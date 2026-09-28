@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use visigrid_engine::cell::{Cell, CellValue};
 
+#[path = "../../engine/examples/support/rss.rs"]
+mod rss;
+
 struct Counting;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -60,24 +63,14 @@ fn mb(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-fn proc_mb(field: &str) -> f64 {
-    std::fs::read_to_string("/proc/self/status")
-        .unwrap_or_default()
-        .lines()
-        .find_map(|l| l.strip_prefix(field))
-        .and_then(|v| v.trim().trim_end_matches(" kB").parse::<f64>().ok())
-        .map(|kb| kb / 1024.0)
-        .unwrap_or(0.0)
-}
-
 fn report(stage: &str) {
     println!(
         "{stage:<34} live {:>8.1} MB   peak {:>8.1} MB   allocs {:>10}   RSS {:>8.1} MB   HWM {:>8.1} MB",
         mb(LIVE.load(Ordering::Relaxed)),
         mb(PEAK.load(Ordering::Relaxed)),
         ALLOCS.load(Ordering::Relaxed),
-        proc_mb("VmRSS:"),
-        proc_mb("VmHWM:"),
+        rss::rss_mb(),
+        rss::peak_rss_mb(),
     );
 }
 
@@ -97,10 +90,6 @@ fn generate(rows: usize, path: &Path) {
         )
         .unwrap();
     }
-}
-
-extern "C" {
-    fn malloc_trim(pad: usize) -> i32;
 }
 
 fn main() {
@@ -168,8 +157,8 @@ fn main() {
     println!("  other             {:.1} MB", mb(live_sheet.saturating_sub(table + text_heap)));
 
     report("before trim");
-    unsafe { malloc_trim(0) };
-    report("after malloc_trim");
+    rss::trim_allocator();
+    report("after trimming the allocator");
 
     // The desktop keeps a clone as base_workbook for replay.
     let before_clone = LIVE.load(Ordering::Relaxed);

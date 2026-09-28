@@ -12,15 +12,9 @@ use std::mem::size_of;
 use visigrid_engine::cell::Cell;
 use visigrid_engine::sheet::{Sheet, SheetId, NUM_COLS, NUM_ROWS};
 
-fn rss_mb() -> f64 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))
-        .and_then(|v| v.trim().trim_end_matches(" kB").parse::<f64>().ok())
-        .map(|kb| kb / 1024.0)
-        .unwrap_or(0.0)
-}
+#[path = "support/rss.rs"]
+mod rss;
+use rss::rss_mb;
 
 fn main() {
     println!("size_of::<Cell>() = {}", size_of::<Cell>());
