@@ -1,6 +1,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use crate::cell::{CellFormat, CellValue};
+use crate::cell::CellFormat;
 use crate::cell_id::CellId;
 use crate::dep_graph::DepGraph;
 use crate::sheet::{Sheet, SheetId, SheetRef, normalize_sheet_name, is_valid_sheet_name, NUM_COLS, NUM_ROWS};
@@ -985,7 +985,7 @@ impl Workbook {
             let sheet_id = sheet.id;
 
             for ((row, col), cell) in sheet.cells_iter() {
-                if let CellValue::Formula { ast: Some(ast), .. } = &cell.value {
+                if let crate::cell::ValueRef::Formula { ast: Some(ast), .. } = cell.value() {
                     // Bind the AST with cross-sheet resolution
                     let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
 
@@ -1073,8 +1073,8 @@ impl Workbook {
 
         // Check if the source cell itself has unknown deps
         if let Some(sheet) = self.sheet_by_id(sheet_id) {
-            if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(row, col)) {
-                if let Some(ast) = cell.value.formula_ast() {
+            if let Some(cell) = sheet.get_cell_opt(row, col) {
+                if let Some(ast) = cell.value().formula_ast() {
                     if has_dynamic_deps(ast) {
                         has_unknown_in_chain = true;
                     }
@@ -1096,8 +1096,8 @@ impl Workbook {
                 // Check for unknown deps in this cell
                 if !has_unknown_in_chain {
                     if let Some(sheet) = self.sheet_by_id(current.sheet) {
-                        if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(current.row, current.col)) {
-                            if let Some(ast) = cell.value.formula_ast() {
+                        if let Some(cell) = sheet.get_cell_opt(current.row, current.col) {
+                            if let Some(ast) = cell.value().formula_ast() {
                                 if has_dynamic_deps(ast) {
                                     has_unknown_in_chain = true;
                                 }
@@ -1147,8 +1147,8 @@ impl Workbook {
 
             // Check if this cell has a cycle error
             if let Some(sheet) = self.sheet_by_id(current.sheet) {
-                if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(current.row, current.col)) {
-                    if cell.value.is_cycle_error() {
+                if let Some(cell) = sheet.get_cell_opt(current.row, current.col) {
+                    if cell.value().is_cycle_error() {
                         return true;
                     }
                 }
@@ -1191,8 +1191,8 @@ impl Workbook {
 
         // Check if source has dynamic refs
         if let Some(sheet) = self.sheet_by_id(from.sheet) {
-            if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(from.row, from.col)) {
-                if let Some(ast) = cell.value.formula_ast() {
+            if let Some(cell) = sheet.get_cell_opt(from.row, from.col) {
+                if let Some(ast) = cell.value().formula_ast() {
                     if has_dynamic_deps(ast) {
                         has_dynamic_refs = true;
                     }
@@ -1251,8 +1251,8 @@ impl Workbook {
                 // Check for dynamic refs
                 if !has_dynamic_refs {
                     if let Some(sheet) = self.sheet_by_id(neighbor.sheet) {
-                        if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(neighbor.row, neighbor.col)) {
-                            if let Some(ast) = cell.value.formula_ast() {
+                        if let Some(cell) = sheet.get_cell_opt(neighbor.row, neighbor.col) {
+                            if let Some(ast) = cell.value().formula_ast() {
                                 if has_dynamic_deps(ast) {
                                     has_dynamic_refs = true;
                                 }
@@ -1375,8 +1375,8 @@ impl Workbook {
             let mut unknown_deps_cells = Vec::new();
             for cell_id in &non_cycle_cells {
                 if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)) {
-                        if let Some(ast) = cell.value.formula_ast() {
+                    if let Some(cell) = sheet.get_cell_opt(cell_id.row, cell_id.col) {
+                        if let Some(ast) = cell.value().formula_ast() {
                             if has_dynamic_deps(ast) {
                                 unknown_deps_cells.push(*cell_id);
                             } else {
@@ -1623,8 +1623,8 @@ impl Workbook {
             let mut unknown_deps_cells = Vec::new();
             for cell_id in order {
                 if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)) {
-                        if let Some(ast) = cell.value.formula_ast() {
+                    if let Some(cell) = sheet.get_cell_opt(cell_id.row, cell_id.col) {
+                        if let Some(ast) = cell.value().formula_ast() {
                             if has_dynamic_deps(ast) {
                                 unknown_deps_cells.push(cell_id);
                             } else {
@@ -1763,8 +1763,8 @@ impl Workbook {
             .formula_cells()
             .filter(|cell_id| {
                 self.sheet_by_id(cell_id.sheet)
-                    .and_then(|sheet| sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)))
-                    .and_then(|cell| cell.value.formula_ast())
+                    .and_then(|sheet| sheet.get_cell_opt(cell_id.row, cell_id.col))
+                    .and_then(|cell| cell.value().formula_ast())
                     .map(crate::formula::analyze::has_dynamic_deps)
                     .unwrap_or(false)
             })
@@ -1809,7 +1809,7 @@ impl Workbook {
                 // way in.
                 let mut cleared: FxHashSet<CellId> = FxHashSet::default();
                 for (row, col, _) in &pending {
-                    if let Some(info) = sheet.cells.get(&crate::sheet::cell_key(*row, *col)).and_then(|c| c.spill_info().cloned()) {
+                    if let Some(info) = sheet.get_cell_opt(*row, *col).and_then(|c| c.spill_info().cloned()) {
                         for dr in 0..info.rows {
                             for dc in 0..info.cols {
                                 if dr != 0 || dc != 0 {
@@ -1955,10 +1955,10 @@ impl Workbook {
         let sheet = self.sheet_by_id(cell_id.sheet)
             .ok_or_else(|| format!("Sheet not found: {:?}", cell_id.sheet))?;
 
-        let cell = sheet.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col))
+        let cell = sheet.get_cell_opt(cell_id.row, cell_id.col)
             .ok_or_else(|| format!("Cell not found: {:?}", cell_id))?;
 
-        if let Some(ast) = cell.value.formula_ast() {
+        if let Some(ast) = cell.value().formula_ast() {
             let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
             let lookup = match custom_fn_handler {
                 Some(handler) => WorkbookLookup::with_custom_functions(
@@ -2160,13 +2160,9 @@ impl Workbook {
             let sheet = &self.sheets[sheet_index];
             let limit = if is_row { sheet.rows } else { sheet.cols };
             let last_used = sheet
-                .cells
-                .iter()
-                .filter(|(_, cell)| !cell.value.raw_display().is_empty())
-                .map(|(key, _)| {
-                    let (r, c) = crate::sheet::from_cell_key(*key);
-                    if is_row { r } else { c }
-                })
+                .cells_iter()
+                .filter(|(_, cell)| !cell.raw_display().is_empty())
+                .map(|((r, c), _)| if is_row { r } else { c })
                 .max();
             if let Some(last) = last_used {
                 if last >= at && last + count >= limit {
@@ -2220,11 +2216,8 @@ impl Workbook {
         let mut writes = Vec::new();
         for (idx, sheet) in self.sheets.iter().enumerate() {
             let formula_sheet = sheet.name.clone();
-            for (row, col, cell) in sheet.cells.iter().map(|(key, cell)| {
-                let (row, col) = crate::sheet::from_cell_key(*key);
-                (row, col, cell)
-            }) {
-                let raw = cell.value.raw_display();
+            for ((row, col), cell) in sheet.cells_iter() {
+                let raw = cell.raw_display();
                 if !raw.starts_with('=') {
                     continue;
                 }
@@ -2369,8 +2362,8 @@ impl Workbook {
             // "Unknown function" for any custom function or =LUA cell.
             let is_formula = self
                 .sheet_by_id(cell_id.sheet)
-                .and_then(|s| s.cells.get(&crate::sheet::cell_key(cell_id.row, cell_id.col)))
-                .map(|c| c.value.formula_ast().is_some())
+                .and_then(|s| s.get_cell_opt(cell_id.row, cell_id.col))
+                .map(|c| c.value().formula_ast().is_some())
                 .unwrap_or(false);
             if is_formula && dirty_set.insert(cell_id) {
                 queue.push_back(cell_id);

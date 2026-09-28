@@ -618,7 +618,7 @@ pub fn compute_sheet_fingerprint_with_meta(workbook: &Workbook, metadata: &CellM
             // Collect cells and sort for deterministic order
             let mut cells: Vec<((usize, usize), String)> = Vec::new();
             for ((row, col), cell) in sheet.cells_iter() {
-                let raw = cell.value.raw_display();
+                let raw = cell.value().raw_display();
                 if !raw.is_empty() {
                     cells.push(((row, col), raw.to_string()));
                 }

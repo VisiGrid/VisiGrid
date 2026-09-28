@@ -1159,18 +1159,23 @@ impl CellValue {
         CellValue::Text(trimmed.to_string())
     }
 
-    pub fn raw_display(&self) -> String {
+    /// Borrow this value as a [`ValueRef`], the storage-independent form.
+    pub fn as_ref(&self) -> ValueRef<'_> {
         match self {
-            CellValue::Empty => String::new(),
-            CellValue::Text(s) => s.clone(),
-            CellValue::Number(n) => format_f64_display(*n),
-            CellValue::Formula { source, .. } => source.clone(),
+            CellValue::Empty => ValueRef::Empty,
+            CellValue::Text(s) => ValueRef::Text(s),
+            CellValue::Number(n) => ValueRef::Number(*n),
+            CellValue::Formula { source, ast } => ValueRef::Formula { source, ast: ast.as_deref() },
         }
+    }
+
+    pub fn raw_display(&self) -> String {
+        self.as_ref().raw_display()
     }
 
     /// Check if this cell contains a cycle error (#CYCLE!).
     pub fn is_cycle_error(&self) -> bool {
-        matches!(self, CellValue::Text(s) if s == "#CYCLE!")
+        self.as_ref().is_cycle_error()
     }
 
     /// Format a number according to the specified format
@@ -1237,27 +1242,89 @@ impl CellValue {
 
     /// Display value with formatting applied
     pub fn formatted_display(&self, format: &CellFormat) -> String {
-        match self {
-            CellValue::Empty => String::new(),
-            CellValue::Text(s) => s.clone(),
-            CellValue::Number(n) => Self::format_number(*n, &format.number_format),
-            CellValue::Formula { source, .. } => source.clone(),
+        self.as_ref().formatted_display(format)
+    }
+
+    pub fn as_number(&self) -> f64 {
+        self.as_ref().as_number()
+    }
+
+    /// Get the parsed AST for formula cells, if available.
+    pub fn formula_ast(&self) -> Option<&parser::ParsedExpr> {
+        self.as_ref().formula_ast()
+    }
+}
+
+/// A stored cell's value, borrowed.
+///
+/// The storage-independent way to read a value: it names no container, so
+/// the cell map behind [`Sheet`](crate::sheet::Sheet) can change shape (#18)
+/// without its readers changing. [`CellValue`] is the owned form.
+#[derive(Debug, Clone, Copy)]
+pub enum ValueRef<'a> {
+    Empty,
+    Text(&'a str),
+    Number(f64),
+    Formula { source: &'a str, ast: Option<&'a parser::ParsedExpr> },
+}
+
+impl<'a> ValueRef<'a> {
+    pub fn raw_display(&self) -> String {
+        match *self {
+            ValueRef::Empty => String::new(),
+            ValueRef::Text(s) => s.to_string(),
+            ValueRef::Number(n) => format_f64_display(n),
+            ValueRef::Formula { source, .. } => source.to_string(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, ValueRef::Empty)
+    }
+
+    pub fn is_formula(&self) -> bool {
+        matches!(self, ValueRef::Formula { .. })
+    }
+
+    /// Check if this cell contains a cycle error (#CYCLE!).
+    pub fn is_cycle_error(&self) -> bool {
+        matches!(self, ValueRef::Text(s) if *s == "#CYCLE!")
+    }
+
+    /// Display value with formatting applied
+    pub fn formatted_display(&self, format: &CellFormat) -> String {
+        match *self {
+            ValueRef::Number(n) => CellValue::format_number(n, &format.number_format),
+            _ => self.raw_display(),
         }
     }
 
     pub fn as_number(&self) -> f64 {
-        match self {
-            CellValue::Number(n) => *n,
-            CellValue::Text(s) => s.parse().unwrap_or(0.0),
+        match *self {
+            ValueRef::Number(n) => n,
+            ValueRef::Text(s) => s.parse().unwrap_or(0.0),
             _ => 0.0,
         }
     }
 
     /// Get the parsed AST for formula cells, if available.
-    pub fn formula_ast(&self) -> Option<&parser::ParsedExpr> {
-        match self {
-            CellValue::Formula { ast, .. } => ast.as_deref(),
+    pub fn formula_ast(&self) -> Option<&'a parser::ParsedExpr> {
+        match *self {
+            ValueRef::Formula { ast, .. } => ast,
             _ => None,
+        }
+    }
+
+    /// An owned copy. Formulas keep their parsed AST.
+    pub fn to_owned_value(&self) -> CellValue {
+        match *self {
+            ValueRef::Empty => CellValue::Empty,
+            ValueRef::Text(s) => CellValue::Text(s.to_string()),
+            ValueRef::Number(n) => CellValue::Number(n),
+            ValueRef::Formula { source, ast } => CellValue::Formula {
+                source: source.to_string(),
+                ast: ast.map(|a| Box::new(a.clone())),
+            },
         }
     }
 }
@@ -1332,6 +1399,96 @@ pub struct Cell {
 pub fn default_format() -> Arc<CellFormat> {
     static DEFAULT: std::sync::OnceLock<Arc<CellFormat>> = std::sync::OnceLock::new();
     DEFAULT.get_or_init(|| Arc::new(CellFormat::default())).clone()
+}
+
+/// A stored cell, borrowed: what [`Sheet::cells_iter`] and
+/// [`Sheet::get_cell_opt`] hand out.
+///
+/// Readers go through this rather than `&Cell` so the storage behind a sheet
+/// is free to stop holding `Cell` structs (#18). For an owned copy, use
+/// [`CellRef::to_cell`] or [`Sheet::get_cell`].
+///
+/// [`Sheet::cells_iter`]: crate::sheet::Sheet::cells_iter
+/// [`Sheet::get_cell_opt`]: crate::sheet::Sheet::get_cell_opt
+/// [`Sheet::get_cell`]: crate::sheet::Sheet::get_cell
+#[derive(Debug, Clone, Copy)]
+pub struct CellRef<'a> {
+    cell: &'a Cell,
+}
+
+impl<'a> CellRef<'a> {
+    pub(crate) fn new(cell: &'a Cell) -> Self {
+        CellRef { cell }
+    }
+
+    pub fn value(&self) -> ValueRef<'a> {
+        self.cell.value.as_ref()
+    }
+
+    pub fn format(&self) -> &'a CellFormat {
+        &self.cell.format
+    }
+
+    pub fn raw_display(&self) -> String {
+        self.value().raw_display()
+    }
+
+    pub fn formatted_display(&self) -> String {
+        self.value().formatted_display(self.format())
+    }
+
+    pub fn style_id(&self) -> Option<u32> {
+        self.cell.style_id()
+    }
+
+    pub fn spill_parent(&self) -> Option<(usize, usize)> {
+        self.cell.spill_parent()
+    }
+
+    pub fn spill_info(&self) -> Option<&'a SpillInfo> {
+        self.cell.spill_info()
+    }
+
+    pub fn spill_error(&self) -> Option<&'a SpillError> {
+        self.cell.spill_error()
+    }
+
+    pub fn frozen_formula(&self) -> Option<&'a str> {
+        self.cell.frozen_formula()
+    }
+
+    pub fn is_spill_receiver(&self) -> bool {
+        self.cell.is_spill_receiver()
+    }
+
+    pub fn is_spill_parent(&self) -> bool {
+        self.cell.is_spill_parent()
+    }
+
+    pub fn has_spill_error(&self) -> bool {
+        self.cell.has_spill_error()
+    }
+
+    /// An owned copy of the cell.
+    pub fn to_cell(&self) -> Cell {
+        self.cell.clone()
+    }
+}
+
+impl Cell {
+    /// Same vocabulary as [`CellRef`], so code reads a cell the same way
+    /// whether it holds an owned `Cell` or a borrowed view.
+    pub fn value(&self) -> ValueRef<'_> {
+        self.value.as_ref()
+    }
+
+    pub fn format(&self) -> &CellFormat {
+        &self.format
+    }
+
+    pub fn as_ref(&self) -> CellRef<'_> {
+        CellRef::new(self)
+    }
 }
 
 impl Default for Cell {
@@ -1460,6 +1617,112 @@ impl Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #18 phase 0: every reader now goes through ValueRef, and CellValue
+    /// delegates to it, so comparing the two would compare the code with
+    /// itself. These outputs were taken from the pre-ValueRef CellValue
+    /// (0.37.0) and are asserted literally.
+    #[test]
+    fn value_ref_matches_the_pre_seam_outputs() {
+        let money = CellFormat {
+            number_format: NumberFormat::Number { decimals: 2, thousands: true, negative: NegativeStyle::default() },
+            ..CellFormat::default()
+        };
+        // (value, raw_display, formatted_display, as_number, is_cycle_error, has_ast)
+        let cases: Vec<(CellValue, &str, &str, f64, bool, bool)> = vec![
+            (CellValue::from_input(""), "", "", 0.0, false, false),
+            (CellValue::from_input("hello"), "hello", "hello", 0.0, false, false),
+            (CellValue::from_input("#CYCLE!"), "#CYCLE!", "#CYCLE!", 0.0, true, false),
+            (CellValue::from_input("42"), "42", "42.00", 42.0, false, false),
+            (CellValue::from_input("3.14159"), "3.14159", "3.14", 3.14159, false, false),
+            (CellValue::from_input("-0.5"), "-0.5", "-0.50", -0.5, false, false),
+            (CellValue::from_input("1234567.891"), "1234567.891", "1,234,567.89", 1234567.891, false, false),
+            (CellValue::from_input("=A1+B1"), "=A1+B1", "=A1+B1", 0.0, false, true),
+            (CellValue::from_input("=SUM(A1:A3)"), "=SUM(A1:A3)", "=SUM(A1:A3)", 0.0, false, true),
+            // Invalid formula: kept as a formula, with no AST.
+            (CellValue::from_input("=SUM("), "=SUM(", "=SUM(", 0.0, false, false),
+            (CellValue::from_input("TRUE"), "TRUE", "TRUE", 0.0, false, false),
+            // Numeric-looking text: parses as a number, but is not number-formatted.
+            (CellValue::Text("42".into()), "42", "42", 42.0, false, false),
+            (CellValue::Text("  7 ".into()), "  7 ", "  7 ", 0.0, false, false),
+        ];
+        for (owned, raw, formatted, number, cycle, has_ast) in cases {
+            let view = owned.as_ref();
+            assert_eq!(view.raw_display(), raw, "{owned:?}");
+            assert_eq!(view.formatted_display(&money), formatted, "{owned:?}");
+            assert_eq!(view.as_number(), number, "{owned:?}");
+            assert_eq!(view.is_cycle_error(), cycle, "{owned:?}");
+            assert_eq!(view.formula_ast().is_some(), has_ast, "{owned:?}");
+            assert_eq!(view.is_formula(), matches!(owned, CellValue::Formula { .. }), "{owned:?}");
+            assert_eq!(view.is_empty(), matches!(owned, CellValue::Empty), "{owned:?}");
+        }
+        // 1e20 displays raw correctly; its thousands-formatted display overflows
+        // (a pre-existing formatter bug), so only the raw form is pinned here.
+        assert_eq!(CellValue::from_input("1e20").as_ref().raw_display(), "100000000000000000000");
+    }
+
+    /// An owned copy of a view is the value it came from, AST included.
+    #[test]
+    fn value_ref_to_owned_value_preserves_the_ast() {
+        for input in ["", "hello", "42", "=A1+B1", "=SUM(A1:A3)*2", "=SUM("] {
+            let original = CellValue::from_input(input);
+            let copy = original.as_ref().to_owned_value();
+            assert_eq!(copy.raw_display(), original.raw_display(), "{input:?}");
+            assert_eq!(
+                format!("{:?}", copy.formula_ast()),
+                format!("{:?}", original.formula_ast()),
+                "AST changed for {input:?}"
+            );
+            assert_eq!(std::mem::discriminant(&copy), std::mem::discriminant(&original), "{input:?}");
+        }
+    }
+
+    /// Style id, spill parent/info/error and frozen formula live in CellExtras;
+    /// CellRef must expose each exactly as the cell holds it.
+    #[test]
+    fn cell_ref_exposes_extras_metadata() {
+        let mut cell = Cell::new();
+        cell.set("=SEQUENCE(3)");
+        cell.set_style_id(Some(7));
+        cell.set_spill_parent(Some((4, 2)));
+        cell.set_spill_info(Some(SpillInfo { rows: 3, cols: 1 }));
+        cell.set_frozen_formula(Some("=A1+1".to_string()));
+        let view = cell.as_ref();
+        assert_eq!(view.style_id(), Some(7));
+        assert_eq!(view.spill_parent(), Some((4, 2)));
+        assert_eq!(view.spill_info().map(|i| (i.rows, i.cols)), Some((3, 1)));
+        assert_eq!(view.frozen_formula(), Some("=A1+1"));
+        assert!(view.is_spill_receiver());
+        assert!(view.is_spill_parent());
+        assert!(!view.has_spill_error());
+
+        let plain = Cell::new();
+        let view = plain.as_ref();
+        assert_eq!(view.style_id(), None);
+        assert_eq!(view.spill_parent(), None);
+        assert!(view.spill_info().is_none());
+        assert!(view.spill_error().is_none());
+        assert_eq!(view.frozen_formula(), None);
+        assert!(!view.is_spill_receiver() && !view.is_spill_parent() && !view.has_spill_error());
+    }
+
+    #[test]
+    fn cell_ref_reads_what_the_cell_holds() {
+        let mut sheet = crate::sheet::Sheet::new(crate::sheet::SheetId(1), 100, 100);
+        sheet.set_value(0, 0, "7");
+        sheet.set_value(1, 0, "note");
+        sheet.set_value(2, 0, "=A1*2");
+        sheet.toggle_bold(1, 0);
+        for ((row, col), view) in sheet.cells_iter() {
+            let owned = sheet.get_cell(row, col);
+            assert_eq!(view.raw_display(), owned.value.raw_display());
+            assert_eq!(view.format().bold, owned.format.bold);
+            assert_eq!(view.to_cell().value.raw_display(), owned.value.raw_display());
+        }
+        assert!(sheet.get_cell_opt(1, 0).unwrap().format().bold);
+        assert!(sheet.get_cell_opt(2, 0).unwrap().value().is_formula());
+        assert!(sheet.get_cell_opt(50, 50).is_none());
+    }
 
     #[test]
     fn test_cellformat_is_default() {

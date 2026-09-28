@@ -376,12 +376,11 @@ pub fn cmd_fill(
 /// Formula cells are preserved so that template logic (XLOOKUP, SUMIF, etc.)
 /// survives across fill cycles.
 fn clear_sheet(workbook: &mut visigrid_engine::workbook::Workbook, sheet_idx: usize) {
-    use visigrid_engine::cell::CellValue;
 
     let positions: Vec<(usize, usize)> = if let Some(sheet) = workbook.sheet(sheet_idx) {
         sheet
             .cells_iter()
-            .filter(|(_, cell)| !matches!(cell.value, CellValue::Formula { .. }))
+            .filter(|(_, cell)| !cell.value().is_formula())
             .map(|((r, c), _)| (r, c))
             .collect()
     } else {

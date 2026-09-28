@@ -61,7 +61,7 @@ impl Spreadsheet {
         let mut count = 0;
 
         for ((_, _), cell) in self.sheet(cx).cells_iter() {
-            let raw = cell.value.raw_display();
+            let raw = cell.value().raw_display();
             if raw.starts_with('=') {
                 // Simple check: does the formula contain this name as a word?
                 // More sophisticated: parse the formula and check identifiers
@@ -117,7 +117,7 @@ impl Spreadsheet {
         // Collect all formulas first (to avoid borrow issues)
         let formulas: Vec<String> = self.sheet(cx).cells_iter()
             .filter_map(|((_, _), cell)| {
-                let raw = cell.value.raw_display();
+                let raw = cell.value().raw_display();
                 if raw.starts_with('=') {
                     Some(raw.to_uppercase())
                 } else {

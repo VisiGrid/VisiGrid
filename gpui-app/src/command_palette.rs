@@ -7,6 +7,7 @@
 //! - Named range navigation
 //! - Font picker
 //! - Theme picker
+use visigrid_engine::cell::ValueRef;
 
 use gpui::{*};
 
@@ -114,7 +115,7 @@ impl Spreadsheet {
         // Find all cells that reference this cell (dependents)
         let mut references = Vec::new();
         for ((cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
-            if let CellValue::Formula { source, .. } = &cell.value {
+            if let ValueRef::Formula { source, .. } = cell.value() {
                 if let Ok(expr) = parse(source) {
                     let refs = extract_cell_refs(&expr);
                     if refs.contains(&(row, col)) {
@@ -123,7 +124,7 @@ impl Spreadsheet {
                             cell_row,
                             cell_col,
                             cell_ref,
-                            source.clone(),
+                            source.to_string(),
                         ));
                     }
                 }
@@ -299,7 +300,7 @@ impl Spreadsheet {
         // Find all cells that use this named range
         let mut references = Vec::new();
         for ((cell_row, cell_col), cell) in self.sheet(cx).cells_iter() {
-            if let CellValue::Formula { source, .. } = &cell.value {
+            if let ValueRef::Formula { source, .. } = cell.value() {
                 // Check if formula references this named range (word-boundary aware)
                 if self.formula_references_name(source, &name_upper) {
                     let cell_ref = self.cell_ref_at(cell_row, cell_col);
@@ -307,7 +308,7 @@ impl Spreadsheet {
                         cell_row,
                         cell_col,
                         cell_ref,
-                        source.clone(),
+                        source.to_string(),
                     ));
                 }
             }
