@@ -17,6 +17,9 @@ pub enum CloudSyncState {
     Offline,
     /// Upload failed
     Error,
+    /// The cloud copy changed since this file last synced; uploads are held
+    /// until the user overwrites the cloud copy.
+    Conflict,
 }
 
 impl Default for CloudSyncState {
@@ -35,6 +38,7 @@ impl CloudSyncState {
             Self::Syncing => "Syncing...",
             Self::Offline => "Offline",
             Self::Error => "Error",
+            Self::Conflict => "Conflict",
         }
     }
 }

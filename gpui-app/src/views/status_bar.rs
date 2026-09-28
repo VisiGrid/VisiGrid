@@ -893,6 +893,7 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
             CloudSyncState::Dirty | CloudSyncState::Syncing => ("☁ ⟳", accent),
             CloudSyncState::Offline => ("☁ ✗", text_muted),
             CloudSyncState::Error => ("☁ !", error_color),
+            CloudSyncState::Conflict => ("☁ ⚠", error_color),
         };
 
         // Build label: "sheet_name" for synced, or state for others
@@ -913,6 +914,7 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
             CloudSyncState::Dirty => "Modified".to_string(),
             CloudSyncState::Offline => "Offline".to_string(),
             CloudSyncState::Error => app.cloud_last_error.clone().unwrap_or_else(|| "Error".to_string()),
+            CloudSyncState::Conflict => "Cloud copy changed".to_string(),
             CloudSyncState::Local => identity.sheet_name.clone(),
         };
 
@@ -933,8 +935,9 @@ fn render_cloud_indicator(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                 match sync_state {
                     CloudSyncState::Offline | CloudSyncState::Error => this.cloud_retry_upload(cx),
-                    CloudSyncState::Synced | CloudSyncState::Local | CloudSyncState::Dirty => {
+                    CloudSyncState::Synced | CloudSyncState::Local | CloudSyncState::Dirty | CloudSyncState::Conflict => {
                         // Open this specific sheet in the VisiGrid web app
+                        // (for a conflict: shows the newer cloud version)
                         let url = format!("https://app.visigrid.app/sheets/{}", public_id);
                         if let Err(e) = open::that(&url) {
                             this.status_message = Some(format!("Failed to open browser: {}", e));

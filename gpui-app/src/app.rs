@@ -880,6 +880,13 @@ pub struct Spreadsheet {
     pub cloud_identity: Option<crate::cloud::CloudIdentity>,
     pub cloud_sync_state: crate::cloud::CloudSyncState,
     pub cloud_upload_generation: u64,
+    /// An upload is between its save request and completion. Later saves wait
+    /// for it, since each save moves the server revision.
+    pub cloud_upload_in_flight: bool,
+    /// Revision a save request reserved on the server whose upload never
+    /// completed. A 409 naming exactly this revision is our own abandoned
+    /// attempt, not someone else's edit.
+    pub cloud_reserved_revision: Option<i64>,
     pub cloud_last_error: Option<String>,
     pub cloud_sheets_list: Vec<crate::cloud::SheetInfo>,
     pub cloud_selected_sheet: Option<usize>,
@@ -1388,6 +1395,8 @@ impl Spreadsheet {
             cloud_identity: None,
             cloud_sync_state: crate::cloud::CloudSyncState::Local,
             cloud_upload_generation: 0,
+            cloud_upload_in_flight: false,
+            cloud_reserved_revision: None,
             cloud_last_error: None,
             cloud_sheets_list: Vec::new(),
             cloud_selected_sheet: None,
@@ -2489,6 +2498,7 @@ impl Spreadsheet {
             CommandId::HubDiagnostics => self.hub_diagnostics(cx),
             CommandId::HubSignIn => self.hub_sign_in(cx),
             CommandId::HubSignOut => self.hub_sign_out(cx),
+            CommandId::CloudOverwrite => self.cloud_overwrite_cloud_copy(cx),
             CommandId::HubLinkDialog => self.hub_show_link_dialog(cx),
 
             // Phase 5: Open Result in Grid

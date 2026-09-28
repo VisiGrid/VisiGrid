@@ -1855,6 +1855,10 @@ pub struct CloudIdentity {
     pub api_base: String,
     pub last_synced_hash: Option<String>,
     pub last_synced_at: Option<String>,
+    /// Server revision this file last matched. Sent as `expected_revision`
+    /// on upload so the server refuses to overwrite edits made elsewhere.
+    /// None for files linked before conflict checks existed.
+    pub last_synced_revision: Option<i64>,
 }
 
 /// Load cloud_identity from a .sheet file (if present)
@@ -1870,8 +1874,18 @@ pub fn load_cloud_identity(path: &Path) -> Result<Option<CloudIdentity>, String>
         return Ok(None);
     }
 
+    // Files written before conflict checks have no last_synced_revision column.
+    let has_revision = conn
+        .prepare("SELECT last_synced_revision FROM cloud_identity LIMIT 1")
+        .is_ok();
+    let sql = if has_revision {
+        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, last_synced_revision FROM cloud_identity WHERE id = 1"
+    } else {
+        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, NULL FROM cloud_identity WHERE id = 1"
+    };
+
     let result = conn.query_row(
-        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at FROM cloud_identity WHERE id = 1",
+        sql,
         [],
         |row| {
             Ok(CloudIdentity {
@@ -1881,6 +1895,7 @@ pub fn load_cloud_identity(path: &Path) -> Result<Option<CloudIdentity>, String>
                 api_base: row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "https://api.visiapi.com".to_string()),
                 last_synced_hash: row.get(4)?,
                 last_synced_at: row.get(5)?,
+                last_synced_revision: row.get(6)?,
             })
         },
     );
@@ -1905,15 +1920,25 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
             sheet_name TEXT NOT NULL,
             api_base TEXT DEFAULT 'https://api.visiapi.com',
             last_synced_hash TEXT,
-            last_synced_at TEXT
+            last_synced_at TEXT,
+            last_synced_revision INTEGER
         )",
         [],
     ).map_err(|e| e.to_string())?;
 
+    // Tables created before conflict checks lack the revision column.
+    let has_revision = conn
+        .prepare("SELECT last_synced_revision FROM cloud_identity LIMIT 1")
+        .is_ok();
+    if !has_revision {
+        conn.execute("ALTER TABLE cloud_identity ADD COLUMN last_synced_revision INTEGER", [])
+            .map_err(|e| e.to_string())?;
+    }
+
     // Upsert the singleton row
     conn.execute(
-        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, last_synced_revision)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             &identity.sheet_id,
             &identity.public_id,
@@ -1921,6 +1946,7 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
             &identity.api_base,
             &identity.last_synced_hash,
             &identity.last_synced_at,
+            &identity.last_synced_revision,
         ],
     ).map_err(|e| e.to_string())?;
 
@@ -2850,6 +2876,65 @@ pub fn upgrade_sheet(path: &Path, out_path: Option<&Path>) -> Result<UpgradeResu
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    fn cloud_identity_at(revision: Option<i64>) -> CloudIdentity {
+        CloudIdentity {
+            sheet_id: 7,
+            public_id: "pub7".to_string(),
+            sheet_name: "Budget".to_string(),
+            api_base: "https://api.example.test".to_string(),
+            last_synced_hash: Some("abc".to_string()),
+            last_synced_at: Some("1700000000".to_string()),
+            last_synced_revision: revision,
+        }
+    }
+
+    /// The revision is what the desktop sends as expected_revision; losing it
+    /// on the round trip would silently disable the server's conflict check.
+    #[test]
+    fn test_cloud_identity_round_trips_the_synced_revision() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        save_workbook(&Workbook::new(), temp_file.path()).unwrap();
+
+        save_cloud_identity(temp_file.path(), &cloud_identity_at(Some(12))).unwrap();
+        let loaded = load_cloud_identity(temp_file.path()).unwrap().unwrap();
+        assert_eq!(loaded, cloud_identity_at(Some(12)));
+    }
+
+    /// Files linked by older builds have a cloud_identity table without the
+    /// revision column. They must still load (revision unknown) and gain the
+    /// column on the next save.
+    #[test]
+    fn test_cloud_identity_from_a_pre_revision_file_loads_and_migrates() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        save_workbook(&Workbook::new(), temp_file.path()).unwrap();
+        {
+            let conn = Connection::open(temp_file.path()).unwrap();
+            conn.execute(
+                "CREATE TABLE cloud_identity (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    sheet_id INTEGER NOT NULL,
+                    public_id TEXT NOT NULL DEFAULT '',
+                    sheet_name TEXT NOT NULL,
+                    api_base TEXT DEFAULT 'https://api.visiapi.com',
+                    last_synced_hash TEXT,
+                    last_synced_at TEXT
+                )",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO cloud_identity VALUES (1, 7, 'pub7', 'Budget', 'https://api.example.test', 'abc', '1700000000')",
+                [],
+            ).unwrap();
+        }
+
+        let legacy = load_cloud_identity(temp_file.path()).unwrap().unwrap();
+        assert_eq!(legacy, cloud_identity_at(None));
+
+        save_cloud_identity(temp_file.path(), &cloud_identity_at(Some(3))).unwrap();
+        let migrated = load_cloud_identity(temp_file.path()).unwrap().unwrap();
+        assert_eq!(migrated.last_synced_revision, Some(3));
+    }
 
     /// A formula carrying a string with quotes, newlines and non-ASCII text
     /// (what a =LUA cell is) must come back from the file byte-identical, and

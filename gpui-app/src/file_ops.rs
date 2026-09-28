@@ -172,6 +172,9 @@ impl Spreadsheet {
                 self.finalize_load(path);
                 self.request_title_refresh(cx);
 
+                // A reservation belongs to the file that made it.
+                self.cloud_reserved_revision = None;
+
                 // Load cloud identity (for .sheet files)
                 if ext_lower == "sheet" {
                     match crate::cloud::load_cloud_identity(path) {

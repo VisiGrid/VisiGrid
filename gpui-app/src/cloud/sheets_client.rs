@@ -138,16 +138,26 @@ impl SheetsClient {
 
     /// Request a presigned upload URL for saving sheet data.
     /// POST /api/desktop/sheets/:id/save
-    pub fn save_sheet(&self, sheet_id: i64, byte_size: u64) -> Result<SaveResponse, HubError> {
+    ///
+    /// `expected_revision` is the server revision the local file last matched.
+    /// The server answers 409 when the sheet has moved past it (see
+    /// [`conflict_revision`]). `None` skips the check — only for a deliberate
+    /// overwrite.
+    pub fn save_sheet(&self, sheet_id: i64, byte_size: u64, expected_revision: Option<i64>) -> Result<SaveResponse, HubError> {
         let url = format!("{}/api/desktop/sheets/{}/save", self.api_base, sheet_id);
+
+        let mut body = serde_json::json!({
+            "byte_size": byte_size,
+            "client_supports_complete": true,
+        });
+        if let Some(rev) = expected_revision {
+            body["expected_revision"] = serde_json::json!(rev);
+        }
 
         let response = self.http
             .post(&url)
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({
-                "byte_size": byte_size,
-                "client_supports_complete": true,
-            }))
+            .json(&body)
             .send()
             .map_err(|e| HubError::Network(e.to_string()))?;
 
@@ -281,4 +291,34 @@ fn parse_sheet_info(v: &serde_json::Value) -> Option<SheetInfo> {
         last_edited_at: v["last_edited_at"].as_str().map(String::from),
         revision: v["revision"].as_i64(),
     })
+}
+
+/// The server's current revision when a save was refused because the sheet
+/// changed since this client last synced (HTTP 409 from the save endpoint).
+pub fn conflict_revision(err: &HubError) -> Option<i64> {
+    match err {
+        HubError::Http(409, body) => serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v["current_revision"].as_i64()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conflict_revision_reads_the_servers_current_revision() {
+        let err = HubError::Http(409, r#"{"error":"This sheet changed since you opened it.","current_revision":9}"#.to_string());
+        assert_eq!(conflict_revision(&err), Some(9));
+    }
+
+    #[test]
+    fn conflict_revision_ignores_other_failures() {
+        // save_complete also answers 409 (size unavailable) without a revision.
+        assert_eq!(conflict_revision(&HubError::Http(409, r#"{"error":"Upload verification failed"}"#.to_string())), None);
+        assert_eq!(conflict_revision(&HubError::Http(500, r#"{"current_revision":9}"#.to_string())), None);
+        assert_eq!(conflict_revision(&HubError::Network("down".to_string())), None);
+    }
 }

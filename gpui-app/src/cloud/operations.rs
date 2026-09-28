@@ -58,6 +58,8 @@ impl Spreadsheet {
                                 .unwrap_or_else(|| "https://api.visiapi.com".to_string()),
                             last_synced_hash: None,
                             last_synced_at: None,
+                            // A new sheet: the first upload is expected to land on it.
+                            last_synced_revision: Some(sheet_info.revision.unwrap_or(0)),
                         };
 
                         // Persist identity to the .sheet file
@@ -142,20 +144,25 @@ impl Spreadsheet {
         let slug = selected.slug.clone();
 
         cx.spawn(async move |this, cx| {
-            let result: Result<Option<Vec<u8>>, HubError> = smol::unblock(move || {
+            let result: Result<(Option<Vec<u8>>, Option<i64>), HubError> = smol::unblock(move || {
                 let client = SheetsClient::from_saved_auth()?;
+                // Read the revision BEFORE the bytes. If a save lands in
+                // between, we hold newer bytes under an older revision and the
+                // first upload conflicts — safe. The other order would record
+                // a revision newer than the bytes and overwrite that save.
+                let revision = client.get_sheet(sheet_id)?.revision;
                 let url = client.get_data_url(sheet_id)?;
                 match url {
                     Some(download_url) => {
                         let bytes = client.download_from_url(&download_url)?;
-                        Ok(Some(bytes))
+                        Ok((Some(bytes), revision))
                     }
-                    None => Ok(None), // New sheet with no data yet
+                    None => Ok((None, revision)), // New sheet with no data yet
                 }
             }).await;
 
             match result {
-                Ok(maybe_bytes) => {
+                Ok((maybe_bytes, revision)) => {
                     // Write to cloud cache directory
                     let cache_dir = cloud_cache_dir();
                     let _ = smol::unblock(move || std::fs::create_dir_all(&cache_dir)).await;
@@ -187,6 +194,7 @@ impl Spreadsheet {
                                 .unwrap_or_else(|| "https://api.visiapi.com".to_string()),
                             last_synced_hash: None,
                             last_synced_at: None,
+                            last_synced_revision: revision,
                         };
 
                         if let Err(e) = crate::cloud::save_cloud_identity(&file_path, &identity) {
