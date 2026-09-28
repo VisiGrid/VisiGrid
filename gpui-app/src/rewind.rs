@@ -102,7 +102,7 @@ impl Spreadsheet {
         // Build the preview workbook and view state (state BEFORE this action)
         let build_result = self.history.build_workbook_before(
             history_index,
-            &self.base_workbook,
+            self.base_workbook.as_ref(),
             MAX_PREVIEW_REPLAY,
             MAX_PREVIEW_BUILD_MS,
         ).map_err(|e| match e {
@@ -118,6 +118,9 @@ impl Spreadsheet {
             }
             crate::history::PreviewBuildError::InvariantViolation(msg) => {
                 format!("Preview aborted — data integrity error: {}", msg)
+            }
+            crate::history::PreviewBuildError::NoBaseSnapshot => {
+                "Preview unavailable for workbooks this large".to_string()
             }
         })?;
 
@@ -238,7 +241,7 @@ impl Spreadsheet {
         // Re-enter preview with new entry
         match self.history.build_workbook_before(
             new_idx,
-            &self.base_workbook,
+            self.base_workbook.as_ref(),
             MAX_PREVIEW_REPLAY,
             MAX_PREVIEW_BUILD_MS,
         ) {
@@ -368,7 +371,7 @@ impl Spreadsheet {
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);  // Catch desync at rewind
         // Update base_workbook to match (this is now the canonical state)
-        self.base_workbook = self.wb(cx).clone();
+        self.capture_base_workbook(cx);
 
         // 2. Apply view state from the plan (row ordering per sheet)
         // Reset row_view to identity for the current sheet

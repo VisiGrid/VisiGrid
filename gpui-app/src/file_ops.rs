@@ -26,7 +26,7 @@ impl Spreadsheet {
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);
-        self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
+        self.capture_base_workbook(cx); // Capture base state for replay
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.cycle_banner.reset_for_new_file();
         self.current_file = None;
@@ -118,7 +118,7 @@ impl Spreadsheet {
                 self.recompute_with_custom_fns(cx);
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
-                self.base_workbook = self.wb(cx).clone(); // Capture base state for replay
+                self.capture_base_workbook(cx); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_result = None;
                 self.import_filename = None;
@@ -330,7 +330,7 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.base_workbook = this.wb(cx).clone(); // Capture base state for replay
+                        this.capture_base_workbook(cx); // Capture base state for replay
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
@@ -473,7 +473,7 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.base_workbook = this.wb(cx).clone();
+                        this.capture_base_workbook(cx);
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_result = None;
                         this.import_filename = Some(filename_for_completion.clone());
@@ -634,7 +634,7 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.base_workbook = this.wb(cx).clone();
+                        this.capture_base_workbook(cx);
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;

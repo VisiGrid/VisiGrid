@@ -474,6 +474,11 @@ impl CellLookup for Sheet {
 
 impl Sheet {
     /// Create a new sheet with the given dimensions and a unique ID
+    /// Number of cells actually stored (non-empty or formatted), not the grid size.
+    pub fn populated_cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
     /// Make room for about `additional` more cells up front. An importer that
     /// knows roughly how many cells are coming avoids the table doubling
     /// mid-load, when the old and new tables are both alive (#18).

@@ -1410,7 +1410,7 @@ impl History {
     pub fn build_workbook_before(
         &self,
         i: usize,
-        base: &Workbook,
+        base: Option<&Workbook>,
         max_replay: usize,
         timeout_ms: u64,
     ) -> Result<PreviewBuildResult, PreviewBuildError> {
@@ -1426,6 +1426,9 @@ impl History {
         if i > max_replay {
             return Err(PreviewBuildError::TooManyActions(i));
         }
+
+        // Large workbooks keep no load-time snapshot to replay from.
+        let base = base.ok_or(PreviewBuildError::NoBaseSnapshot)?;
 
         // REPLAY GATE: Scan [0..i) for unsupported actions BEFORE starting replay.
         // This ensures deterministic failure - same history always fails the same way.
@@ -1929,11 +1932,25 @@ pub enum PreviewBuildError {
     /// Replay detected an invariant violation (data integrity failure)
     /// Preview must abort - no partial previews allowed
     InvariantViolation(String),
+    /// The workbook was too large to keep a load-time copy to replay from
+    NoBaseSnapshot,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Large workbooks keep no load-time copy (#18); preview must say so
+    /// rather than replay from something that isn't there.
+    #[test]
+    fn preview_without_a_base_snapshot_is_refused() {
+        let history = History::new();
+        let result = history.build_workbook_before(0, None, 100, 1_000);
+        assert!(matches!(result, Err(PreviewBuildError::NoBaseSnapshot)));
+
+        let base = Workbook::new();
+        assert!(history.build_workbook_before(0, Some(&base), 100, 1_000).is_ok());
+    }
 
     #[test]
     fn workbook_snapshot_undo_redo_restores_complete_sheet_and_monotonic_revisions() {
