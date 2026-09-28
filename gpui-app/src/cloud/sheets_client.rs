@@ -293,6 +293,13 @@ fn parse_sheet_info(v: &serde_json::Value) -> Option<SheetInfo> {
     })
 }
 
+/// The server rejected the saved token (revoked, or from another environment).
+/// Signing in again is the only fix, and "Hub: Sign In" refuses while a token
+/// file exists, so callers clear it via `cloud_sign_in_expired`.
+pub fn is_unauthorized(err: &HubError) -> bool {
+    matches!(err, HubError::Http(401, _))
+}
+
 /// The server's current revision when a save was refused because the sheet
 /// changed since this client last synced (HTTP 409 from the save endpoint).
 pub fn conflict_revision(err: &HubError) -> Option<i64> {
@@ -312,6 +319,13 @@ mod tests {
     fn conflict_revision_reads_the_servers_current_revision() {
         let err = HubError::Http(409, r#"{"error":"This sheet changed since you opened it.","current_revision":9}"#.to_string());
         assert_eq!(conflict_revision(&err), Some(9));
+    }
+
+    #[test]
+    fn unauthorized_is_only_a_401() {
+        assert!(is_unauthorized(&HubError::Http(401, r#"{"error":"Unauthorized"}"#.to_string())));
+        assert!(!is_unauthorized(&HubError::Http(403, String::new())));
+        assert!(!is_unauthorized(&HubError::NotAuthenticated));
     }
 
     #[test]

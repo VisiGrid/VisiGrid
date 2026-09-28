@@ -11,7 +11,7 @@
 
 use crate::app::Spreadsheet;
 use crate::cloud::identity::CloudSyncState;
-use crate::cloud::sheets_client::{conflict_revision, SheetsClient};
+use crate::cloud::sheets_client::{conflict_revision, is_unauthorized, SheetsClient};
 use crate::hub::client::{hash_bytes, HubError};
 
 /// How a finished upload attempt ended.
@@ -195,7 +195,11 @@ impl Spreadsheet {
                         let offline = matches!(error, HubError::Network(_));
                         let msg = error.to_string();
                         this.cloud_last_error = Some(msg.clone());
-                        if offline {
+                        if is_unauthorized(&error) {
+                            this.cloud_sync_state = CloudSyncState::Error;
+                            this.cloud_last_error = Some("Sign-in expired".to_string());
+                            this.cloud_sign_in_expired(false, cx);
+                        } else if offline {
                             this.cloud_sync_state = CloudSyncState::Offline;
                             this.status_message = Some("Cloud sync: offline".to_string());
                         } else {

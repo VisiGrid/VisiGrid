@@ -5,12 +5,30 @@
 
 use crate::app::Spreadsheet;
 use crate::cloud::{CloudIdentity, CloudSyncState};
-use crate::cloud::sheets_client::SheetsClient;
+use crate::cloud::sheets_client::{is_unauthorized, SheetsClient};
 use crate::hub::client::HubError;
 use visigrid_io::json::{self, CloudBlobKind};
 use visigrid_io::native;
 
 impl Spreadsheet {
+    /// The saved sign-in was rejected. Drop it so "Hub: Sign In" will run
+    /// (it refuses while a token file exists) and, when the user asked for
+    /// something that needs the cloud, start signing in straight away.
+    pub(crate) fn cloud_sign_in_expired(&mut self, start_sign_in: bool, cx: &mut gpui::Context<Self>) {
+        let _ = crate::hub::auth::delete_auth();
+        if start_sign_in {
+            self.mode = crate::mode::Mode::Navigation;
+            self.hub_sign_in(cx);
+            self.status_message = Some(
+                "Your VisiGrid sign-in expired. Sign in in the browser (or paste the token), then try again."
+                    .to_string(),
+            );
+        } else {
+            self.status_message = Some("Your VisiGrid sign-in expired. Run \"Hub: Sign In\" to resume cloud sync.".to_string());
+        }
+        cx.notify();
+    }
+
     /// Move the current local file to cloud.
     /// Creates a sheet on the server, attaches a CloudIdentity, and triggers initial upload.
     pub fn cloud_move_to_cloud(&mut self, cx: &mut gpui::Context<Self>) {
@@ -82,6 +100,9 @@ impl Spreadsheet {
                         cx.notify();
                     });
                 }
+                Err(ref e) if is_unauthorized(e) => {
+                    let _ = this.update(cx, |this, cx| this.cloud_sign_in_expired(true, cx));
+                }
                 Err(e) => {
                     let msg = e.to_string();
                     let _ = this.update(cx, |this, cx| {
@@ -122,6 +143,9 @@ impl Spreadsheet {
                     }
                     Err(HubError::NotAuthenticated) => {
                         this.status_message = Some("Sign in first to open cloud sheets.".to_string());
+                    }
+                    Err(ref e) if is_unauthorized(e) => {
+                        this.cloud_sign_in_expired(true, cx);
                     }
                     Err(e) => {
                         this.status_message = Some(format!("Failed to list cloud sheets: {}", e));
@@ -273,6 +297,9 @@ impl Spreadsheet {
                         });
                         cx.notify();
                     });
+                }
+                Err(ref e) if is_unauthorized(e) => {
+                    let _ = this.update(cx, |this, cx| this.cloud_sign_in_expired(true, cx));
                 }
                 Err(e) => {
                     let msg = e.to_string();
