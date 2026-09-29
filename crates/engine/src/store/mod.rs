@@ -7,9 +7,12 @@
 //! so it can change without its callers changing.
 
 mod columns;
+// The pre-#18 store: kept as the reference the differential tests check the
+// column store against.
+#[cfg(test)]
 mod hash;
 
-pub(crate) use hash::HashStore as CellStore;
+pub(crate) use columns::ColumnStore as CellStore;
 
 #[cfg(test)]
 mod differential {
@@ -30,7 +33,6 @@ mod differential {
         fn upsert_with(&mut self, row: usize, col: usize, f: &dyn Fn(&mut Cell));
         fn update_with(&mut self, row: usize, col: usize, f: &dyn Fn(&mut Cell)) -> bool;
         fn remove(&mut self, row: usize, col: usize) -> Option<Cell>;
-        fn retain_where(&mut self, keep: &dyn Fn((usize, usize)) -> bool);
         fn insert_rows(&mut self, at: usize, count: usize, limit: usize);
         fn delete_rows(&mut self, start: usize, count: usize);
         fn insert_cols(&mut self, at: usize, count: usize, limit: usize);
@@ -50,7 +52,6 @@ mod differential {
                     self.update(row, col, |c| f(c)).is_some()
                 }
                 fn remove(&mut self, row: usize, col: usize) -> Option<Cell> { <$t>::remove(self, row, col) }
-                fn retain_where(&mut self, keep: &dyn Fn((usize, usize)) -> bool) { self.retain(|pos, _| keep(pos)) }
                 fn insert_rows(&mut self, at: usize, count: usize, limit: usize) { <$t>::insert_rows(self, at, count, limit) }
                 fn delete_rows(&mut self, start: usize, count: usize) { <$t>::delete_rows(self, start, count) }
                 fn insert_cols(&mut self, at: usize, count: usize, limit: usize) { <$t>::insert_cols(self, at, count, limit) }
@@ -199,9 +200,14 @@ mod differential {
                 }
             }
             10 => {
+                // Remove every cell matching a condition, across the sheet.
                 let m = rng.below(5) + 2;
-                a.retain_where(&|(r, c)| (r + c) % m != 0);
-                b.retain_where(&|(r, c)| (r + c) % m != 0);
+                let doomed: Vec<_> =
+                    a.cells().into_iter().map(|(pos, _)| pos).filter(|(r, c)| (r + c) % m == 0).collect();
+                for (r, c) in doomed {
+                    a.remove(r, c);
+                    b.remove(r, c);
+                }
             }
             11 => {
                 let (at, n) = (rng.below(ROWS), rng.below(40) + 1);

@@ -74,11 +74,6 @@ impl HashStore {
         self.map.remove(&key(row, col))
     }
 
-    /// Keep only the cells for which `keep` is true.
-    pub fn retain(&mut self, mut keep: impl FnMut((usize, usize), CellRef<'_>) -> bool) {
-        self.map.retain(|k, cell| keep(coords(*k), CellRef::new(cell)));
-    }
-
     /// Move cells at or below `at` down by `count` rows. Cells that would land
     /// at or past `limit` are dropped (callers refuse inserts that would push
     /// data off the grid before getting here).

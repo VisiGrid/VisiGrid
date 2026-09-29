@@ -79,10 +79,6 @@ fn set_bit(bits: &mut [u64; WORDS], off: usize, on: bool) {
     }
 }
 
-fn ones(bits: &[u64; WORDS]) -> impl Iterator<Item = usize> + '_ {
-    (0..CHUNK_ROWS).filter(move |&off| bit(bits, off))
-}
-
 #[derive(Debug, Clone)]
 enum Cells {
     Sparse(Vec<(u16, Slot)>),
@@ -104,17 +100,18 @@ impl Cells {
         }
     }
 
-    fn offsets(&self) -> Vec<usize> {
+    /// Present cells in offset order, without allocating.
+    fn slots(&self) -> SlotIter<'_> {
         match self {
-            Cells::Sparse(v) => v.iter().map(|e| e.0 as usize).collect(),
+            Cells::Sparse(v) => SlotIter::Sparse(v.iter()),
             Cells::Numbers { present, .. } | Cells::Texts { present, .. } | Cells::Mixed { present, .. } => {
-                ones(present).collect()
+                SlotIter::Dense { cells: self, present, word: 0, bits: present[0] }
             }
         }
     }
 
     fn entries(&self) -> Vec<(usize, Slot)> {
-        self.offsets().into_iter().map(|off| (off, self.get(off).unwrap())).collect()
+        self.slots().collect()
     }
 
     /// Dense form of `entries`, specialised when every value agrees in kind.
@@ -234,6 +231,39 @@ impl Cells {
     }
 }
 
+enum SlotIter<'a> {
+    Sparse(std::slice::Iter<'a, (u16, Slot)>),
+    Dense { cells: &'a Cells, present: &'a [u64; WORDS], word: usize, bits: u64 },
+}
+
+impl Iterator for SlotIter<'_> {
+    type Item = (usize, Slot);
+
+    fn next(&mut self) -> Option<(usize, Slot)> {
+        match self {
+            SlotIter::Sparse(it) => it.next().map(|&(off, slot)| (off as usize, slot)),
+            SlotIter::Dense { cells, present, word, bits } => loop {
+                if *bits != 0 {
+                    let off = *word * 64 + bits.trailing_zeros() as usize;
+                    *bits &= *bits - 1;
+                    let slot = match cells {
+                        Cells::Numbers { values, .. } => Slot::Number(values[off]),
+                        Cells::Texts { ids, .. } => Slot::Text(ids[off]),
+                        Cells::Mixed { slots, .. } => slots[off],
+                        Cells::Sparse(_) => unreachable!("dense iterator over sparse cells"),
+                    };
+                    return Some((off, slot));
+                }
+                *word += 1;
+                if *word >= WORDS {
+                    return None;
+                }
+                *bits = present[*word];
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Formats {
     Uniform(FormatId),
@@ -303,50 +333,63 @@ impl Column {
 }
 
 /// Interned text with reference counts, so repeated values cost one copy
-/// and a cleared cell gives its string back.
+/// and a cleared cell gives its string back. The index stores only ids and
+/// hashes through `entries`, so each distinct string is kept once.
 #[derive(Debug, Clone, Default)]
 struct StringPool {
-    entries: Vec<Option<(Arc<str>, u32)>>,
+    entries: Vec<Option<(Box<str>, u32)>>,
     free: Vec<StrId>,
-    index: HashMap<Arc<str>, StrId>,
+    index: hashbrown::HashTable<StrId>,
+}
+
+fn hash_str(s: &str) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(s)
 }
 
 impl StringPool {
+    fn text(entries: &[Option<(Box<str>, u32)>], id: StrId) -> &str {
+        &entries[id as usize].as_ref().expect("live string id").0
+    }
+
     fn intern(&mut self, s: &str) -> StrId {
-        if let Some(&id) = self.index.get(s) {
-            if let Some((_, refs)) = &mut self.entries[id as usize] {
+        let hash = hash_str(s);
+        let entries = &mut self.entries;
+        if let Some(&id) = self.index.find(hash, |&id| Self::text(entries, id) == s) {
+            if let Some((_, refs)) = &mut entries[id as usize] {
                 *refs += 1;
             }
             return id;
         }
-        let text: Arc<str> = Arc::from(s);
         let id = match self.free.pop() {
             Some(id) => {
-                self.entries[id as usize] = Some((Arc::clone(&text), 1));
+                entries[id as usize] = Some((Box::from(s), 1));
                 id
             }
             None => {
-                self.entries.push(Some((Arc::clone(&text), 1)));
-                (self.entries.len() - 1) as StrId
+                entries.push(Some((Box::from(s), 1)));
+                (entries.len() - 1) as StrId
             }
         };
-        self.index.insert(text, id);
+        let entries = &self.entries;
+        self.index.insert_unique(hash, id, |&i| hash_str(Self::text(entries, i)));
         id
     }
 
     fn get(&self, id: StrId) -> &str {
-        &self.entries[id as usize].as_ref().expect("live string id").0
+        Self::text(&self.entries, id)
     }
 
     fn release(&mut self, id: StrId) {
-        let entry = &mut self.entries[id as usize];
-        if let Some((text, refs)) = entry {
-            *refs -= 1;
-            if *refs == 0 {
-                self.index.remove(&**text);
-                *entry = None;
-                self.free.push(id);
+        let Some((text, refs)) = &mut self.entries[id as usize] else { return };
+        *refs -= 1;
+        if *refs == 0 {
+            let hash = hash_str(text);
+            if let Ok(entry) = self.index.find_entry(hash, |&i| i == id) {
+                entry.remove();
             }
+            self.entries[id as usize] = None;
+            self.free.push(id);
         }
     }
 }
@@ -393,6 +436,11 @@ impl FormulaTable {
 struct FormatTable {
     formats: Vec<Arc<CellFormat>>,
     index: HashMap<Arc<CellFormat>, FormatId>,
+    /// Allocation address of each stored format. The table holds those Arcs,
+    /// so an incoming Arc at one of these addresses is that same format, and
+    /// the 112-byte value need not be hashed. Sheets share format Arcs, so
+    /// this is the common case.
+    by_address: HashMap<usize, FormatId>,
 }
 
 impl Default for FormatTable {
@@ -400,16 +448,22 @@ impl Default for FormatTable {
         let default = Cell::default().format;
         let mut index = HashMap::new();
         index.insert(Arc::clone(&default), 0);
-        FormatTable { formats: vec![default], index }
+        let mut by_address = HashMap::new();
+        by_address.insert(Arc::as_ptr(&default) as usize, 0);
+        FormatTable { formats: vec![default], index, by_address }
     }
 }
 
 impl FormatTable {
     fn intern(&mut self, format: Arc<CellFormat>) -> FormatId {
+        if let Some(&id) = self.by_address.get(&(Arc::as_ptr(&format) as usize)) {
+            return id;
+        }
         if let Some(&id) = self.index.get(&format) {
             return id;
         }
         let id = self.formats.len() as FormatId;
+        self.by_address.insert(Arc::as_ptr(&format) as usize, id);
         self.formats.push(Arc::clone(&format));
         self.index.insert(format, id);
         id
@@ -452,8 +506,7 @@ impl ColumnStore {
         let (idx, off) = split(row);
         let chunk = self.columns.get(col)?.chunk(idx)?;
         let slot = chunk.cells.get(off)?;
-        let extras = if chunk.extras > 0 { self.extras.get(&(row as u32, col as u32)) } else { None };
-        Some(CellRef::from_parts(self.value_ref(slot), self.formats.get(chunk.formats.get(off)), extras))
+        Some(self.view(row, col, chunk, off, slot))
     }
 
     fn value_ref(&self, slot: Slot) -> ValueRef<'_> {
@@ -469,19 +522,13 @@ impl ColumnStore {
     }
 
     /// Every stored cell, column by column, top to bottom.
-    pub fn iter(&self) -> impl Iterator<Item = ((usize, usize), CellRef<'_>)> {
-        self.columns.iter().enumerate().flat_map(move |(col, column)| {
-            column.chunks.iter().flat_map(move |(idx, chunk)| {
-                chunk.cells.entries().into_iter().map(move |(off, slot)| {
-                    let row = join(*idx, off);
-                    let extras =
-                        if chunk.extras > 0 { self.extras.get(&(row as u32, col as u32)) } else { None };
-                    let view =
-                        CellRef::from_parts(self.value_ref(slot), self.formats.get(chunk.formats.get(off)), extras);
-                    ((row, col), view)
-                })
-            })
-        })
+    pub fn iter(&self) -> Iter<'_> {
+        Iter { store: self, col: 0, chunk: 0, slots: None }
+    }
+
+    fn view(&self, row: usize, col: usize, chunk: &Chunk, off: usize, slot: Slot) -> CellRef<'_> {
+        let extras = if chunk.extras > 0 { self.extras.get(&(row as u32, col as u32)) } else { None };
+        CellRef::from_parts(self.value_ref(slot), self.formats.get(chunk.formats.get(off)), extras)
     }
 
     /// Change a cell that exists; `None` when there is no cell there.
@@ -595,17 +642,6 @@ impl ColumnStore {
         Some(Cell::from_parts(value, format, raw.extras))
     }
 
-    /// Keep only the cells for which `keep` is true.
-    pub fn retain(&mut self, mut keep: impl FnMut((usize, usize), CellRef<'_>) -> bool) {
-        let doomed: Vec<(usize, usize)> =
-            self.iter().filter_map(|(pos, cell)| (!keep(pos, cell)).then_some(pos)).collect();
-        for (row, col) in doomed {
-            if let Some(raw) = self.take(row, col) {
-                self.release(&raw);
-            }
-        }
-    }
-
     /// Move cells at or below `at` down by `count` rows, dropping any that
     /// would land at or past `limit`.
     pub fn insert_rows(&mut self, at: usize, count: usize, limit: usize) {
@@ -663,24 +699,78 @@ impl ColumnStore {
     }
 }
 
+/// Iterator over a column store's cells: one flat state machine rather than
+/// nested adapters, since exporters and bounds scans walk every cell.
+pub(crate) struct Iter<'a> {
+    store: &'a ColumnStore,
+    col: usize,
+    chunk: usize,
+    slots: Option<SlotIter<'a>>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = ((usize, usize), CellRef<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let column = self.store.columns.get(self.col)?;
+            if let Some(slots) = &mut self.slots {
+                let (idx, chunk) = &column.chunks[self.chunk];
+                if let Some((off, slot)) = slots.next() {
+                    let row = join(*idx, off);
+                    return Some(((row, self.col), self.store.view(row, self.col, chunk, off, slot)));
+                }
+                self.slots = None;
+                self.chunk += 1;
+            }
+            match column.chunks.get(self.chunk) {
+                Some((_, chunk)) => self.slots = Some(chunk.cells.slots()),
+                None => {
+                    self.col += 1;
+                    self.chunk = 0;
+                }
+            }
+        }
+    }
+}
+
+/// Serialized exactly as the hash store was (a map from `(row, col)` to
+/// `Cell`), so the format does not change with the representation.
+/// Deserialization also accepts a sequence of `((row, col), cell)` pairs.
 impl serde::Serialize for ColumnStore {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.len))?;
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.len))?;
         for ((row, col), cell) in self.iter() {
-            seq.serialize_element(&((row as u32, col as u32), cell.to_cell()))?;
+            map.serialize_entry(&(row as u32, col as u32), &cell.to_cell())?;
         }
-        seq.end()
+        map.end()
     }
 }
 
 impl<'de> serde::Deserialize<'de> for ColumnStore {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let cells: Vec<((u32, u32), Cell)> = serde::Deserialize::deserialize(deserializer)?;
-        let mut store = ColumnStore::default();
-        for ((row, col), cell) in cells {
-            store.insert(row as usize, col as usize, cell);
+        struct Cells;
+        impl<'de> serde::de::Visitor<'de> for Cells {
+            type Value = ColumnStore;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map or sequence of (row, col) to cell")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ColumnStore, A::Error> {
+                let mut store = ColumnStore::default();
+                while let Some(((row, col), cell)) = map.next_entry::<(u32, u32), Cell>()? {
+                    store.insert(row as usize, col as usize, cell);
+                }
+                Ok(store)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<ColumnStore, A::Error> {
+                let mut store = ColumnStore::default();
+                while let Some(((row, col), cell)) = seq.next_element::<((u32, u32), Cell)>()? {
+                    store.insert(row as usize, col as usize, cell);
+                }
+                Ok(store)
+            }
         }
-        Ok(store)
+        deserializer.deserialize_any(Cells)
     }
 }
