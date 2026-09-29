@@ -262,14 +262,14 @@ fn graph_mapping_preserves_open_axis_when_first_row_is_deleted() {
     let mut graph = DepGraph::new();
     let formula = CellId::new(sheet, 5, 2);
     graph.register_leaf_formula(formula);
-    graph.set_whole_ranges(
+    graph.set_ranges(
         formula,
-        vec![WholeRangeRef {
+        vec![visigrid_engine::dep_graph::RangeRef::from_whole(&WholeRangeRef {
             sheet,
             axis: RangeAxis::Column,
             start: 0,
             end: 1,
-        }],
+        })],
     );
     graph.apply_mapping(|cell| {
         cell.row
