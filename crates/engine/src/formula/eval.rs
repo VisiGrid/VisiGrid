@@ -21,6 +21,35 @@ pub trait CellLookup {
     fn get_value(&self, row: usize, col: usize) -> f64;
     fn get_text(&self, row: usize, col: usize) -> String;
 
+    /// The numbers SUM-like functions take from a rectangle, in row-major
+    /// order: for each cell, its text parsed as a number, skipping cells
+    /// whose text does not parse. This default is that loop, one `get_text`
+    /// per cell. Real sheets override it to visit only the cells that exist
+    /// (#18): a whole column no longer formats a string for every row.
+    fn numbers_in_range(
+        &self,
+        sheet: &SheetRef,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        for r in start_row..=end_row {
+            for c in start_col..=end_col {
+                let text = match sheet {
+                    SheetRef::Current => self.get_text(r, c),
+                    SheetRef::Id(id) => self.get_text_sheet(*id, r, c),
+                    SheetRef::RefError { .. } => return Err("#REF!".to_string()),
+                };
+                if let Ok(n) = text.parse::<f64>() {
+                    out.push(n);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A cell's value with its type intact.
     ///
     /// `get_text` flattens everything to a string, so a caller has to guess the
@@ -153,6 +182,18 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
         self.inner.get_value(row, col)
     }
 
+    fn numbers_in_range(
+        &self,
+        sheet: &SheetRef,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        self.inner.numbers_in_range(sheet, start_row, start_col, end_row, end_col, out)
+    }
+
     fn get_text(&self, row: usize, col: usize) -> String {
         self.inner.get_text(row, col)
     }
@@ -229,6 +270,18 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn get_value(&self, row: usize, col: usize) -> f64 {
         self.inner.get_value(row, col)
+    }
+
+    fn numbers_in_range(
+        &self,
+        sheet: &SheetRef,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        self.inner.numbers_in_range(sheet, start_row, start_col, end_row, end_col, out)
     }
 
     fn get_text(&self, row: usize, col: usize) -> String {

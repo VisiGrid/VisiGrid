@@ -549,8 +549,22 @@ impl ColumnStore {
     /// query costs that column, not the sheet.
     pub fn positions_in(&self, min_row: usize, max_row: usize, min_col: usize, max_col: usize) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
+        self.for_each_in(min_row, max_row, min_col, max_col, |pos, _| out.push(pos));
+        out
+    }
+
+    /// Visit the stored cells inside a rectangle, column by column and top
+    /// to bottom within a column, touching only the chunks it overlaps.
+    pub fn for_each_in(
+        &self,
+        min_row: usize,
+        max_row: usize,
+        min_col: usize,
+        max_col: usize,
+        mut f: impl FnMut((usize, usize), CellRef<'_>),
+    ) {
         if self.columns.is_empty() || min_row > max_row || min_col > max_col {
-            return out;
+            return;
         }
         let last_col = max_col.min(self.columns.len() - 1);
         let (lo, _) = split(min_row);
@@ -562,15 +576,14 @@ impl ColumnStore {
                 if *idx > hi {
                     break;
                 }
-                for (off, _) in chunk.cells.slots() {
+                for (off, slot) in chunk.cells.slots() {
                     let row = join(*idx, off);
                     if (min_row..=max_row).contains(&row) {
-                        out.push((row, col));
+                        f((row, col), self.view(row, col, chunk, off, slot));
                     }
                 }
             }
         }
-        out
     }
 
     /// Change a cell that exists; `None` when there is no cell there.

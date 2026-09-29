@@ -392,16 +392,8 @@ pub(crate) fn collect_numbers_from_range_sheet<L: CellLookup>(
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
 
-    for r in min_row..=max_row {
-        for c in min_col..=max_col {
-            let text = get_text_for_sheet(lookup, sheet, r, c)?;
-            // Only include numeric values, skip text/empty
-            if let Ok(n) = text.parse::<f64>() {
-                values.push(n);
-            }
-        }
-    }
-    Ok(())
+    // Only numeric values, skipping text/empty; see CellLookup::numbers_in_range.
+    lookup.numbers_in_range(sheet, min_row, min_col, max_row, max_col, values)
 }
 
 /// Legacy helper for same-sheet ranges (used by named range resolution)
