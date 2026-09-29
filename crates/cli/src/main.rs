@@ -5367,7 +5367,7 @@ fn cmd_sheet_inspect(
             let mut max_row = 0usize;
             let mut max_col = 0usize;
             for ((r, c), cell) in s.cells_iter() {
-                if !cell.value.raw_display().is_empty() {
+                if !cell.value().raw_display().is_empty() {
                     non_empty_cells += 1;
                     if r + 1 > max_row { max_row = r + 1; }
                     if c + 1 > max_col { max_col = c + 1; }
@@ -5403,11 +5403,11 @@ fn cmd_sheet_inspect(
         // Workbook metadata
         let cell_count = if let Some(ref sa) = sheet_arg {
             let (_, s) = resolve_sheet(&workbook, Some(sa))?;
-            s.cells_iter().filter(|(_, c)| !c.value.raw_display().is_empty()).count()
+            s.cells_iter().filter(|(_, c)| !c.value().raw_display().is_empty()).count()
         } else {
             (0..workbook.sheet_count())
                 .filter_map(|i| workbook.sheet(i))
-                .map(|s| s.cells_iter().filter(|(_, c)| !c.value.raw_display().is_empty()).count())
+                .map(|s| s.cells_iter().filter(|(_, c)| !c.value().raw_display().is_empty()).count())
                 .sum()
         };
 
@@ -5464,7 +5464,7 @@ fn cmd_sheet_inspect(
 
         let mut cells: Vec<((usize, usize), sheet_ops::CellInspectResult)> = Vec::new();
         for ((row, col), cell) in sheet.cells_iter() {
-            let raw_str = cell.value.raw_display();
+            let raw_str = cell.value().raw_display();
             if raw_str.is_empty() { continue; }
             let display = sheet.get_display(row, col);
             let value_type = if is_native {
@@ -6013,7 +6013,7 @@ fn cmd_sheet_import(
             for c in 0..max_col {
                 let is_empty = match sheet_mut.get_cell_opt(r, c) {
                     None => true,
-                    Some(cell) => cell.value.raw_display().is_empty(),
+                    Some(cell) => cell.value().raw_display().is_empty(),
                 };
                 if is_empty {
                     sheet_mut.set_value(r, c, "#NULL!");
@@ -6028,7 +6028,7 @@ fn cmd_sheet_import(
     let (rows, cols) = get_data_bounds(sheet);
     let mut cells = 0;
     for ((_row, _col), cell) in sheet.cells_iter() {
-        if !cell.value.raw_display().is_empty() {
+        if !cell.value().raw_display().is_empty() {
             cells += 1;
         }
     }

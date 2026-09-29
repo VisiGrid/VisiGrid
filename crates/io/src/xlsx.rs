@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use calamine::{open_workbook_auto, Data, Reader, Sheets};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Workbook as XlsxWorkbook, Worksheet};
-use visigrid_engine::cell::{Alignment, BorderStyle, CellFormat, CellValue, DateStyle, NumberFormat, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellFormat, CellValue, ValueRef, DateStyle, NumberFormat, VerticalAlignment};
 use visigrid_engine::formula::analyze::tally_unknown_functions;
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::formula::parser::parse as parse_formula;
@@ -619,7 +619,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                 // Snapshot the typed cached value before formula overwrite
                                 if options.freeze_cycles {
                                     let cached = sheet.get_cell_opt(target_row, target_col)
-                                        .map(|c| c.value.clone());
+                                        .map(|c| c.value().to_owned_value());
                                     cached_snapshots.last_mut().unwrap().insert(
                                         (target_row, target_col),
                                         (cached, formula_str.clone()),
@@ -803,7 +803,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             let mut sheet_circular = 0usize;
             for ((_row, _col), cell) in sheet.cells_iter() {
                 // Circulars: structural graph property (set during dep graph cycle detection)
-                if cell.value.is_cycle_error() {
+                if cell.value().is_cycle_error() {
                     sheet_circular += 1;
                     if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
                         result.recalc_error_examples.push(RecalcErrorExample {
@@ -817,12 +817,12 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     continue;
                 }
                 // Formula errors: evaluate formula cells, check for Value::Error
-                if cell.value.formula_ast().is_some() {
+                if cell.value().formula_ast().is_some() {
                     if let Value::Error(ref e) = sheet.get_computed_value(_row, _col) {
                         sheet_errors += 1;
                         if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
-                            let formula_source = match &cell.value {
-                                CellValue::Formula { source, .. } => Some(source.clone()),
+                            let formula_source = match cell.value() {
+                                ValueRef::Formula { source, .. } => Some(source.to_string()),
                                 _ => None,
                             };
                             result.recalc_error_examples.push(RecalcErrorExample {
@@ -1558,8 +1558,8 @@ fn export_sheet_cells(
         let col16 = col as u16;
 
         // Build format for this cell
-        let mut format = build_excel_format(&cell.format);
-        if cell.format.is_default()
+        let mut format = build_excel_format(&cell.format());
+        if cell.format().is_default()
             && (sheet.row_formats.contains_key(&row) || sheet.col_formats.contains_key(&col)) {
             // The writer treats its empty Format as "inherit row/column".
             // Explicitly request Excel's default foreground to emit an XF
@@ -1567,10 +1567,10 @@ fn export_sheet_cells(
             format = format.set_font_color(rust_xlsxwriter::Color::Theme(1, 0));
         }
 
-        match &cell.value {
-            CellValue::Empty => {
+        match cell.value() {
+            ValueRef::Empty => {
                 // Only write format if cell has formatting
-                if has_formatting(&cell.format) || sheet.row_formats.contains_key(&row)
+                if has_formatting(&cell.format()) || sheet.row_formats.contains_key(&row)
                     || sheet.col_formats.contains_key(&col) {
                     worksheet
                         .write_blank(row32, col16, &format)
@@ -1578,17 +1578,17 @@ fn export_sheet_cells(
                     cells_exported += 1;
                 }
             }
-            CellValue::Text(s) => {
+            ValueRef::Text(s) => {
                 worksheet
                     .write_string_with_format(row32, col16, s, &format)
                     .map_err(|e| format!("Failed to write cell ({}, {}): {}", row, col, e))?;
                 cells_exported += 1;
             }
-            CellValue::Number(n) => {
+            ValueRef::Number(n) => {
                 // Check for precision loss (>15 significant digits)
-                if exceeds_excel_precision(*n) {
+                if exceeds_excel_precision(n) {
                     // Export as text to preserve exact value
-                    let text_value = format!("{}", *n as i64); // Format as integer string
+                    let text_value = format!("{}", n as i64); // Format as integer string
                     worksheet
                         .write_string_with_format(row32, col16, &text_value, &format)
                         .map_err(|e| format!("Failed to write cell ({}, {}): {}", row, col, e))?;
@@ -1600,19 +1600,19 @@ fn export_sheet_cells(
                     });
                 } else {
                     // Safe to export as number
-                    let format = apply_number_format(format, &cell.format.number_format);
+                    let format = apply_number_format(format, &cell.format().number_format);
                     worksheet
-                        .write_number_with_format(row32, col16, *n, &format)
+                        .write_number_with_format(row32, col16, n, &format)
                         .map_err(|e| format!("Failed to write cell ({}, {}): {}", row, col, e))?;
                 }
                 cells_exported += 1;
             }
-            CellValue::Formula { source, ast } => {
+            ValueRef::Formula { source, ast } => {
                 // Try to export as formula if it has a valid AST
                 if ast.is_some() {
                     // Export the formula string (strip leading '=')
                     let formula_str = source.strip_prefix('=').unwrap_or(source);
-                    let format = apply_number_format(format, &cell.format.number_format);
+                    let format = apply_number_format(format, &cell.format().number_format);
 
                     worksheet
                         .write_formula_with_format(row32, col16, formula_str, &format)
@@ -1622,7 +1622,7 @@ fn export_sheet_cells(
                     // Invalid formula - export computed value instead
                     let display = sheet.get_formatted_display(row, col);
                     if let Ok(n) = display.parse::<f64>() {
-                        let format = apply_number_format(format, &cell.format.number_format);
+                        let format = apply_number_format(format, &cell.format().number_format);
                         worksheet
                             .write_number_with_format(row32, col16, n, &format)
                             .map_err(|e| format!("Failed to write cell ({}, {}): {}", row, col, e))?;
@@ -1636,7 +1636,7 @@ fn export_sheet_cells(
                     converted_formulas.push(ConvertedFormula {
                         sheet: sheet.name.clone(),
                         address: cell_address(row, col),
-                        formula: source.clone(),
+                        formula: source.to_string(),
                         value: display,
                     });
 

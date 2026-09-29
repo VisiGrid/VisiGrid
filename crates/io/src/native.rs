@@ -5,7 +5,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellStyle, CellValue, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, CellRef, CellStyle, ValueRef, DateStyle, NegativeStyle, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::workbook::Workbook;
@@ -65,7 +65,7 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
             // Collect cells and sort for deterministic order
             let mut cells: Vec<((usize, usize), String)> = Vec::new();
             for ((row, col), cell) in sheet.cells_iter() {
-                let raw = cell.value.raw_display();
+                let raw = cell.value().raw_display();
                 if !raw.is_empty() {
                     cells.push(((row, col), raw.to_string()));
                 }
@@ -458,18 +458,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 /// For formula cells, persists the computed cached value in value_num/value_text
 /// and the formula source text in formula_source.
 fn cell_save_values(
-    cell: &visigrid_engine::cell::Cell,
+    cell: CellRef<'_>,
     sheet: &Sheet,
     row: usize,
     col: usize,
 ) -> (i32, Option<f64>, Option<String>, Option<String>) {
-    let raw = cell.value.raw_display();
+    let raw = cell.raw_display();
     if raw.is_empty() {
         return (TYPE_EMPTY, None, None, None);
     }
 
-    match &cell.value {
-        CellValue::Formula { .. } => {
+    match cell.value() {
+        ValueRef::Formula { .. } => {
             // Store formula source in formula_source, cached result in value_num/value_text
             let computed = sheet.get_computed_value(row, col);
             let (vnum, vtext) = match computed {
@@ -481,15 +481,15 @@ fn cell_save_values(
             };
             (TYPE_FORMULA, vnum, vtext, Some(raw))
         }
-        CellValue::Number(_) => {
+        ValueRef::Number(_) => {
             if let Ok(num) = raw.parse::<f64>() {
                 (TYPE_NUMBER, Some(num), None, None)
             } else {
                 (TYPE_TEXT, None, Some(raw), None)
             }
         }
-        CellValue::Text(_) => (TYPE_TEXT, None, Some(raw), None),
-        CellValue::Empty => (TYPE_EMPTY, None, None, None),
+        ValueRef::Text(_) => (TYPE_TEXT, None, Some(raw), None),
+        ValueRef::Empty => (TYPE_EMPTY, None, None, None),
     }
 }
 
@@ -579,8 +579,8 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
         ).map_err(|e| e.to_string())?;
 
         for ((row, col), cell) in sheet.cells_iter() {
-                let raw = cell.value.raw_display();
-                let format = &cell.format;
+                let raw = cell.value().raw_display();
+                let format = &cell.format();
 
                 // Skip cells with no value and default formatting
                 if raw.is_empty() && format.is_default()
@@ -886,8 +886,8 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
 
             // Save cells for this sheet
             for ((row, col), cell) in sheet.cells_iter() {
-                let raw = cell.value.raw_display();
-                let format = &cell.format;
+                let raw = cell.value().raw_display();
+                let format = &cell.format();
 
                 // Skip cells with no value and default formatting
                 if raw.is_empty() && format.is_default()
@@ -1045,8 +1045,8 @@ fn write_workbook_with_metadata(
 
             // Save cells for this sheet
             for ((row, col), cell) in sheet.cells_iter() {
-                let raw = cell.value.raw_display();
-                let format = &cell.format;
+                let raw = cell.value().raw_display();
+                let format = &cell.format();
 
                 if raw.is_empty() && format.is_default()
                     && !sheet.row_formats.contains_key(&row) && !sheet.col_formats.contains_key(&col) {
@@ -2460,8 +2460,8 @@ fn write_workbook_full(
             ]).map_err(|e| e.to_string())?;
 
             for ((row, col), cell) in sheet.cells_iter() {
-                let raw = cell.value.raw_display();
-                let format = &cell.format;
+                let raw = cell.value().raw_display();
+                let format = &cell.format();
 
                 if raw.is_empty() && format.is_default()
                     && !sheet.row_formats.contains_key(&row) && !sheet.col_formats.contains_key(&col) {
@@ -2852,7 +2852,7 @@ pub fn upgrade_sheet(path: &Path, out_path: Option<&Path>) -> Result<UpgradeResu
     for sheet in workbook.sheets() {
         formula_cells_total += sheet
             .cells_iter()
-            .filter(|(_, cell)| matches!(cell.value, CellValue::Formula { .. }))
+            .filter(|(_, cell)| cell.value().is_formula())
             .count();
     }
 

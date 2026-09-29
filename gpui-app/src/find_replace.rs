@@ -4,6 +4,7 @@
 //! - MatchKind and MatchHit types for search results
 //! - Find/Replace dialog control methods
 //! - Search and replace operations with formula-aware matching
+use visigrid_engine::cell::ValueRef;
 
 use gpui::*;
 use crate::app::Spreadsheet;
@@ -261,13 +262,13 @@ impl Spreadsheet {
         let mut display_cells: Vec<(usize, usize)> = Vec::new();
 
         for ((row, col), cell) in self.sheet(cx).cells_iter() {
-            match &cell.value {
-                CellValue::Empty => {}
-                CellValue::Text(text) => {
-                    cells_to_search.push((row, col, Some(MatchKind::Text), text.clone()));
+            match cell.value() {
+                ValueRef::Empty => {}
+                ValueRef::Text(text) => {
+                    cells_to_search.push((row, col, Some(MatchKind::Text), text.to_string()));
                 }
-                CellValue::Formula { source, .. } => {
-                    cells_to_search.push((row, col, Some(MatchKind::Formula), source.clone()));
+                ValueRef::Formula { source, .. } => {
+                    cells_to_search.push((row, col, Some(MatchKind::Formula), source.to_string()));
                 }
                 _ => {
                     display_cells.push((row, col));

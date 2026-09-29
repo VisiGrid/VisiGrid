@@ -1032,7 +1032,6 @@ fn register_styles_table(lua: &Lua) -> LuaResult<()> {
 // SheetId is used by the tests below; clippy --fix removed it because the
 // non-test build does not reference it.
 use visigrid_engine::sheet::{Sheet, SheetId};
-use visigrid_engine::cell::CellValue;
 
 /// Adapter that wraps a snapshot of sheet data for Lua read access.
 ///
@@ -1070,10 +1069,10 @@ impl SheetSnapshot {
 
         // Sparse iteration - only populated cells
         for ((row, col), cell) in sheet.cells_iter() {
-            let raw = cell.value.raw_display();
+            let raw = cell.value().raw_display();
             if !raw.is_empty() {
                 // Convert CellValue to LuaCellValue
-                let lua_value = cell_value_to_lua_cell_value(&cell.value, sheet, row, col);
+                let lua_value = cell_value_to_lua_cell_value(cell.value(), sheet, row, col);
                 values.insert((row, col), lua_value);
 
                 // Check if it's a formula
@@ -1111,12 +1110,13 @@ impl SheetReader for SheetSnapshot {
 }
 
 /// Convert engine CellValue to LuaCellValue
-fn cell_value_to_lua_cell_value(value: &CellValue, sheet: &Sheet, row: usize, col: usize) -> LuaCellValue {
+fn cell_value_to_lua_cell_value(value: visigrid_engine::cell::ValueRef<'_>, sheet: &Sheet, row: usize, col: usize) -> LuaCellValue {
+    use visigrid_engine::cell::ValueRef;
     match value {
-        CellValue::Empty => LuaCellValue::Nil,
-        CellValue::Number(n) => LuaCellValue::Number(*n),
-        CellValue::Text(s) => LuaCellValue::String(s.clone()),
-        CellValue::Formula { .. } => {
+        ValueRef::Empty => LuaCellValue::Nil,
+        ValueRef::Number(n) => LuaCellValue::Number(n),
+        ValueRef::Text(s) => LuaCellValue::String(s.to_string()),
+        ValueRef::Formula { .. } => {
             // For formulas, return the evaluated display value
             let display = sheet.get_display(row, col);
             // Try to parse as number first

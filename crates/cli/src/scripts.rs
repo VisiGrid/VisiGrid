@@ -707,12 +707,12 @@ fn create_cli_snapshot(sheet: &Sheet) -> CliSnapshot {
     let mut formulas = std::collections::HashMap::new();
 
     for ((row, col), cell) in sheet.cells_iter() {
-        let raw = cell.value.raw_display();
+        let raw = cell.value().raw_display();
         if !raw.is_empty() {
             if raw.starts_with('=') {
                 formulas.insert((row, col), raw.to_string());
                 // Also store computed value
-                let display = cell.value.raw_display();
+                let display = cell.value().raw_display();
                 values.insert((row, col), display.to_string());
             } else {
                 values.insert((row, col), raw.to_string());

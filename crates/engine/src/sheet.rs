@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::cell::{Alignment, Cell, CellBorder, CellFormat, CellStyle, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment, max_border};
+use super::cell::{Alignment, Cell, CellRef, CellBorder, CellFormat, CellStyle, CellValue, NumberFormat, SpillError, SpillInfo, TextOverflow, VerticalAlignment, max_border};
 use super::formula::eval::{self, Array2D, CellLookup, EvalResult, LookupWithContext, Value};
 use super::formula::parser::{bind_expr_same_sheet, Expr as ExprAst};
 use super::validation::ValidationStore;
@@ -299,8 +299,10 @@ pub struct Sheet {
     /// Normalized name for case-insensitive lookup (trimmed + lowercased)
     #[serde(default)]
     pub name_key: String,
-    /// Cell storage - pub(crate) for workbook-level access during recompute
-    pub(crate) cells: HashMap<CellKey, Cell>,
+    /// Cell storage. Private on purpose: everything outside this file reads
+    /// through `CellRef` (`cells_iter`, `get_cell_opt`) so the representation
+    /// can change without its readers changing (#18).
+    cells: HashMap<CellKey, Cell>,
     /// Distinct formats in this sheet, so cells that look alike share one
     /// allocation instead of carrying 112 bytes each. Rebuilt on load; never
     /// serialized.
@@ -721,9 +723,9 @@ impl Sheet {
         bounds.unwrap_or((0, 0))
     }
 
-    /// Get a reference to a cell if it exists, without creating one.
-    pub fn get_cell_opt(&self, row: usize, col: usize) -> Option<&Cell> {
-        self.cells.get(&cell_key(row, col))
+    /// Borrow a cell if it exists, without creating one.
+    pub fn get_cell_opt(&self, row: usize, col: usize) -> Option<CellRef<'_>> {
+        self.cells.get(&cell_key(row, col)).map(CellRef::new)
     }
 
     /// Evaluate a cell's formula and apply spill if it returns an array
@@ -1274,8 +1276,8 @@ impl Sheet {
     ///
     /// Yields owned coordinates, not a reference to them: storage keys are
     /// u32 pairs and callers speak usize.
-    pub fn cells_iter(&self) -> impl Iterator<Item = ((usize, usize), &Cell)> {
-        self.cells.iter().map(|(key, cell)| (from_cell_key(*key), cell))
+    pub fn cells_iter(&self) -> impl Iterator<Item = ((usize, usize), CellRef<'_>)> {
+        self.cells.iter().map(|(key, cell)| (from_cell_key(*key), CellRef::new(cell)))
     }
 
     /// Get coordinates of non-empty cells within a range

@@ -30,7 +30,7 @@ impl Spreadsheet {
             // Try to find a named range in the current cell's formula
             let (row, col) = self.view_state.selected;
             let cell = self.sheet(cx).get_cell(row, col);
-            let formula_text = self.get_formula_source(&cell.value);
+            let formula_text = self.get_formula_source(cell.value());
             if let Some(formula) = formula_text {
                 // Look for named range references in the formula
                 self.find_named_range_in_formula(&formula, cx)
@@ -126,7 +126,7 @@ impl Spreadsheet {
         // Collect cells to check (to avoid borrowing conflict with self.rename_affected_cells)
         let cells_to_check: Vec<_> = self.sheet(cx).cells_iter()
             .filter_map(|((row, col), cell)| {
-                self.get_formula_source(&cell.value).map(|formula| (row, col, formula))
+                self.get_formula_source(cell.value()).map(|formula| (row, col, formula))
             })
             .collect();
 
@@ -210,7 +210,7 @@ impl Spreadsheet {
         // Find affected cells
         let affected_cells: Vec<(usize, usize)> = self.sheet(cx).cells_iter()
             .filter_map(|((row, col), cell)| {
-                let raw = cell.value.raw_display();
+                let raw = cell.value().raw_display();
                 if raw.starts_with('=') {
                     let formula_upper = raw.to_uppercase();
                     let contains_name = formula_upper
@@ -227,7 +227,7 @@ impl Spreadsheet {
         // Update formulas in all affected cells
         for &(row, col) in &affected_cells {
             let cell = self.sheet(cx).get_cell(row, col);
-            if let Some(formula) = self.get_formula_source(&cell.value) {
+            if let Some(formula) = self.get_formula_source(cell.value()) {
                 let new_formula = self.replace_name_in_formula(&formula, &old_name_upper, new_name);
 
                 changes.push(CellChange {

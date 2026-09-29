@@ -244,7 +244,7 @@ pub fn execution_context_fingerprint(
     let mut volatile_inputs = Vec::new();
     for sheet in workbook.sheets() {
         for (_, cell) in sheet.cells_iter() {
-            note_volatile_formula(&cell.value.raw_display(), &mut volatile_inputs);
+            note_volatile_formula(&cell.value().raw_display(), &mut volatile_inputs);
         }
     }
     for planned in planned_ops {

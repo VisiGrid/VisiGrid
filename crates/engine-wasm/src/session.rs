@@ -195,7 +195,7 @@ impl Session {
         for (idx, sheet) in self.wb.sheets().iter().enumerate() {
             let mut coords: Vec<(usize, usize)> = sheet
                 .cells_iter()
-                .filter(|(_, cell)| cell.value.formula_ast().is_some())
+                .filter(|(_, cell)| cell.value().formula_ast().is_some())
                 .map(|((row, col), _)| (row, col))
                 .collect();
             // Sparse storage iterates in hash order; sort so the same workbook
