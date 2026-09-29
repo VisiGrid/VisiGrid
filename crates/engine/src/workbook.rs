@@ -2835,6 +2835,27 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
             .unwrap_or(0.0)
     }
 
+    fn numbers_in_range(
+        &self,
+        sheet: &SheetRef,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        let target = match sheet {
+            SheetRef::Current => self.current_sheet(),
+            SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
+            SheetRef::RefError { .. } => return Err("#REF!".to_string()),
+        };
+        // A missing sheet's cells read "#REF!", which contributes nothing.
+        if let Some(target) = target {
+            target.numbers_in(start_row, start_col, end_row, end_col, out);
+        }
+        Ok(())
+    }
+
     fn get_text(&self, row: usize, col: usize) -> String {
         self.current_sheet()
             .map(|sheet| sheet.get_text(row, col))

@@ -444,6 +444,27 @@ impl CellLookup for Sheet {
         }
     }
 
+    fn numbers_in_range(
+        &self,
+        sheet: &SheetRef,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        match sheet {
+            SheetRef::Current => {
+                self.numbers_in(start_row, start_col, end_row, end_col, out);
+                Ok(())
+            }
+            SheetRef::RefError { .. } => Err("#REF!".to_string()),
+            // A bare sheet cannot see other sheets: their text reads "#REF!",
+            // which contributes nothing.
+            SheetRef::Id(_) => Ok(()),
+        }
+    }
+
     fn debug_context(&self) -> String {
         format!(
             "Sheet(name=\"{}\", ptr={:p}, cache_len={})",
@@ -1211,6 +1232,91 @@ impl Sheet {
             }
             None => Value::Empty,
         }
+    }
+
+    /// The numbers in a rectangle as SUM-like functions read them, in
+    /// row-major order (#18).
+    ///
+    /// Exactly what `get_text` then `parse::<f64>()` yields for each cell,
+    /// without formatting a string per cell or visiting empty ones: a cell
+    /// being evaluated is skipped (it reads "#CIRC!"); a spill receiver gives
+    /// its spilled value; text counts if it parses as a number; a formula
+    /// gives its computed result; booleans, errors and blanks give nothing.
+    ///
+    /// One deliberate difference: a stored integer at or above 2^63 comes
+    /// back as itself. `get_text` formats integers through `i64`, which
+    /// saturated them, so SUM disagreed with `=A1+A2` for those values.
+    pub fn numbers_in(&self, start_row: usize, start_col: usize, end_row: usize, end_col: usize, out: &mut Vec<f64>) {
+        // The old path formatted integers through i64, which also turned
+        // -0.0 into "0". Keep that: SUM of a -0 cell is 0, not -0.
+        fn unsigned_zero(n: f64) -> f64 {
+            if n == 0.0 { 0.0 } else { n }
+        }
+        fn number(value: &Value) -> Option<f64> {
+            match value {
+                Value::Number(n) => Some(unsigned_zero(*n)),
+                Value::Text(s) => s.parse().ok(),
+                Value::Boolean(_) | Value::Error(_) | Value::Empty => None,
+            }
+        }
+        let inside = |r: usize, c: usize| (start_row..=end_row).contains(&r) && (start_col..=end_col).contains(&c);
+        EVALUATING.with(|evaluating| {
+            let evaluating = evaluating.borrow();
+            let skip = |r: usize, c: usize| !evaluating.is_empty() && evaluating.contains(&(r, c));
+            // Spill receivers inside the rectangle, found by whichever is
+            // smaller: checking each position of the rectangle, or scanning
+            // the sheet's spill cells. Many small SUMs beside a large spill
+            // then cost their own size, not the spill's.
+            let area = (end_row - start_row + 1).saturating_mul(end_col - start_col + 1);
+            let spills: Vec<(usize, usize)> = if self.spill_values.is_empty() {
+                Vec::new()
+            } else if area <= self.spill_values.len() {
+                (start_row..=end_row)
+                    .flat_map(|r| (start_col..=end_col).map(move |c| (r, c)))
+                    .filter(|pos| self.spill_values.contains_key(pos))
+                    .collect()
+            } else {
+                self.spill_values.keys().copied().filter(|&(r, c)| inside(r, c)).collect()
+            };
+            let spills_inside = !spills.is_empty();
+            // One column with no spill receivers arrives in row order already.
+            let in_order = start_col == end_col && !spills_inside;
+            let mut found: Vec<(usize, usize, f64)> = Vec::new();
+            let mut take = |r: usize, c: usize, n: f64| {
+                if in_order {
+                    out.push(n);
+                } else {
+                    found.push((r, c, n));
+                }
+            };
+            self.cells.for_each_in(start_row, end_row, start_col, end_col, |(r, c), cell| {
+                if skip(r, c) || self.spill_values.contains_key(&(r, c)) {
+                    return;
+                }
+                let n = match cell.value() {
+                    ValueRef::Number(n) => Some(unsigned_zero(n)),
+                    ValueRef::Text(s) => s.parse().ok(),
+                    ValueRef::Formula { ast: Some(_), .. } => {
+                        self.get_cached_value(r, c).as_ref().and_then(number)
+                    }
+                    ValueRef::Formula { ast: None, .. } | ValueRef::Empty => None,
+                };
+                if let Some(n) = n {
+                    take(r, c, n);
+                }
+            });
+            for &(r, c) in &spills {
+                if !skip(r, c) {
+                    if let Some(n) = self.spill_values.get(&(r, c)).and_then(number) {
+                        take(r, c, n);
+                    }
+                }
+            }
+            if !in_order {
+                found.sort_unstable_by_key(|&(r, c, _)| (r, c));
+                out.extend(found.into_iter().map(|(_, _, n)| n));
+            }
+        });
     }
 
     /// Get a reference to a cell (returns default empty cell if not found)
