@@ -1634,7 +1634,7 @@ mod tests {
             (CellValue::from_input("hello"), "hello", "hello", 0.0, false, false),
             (CellValue::from_input("#CYCLE!"), "#CYCLE!", "#CYCLE!", 0.0, true, false),
             (CellValue::from_input("42"), "42", "42.00", 42.0, false, false),
-            (CellValue::from_input("3.14159"), "3.14159", "3.14", 3.14159, false, false),
+            (CellValue::from_input("3.45678"), "3.45678", "3.46", 3.45678, false, false),
             (CellValue::from_input("-0.5"), "-0.5", "-0.50", -0.5, false, false),
             (CellValue::from_input("1234567.891"), "1234567.891", "1,234,567.89", 1234567.891, false, false),
             (CellValue::from_input("=A1+B1"), "=A1+B1", "=A1+B1", 0.0, false, true),
@@ -1687,6 +1687,7 @@ mod tests {
         cell.set_spill_parent(Some((4, 2)));
         cell.set_spill_info(Some(SpillInfo { rows: 3, cols: 1 }));
         cell.set_frozen_formula(Some("=A1+1".to_string()));
+        cell.set_spill_error(Some(SpillError { blocked_by: (5, 2) }));
         let view = cell.as_ref();
         assert_eq!(view.style_id(), Some(7));
         assert_eq!(view.spill_parent(), Some((4, 2)));
@@ -1694,7 +1695,8 @@ mod tests {
         assert_eq!(view.frozen_formula(), Some("=A1+1"));
         assert!(view.is_spill_receiver());
         assert!(view.is_spill_parent());
-        assert!(!view.has_spill_error());
+        assert_eq!(view.spill_error().map(|e| e.blocked_by), Some((5, 2)));
+        assert!(view.has_spill_error());
 
         let plain = Cell::new();
         let view = plain.as_ref();
