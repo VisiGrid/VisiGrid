@@ -2,7 +2,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 #[path = "workbook_pivot.rs"]
 mod pivot_ops;
-pub use pivot_ops::{PivotCommit, PivotOpError, PivotState};
+pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot};
 use serde::{Deserialize, Serialize};
 use crate::cell::{CellFormat, CellValue};
 use crate::cell_id::CellId;

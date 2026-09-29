@@ -68,6 +68,15 @@ impl PivotCommit {
     }
 }
 
+/// A pivot as saved in a file. Files identify sheets by position, and loading
+/// assigns fresh sheet ids, so the source sheet is stored by index.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SavedPivot {
+    /// Index of the source sheet in the saved workbook.
+    pub source_sheet: usize,
+    pub table: PivotTable,
+}
+
 /// Why a pivot action cannot be performed. The workbook is unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PivotOpError {
@@ -367,6 +376,72 @@ impl Workbook {
             }
         }
         changed
+    }
+
+    /// The pivots on sheet `sheet_idx`, in their saved form.
+    pub fn saved_pivots(&self, sheet_idx: usize) -> Vec<SavedPivot> {
+        let Some(sheet) = self.sheets.get(sheet_idx) else { return Vec::new() };
+        sheet
+            .pivots
+            .iter()
+            .filter_map(|p| {
+                let source_sheet = self.sheet_index_by_id(p.source.sheet_id)?;
+                Some(SavedPivot { source_sheet, table: p.clone() })
+            })
+            .collect()
+    }
+
+    /// Restore saved pivots onto sheet `sheet_idx` after its cells are loaded.
+    /// Each is validated: its source sheet must exist, its output must fit the
+    /// grid and not overlap another pivot or a merge, and its id must be unique
+    /// in the workbook. An invalid pivot is dropped (its output stays as plain
+    /// values) and a warning is returned. Loaded pivots keep their saved stale
+    /// flag; nothing is refreshed.
+    pub fn restore_pivots(&mut self, sheet_idx: usize, saved: Vec<SavedPivot>) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if sheet_idx >= self.sheets.len() {
+            return warnings;
+        }
+        for sp in saved {
+            let mut t = sp.table;
+            let Some(source_id) = self.sheets.get(sp.source_sheet).map(|s| s.id) else {
+                warnings.push(format!("{}: its source sheet is missing; kept as values.", t.name));
+                continue;
+            };
+            t.source.sheet_id = source_id;
+            t.source_generation = None;
+            if t.source.end_row < t.source.start_row || t.source.end_col < t.source.start_col {
+                warnings.push(format!("{}: invalid source range; kept as values.", t.name));
+                continue;
+            }
+            if self.find_pivot(t.id).is_some() {
+                warnings.push(format!("{}: duplicate pivot id; kept as values.", t.name));
+                continue;
+            }
+            let sheet = &self.sheets[sheet_idx];
+            if let Some((r0, c0, r1, c1)) = t.region() {
+                if r1 >= sheet.rows.min(NUM_ROWS) || c1 >= sheet.cols.min(NUM_COLS) {
+                    warnings.push(format!("{}: output runs off the sheet; kept as values.", t.name));
+                    continue;
+                }
+                if let Some(other) = sheet.pivots.iter().find(|p| p.intersects(r0, c0, r1, c1)) {
+                    warnings.push(format!("{}: output overlaps {}; kept as values.", t.name, other.name));
+                    continue;
+                }
+                if sheet
+                    .merged_regions
+                    .iter()
+                    .any(|m| m.start.0 <= r1 && r0 <= m.end.0 && m.start.1 <= c1 && c0 <= m.end.1)
+                {
+                    warnings.push(format!("{}: output overlaps a merged cell; kept as values.", t.name));
+                    continue;
+                }
+            }
+            let sheet = &mut self.sheets[sheet_idx];
+            sheet.pivots.push(t);
+            sheet.pivots.sort_by_key(|p| p.id);
+        }
+        warnings
     }
 
     /// Structural-edit support: would this edit cut through a pivot's output
@@ -725,6 +800,36 @@ mod tests {
         assert_eq!(wb.pivot_source_growth(&p), Some(5));
         // The source itself is unchanged until the user accepts.
         assert_eq!(wb.find_pivot(id).unwrap().1.source.end_row, 3);
+    }
+
+    #[test]
+    fn saved_form_round_trips_and_invalid_pivots_are_dropped() {
+        let (mut wb, data, out) = book();
+        let t = table(&wb, data);
+        refresh(&mut wb, out, t);
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        let saved = wb.saved_pivots(oi);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].source_sheet, wb.sheet_index_by_id(data).unwrap());
+        let json = serde_json::to_string(&saved).unwrap();
+
+        // A fresh workbook with different sheet ids: restore maps the index.
+        let mut wb2 = Workbook::new();
+        wb2.add_sheet();
+        let back: Vec<SavedPivot> = serde_json::from_str(&json).unwrap();
+        let warnings = wb2.restore_pivots(1, back.clone());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (_, p) = wb2.find_pivot(back[0].table.id).unwrap();
+        assert_eq!(p.source.sheet_id, wb2.sheet(0).unwrap().id);
+        // Restoring the same pivot again is a duplicate id: dropped.
+        let w = wb2.restore_pivots(1, back.clone());
+        assert_eq!(w.len(), 1);
+        // A missing source sheet: dropped.
+        let mut bad = back.clone();
+        bad[0].source_sheet = 9;
+        bad[0].table.id = 99;
+        let w = wb2.restore_pivots(1, bad);
+        assert!(w[0].contains("source sheet is missing"));
     }
 
     #[test]

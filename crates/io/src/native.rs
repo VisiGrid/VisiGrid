@@ -986,6 +986,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
     }
 
     save_cond_formats(&conn, workbook)?;
+    save_pivots(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1157,6 +1158,7 @@ fn write_workbook_with_metadata(
     }
 
     save_cond_formats(&conn, workbook)?;
+    save_pivots(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1465,6 +1467,8 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     load_cond_formats(&conn, &mut workbook);
     load_tab_colors(&conn, &mut workbook);
     load_sheet_defaults(&conn, &mut workbook);
+    // After cells: a pivot's ownership must not block loading its own output.
+    load_pivots(&conn, &mut workbook);
 
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
@@ -1559,6 +1563,48 @@ fn load_tab_colors(conn: &Connection, workbook: &mut Workbook) {
             if let Some(sheet) = workbook.sheet_mut(sheet_idx) {
                 sheet.tab_color = Some([parts[0], parts[1], parts[2], parts[3]]);
             }
+        }
+    }
+}
+
+/// Pivot tables per sheet, as JSON meta blobs `pivots_{sheet_idx}`. Absent
+/// key = no pivots. An older VisiGrid ignores the key and shows the output as
+/// plain values, which is safe: nothing is lost, only the definition.
+fn save_pivots(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+    for sheet_idx in 0..workbook.sheet_count() {
+        conn.execute("DELETE FROM meta WHERE key = ?1", params![format!("pivots_{}", sheet_idx)])
+            .map_err(|e| e.to_string())?;
+        let saved = workbook.saved_pivots(sheet_idx);
+        if saved.is_empty() {
+            continue;
+        }
+        let json = serde_json::to_string(&saved).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![format!("pivots_{}", sheet_idx), json],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_pivots(conn: &Connection, workbook: &mut Workbook) {
+    for sheet_idx in 0..workbook.sheet_count() {
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![format!("pivots_{}", sheet_idx)],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(json) = json else { continue };
+        match serde_json::from_str::<Vec<visigrid_engine::workbook::SavedPivot>>(&json) {
+            Ok(saved) => {
+                for w in workbook.restore_pivots(sheet_idx, saved) {
+                    eprintln!("Warning: pivot on sheet {}: {}", sheet_idx, w);
+                }
+            }
+            Err(e) => eprintln!("Warning: skipping unreadable pivots_{}: {}", sheet_idx, e),
         }
     }
 }
@@ -3672,6 +3718,84 @@ mod tests {
         let fp_tolerance = compute_semantic_fingerprint(&wb);
         assert_ne!(fp_max_iters, fp_tolerance,
             "Fingerprint must change when tolerance changes");
+    }
+
+    #[test]
+    fn test_pivot_persistence_roundtrip_keeps_output_ownership_and_stale_flag() {
+        use visigrid_engine::cell::NumberFormat;
+        use visigrid_engine::pivot::{aggregate, Aggregation, PivotDefinition, PivotField, PivotSource, PivotTable, PivotValueField};
+
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let path = temp_file.path();
+
+        let mut wb = Workbook::new();
+        {
+            let s = wb.sheet_mut(0).unwrap();
+            s.set_value(0, 0, "Region");
+            s.set_value(0, 1, "Amount");
+            s.set_value(1, 0, "West");
+            s.set_value(1, 1, "10");
+            s.set_value(2, 0, "East");
+            s.set_value(2, 1, "5");
+        }
+        let out_idx = wb.add_sheet();
+        let out_id = wb.sheet(out_idx).unwrap().id;
+        let data_id = wb.sheet(0).unwrap().id;
+        let money = NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None };
+        let t = PivotTable {
+            id: wb.next_pivot_id(),
+            name: wb.next_pivot_name(),
+            source: PivotSource { sheet_id: data_id, start_row: 0, start_col: 0, end_row: 2, end_col: 1 },
+            definition: PivotDefinition {
+                rows: vec![PivotField { offset: 0, header: "Region".into() }],
+                column: None,
+                values: vec![PivotValueField {
+                    field: PivotField { offset: 1, header: "Amount".into() },
+                    aggregation: Aggregation::Sum,
+                    number_format: Some(money.clone()),
+                }],
+            },
+            anchor_row: 2,
+            anchor_col: 1,
+            extent: None,
+            last_refresh: None,
+            stale: false,
+            source_generation: None,
+        };
+        let (snap, gen) = wb.pivot_snapshot(&t).unwrap();
+        let output = aggregate(&t.definition, &snap).unwrap();
+        let commit = wb.prepare_pivot_commit(out_id, t.clone(), &output, gen, 1_790_000_000).unwrap();
+        wb.apply_pivot_state(&commit.after).unwrap();
+        // Edit the source so the saved pivot is stale.
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "11");
+        wb.update_pivot_staleness();
+
+        save_workbook(&wb, path).unwrap();
+        let mut loaded = load_workbook(path).unwrap();
+
+        let (idx, p) = loaded.find_pivot(t.id).expect("pivot survives save/load");
+        assert_eq!(idx, 1);
+        assert_eq!(p.definition, t.definition);
+        assert_eq!(p.source.sheet_id, loaded.sheet(0).unwrap().id, "source re-bound by index");
+        assert_eq!(p.extent, Some((4, 2)));
+        assert!(p.stale, "stale flag persisted; opening does not refresh");
+        assert_eq!(p.last_refresh.as_ref().unwrap().refreshed_at, 1_790_000_000);
+        let out = loaded.sheet(1).unwrap();
+        // Output values as last committed (10, not the edited 11).
+        // Anchored at B3: header row, East, West, Grand Total.
+        assert_eq!(out.get_display(2, 1), "Region");
+        assert_eq!(out.get_display(4, 1), "West");
+        assert_eq!(out.get_raw(4, 2), "10");
+        assert_eq!(out.get_format(4, 2).number_format, money);
+        assert_eq!(out.get_display(5, 1), "Grand Total");
+        // Ownership is restored: ordinary writes are refused.
+        loaded.set_cell_value_tracked(1, 4, 2, "999");
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(4, 2), "10");
+
+        // Saving again does not duplicate the pivot.
+        save_workbook(&loaded, path).unwrap();
+        let again = load_workbook(path).unwrap();
+        assert_eq!(again.pivots().len(), 1);
     }
 
     #[test]
