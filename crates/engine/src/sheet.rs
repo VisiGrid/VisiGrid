@@ -393,7 +393,7 @@ impl CellLookup for Sheet {
             Some(cell) => match cell.value() {
                 ValueRef::Empty => 0.0,
                 ValueRef::Number(n) => n,
-                ValueRef::Text(s) => s.parse().unwrap_or(0.0),
+                ValueRef::Text(s) => crate::cell::parse_finite(s).unwrap_or(0.0),
                 ValueRef::Formula { ast: Some(_), .. } => {
                     // Cache-only: never evaluate on cache miss.
                     // Topo recalc populates the cache; miss means not yet computed.
@@ -1255,7 +1255,7 @@ impl Sheet {
         fn number(value: &Value) -> Option<f64> {
             match value {
                 Value::Number(n) => Some(unsigned_zero(*n)),
-                Value::Text(s) => s.parse().ok(),
+                Value::Text(s) => crate::cell::parse_finite(s),
                 Value::Boolean(_) | Value::Error(_) | Value::Empty => None,
             }
         }
@@ -1295,7 +1295,7 @@ impl Sheet {
                 }
                 let n = match cell.value() {
                     ValueRef::Number(n) => Some(unsigned_zero(n)),
-                    ValueRef::Text(s) => s.parse().ok(),
+                    ValueRef::Text(s) => crate::cell::parse_finite(s),
                     ValueRef::Formula { ast: Some(_), .. } => {
                         self.get_cached_value(r, c).as_ref().and_then(number)
                     }

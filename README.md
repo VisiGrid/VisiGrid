@@ -18,7 +18,7 @@ vgrid sheet fingerprint model.sheet --json
 vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
 ```
 
-123 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
+134 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
 
 ## Why VisiGrid
 

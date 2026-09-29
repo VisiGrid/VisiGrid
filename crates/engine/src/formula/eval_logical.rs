@@ -74,12 +74,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() != 1 {
                 return Some(EvalResult::Error("ISBLANK requires exactly one argument".to_string()));
             }
-            let result = evaluate(&args[0], lookup);
-            let is_blank = match &result {
-                EvalResult::Text(s) => s.is_empty(),
-                _ => false,
-            };
-            EvalResult::Boolean(is_blank)
+            // TRUE only for a cell holding nothing. It used to be the reverse: an
+            // empty cell read FALSE and the literal "" read TRUE. A formula that
+            // returns "" is not blank, in Excel or here.
+            EvalResult::Boolean(matches!(evaluate(&args[0], lookup), EvalResult::Empty))
         }
         "ISNUMBER" => {
             if args.len() != 1 {

@@ -42,7 +42,7 @@ pub trait CellLookup {
                     SheetRef::Id(id) => self.get_text_sheet(*id, r, c),
                     SheetRef::RefError { .. } => return Err("#REF!".to_string()),
                 };
-                if let Ok(n) = text.parse::<f64>() {
+                if let Some(n) = crate::cell::parse_finite(&text) {
                     out.push(n);
                 }
             }
@@ -67,7 +67,7 @@ pub trait CellLookup {
             Value::Empty
         } else if text.starts_with('#') {
             Value::Error(text)
-        } else if let Ok(n) = text.parse::<f64>() {
+        } else if let Some(n) = crate::cell::parse_finite(&text) {
             Value::Number(n)
         } else if text.eq_ignore_ascii_case("TRUE") {
             Value::Boolean(true)
@@ -83,7 +83,7 @@ pub trait CellLookup {
         let text = self.get_text_sheet(sheet_id, row, col);
         if text.is_empty() {
             Value::Empty
-        } else if let Ok(n) = text.parse::<f64>() {
+        } else if let Some(n) = crate::cell::parse_finite(&text) {
             Value::Number(n)
         } else {
             Value::Text(text)
@@ -141,7 +141,7 @@ pub trait CellLookup {
             Value::Empty
         } else if text.starts_with('#') {
             Value::Error(text)
-        } else if let Ok(n) = text.parse::<f64>() {
+        } else if let Some(n) = crate::cell::parse_finite(&text) {
             Value::Number(n)
         } else if text.eq_ignore_ascii_case("TRUE") {
             Value::Boolean(true)
@@ -357,7 +357,7 @@ impl Value {
                     return Err(s.clone());
                 }
                 // Try numeric parse first
-                if let Ok(n) = s.parse::<f64>() {
+                if let Some(n) = crate::cell::parse_finite(s) {
                     return Ok(n);
                 }
                 // Try date string parse (ISO: 2023-11-07, US: 11/07/2023)
@@ -558,7 +558,7 @@ impl EvalResult {
                     return Err(s.clone());
                 }
                 // Try numeric parse first
-                if let Ok(n) = s.parse::<f64>() {
+                if let Some(n) = crate::cell::parse_finite(s) {
                     return Ok(n);
                 }
                 // Try date string parse (ISO: 2023-11-07, US: 11/07/2023)
@@ -698,7 +698,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                         EvalResult::Empty
                     } else if text.starts_with('#') {
                         EvalResult::Error(text)
-                    } else if let Ok(n) = text.parse::<f64>() {
+                    } else if let Some(n) = crate::cell::parse_finite(&text) {
                         EvalResult::Number(n)
                     } else if text.to_uppercase() == "TRUE" {
                         EvalResult::Boolean(true)
@@ -749,10 +749,15 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
                             }
                             left_val / right_val
                         }
-                        Op::Pow => left_val.powf(right_val),
+                        Op::Pow => return super::eval_math::power(left_val, right_val),
                         _ => unreachable!(),
                     };
-                    EvalResult::Number(result)
+                    // Overflow (1E308*10) has no spreadsheet value; Excel says #NUM!.
+                    if result.is_finite() {
+                        EvalResult::Number(result)
+                    } else {
+                        EvalResult::Error("#NUM!".to_string())
+                    }
                 }
 
                 // Comparison operators
@@ -899,7 +904,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         bounded = args.iter().map(|arg| super::whole_range::bound_for_evaluation(arg, lookup)).collect::<Vec<_>>();
         bounded.as_slice()
     } else { args };
-    None
+    let result = None
         .or_else(|| super::eval_math::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_logical::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_text::try_evaluate(name, args, lookup))
@@ -914,7 +919,14 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
             let eval_args = eval_function_args(args, lookup);
             lookup.try_custom_function(name, &eval_args)
         })
-        .unwrap_or_else(|| EvalResult::Error(format!("Unknown function: {}", name)))
+        .unwrap_or_else(|| EvalResult::Error(format!("Unknown function: {}", name)));
+    // A spreadsheet has no NaN or infinity. Any function that computes one — EXP(1000),
+    // POWER(-8,1/3), an overflowing product — reports #NUM!, as Excel does, instead of
+    // leaving the cell showing #NAN or #INF.
+    match result {
+        EvalResult::Number(n) if !n.is_finite() => EvalResult::Error("#NUM!".to_string()),
+        other => other,
+    }
 }
 
 
@@ -3092,5 +3104,169 @@ mod tests {
         let expr = parse_and_bind("=COUNTIF(A1,\"\")");
         let result = evaluate(&expr, &lookup);
         assert_eq!(result, EvalResult::Number(1.0));
+    }
+
+    // --- Excel parity for the math functions (the site's function reference held
+    // these back as wrong; each case below is one it would have published). ---
+
+    fn eval_str(formula: &str) -> EvalResult {
+        evaluate(&parse_and_bind(formula), &TestLookup::new())
+    }
+
+    fn assert_num(formula: &str, expected: f64) {
+        match eval_str(formula) {
+            EvalResult::Number(n) => assert_eq!(n, expected, "{formula}"),
+            other => panic!("{formula}: expected {expected}, got {other:?}"),
+        }
+    }
+
+    fn assert_err(formula: &str, expected: &str) {
+        assert_eq!(eval_str(formula), EvalResult::Error(expected.to_string()), "{formula}");
+    }
+
+    #[test]
+    fn round_family_rounds_the_decimal_not_its_binary_neighbour() {
+        // Each of these used to be off by one in the last place: 1.005 is stored as
+        // 1.00499999..., so scaling then rounding the raw product went the wrong way.
+        assert_num("=ROUND(1.005,2)", 1.01);
+        assert_num("=ROUND(0.285,2)", 0.29);
+        assert_num("=ROUND(10.075,2)", 10.08);
+        assert_num("=ROUND(2.675,2)", 2.68);
+        assert_num("=ROUNDDOWN(4.35,2)", 4.35);
+        assert_num("=ROUNDDOWN(1.15,2)", 1.15);
+        assert_num("=ROUNDUP(1.1,2)", 1.1);
+        assert_num("=ROUNDUP(2.2,1)", 2.2);
+        assert_num("=TRUNC(0.29,2)", 0.29);
+        assert_num("=TRUNC(4.35,2)", 4.35);
+    }
+
+    #[test]
+    fn round_family_keeps_its_ordinary_behaviour() {
+        assert_num("=ROUND(2.5,0)", 3.0);
+        assert_num("=ROUND(-2.5,0)", -3.0);
+        assert_num("=ROUND(1234.567,-2)", 1200.0);
+        assert_num("=ROUND(3.14159)", 3.0);
+        assert_num("=ROUNDUP(3.21,1)", 3.3);
+        assert_num("=ROUNDUP(-3.21,1)", -3.3);
+        assert_num("=ROUNDDOWN(-3.29,1)", -3.2);
+        assert_num("=ROUNDUP(1234,-2)", 1300.0);
+        assert_num("=ROUNDDOWN(1299,-2)", 1200.0);
+        assert_num("=TRUNC(-4.7)", -4.0);
+        // More decimals than the value holds is a no-op, not NaN.
+        assert_num("=ROUND(1,400)", 1.0);
+        assert_num("=ROUND(0.1,20)", 0.1);
+    }
+
+    #[test]
+    fn mod_takes_the_sign_of_the_divisor() {
+        assert_num("=MOD(-10,3)", 2.0);
+        assert_num("=MOD(10,-3)", -2.0);
+        assert_num("=MOD(-10,-3)", -1.0);
+        assert_num("=MOD(10,3)", 1.0);
+        assert_num("=MOD(-1,12)", 11.0);
+        assert_num("=MOD(5.5,2)", 1.5);
+        assert_num("=MOD(0.3,0.1)", 0.0);
+        assert_err("=MOD(10,0)", "#DIV/0!");
+    }
+
+    #[test]
+    fn ceiling_and_floor_take_a_significance() {
+        assert_num("=CEILING(4.2,0.5)", 4.5);
+        assert_num("=CEILING(12,5)", 15.0);
+        assert_num("=CEILING(-4.2,1)", -4.0);
+        assert_num("=CEILING(-4.2,-1)", -5.0);
+        assert_num("=CEILING(0.25,0.1)", 0.3);
+        assert_num("=CEILING(4.2,0)", 0.0);
+        assert_err("=CEILING(4.2,-1)", "#NUM!");
+        assert_num("=FLOOR(12,5)", 10.0);
+        assert_num("=FLOOR(4.8,1)", 4.0);
+        assert_num("=FLOOR(-2.5,2)", -4.0);
+        assert_num("=FLOOR(-2.5,-2)", -2.0);
+        assert_num("=FLOOR(0.3,0.1)", 0.3);
+        assert_err("=FLOOR(4.2,0)", "#DIV/0!");
+        assert_err("=FLOOR(4.2,-1)", "#NUM!");
+        // The one-argument form sheets already use keeps working.
+        assert_num("=CEILING(4.2)", 5.0);
+        assert_num("=FLOOR(4.8)", 4.0);
+    }
+
+    #[test]
+    fn randbetween_rounds_its_bounds_inwards() {
+        // Floor on both bounds let RANDBETWEEN(1.5,2.5) return 1.
+        for _ in 0..200 {
+            assert_num("=RANDBETWEEN(1.5,2.5)", 2.0);
+        }
+        assert_err("=RANDBETWEEN(1.9,1.9)", "#NUM!");
+        assert_err("=RANDBETWEEN(6,1)", "#NUM!");
+    }
+
+    #[test]
+    fn rand_advances_between_calls() {
+        // Seeding from the clock on every call made consecutive calls equal whenever
+        // the clock had not ticked — always, in the browser's millisecond clock.
+        let draws: Vec<f64> = (0..50)
+            .map(|_| match eval_str("=RAND()") {
+                EvalResult::Number(n) => n,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(draws.iter().all(|n| (0.0..1.0).contains(n)));
+        let mut distinct = draws.clone();
+        distinct.sort_by(f64::total_cmp);
+        distinct.dedup();
+        assert_eq!(distinct.len(), draws.len(), "RAND repeated a value: {draws:?}");
+    }
+
+    #[test]
+    fn non_finite_results_are_num_errors() {
+        assert_err("=POWER(-8,1/3)", "#NUM!");
+        assert_err("=(-8)^(1/3)", "#NUM!");
+        assert_err("=POWER(10,400)", "#NUM!");
+        assert_err("=EXP(1000)", "#NUM!");
+        assert_err("=10^400", "#NUM!");
+        assert_err("=1E308*10", "#NUM!");
+        assert_err("=POWER(0,-1)", "#DIV/0!");
+        assert_err("=0^-1", "#DIV/0!");
+        assert_num("=POWER(0,0)", 1.0);
+        assert_num("=POWER(-2,3)", -8.0);
+    }
+
+    #[test]
+    fn scientific_notation_literals() {
+        assert_num("=1E3", 1000.0);
+        assert_num("=1e3", 1000.0);
+        assert_num("=2.5E+2", 250.0);
+        assert_num("=1E-3", 0.001);
+        assert_num("=1E3+1", 1001.0);
+        assert_eq!(eval_str("=1+1E-15=1"), EvalResult::Boolean(true));
+        assert_eq!(eval_str("=1+1E-10=1"), EvalResult::Boolean(false));
+        // Out of range is a parse error, not an infinity smuggled into the AST.
+        assert!(parse("=1E999").is_err());
+    }
+
+    #[test]
+    fn isblank_is_true_for_an_empty_cell_only() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 1, "x");
+        let isblank = |f: &str| evaluate(&parse_and_bind(f), &lookup);
+        assert_eq!(isblank("=ISBLANK(A1)"), EvalResult::Boolean(true));
+        assert_eq!(isblank("=ISBLANK(B1)"), EvalResult::Boolean(false));
+        assert_eq!(isblank("=ISBLANK(\"\")"), EvalResult::Boolean(false));
+        assert_eq!(isblank("=ISBLANK(0)"), EvalResult::Boolean(false));
+    }
+
+    #[test]
+    fn nan_and_inf_text_are_not_numbers() {
+        // #34: "NaN".parse::<f64>() succeeds, which put a NaN into MEDIAN's sort.
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "NaN");
+        lookup.set(1, 0, "1");
+        lookup.set(2, 0, "inf");
+        lookup.set(3, 0, "3");
+        let eval = |f: &str| evaluate(&parse_and_bind(f), &lookup);
+        assert_eq!(eval("=MEDIAN(A1:A4)"), EvalResult::Number(2.0));
+        assert_eq!(eval("=SUM(A1:A4)"), EvalResult::Number(4.0));
+        assert_eq!(eval("=COUNT(A1:A4)"), EvalResult::Number(2.0));
+        assert_eq!(eval("=ISTEXT(A1)"), EvalResult::Boolean(true));
     }
 }

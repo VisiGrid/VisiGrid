@@ -1121,6 +1121,16 @@ pub fn try_parse_number(s: &str) -> Option<f64> {
     Some(n)
 }
 
+/// Parse text as a spreadsheet number: what `f64::from_str` accepts, minus the words.
+///
+/// Rust's parser reads "NaN", "inf" and "infinity" as numbers. A spreadsheet does not —
+/// in Excel they are text — and letting them through stored a NaN in the cell, which
+/// then panicked MEDIAN's sort (#34). Every place that turns cell text into a number
+/// goes through this so typed input, range reads and coercion agree.
+pub fn parse_finite(s: &str) -> Option<f64> {
+    s.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
 impl CellValue {
     pub fn from_input(input: &str) -> Self {
         let trimmed = input.trim();
@@ -1142,7 +1152,7 @@ impl CellValue {
             let pct_clean: String = pct.chars()
                 .filter(|c| !c.is_whitespace() && *c != ',')
                 .collect();
-            if let Ok(n) = pct_clean.parse::<f64>() {
+            if let Some(n) = parse_finite(&pct_clean) {
                 return CellValue::Number(n / 100.0);
             }
         }
@@ -1152,7 +1162,7 @@ impl CellValue {
             return CellValue::Number(n);
         }
 
-        if let Ok(num) = trimmed.parse::<f64>() {
+        if let Some(num) = parse_finite(trimmed) {
             return CellValue::Number(num);
         }
 
@@ -1302,7 +1312,7 @@ impl<'a> ValueRef<'a> {
     pub fn as_number(&self) -> f64 {
         match *self {
             ValueRef::Number(n) => n,
-            ValueRef::Text(s) => s.parse().unwrap_or(0.0),
+            ValueRef::Text(s) => parse_finite(s).unwrap_or(0.0),
             _ => 0.0,
         }
     }
