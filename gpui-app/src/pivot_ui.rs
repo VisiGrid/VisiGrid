@@ -142,7 +142,7 @@ impl Spreadsheet {
 // Field-list drawer state, and the create / apply / refresh / delete flow.
 // ---------------------------------------------------------------------------
 
-use visigrid_engine::cell::NumberFormat;
+use visigrid_engine::cell::{CellBorder, CellFormat, NumberFormat};
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::pivot::{
     self, Aggregation, PivotDefinition, PivotError, PivotField, PivotOutput, PivotSnapshot, PivotSource,
@@ -151,6 +151,70 @@ use visigrid_engine::pivot::{
 
 /// Sources with more data rows than this aggregate on a background thread.
 const BACKGROUND_ROWS: u32 = 100_000;
+
+/// Choose a readable format only where the source supplied no number format.
+/// Store it on the value field so it follows subsequent layout changes.
+fn format_new_pivot_values(definition: &mut PivotDefinition, output: &PivotOutput) {
+    let mut fractional = vec![false; definition.values.len()];
+    for row in output.cells.iter().skip(output.header_rows) {
+        for (col, value) in row.iter().enumerate() {
+            if let (Some(Some(field)), Value::Number(n)) = (output.value_columns.get(col), value) {
+                if n.is_finite() && (n - n.round()).abs() > 1e-9 {
+                    fractional[*field] = true;
+                }
+            }
+        }
+    }
+    for (i, field) in definition.values.iter_mut().enumerate() {
+        if field.number_format.as_ref().is_none_or(|f| matches!(f, NumberFormat::General)) {
+            let count = matches!(field.aggregation, Aggregation::Count | Aggregation::DistinctCount);
+            let decimals = if !count && (fractional[i] || field.aggregation == Aggregation::Average) { 2 } else { 0 };
+            field.number_format = Some(NumberFormat::Number { decimals, thousands: true, negative: Default::default() });
+        }
+    }
+}
+
+/// Creation-only defaults. The blank, styled sheet becomes the create action's
+/// sheet snapshot, so redo restores the style without a workbook-sized copy.
+/// Refresh deliberately leaves these formats and later user edits alone.
+fn style_new_pivot(sheet: &mut Sheet, table: &PivotTable, output: &PivotOutput) {
+    let (r0, c0) = (table.anchor_row as usize, table.anchor_col as usize);
+    let border = CellBorder { color: Some([177, 192, 213, 255]), ..CellBorder::thin() };
+    // Fill and foreground travel together, remaining legible in either theme.
+    let header = CellFormat {
+        bold: true,
+        background_color: Some([232, 239, 250, 255]),
+        font_color: Some([34, 53, 78, 255]),
+        ..CellFormat::default()
+    };
+    for r in 0..output.header_rows {
+        for c in 0..output.width() {
+            let mut format = header.clone();
+            if r + 1 == output.header_rows { format.border_bottom = border; }
+            sheet.set_format(r0 + r, c0 + c, format);
+        }
+    }
+    let has_total = !table.definition.values.is_empty() || table.definition.column.is_some();
+    if has_total && output.height() > output.header_rows {
+        let total = CellFormat {
+            background_color: Some([241, 245, 251, 255]),
+            border_top: border,
+            ..header.clone()
+        };
+        for c in 0..output.width() {
+            sheet.set_format(r0 + output.height() - 1, c0 + c, total.clone());
+        }
+    }
+    if table.definition.column.is_some() {
+        let first_total = output.width() - table.definition.values.len().max(1);
+        for r in 0..output.height() {
+            for c in first_total..output.width() {
+                sheet.set_bold(r0 + r, c0 + c, true);
+            }
+            sheet.set_border_left(r0 + r, c0 + first_total, border);
+        }
+    }
+}
 
 /// What the drawer is building.
 #[derive(Debug, Clone, PartialEq)]
@@ -210,7 +274,7 @@ impl PivotPanel {
         PivotField { offset: offset as u32, header: self.headers[offset].clone() }
     }
 
-    fn move_cursor_to(&mut self, item: PivotPanelItem) {
+    pub(crate) fn move_cursor_to(&mut self, item: PivotPanelItem) {
         if let Some(i) = self.items().iter().position(|x| *x == item) {
             self.cursor = i;
         }
@@ -227,7 +291,7 @@ impl PivotPanel {
     }
 
     /// Assign the field under the cursor. Returns a message if nothing happened.
-    fn assign(&mut self, target: char) -> Option<String> {
+    pub(crate) fn assign(&mut self, target: char) -> Option<String> {
         let Some(PivotPanelItem::Field(i)) = self.current() else {
             return Some("Move to a field in the list first.".into());
         };
@@ -262,7 +326,7 @@ impl PivotPanel {
         None
     }
 
-    fn remove_current(&mut self) {
+    pub(crate) fn remove_current(&mut self) {
         match self.current() {
             Some(PivotPanelItem::Row(k)) => {
                 self.draft.rows.remove(k);
@@ -276,7 +340,7 @@ impl PivotPanel {
         self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
     }
 
-    fn reorder(&mut self, up: bool) {
+    pub(crate) fn reorder(&mut self, up: bool) {
         match self.current() {
             Some(PivotPanelItem::Row(k)) => {
                 let j = if up { k.checked_sub(1) } else { (k + 1 < self.draft.rows.len()).then_some(k + 1) };
@@ -307,7 +371,7 @@ impl PivotPanel {
         self.set_aggregation(k, all[next]);
     }
 
-    fn set_aggregation(&mut self, k: usize, agg: Aggregation) {
+    pub(crate) fn set_aggregation(&mut self, k: usize, agg: Aggregation) {
         let offset = self.draft.values[k].field.offset as usize;
         let src = self.column_formats.get(offset).cloned().unwrap_or_default();
         let v = &mut self.draft.values[k];
@@ -320,7 +384,7 @@ impl PivotPanel {
     }
 
     /// Apply the aggregation under the cursor to every value field.
-    fn apply_aggregation_to_all(&mut self) -> Option<String> {
+    pub(crate) fn apply_aggregation_to_all(&mut self) -> Option<String> {
         let Some(PivotPanelItem::Value(k)) = self.current() else {
             return Some("Move to a value field first.".into());
         };
@@ -696,7 +760,7 @@ impl Spreadsheet {
     /// workbook is unchanged and the last committed output stays.
     fn pivot_finish(
         &mut self,
-        job: PivotJob,
+        mut job: PivotJob,
         result: Result<PivotOutput, PivotError>,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -724,11 +788,15 @@ impl Spreadsheet {
 
         match job.mode {
             PivotPanelMode::New => {
+                format_new_pivot_values(&mut job.table.definition, &output);
                 // Create the output sheet only now, so a failed or cancelled
                 // create never leaves an empty sheet behind.
                 let (sheet_index, created) = self.workbook.update(cx, |wb, _| {
                     let name = crate::structured_results::unique_sheet_name(wb, "Pivot");
                     let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
+                    if let Some(sheet) = wb.sheet_mut(idx) {
+                        style_new_pivot(sheet, &job.table, &output);
+                    }
                     (idx, wb.sheet(idx).cloned())
                 });
                 let Some(created) = created else { return false };
@@ -747,13 +815,30 @@ impl Spreadsheet {
                     }
                 };
                 let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
-                self.record_pivot_commit(commit, Some((sheet_index, Box::new(created))), job.description.clone());
                 self.activate_sheet(sheet_index, cx);
                 self.row_view = RowView::new(NUM_ROWS);
                 self.clear_selection_state();
+                // Widths are part of creation's single undo step. Fit once;
+                // refresh must preserve widths the user has subsequently set.
+                let columns: Vec<usize> = (job.table.anchor_col as usize..job.table.anchor_col as usize + cols).collect();
+                let widths = self.measure_columns(&columns, None, cx);
+                let mut actions = vec![crate::history::UndoAction::PivotCommit {
+                    commit: Box::new(commit),
+                    created_sheet: Some((sheet_index, Box::new(created))),
+                    description: job.description.clone(),
+                }];
+                for col in columns {
+                    let width = widths[&col].max(self.metrics.default_cell_sizes.column_width);
+                    self.set_col_width(col, width);
+                    actions.push(crate::history::UndoAction::ColumnWidthSet { sheet_id, col, old: None, new: Some(width) });
+                }
+                self.history.record_action_with_provenance(crate::history::UndoAction::Group {
+                    actions, description: job.description.clone(),
+                }, None);
                 if let Some(p) = self.pivot_panel.as_mut() {
                     if p.mode == PivotPanelMode::New {
                         p.mode = PivotPanelMode::Edit { pivot_id: job.table.id };
+                        p.draft = job.table.definition.clone();
                     }
                     p.message = Some(format!("{} created: {rows} × {cols}.", job.table.name));
                 }
@@ -946,5 +1031,119 @@ mod panel_tests {
         p.remove_current();
         assert_eq!(p.draft.rows.len(), 1);
         assert_eq!(p.draft.rows[0].header, "Region");
+    }
+
+    #[::core::prelude::v1::test]
+    fn created_style_survives_refresh_and_sheet_redo() {
+        use super::{format_new_pivot_values, style_new_pivot};
+        use visigrid_engine::pivot::{aggregate, PivotField, PivotTable, PivotValueField};
+        use visigrid_engine::workbook::Workbook;
+
+        let mut wb = Workbook::new();
+        let source_id = wb.sheet(0).unwrap().id;
+        for (r, row) in [
+            ["Region", "Product", "Revenue"],
+            ["East", "Desk", "125074.98"],
+            ["West", "Chair", "124875.02"],
+        ].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                wb.set_cell_value_tracked(0, r, c, value);
+            }
+        }
+        let field = |offset, header: &str| PivotField { offset, header: header.into() };
+        let mut table = PivotTable {
+            id: wb.next_pivot_id(), name: wb.next_pivot_name(),
+            source: PivotSource { sheet_id: source_id, start_row: 0, start_col: 0, end_row: 2, end_col: 2 },
+            definition: PivotDefinition {
+                rows: vec![field(0, "Region")], column: Some(field(1, "Product")),
+                values: vec![PivotValueField { field: field(2, "Revenue"), aggregation: Aggregation::Sum, number_format: None }],
+            },
+            anchor_row: 0, anchor_col: 0, extent: None, last_refresh: None,
+            stale: false, source_generation: None,
+        };
+        let (snapshot, generation) = wb.pivot_snapshot(&table).unwrap();
+        let output = aggregate(&table.definition, &snapshot).unwrap();
+        format_new_pivot_values(&mut table.definition, &output);
+        let index = wb.add_sheet();
+        let sheet_id = wb.sheet(index).unwrap().id;
+        style_new_pivot(wb.sheet_mut(index).unwrap(), &table, &output);
+        let created = wb.sheet(index).unwrap().clone();
+        let commit = wb.prepare_pivot_commit(sheet_id, table.clone(), &output, generation, 0).unwrap();
+        wb.apply_pivot_state(&commit.after).unwrap();
+        let sheet = wb.sheet(index).unwrap();
+        assert!(sheet.get_format(0, 0).bold);
+        assert!(sheet.get_format(1, 0).border_bottom.is_set());
+        assert!(sheet.get_format(4, 0).border_top.is_set());
+        assert!(sheet.get_format(2, 3).bold);
+        assert!(sheet.get_format(2, 3).border_left.is_set());
+        assert_eq!(sheet.get_formatted_display(2, 2), "125,074.98");
+        assert_eq!(sheet.get_formatted_display(4, 3), "249,950.00");
+        let formats: Vec<_> = (0..5).flat_map(|r| (0..4).map(move |c| (r, c)))
+            .map(|(r, c)| (r, c, sheet.get_format(r, c))).collect();
+
+        // Same sequence used by the desktop create action: remove the sheet,
+        // restore its styled snapshot, then restore the committed values.
+        wb.apply_pivot_state(&commit.before).unwrap();
+        wb.take_sheet(index);
+        wb.restore_sheet(index, created);
+        wb.apply_pivot_state(&commit.after).unwrap();
+        for (r, c, format) in formats {
+            assert_eq!(wb.sheet(index).unwrap().get_format(r, c), format);
+        }
+
+        // Refresh cannot repaint a user's customized header or body cell.
+        wb.sheet_mut(index).unwrap().set_bold(0, 0, false);
+        wb.sheet_mut(index).unwrap().set_background_color(2, 2, Some([250, 220, 100, 255]));
+        wb.set_cell_value_tracked(0, 1, 2, "125000.50");
+        let (snapshot, generation) = wb.pivot_snapshot(&table).unwrap();
+        let output = aggregate(&table.definition, &snapshot).unwrap();
+        let refresh = wb.prepare_pivot_commit(sheet_id, table, &output, generation, 1).unwrap();
+        wb.apply_pivot_state(&refresh.after).unwrap();
+        assert!(!wb.sheet(index).unwrap().get_format(0, 0).bold);
+        assert_eq!(wb.sheet(index).unwrap().get_format(2, 2).background_color, Some([250, 220, 100, 255]));
+        assert_eq!(wb.sheet(index).unwrap().get_formatted_display(2, 2), "125,000.50");
+    }
+
+    #[::core::prelude::v1::test]
+    fn creation_keeps_source_formats_and_does_not_mark_group_labels_as_totals() {
+        use super::{format_new_pivot_values, style_new_pivot};
+        use visigrid_engine::formula::eval::Value;
+        use visigrid_engine::pivot::{PivotField, PivotOutput, PivotTable};
+        use visigrid_engine::sheet::Sheet;
+
+        let mut p = panel();
+        p.cursor = 2;
+        p.assign('v'); // currency
+        p.cursor = 1;
+        p.assign('v'); // count
+        let original = p.draft.clone();
+        let output = PivotOutput {
+            cells: vec![vec![Value::Number(1234.5), Value::Number(7.0)]],
+            header_rows: 0, row_groups: 0, column_items: 0, source_rows: 10,
+            value_columns: vec![Some(0), Some(1)],
+        };
+        format_new_pivot_values(&mut p.draft, &output);
+        assert_eq!(p.draft, original);
+
+        let mut sheet = Sheet::new(SheetId(2), 100, 20);
+        let table = PivotTable {
+            id: 1, name: "Groups".into(), source: p.source,
+            definition: PivotDefinition {
+                rows: vec![PivotField { offset: 0, header: "Region".into() }],
+                ..Default::default()
+            },
+            anchor_row: 3, anchor_col: 2, extent: None, last_refresh: None,
+            stale: false, source_generation: None,
+        };
+        let output = PivotOutput {
+            cells: vec![vec![Value::Text("Region".into())], vec![Value::Text("East".into())]],
+            header_rows: 1, row_groups: 1, column_items: 0, source_rows: 10,
+            value_columns: vec![None],
+        };
+        style_new_pivot(&mut sheet, &table, &output);
+        assert!(sheet.get_format(3, 2).bold);
+        assert!(!sheet.get_format(4, 2).bold);
+        assert!(!sheet.get_format(4, 2).border_top.is_set());
+        assert_eq!(sheet.get_format(0, 0), Default::default());
     }
 }

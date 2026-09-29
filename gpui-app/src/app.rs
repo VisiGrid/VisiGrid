@@ -3404,7 +3404,7 @@ impl Spreadsheet {
     /// (the import-time path has no window) it falls back to an estimate over
     /// CHARACTERS — the old code multiplied `str::len()`, which is bytes, so
     /// "café" measured as 5 and CJK as 3× its true width.
-    fn measure_columns(
+    pub(crate) fn measure_columns(
         &self,
         cols: &[usize],
         window: Option<&Window>,

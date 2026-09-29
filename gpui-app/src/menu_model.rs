@@ -167,9 +167,9 @@ pub fn data_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Disabled("Filter"),
         MenuEntry::Separator,
         MenuEntry::Item { label: "PivotTable Fields", shortcut: None, action: MenuAction::EditPivotFields, accel: None },
-        MenuEntry::Item { label: "Refresh PivotTable", shortcut: Some("Alt+F5"), action: MenuAction::RefreshPivot, accel: None },
-        MenuEntry::Item { label: "Refresh All PivotTables", shortcut: Some("Ctrl+Alt+F5"), action: MenuAction::RefreshAllPivots, accel: None },
-        MenuEntry::Item { label: "Delete PivotTable", shortcut: None, action: MenuAction::DeletePivot, accel: None },
+        MenuEntry::Item { label: "Refresh PivotTable", shortcut: Some("Alt+F5"), action: MenuAction::RefreshPivot, accel: Some('h') },
+        MenuEntry::Item { label: "Refresh All PivotTables", shortcut: Some("Ctrl+Alt+F5"), action: MenuAction::RefreshAllPivots, accel: Some('s') },
+        MenuEntry::Item { label: "Delete PivotTable", shortcut: None, action: MenuAction::DeletePivot, accel: Some('t') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "AI Formula...", shortcut: Some("Ctrl+Shift+A"), action: MenuAction::InsertFormulaAI, accel: Some('f') },
         MenuEntry::Item { label: "Analyze with AI", shortcut: Some("Ctrl+Shift+E"), action: MenuAction::AnalyzeAI, accel: Some('a') },
@@ -345,5 +345,13 @@ pub fn debug_assert_all_accels() {
     use crate::mode::Menu;
     for menu in [Menu::File, Menu::Edit, Menu::View, Menu::Format, Menu::Data, Menu::Help] {
         debug_assert_unique_accels(menu);
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    #[::core::prelude::v1::test]
+    fn startup_menu_accelerators_are_unique() {
+        super::debug_assert_all_accels();
     }
 }
