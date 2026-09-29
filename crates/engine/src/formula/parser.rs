@@ -327,7 +327,34 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         break;
                     }
                 }
+                // Scientific notation: 1E3, 2.5e-4, 1E+10. Only when digits follow,
+                // so nothing that was valid before changes meaning.
+                if matches!(chars.peek(), Some('e' | 'E')) {
+                    let mut ahead = chars.clone();
+                    ahead.next();
+                    let sign = match ahead.peek() {
+                        Some(&c @ ('+' | '-')) => { ahead.next(); Some(c) }
+                        _ => None,
+                    };
+                    if ahead.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        num_str.push('e');
+                        if let Some(c) = sign {
+                            num_str.push(c);
+                        }
+                        chars = ahead;
+                        while let Some(&d) = chars.peek() {
+                            if !d.is_ascii_digit() {
+                                break;
+                            }
+                            num_str.push(d);
+                            chars.next();
+                        }
+                    }
+                }
                 let num: f64 = num_str.parse().map_err(|_| format!("Invalid number: {}", num_str))?;
+                if !num.is_finite() {
+                    return Err(format!("Number out of range: {}", num_str));
+                }
                 tokens.push(Token::Number(num, num_str.bytes().all(|c| c.is_ascii_digit())));
             }
             // Error literals: only #REF! is representable in the AST — it is

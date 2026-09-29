@@ -163,6 +163,104 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
     None
 }
 
+/// Round to 15 significant figures — the precision a spreadsheet actually promises.
+///
+/// Decimal inputs rarely survive binary exactly: 1.005 is stored as 1.00499999999999989,
+/// so 1.005 * 100 is 100.49999999999999 and a plain `round()` gives 100, not 101. Snapping
+/// the scaled value to 15 significant figures first recovers the decimal the user typed
+/// before the rounding decision is made, which is what Excel does.
+pub(crate) fn round_to_15_sig(x: f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    format!("{:.14e}", x).parse().unwrap_or(x)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RoundMode {
+    /// ROUND: nearest, halves away from zero.
+    Nearest,
+    /// ROUNDUP: away from zero.
+    AwayFromZero,
+    /// ROUNDDOWN and TRUNC: towards zero.
+    TowardZero,
+}
+
+/// Round `value` to `digits` decimal places (negative digits round left of the point).
+///
+/// Shared by ROUND, ROUNDUP, ROUNDDOWN and TRUNC, which used to scale and round the raw
+/// binary product — ROUNDDOWN(4.35,2) came out 4.34 and ROUNDUP(1.1,2) 1.11.
+pub(crate) fn round_to_digits(value: f64, digits: i32, mode: RoundMode) -> f64 {
+    if value == 0.0 || !value.is_finite() {
+        return value;
+    }
+    let apply = |x: f64| match mode {
+        RoundMode::Nearest => x.round(),
+        RoundMode::AwayFromZero => if x >= 0.0 { x.ceil() } else { x.floor() },
+        RoundMode::TowardZero => x.trunc(),
+    };
+    // Past ~308 the factor overflows; no f64 has digits that far out anyway.
+    let digits = digits.clamp(-308, 308);
+    if digits >= 0 {
+        let factor = 10_f64.powi(digits);
+        let scaled = value * factor;
+        // Asking for more decimals than the value holds changes nothing.
+        if !scaled.is_finite() || scaled.abs() >= 1e15 {
+            return value;
+        }
+        apply(round_to_15_sig(scaled)) / factor
+    } else {
+        // Divide rather than multiply by 10^digits: 0.01 is not exact, 100 is.
+        let factor = 10_f64.powi(-digits);
+        apply(round_to_15_sig(value / factor)) * factor
+    }
+}
+
+/// Excel's MOD: the remainder takes the sign of the divisor, n - d*INT(n/d).
+///
+/// Rust's `%` keeps the sign of the dividend, which gave MOD(-10,3) = -1 instead of 2 —
+/// wrong for every "wrap a negative offset into a range" formula. The quotient is snapped
+/// to 15 figures so MOD(0.3,0.1) is 0 rather than the 0.0999... left by binary division.
+/// The caller handles a zero divisor.
+pub(crate) fn excel_mod(n: f64, d: f64) -> f64 {
+    let q = round_to_15_sig(n / d).floor();
+    let r = n - d * q;
+    // What is left below the operands' 15th figure is binary residue, not remainder:
+    // 0.3 - 0.1*3 is -5.6e-17.
+    if r.abs() <= n.abs().max(d.abs()) * 1e-14 {
+        return 0.0;
+    }
+    let r = round_to_15_sig(r);
+    // Snapping can land exactly on the divisor; that is a full turn, i.e. zero.
+    if r == d { 0.0 } else { r }
+}
+
+/// Next value from the process-wide generator behind RAND and RANDBETWEEN.
+///
+/// Both used to hash the current clock reading on every call. The browser clock ticks in
+/// milliseconds, so every RAND() in one recalculation read the same instant and returned
+/// the same number. This is SplitMix64: seeded once from the clock, then advanced on
+/// every call, so neighbouring cells get independent values.
+pub(crate) fn next_random_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+    static STATE: AtomicU64 = AtomicU64::new(0);
+
+    if STATE.load(Ordering::Relaxed) == 0 {
+        let seed = (crate::timing::now_since_epoch().as_nanos() as u64) | 1;
+        let _ = STATE.compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed);
+    }
+    let mut z = STATE.fetch_add(GAMMA, Ordering::Relaxed).wrapping_add(GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Uniform in [0, 1): the top 53 bits, so every value is exactly representable.
+pub(crate) fn next_random_f64() -> f64 {
+    (next_random_u64() >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// Compare two floats for spreadsheet equality.
 ///
 /// Uses a magnitude-relative tolerance rather than a bare `f64::EPSILON` absolute check.

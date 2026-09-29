@@ -29,6 +29,7 @@ fn content(rng: &mut Rng) -> String {
         17 => "=0*-1".to_string(),      // negative zero as a formula result
         18 => " 5".to_string(),         // text that does not parse
         19 => "+5".to_string(),
+        15 => "NaN".to_string(),        // Rust parses it; a spreadsheet must not (#34)
         20 => "inf".to_string(),
         21 => "1e3".to_string(),
         22 => "=\"-0\"".to_string(),  // text "-0" from a formula
@@ -55,7 +56,7 @@ fn slow(sheet: &Sheet, r0: usize, c0: usize, r1: usize, c1: usize) -> Vec<f64> {
     let mut out = Vec::new();
     for r in r0..=r1 {
         for c in c0..=c1 {
-            if let Ok(n) = CellLookup::get_text(sheet, r, c).parse::<f64>() {
+            if let Some(n) = visigrid_engine::cell::parse_finite(&CellLookup::get_text(sheet, r, c)) {
                 out.push(n);
             }
         }
@@ -121,7 +122,7 @@ fn cross_sheet_numbers_match_the_per_cell_loop() {
         let mut expected = Vec::new();
         for r in r0..=r1 {
             for c in c0..=c1 {
-                if let Ok(n) = lookup.get_text_sheet(other, r, c).parse::<f64>() {
+                if let Some(n) = visigrid_engine::cell::parse_finite(&lookup.get_text_sheet(other, r, c)) {
                     expected.push(n);
                 }
             }

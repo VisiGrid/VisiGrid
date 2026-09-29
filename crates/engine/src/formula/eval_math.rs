@@ -2,7 +2,9 @@
 // POWER, SQRT, CEILING, FLOOR, PRODUCT, MEDIAN, SUMPRODUCT
 
 use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution};
-use super::eval_helpers::{collect_numbers, collect_all_values};
+use super::eval_helpers::{
+    collect_all_values, collect_numbers, excel_mod, round_to_15_sig, round_to_digits, RoundMode,
+};
 use super::parser::{BoundExpr, Expr};
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -93,8 +95,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            EvalResult::Number((value * factor).round() / factor)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::Nearest))
         }
         "ROUNDUP" => {
             if args.is_empty() || args.len() > 2 {
@@ -112,13 +113,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            let result = if value >= 0.0 {
-                (value * factor).ceil() / factor
-            } else {
-                (value * factor).floor() / factor
-            };
-            EvalResult::Number(result)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::AwayFromZero))
         }
         "ROUNDDOWN" => {
             if args.is_empty() || args.len() > 2 {
@@ -136,13 +131,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            let result = if value >= 0.0 {
-                (value * factor).floor() / factor
-            } else {
-                (value * factor).ceil() / factor
-            };
-            EvalResult::Number(result)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::TowardZero))
         }
         "TRUNC" => {
             if args.is_empty() || args.len() > 2 {
@@ -160,13 +149,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            let result = if value >= 0.0 {
-                (value * factor).floor() / factor
-            } else {
-                (value * factor).ceil() / factor
-            };
-            EvalResult::Number(result)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::TowardZero))
         }
         "INT" => {
             if args.len() != 1 {
@@ -192,7 +175,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if divisor == 0.0 {
                 return Some(EvalResult::Error("#DIV/0!".to_string()));
             }
-            EvalResult::Number(number % divisor)
+            EvalResult::Number(excel_mod(number, divisor))
         }
         "POWER" => {
             if args.len() != 2 {
@@ -206,7 +189,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Ok(n) => n,
                 Err(e) => return Some(EvalResult::Error(e)),
             };
-            EvalResult::Number(base.powf(exp))
+            power(base, exp)
         }
         "SQRT" => {
             if args.len() != 1 {
@@ -218,23 +201,26 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Err(e) => EvalResult::Error(e),
             }
         }
-        "CEILING" => {
-            if args.len() != 1 {
-                return Some(EvalResult::Error("CEILING requires exactly one argument".to_string()));
+        "CEILING" | "FLOOR" => {
+            // CEILING(number, [significance]) / FLOOR(number, [significance]).
+            // Excel requires the significance; it is optional here so sheets written
+            // against the old one-argument form (whole-number ceil/floor) still work.
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error(format!("{} requires 1 or 2 arguments", name)));
             }
-            match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => EvalResult::Number(n.ceil()),
-                Err(e) => EvalResult::Error(e),
-            }
-        }
-        "FLOOR" => {
-            if args.len() != 1 {
-                return Some(EvalResult::Error("FLOOR requires exactly one argument".to_string()));
-            }
-            match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => EvalResult::Number(n.floor()),
-                Err(e) => EvalResult::Error(e),
-            }
+            let number = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let significance = if args.len() == 2 {
+                match evaluate(&args[1], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                1.0
+            };
+            round_to_multiple(number, significance, name == "CEILING")
         }
         "PRODUCT" => {
             let values = collect_numbers(args, lookup);
@@ -256,7 +242,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.is_empty() {
                         EvalResult::Error("MEDIAN requires at least one value".to_string())
                     } else {
-                        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        vals.sort_by(f64::total_cmp);
                         let mid = vals.len() / 2;
                         if vals.len() % 2 == 0 {
                             EvalResult::Number((vals[mid - 1] + vals[mid]) / 2.0)
@@ -368,4 +354,45 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         _ => return None,
     };
     Some(result)
+}
+
+/// POWER and the ^ operator. Excel never shows NaN or infinity: 0 to a negative power is
+/// a division by zero, and anything else without a finite real result is #NUM!.
+pub(crate) fn power(base: f64, exp: f64) -> EvalResult {
+    if base == 0.0 && exp < 0.0 {
+        return EvalResult::Error("#DIV/0!".to_string());
+    }
+    let result = base.powf(exp);
+    if result.is_finite() {
+        EvalResult::Number(result)
+    } else {
+        EvalResult::Error("#NUM!".to_string())
+    }
+}
+
+/// CEILING and FLOOR with Excel's significance rules.
+///
+/// The quotient is rounded towards +inf (CEILING) or -inf (FLOOR) and multiplied back,
+/// which gives each sign combination Excel's answer: CEILING(-4.2,1) = -4 and
+/// CEILING(-4.2,-1) = -5. A positive number with a negative significance is #NUM!.
+/// A zero significance gives 0 for CEILING and #DIV/0! for FLOOR, as in Excel.
+fn round_to_multiple(number: f64, significance: f64, up: bool) -> EvalResult {
+    if number == 0.0 {
+        return EvalResult::Number(0.0);
+    }
+    if significance == 0.0 {
+        return if up {
+            EvalResult::Number(0.0)
+        } else {
+            EvalResult::Error("#DIV/0!".to_string())
+        };
+    }
+    if number > 0.0 && significance < 0.0 {
+        return EvalResult::Error("#NUM!".to_string());
+    }
+    // 0.3/0.1 is 2.9999999999999996 in binary; snap before choosing a side.
+    let q = round_to_15_sig(number / significance);
+    let q = if up { q.ceil() } else { q.floor() };
+    // ...and again after, so CEILING(0.25,0.1) is 0.3 rather than 0.30000000000000004.
+    EvalResult::Number(round_to_15_sig(q * significance))
 }
