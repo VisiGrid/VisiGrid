@@ -1165,7 +1165,22 @@ impl Sheet {
         EVALUATING.with(|evaluating| {
             let evaluating = evaluating.borrow();
             let skip = |r: usize, c: usize| !evaluating.is_empty() && evaluating.contains(&(r, c));
-            let spills_inside = self.spill_values.keys().any(|&(r, c)| inside(r, c));
+            // Spill receivers inside the rectangle, found by whichever is
+            // smaller: checking each position of the rectangle, or scanning
+            // the sheet's spill cells. Many small SUMs beside a large spill
+            // then cost their own size, not the spill's.
+            let area = (end_row - start_row + 1).saturating_mul(end_col - start_col + 1);
+            let spills: Vec<(usize, usize)> = if self.spill_values.is_empty() {
+                Vec::new()
+            } else if area <= self.spill_values.len() {
+                (start_row..=end_row)
+                    .flat_map(|r| (start_col..=end_col).map(move |c| (r, c)))
+                    .filter(|pos| self.spill_values.contains_key(pos))
+                    .collect()
+            } else {
+                self.spill_values.keys().copied().filter(|&(r, c)| inside(r, c)).collect()
+            };
+            let spills_inside = !spills.is_empty();
             // One column with no spill receivers arrives in row order already.
             let in_order = start_col == end_col && !spills_inside;
             let mut found: Vec<(usize, usize, f64)> = Vec::new();
@@ -1192,12 +1207,10 @@ impl Sheet {
                     take(r, c, n);
                 }
             });
-            if spills_inside {
-                for (&(r, c), value) in &self.spill_values {
-                    if inside(r, c) && !skip(r, c) {
-                        if let Some(n) = number(value) {
-                            take(r, c, n);
-                        }
+            for &(r, c) in &spills {
+                if !skip(r, c) {
+                    if let Some(n) = self.spill_values.get(&(r, c)).and_then(number) {
+                        take(r, c, n);
                     }
                 }
             }
