@@ -15,6 +15,9 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 ordered-float = { workspace = true }
 rustc-hash = "2.0"
+# Raw hash table for the column store's string pool (#18): the index holds
+# 4-byte ids instead of a second copy of each string. Already in the tree.
+hashbrown = { version = "0.16", default-features = false }
 ssfmt = "0.1"
 
 # Browser clock. std::time::SystemTime::now() panics on wasm32-unknown-unknown,

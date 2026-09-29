@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.38.0
+
+### Performance
+
+- **Large sheets use about a tenth of the memory.** Cells are now stored by column, in blocks that pick the most compact form for what they hold: a run of numbers takes 8 bytes per cell, repeated text is stored once and referenced, and empty stretches take nothing. A 1M-row by 5-column CSV now takes about 43 MB once loaded, down from about 470 MB, and importing it peaks at about 77 MB instead of about 510 MB. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+- **Inserting or deleting rows and columns in a large sheet is faster and no longer needs spare memory.** Each insert or delete used to hold an extra half gigabyte or so on a million-row sheet while it moved every cell. Inserting or deleting a column is now close to instant, and a row insert or delete at the top of a million-row sheet takes about a third of a second, with almost no extra memory. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+- **Reading cells and recalculating are faster** on large sheets, since the cells a formula reads sit next to each other in memory. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+
 ## 0.37.1
 
 ### Internals
