@@ -2253,6 +2253,31 @@ mod tests {
         assert!(sheet.cells_iter().count() < 10);
     }
 
+    /// #18 phase 2, through the public API: results live with their
+    /// formulas. Replacing the formula drops the result; restyling keeps it.
+    #[test]
+    fn formula_results_follow_the_formula_not_the_cell() {
+        use crate::formula::eval::Value;
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
+        sheet.set_value(0, 0, "2");
+        sheet.set_value(1, 0, "=A1*21");
+        sheet.cache_computed(1, 0, Value::Number(42.0));
+
+        sheet.toggle_bold(1, 0);
+        sheet.set_style_id(1, 0, 7);
+        assert_eq!(sheet.get_cached_value(1, 0), Some(Value::Number(42.0)), "restyling keeps the result");
+
+        // set_value evaluates on the spot: the new formula's value, not 42.
+        sheet.set_value(1, 0, "=A1*3");
+        assert_eq!(sheet.get_cached_value(1, 0), Some(Value::Number(6.0)), "the new formula's own result");
+        // set_value_deferred (bulk loads) leaves it for the ordered recompute.
+        sheet.set_value_deferred(1, 0, "=A1*4");
+        assert_eq!(sheet.get_cached_value(1, 0), None, "a deferred formula starts uncomputed");
+
+        sheet.cache_computed(5, 5, Value::Number(1.0));
+        assert_eq!(sheet.get_cached_value(5, 5), None, "no formula there, nothing kept");
+    }
+
     use super::*;
     use crate::cell::{DateStyle, NegativeStyle};
 

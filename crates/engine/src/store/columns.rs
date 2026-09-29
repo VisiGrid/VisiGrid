@@ -645,15 +645,24 @@ impl ColumnStore {
         self.formulas.values.borrow().iter().filter(|v| v.is_some()).count()
     }
 
-    /// A write that keeps a formula keeps its result, as it did when results
-    /// were keyed by position: only an explicit clear drops one.
-    fn take_computed(&self, row: usize, col: usize) -> Option<Value> {
-        self.formula_id(row, col).and_then(|id| self.formulas.take_value(id))
+    /// A write that keeps the same formula keeps its result (a style, spill
+    /// or metadata change), as it did when results were keyed by position.
+    /// Returns the result with the formula source it belongs to.
+    fn take_computed(&self, row: usize, col: usize) -> Option<(Value, String)> {
+        let id = self.formula_id(row, col)?;
+        let value = self.formulas.take_value(id)?;
+        Some((value, self.formulas.get(id).source.clone()))
     }
 
-    fn restore_computed(&self, row: usize, col: usize, value: Option<Value>) {
-        if let Some(value) = value {
-            self.set_computed(row, col, value);
+    /// Put a carried result back only if the cell still holds the same
+    /// formula. A different formula starts uncomputed, whether or not the
+    /// caller remembered to clear first.
+    fn restore_computed(&self, row: usize, col: usize, carried: Option<(Value, String)>) {
+        let Some((value, source)) = carried else { return };
+        if let Some(id) = self.formula_id(row, col) {
+            if self.formulas.get(id).source == source {
+                self.formulas.set_value(id, Some(value));
+            }
         }
     }
 

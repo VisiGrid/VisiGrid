@@ -354,6 +354,16 @@ mod differential {
         }
 
         #[test]
+        fn a_different_formula_starts_uncomputed_even_without_a_clear() {
+            let mut s = store_with_formula(5, 1);
+            s.upsert(5, 1, Cell::default, |c| c.set("=B1*2"));
+            assert_eq!(result(&s, 5, 1), None, "new formula, no stale result");
+            let mut s = store_with_formula(5, 1);
+            s.update(5, 1, |c| c.set("=A1+1"));
+            assert_eq!(result(&s, 5, 1), Some(Value::Number(42.0)), "same formula keeps it");
+        }
+
+        #[test]
         fn a_reused_formula_id_starts_uncomputed() {
             let mut s = store_with_formula(5, 1);
             s.remove(5, 1);
