@@ -601,7 +601,7 @@ impl Sheet {
     pub(crate) fn write_pivot_cell(&mut self, row: usize, col: usize, value: &crate::formula::eval::Value) {
         use crate::formula::eval::Value;
         self.clear_spill_from(row, col);
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
         match value {
             Value::Empty => {
                 // Keep the cell's formatting: a blank result inside the output
