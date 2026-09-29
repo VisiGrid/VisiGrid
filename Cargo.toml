@@ -7,6 +7,7 @@ members = [
     "crates/engine-wasm",
     "crates/core",
     "crates/io",
+    "crates/print",
     "crates/config",
     "crates/license",
     "crates/protocol",

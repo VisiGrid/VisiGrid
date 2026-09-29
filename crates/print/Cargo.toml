@@ -1,0 +1,18 @@
+[package]
+name = "visigrid-print"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Device-independent worksheet pagination for print and PDF"
+
+[features]
+default = []
+# Prototype only: the app does not yet depend on this backend.
+pdf-spike = ["dep:krilla"]
+
+[dependencies]
+krilla = { version = "0.8.2", default-features = false, features = ["simple-text"], optional = true }
+
+[[example]]
+name = "pdf_spike"
+required-features = ["pdf-spike"]
