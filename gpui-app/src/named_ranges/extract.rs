@@ -15,7 +15,7 @@ impl Spreadsheet {
         // Get the current cell's formula
         let (row, col) = self.view_state.selected;
         let cell = self.sheet(cx).get_cell(row, col);
-        let formula_opt = self.get_formula_source(&cell.value);
+        let formula_opt = self.get_formula_source(cell.value());
 
         let formula = match formula_opt {
             Some(f) => f,
@@ -191,7 +191,7 @@ impl Spreadsheet {
         let mut total_count = 0;
 
         for ((row, col), cell) in self.sheet(cx).cells_iter() {
-            let raw = cell.value.raw_display();
+            let raw = cell.value().raw_display();
             if !raw.starts_with('=') {
                 continue;
             }

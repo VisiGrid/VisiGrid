@@ -57,8 +57,8 @@ impl MinimapCache {
 }
 
 /// Returns true if a cell has meaningful content (value or formula, not empty).
-fn cell_has_content(cell: &visigrid_engine::cell::Cell) -> bool {
-    !matches!(cell.value, CellValue::Empty)
+fn cell_has_content(cell: visigrid_engine::cell::CellRef<'_>) -> bool {
+    !cell.value().is_empty()
 }
 
 /// Pass 1: find the min and max row that have content.

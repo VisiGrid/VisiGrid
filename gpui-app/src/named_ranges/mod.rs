@@ -24,9 +24,9 @@ impl Spreadsheet {
     // =========================================================================
 
     /// Extract formula source from a CellValue if it's a formula
-    pub(crate) fn get_formula_source(&self, value: &visigrid_engine::cell::CellValue) -> Option<String> {
+    pub(crate) fn get_formula_source(&self, value: visigrid_engine::cell::ValueRef<'_>) -> Option<String> {
         match value {
-            visigrid_engine::cell::CellValue::Formula { source, .. } => Some(source.clone()),
+            visigrid_engine::cell::ValueRef::Formula { source, .. } => Some(source.to_string()),
             _ => None,
         }
     }

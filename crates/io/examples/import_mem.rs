@@ -16,7 +16,7 @@ use std::mem::size_of;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use visigrid_engine::cell::{Cell, CellValue};
+use visigrid_engine::cell::{Cell, CellValue, ValueRef};
 
 #[path = "../../engine/examples/support/rss.rs"]
 mod rss;
@@ -133,11 +133,13 @@ fn main() {
     // Break the sheet down: text heap vs everything else.
     let (mut text_cells, mut text_heap, mut numbers, mut formulas) = (0usize, 0usize, 0usize, 0usize);
     for (_, cell) in sheet.cells_iter() {
-        match &cell.value {
-            CellValue::Text(s) => { text_cells += 1; text_heap += s.capacity(); }
-            CellValue::Number(_) => numbers += 1,
-            CellValue::Formula { .. } => formulas += 1,
-            CellValue::Empty => {}
+        // Text bytes, not allocation capacity: a borrowed view has no
+        // capacity, and after #18 the storage behind it won't be a String.
+        match cell.value() {
+            ValueRef::Text(s) => { text_cells += 1; text_heap += s.len(); }
+            ValueRef::Number(_) => numbers += 1,
+            ValueRef::Formula { .. } => formulas += 1,
+            ValueRef::Empty => {}
         }
     }
 
@@ -152,7 +154,7 @@ fn main() {
     println!("retained sheet     {:.1} MB = {:.0} B/cell", mb(live_sheet), live_sheet as f64 / cells as f64);
     println!("  hash table        {:.1} MB = {:.0} B/cell  ({} buckets x {} B entry, load {:.2})",
         mb(table), table as f64 / cells as f64, buckets, entry, cells as f64 / buckets as f64);
-    println!("  text heap (exact) {:.1} MB = {:.0} B/cell, {:.1} B per text cell",
+    println!("  text bytes        {:.1} MB = {:.0} B/cell, {:.1} B per text cell",
         mb(text_heap), text_heap as f64 / cells as f64, text_heap as f64 / text_cells.max(1) as f64);
     println!("  other             {:.1} MB", mb(live_sheet.saturating_sub(table + text_heap)));
 

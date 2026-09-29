@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.37.1
+
+### Internals
+
+- **Cell reads go through a storage-independent view.** Every part of VisiGrid that reads a cell (the engine, file import and export, the CLI, Lua scripting, sessions, the browser engine and the desktop app) now does so through one read-only interface, instead of borrowing the cell's in-memory structure. Nothing you can see changes: the same files open, the same values display, and memory use is the same. This is the groundwork for storing cells by column, which will cut the memory a large sheet needs by roughly ten times. It ships separately so that change can be measured against it. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+
 ## 0.37.0
 
 ### Formulas

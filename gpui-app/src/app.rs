@@ -5,7 +5,7 @@ use visigrid_engine::workbook::Workbook;
 use visigrid_engine::formula::eval::CellLookup;
 use visigrid_engine::filter::{RowView, FilterState};
 use visigrid_engine::sheet::SheetId;
-use visigrid_engine::cell::{CellBorder, CellStyle, max_border, NumberFormat, NegativeStyle};
+use visigrid_engine::cell::{CellBorder, CellStyle, max_border, NumberFormat, NegativeStyle, ValueRef};
 
 use crate::clipboard::InternalClipboard;
 use crate::find_replace::MatchHit;
@@ -2169,12 +2169,12 @@ impl Spreadsheet {
             // Cache is stale, rebuild from sparse storage
             let sheet = self.sheet(cx);
             let entries: Vec<CellEntry> = sheet.cells_iter()
-                .filter(|(_, cell)| !matches!(cell.value, CellValue::Empty))
+                .filter(|(_, cell)| !cell.value().is_empty())
                 .take(1000)  // Cap cells scanned for performance
                 .map(|((row, col), cell)| {
                     let display = sheet.get_display(row, col);
-                    let formula = match &cell.value {
-                        CellValue::Formula { source, .. } => Some(source.clone()),
+                    let formula = match cell.value() {
+                        ValueRef::Formula { source, .. } => Some(source.to_string()),
                         _ => None,
                     };
                     CellEntry::new(row, col, display, formula)
@@ -4505,7 +4505,7 @@ pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
     sheet.name.hash(&mut hasher);
 
     // Collect cell positions for sampling — cells_iter yields populated cells only
-    let cells: Vec<((usize, usize), &visigrid_engine::cell::Cell)> =
+    let cells: Vec<((usize, usize), visigrid_engine::cell::CellRef<'_>)> =
         sheet.cells_iter().collect();
     let count = cells.len();
     count.hash(&mut hasher);
@@ -4536,10 +4536,10 @@ pub(crate) fn sheet_fingerprint(sheet: &visigrid_engine::sheet::Sheet) -> u64 {
     // Hash a cell's raw content (value + formula, not display)
     let hash_cell = |h: &mut std::collections::hash_map::DefaultHasher,
                      &(r, c): &(usize, usize),
-                     cell: &visigrid_engine::cell::Cell| {
+                     cell: &visigrid_engine::cell::CellRef<'_>| {
         r.hash(h);
         c.hash(h);
-        cell.value.raw_display().hash(h);
+        cell.raw_display().hash(h);
     };
 
     if count <= TOTAL_SAMPLES {

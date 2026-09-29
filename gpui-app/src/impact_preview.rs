@@ -25,7 +25,7 @@ impl Spreadsheet {
 
         // Scan all cells for formulas containing the name
         for ((row, col), cell) in self.sheet(cx).cells_iter() {
-            let raw = cell.value.raw_display();
+            let raw = cell.value().raw_display();
             if !raw.starts_with('=') {
                 continue;
             }
