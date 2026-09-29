@@ -7648,6 +7648,7 @@ name = "visigrid-engine"
 version = "0.37.1"
 dependencies = [
  "chrono",
+ "hashbrown 0.16.1",
  "js-sys",
  "ordered-float 4.6.0",
  "rustc-hash 2.1.3",

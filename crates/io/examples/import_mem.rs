@@ -133,7 +133,8 @@ fn main() {
     // Break the sheet down: text heap vs everything else.
     let (mut text_cells, mut text_heap, mut numbers, mut formulas) = (0usize, 0usize, 0usize, 0usize);
     for (_, cell) in sheet.cells_iter() {
-        // Text bytes, not allocation capacity: a borrowed view has no
+        // Text bytes as if every cell held its own copy, not allocation
+        // capacity: a borrowed view has no
         // capacity, and after #18 the storage behind it won't be a String.
         match cell.value() {
             ValueRef::Text(s) => { text_cells += 1; text_heap += s.len(); }
@@ -143,20 +144,12 @@ fn main() {
         }
     }
 
-    // hashbrown: buckets = next_power_of_two(ceil(n * 8 / 7)), one control byte each.
-    let buckets = ((cells * 8 + 6) / 7).next_power_of_two();
-    let entry = size_of::<((u32, u32), Cell)>();
-    let table = buckets * entry + buckets + 16;
-
     println!();
     println!("file {:.1} MB, {} cells ({} text, {} number, {} formula)", mb(file_bytes), cells, text_cells, numbers, formulas);
     println!("import peak (heap) {:.1} MB = {:.0} B/cell", mb(import_peak), import_peak as f64 / cells as f64);
     println!("retained sheet     {:.1} MB = {:.0} B/cell", mb(live_sheet), live_sheet as f64 / cells as f64);
-    println!("  hash table        {:.1} MB = {:.0} B/cell  ({} buckets x {} B entry, load {:.2})",
-        mb(table), table as f64 / cells as f64, buckets, entry, cells as f64 / buckets as f64);
-    println!("  text bytes        {:.1} MB = {:.0} B/cell, {:.1} B per text cell",
+    println!("  text, unpooled    {:.1} MB = {:.0} B/cell, {:.1} B per text cell",
         mb(text_heap), text_heap as f64 / cells as f64, text_heap as f64 / text_cells.max(1) as f64);
-    println!("  other             {:.1} MB", mb(live_sheet.saturating_sub(table + text_heap)));
 
     report("before trim");
     rss::trim_allocator();
