@@ -786,6 +786,11 @@ pub struct Spreadsheet {
     #[allow(dead_code)]
     appearance_subscription: Option<gpui::Subscription>,
 
+    // Routes keys to the pivot field list before key bindings run (see
+    // Spreadsheet::intercept_pivot_keys). Kept alive for the window's life.
+    #[allow(dead_code)]
+    pivot_key_subscription: gpui::Subscription,
+
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
     pub impact_preview_usages: Vec<crate::views::impact_preview::ImpactedFormula>,
@@ -1102,6 +1107,8 @@ impl Spreadsheet {
             }
         });
 
+        let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
+
         // Session server channel: requests from TCP server → GUI thread
         let (session_tx, session_rx) = std::sync::mpsc::channel();
         let session_server = crate::session_server::SessionServer::new();
@@ -1323,6 +1330,7 @@ impl Spreadsheet {
             show_f2_tip: false,
             settings_subscription,
             appearance_subscription: Some(appearance_subscription),
+            pivot_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),

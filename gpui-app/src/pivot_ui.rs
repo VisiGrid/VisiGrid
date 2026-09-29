@@ -529,10 +529,44 @@ impl Spreadsheet {
     // ---- keyboard ---------------------------------------------------------------
 
     /// Keys for the open drawer. Returns true if the key was handled.
-    pub(crate) fn pivot_panel_handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+    /// Give the open field list first claim on keystrokes.
+    ///
+    /// GPUI dispatches key bindings before key-down listeners, and the grid
+    /// binds the keys the list needs (arrows to MoveUp/Down/Left/Right, Enter
+    /// to ConfirmEdit, Escape, Home/End, Delete to DeleteCell). A listener
+    /// never saw them, so arrows moved the grid cursor and Delete cleared a
+    /// cell. Interceptors run before bindings. This one acts only for this
+    /// window, only while the grid itself has focus (not a dialog, palette,
+    /// terminal or text field), with no menu open and no cell being edited.
+    pub(crate) fn intercept_pivot_keys(window: &mut Window, cx: &mut Context<Self>) -> gpui::Subscription {
+        let this = cx.entity().downgrade();
+        let window_handle = window.window_handle();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != window_handle {
+                return;
+            }
+            let Some(this) = this.upgrade() else { return };
+            let handled = this.update(cx, |this, cx| {
+                if this.pivot_panel.is_none()
+                    || this.open_menu.is_some()
+                    || this.mode.is_editing()
+                    || this.mode.is_overlay()
+                    || !this.focus_handle.is_focused(window)
+                {
+                    return false;
+                }
+                this.pivot_panel_handle_key(&event.keystroke, cx)
+            });
+            if handled {
+                cx.stop_propagation();
+            }
+        })
+    }
+
+    pub(crate) fn pivot_panel_handle_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
         let Some(panel) = self.pivot_panel.as_mut() else { return false };
-        let key = event.keystroke.key.as_str();
-        let m = &event.keystroke.modifiers;
+        let key = keystroke.key.as_str();
+        let m = &keystroke.modifiers;
         if panel.busy && key != "escape" {
             return true;
         }
