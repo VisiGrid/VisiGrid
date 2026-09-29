@@ -624,8 +624,13 @@ impl Sheet {
         self.computed_cache.borrow_mut().remove(&(row, col));
         match value {
             Value::Empty => {
-                self.cells.remove(&cell_key(row, col));
+                // Keep the cell's formatting: a blank result inside the output
+                // (a missing intersection) must not strip the user's styling.
                 self.spill_values.remove(&(row, col));
+                if let Some(cell) = self.cells.get_mut(&cell_key(row, col)) {
+                    cell.value = CellValue::Empty;
+                    cell.clear_spill_state();
+                }
             }
             Value::Number(n) => {
                 let cell = self.cell_with_inherited_format(row, col);

@@ -32,10 +32,11 @@
 //!   so a grand average is sum ÷ count over all contributing rows.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cell::{NegativeStyle, NumberFormat};
 use crate::formula::eval::Value;
 use crate::sheet::{Sheet, SheetId};
 
@@ -48,6 +49,10 @@ pub const MAX_OUTPUT_CELLS: usize = 250_000;
 /// is almost always a mistake (a date or an id as the column field).
 pub const MAX_OUTPUT_COLS: usize = 2_000;
 
+/// Distinct Count holds a set of keys per output cell and per total. Refuse
+/// when the keys held across all of them would exceed this.
+pub const MAX_DISTINCT_KEYS: usize = 4_000_000;
+
 /// Label used for blank group keys.
 pub const BLANK_LABEL: &str = "(blank)";
 /// Label of the grand-total row and column.
@@ -59,25 +64,33 @@ pub const GRAND_TOTAL_LABEL: &str = "Grand Total";
 pub enum Aggregation {
     Sum,
     Count,
+    DistinctCount,
     Average,
     Min,
     Max,
 }
 
 impl Aggregation {
-    pub const ALL: [Aggregation; 5] = [
+    pub const ALL: [Aggregation; 6] = [
         Aggregation::Sum,
         Aggregation::Count,
+        Aggregation::DistinctCount,
         Aggregation::Average,
         Aggregation::Min,
         Aggregation::Max,
     ];
+
+    /// Counts display as whole numbers whatever the source's format.
+    pub fn is_count(self) -> bool {
+        matches!(self, Aggregation::Count | Aggregation::DistinctCount)
+    }
 
     /// Display name used in value-field headers ("Sum of Amount").
     pub fn label(self) -> &'static str {
         match self {
             Aggregation::Sum => "Sum",
             Aggregation::Count => "Count",
+            Aggregation::DistinctCount => "Distinct Count",
             Aggregation::Average => "Average",
             Aggregation::Min => "Min",
             Aggregation::Max => "Max",
@@ -96,10 +109,27 @@ pub struct PivotField {
     pub header: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PivotValueField {
     pub field: PivotField,
     pub aggregation: Aggregation,
+    /// Number format for this field's results. It belongs to the field, so it
+    /// follows the results when the layout changes. `None` = General.
+    #[serde(default)]
+    pub number_format: Option<NumberFormat>,
+}
+
+/// The default number format for a new value field: counts are whole
+/// numbers (never currency); other aggregations take the source column's
+/// format when it has one.
+pub fn default_number_format(aggregation: Aggregation, source: &NumberFormat) -> Option<NumberFormat> {
+    if aggregation.is_count() {
+        return Some(NumberFormat::Number { decimals: 0, thousands: true, negative: NegativeStyle::default() });
+    }
+    match source {
+        NumberFormat::General => None,
+        other => Some(other.clone()),
+    }
 }
 
 impl PivotValueField {
@@ -110,7 +140,7 @@ impl PivotValueField {
 }
 
 /// Which fields go where. Row fields are ordered (outermost first).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PivotDefinition {
     #[serde(default)]
     pub rows: Vec<PivotField>,
@@ -242,6 +272,8 @@ pub enum PivotError {
     DuplicateLayoutField { header: String },
     OutputTooLarge { rows: usize, cols: usize, cells: usize },
     OutputTooWide { cols: usize },
+    /// Distinct Count would hold more keys than the budget.
+    DistinctTooLarge { keys: usize },
 }
 
 impl std::fmt::Display for PivotError {
@@ -260,6 +292,10 @@ impl std::fmt::Display for PivotError {
             PivotError::OutputTooLarge { rows, cols, cells } => write!(
                 f,
                 "The pivot would produce {rows} × {cols} = {cells} cells, over the {MAX_OUTPUT_CELLS}-cell limit. Use fewer or coarser fields."
+            ),
+            PivotError::DistinctTooLarge { keys } => write!(
+                f,
+                "Distinct Count would track over {keys} distinct values, above the {MAX_DISTINCT_KEYS} limit. Use fewer groups or Count instead."
             ),
             PivotError::OutputTooWide { cols } => write!(
                 f,
@@ -446,11 +482,26 @@ struct Acc {
     error: Option<String>,
     /// At least one source row contributed (even if every value was blank).
     touched: bool,
+    /// Distinct non-empty keys, only for Distinct Count fields.
+    distinct: Option<HashSet<Key>>,
 }
 
 impl Acc {
+    fn new(agg: Aggregation) -> Acc {
+        Acc {
+            distinct: (agg == Aggregation::DistinctCount).then(HashSet::new),
+            ..Acc::default()
+        }
+    }
+
     fn add(&mut self, v: &Value) {
         self.touched = true;
+        if let Some(set) = &mut self.distinct {
+            let key = Key::from_value(v);
+            if key != Key::Blank {
+                set.insert(key);
+            }
+        }
         match v {
             Value::Empty => {}
             Value::Text(s) if s.is_empty() => {}
@@ -473,6 +524,9 @@ impl Acc {
 
     fn merge(&mut self, o: &Acc) {
         self.touched |= o.touched;
+        if let (Some(a), Some(b)) = (&mut self.distinct, &o.distinct) {
+            a.extend(b.iter().cloned());
+        }
         self.sum += o.sum;
         self.numeric += o.numeric;
         self.non_empty += o.non_empty;
@@ -496,6 +550,9 @@ impl Acc {
         if agg == Aggregation::Count {
             return Value::Number(self.non_empty as f64);
         }
+        if agg == Aggregation::DistinctCount {
+            return Value::Number(self.distinct.as_ref().map_or(0, |d| d.len()) as f64);
+        }
         if let Some(e) = &self.error {
             return Value::Error(e.clone());
         }
@@ -510,12 +567,16 @@ impl Acc {
             }
             Aggregation::Min => Value::Number(self.min.unwrap_or(0.0)),
             Aggregation::Max => Value::Number(self.max.unwrap_or(0.0)),
-            Aggregation::Count => unreachable!(),
+            Aggregation::Count | Aggregation::DistinctCount => unreachable!(),
         }
     }
 }
 
 static EMPTY_VALUE: Value = Value::Empty;
+
+fn new_accs(def: &PivotDefinition) -> Vec<Acc> {
+    def.values.iter().map(|v| Acc::new(v.aggregation)).collect()
+}
 
 fn get(col: &[Value], r: usize) -> &Value {
     col.get(r).unwrap_or(&EMPTY_VALUE)
@@ -537,6 +598,9 @@ pub struct PivotOutput {
     pub column_items: usize,
     /// Source data rows read.
     pub source_rows: usize,
+    /// For each output column, the value field whose results it holds (data
+    /// rows and the grand-total row), or `None` for label columns.
+    pub value_columns: Vec<Option<usize>>,
 }
 
 impl PivotOutput {
@@ -619,7 +683,7 @@ pub fn aggregate(def: &PivotDefinition, snap: &PivotSnapshot) -> Result<PivotOut
             Some(c) => col_set.intern(get(c, r)),
             None => 0,
         };
-        let accs = cell_acc.entry((g, ci)).or_insert_with(|| vec![Acc::default(); nv]);
+        let accs = cell_acc.entry((g, ci)).or_insert_with(|| new_accs(def));
         for (vi, vc) in val_cols.iter().enumerate() {
             accs[vi].add(get(vc, r));
         }
@@ -659,15 +723,26 @@ pub fn aggregate(def: &PivotDefinition, snap: &PivotSnapshot) -> Result<PivotOut
     let (col_order, _) = col_set.sorted();
 
     // 4. Totals from underlying accumulators.
-    let mut row_totals: Vec<Vec<Acc>> = vec![vec![Acc::default(); nv]; groups.len()];
+    let mut row_totals: Vec<Vec<Acc>> = (0..groups.len()).map(|_| new_accs(def)).collect();
     let mut col_totals: HashMap<u32, Vec<Acc>> = HashMap::new();
-    let mut grand: Vec<Acc> = vec![Acc::default(); nv];
+    let mut grand: Vec<Acc> = new_accs(def);
     for (&(g, ci), accs) in &cell_acc {
         for vi in 0..nv {
             row_totals[g][vi].merge(&accs[vi]);
-            col_totals.entry(ci).or_insert_with(|| vec![Acc::default(); nv])[vi].merge(&accs[vi]);
+            col_totals.entry(ci).or_insert_with(|| new_accs(def))[vi].merge(&accs[vi]);
             grand[vi].merge(&accs[vi]);
         }
+    }
+    let distinct_keys: usize = cell_acc
+        .values()
+        .chain(row_totals.iter())
+        .chain(col_totals.values())
+        .chain(std::iter::once(&grand))
+        .flat_map(|accs| accs.iter())
+        .map(|a| a.distinct.as_ref().map_or(0, |d| d.len()))
+        .sum();
+    if distinct_keys > MAX_DISTINCT_KEYS {
+        return Err(PivotError::DistinctTooLarge { keys: distinct_keys });
     }
     if n > 0 {
         // A grand total over zero rows stays blank; over ≥1 row it is touched.
@@ -770,12 +845,20 @@ pub fn aggregate(def: &PivotDefinition, snap: &PivotSnapshot) -> Result<PivotOut
         }
     }
 
+    let mut value_columns: Vec<Option<usize>> = vec![None; width];
+    if nv > 0 {
+        for (c, slot) in value_columns.iter_mut().enumerate().skip(label_cols) {
+            *slot = Some((c - label_cols) % value_block.max(1));
+        }
+    }
+
     Ok(PivotOutput {
         cells: out,
         header_rows,
         row_groups: body_rows,
         column_items: n_col_items,
         source_rows: n,
+        value_columns,
     })
 }
 
@@ -796,7 +879,7 @@ mod tests {
         PivotField { offset, header: header.to_string() }
     }
     fn v(offset: u32, header: &str, aggregation: Aggregation) -> PivotValueField {
-        PivotValueField { field: f(offset, header), aggregation }
+        PivotValueField { field: f(offset, header), aggregation, number_format: None }
     }
 
     /// Build a snapshot from header names and row-major data.
@@ -1049,6 +1132,70 @@ mod tests {
         let def = PivotDefinition { rows: vec![], column: None, values: vec![v(2, "Amount", Aggregation::Max)] };
         let out = aggregate(&def, &sales()).unwrap();
         assert_eq!(out.cells, vec![vec![Value::Empty, t("Max of Amount")], vec![t(GRAND_TOTAL_LABEL), n(100.0)]]);
+    }
+
+    #[test]
+    fn distinct_count_totals_deduplicate_across_groups() {
+        // Customer "c1" buys in both regions: 2 distinct per region, 3 overall.
+        let s = snap(
+            &["Region", "Customer"],
+            vec![
+                vec![t("East"), t("c1")],
+                vec![t("East"), t("c2")],
+                vec![t("East"), t("C1")], // same customer, different case
+                vec![t("West"), t("c1")],
+                vec![t("West"), t("c3")],
+                vec![t("West"), Value::Empty], // blank is not a customer
+            ],
+        );
+        let def = PivotDefinition {
+            rows: vec![f(0, "Region")],
+            column: None,
+            values: vec![v(1, "Customer", Aggregation::DistinctCount), v(1, "Customer", Aggregation::Count)],
+        };
+        let out = aggregate(&def, &s).unwrap();
+        assert_eq!(out.cells[0][1], t("Distinct Count of Customer"));
+        assert_eq!(out.cells[1], vec![t("East"), n(2.0), n(3.0)]);
+        assert_eq!(out.cells[2], vec![t("West"), n(2.0), n(2.0)]);
+        // Grand total is 3 distinct customers, not 2 + 2.
+        assert_eq!(out.cells[3], vec![t(GRAND_TOTAL_LABEL), n(3.0), n(5.0)]);
+    }
+
+    #[test]
+    fn distinct_count_column_totals_deduplicate_too() {
+        let s = snap(
+            &["R", "C", "K"],
+            vec![
+                vec![t("a"), t("x"), n(1.0)],
+                vec![t("b"), t("x"), n(1.0)],
+                vec![t("b"), t("y"), n(2.0)],
+            ],
+        );
+        let def = PivotDefinition { rows: vec![f(0, "R")], column: Some(f(1, "C")), values: vec![v(2, "K", Aggregation::DistinctCount)] };
+        let out = aggregate(&def, &s).unwrap();
+        // Column x total: {1} → 1 (not 1 + 1); row b total: {1, 2} → 2; grand {1, 2} → 2.
+        assert_eq!(out.cells[4], vec![t(GRAND_TOTAL_LABEL), n(1.0), n(1.0), n(2.0)]);
+        assert_eq!(out.cells[3], vec![t("b"), n(1.0), n(1.0), n(2.0)]);
+    }
+
+    #[test]
+    fn value_columns_map_output_columns_to_fields() {
+        let def = PivotDefinition {
+            rows: vec![f(0, "Region")],
+            column: Some(f(1, "Month")),
+            values: vec![v(2, "Amount", Aggregation::Sum), v(2, "Amount", Aggregation::Count)],
+        };
+        let out = aggregate(&def, &sales()).unwrap();
+        assert_eq!(out.value_columns, vec![None, Some(0), Some(1), Some(0), Some(1), Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn default_formats_counts_are_plain_others_inherit() {
+        let cur = NumberFormat::Currency { decimals: 2, thousands: true, symbol: None, negative: NegativeStyle::default() };
+        assert_eq!(default_number_format(Aggregation::Sum, &cur), Some(cur.clone()));
+        assert!(matches!(default_number_format(Aggregation::Count, &cur), Some(NumberFormat::Number { decimals: 0, .. })));
+        assert!(matches!(default_number_format(Aggregation::DistinctCount, &cur), Some(NumberFormat::Number { decimals: 0, .. })));
+        assert_eq!(default_number_format(Aggregation::Average, &NumberFormat::General), None);
     }
 
     #[test]

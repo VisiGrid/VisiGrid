@@ -7,6 +7,7 @@
 //! before and after. Applying `after` performs the action; applying `before`
 //! undoes it. Both are bounded by the output budget in [`crate::pivot`].
 
+use crate::cell::NumberFormat;
 use crate::cell_id::CellId;
 use crate::formula::eval::Value;
 use crate::pivot::{self, PivotError, PivotOutput, PivotSnapshot, PivotTable, RefreshRecord};
@@ -22,9 +23,19 @@ pub struct PivotState {
     pub pivot_id: u64,
     /// `None` = no such pivot (before a create, after a delete).
     pub table: Option<PivotTable>,
-    /// Cell values over the union of the old and new regions. `Value::Empty`
-    /// clears the cell.
-    pub cells: Vec<(u32, u32, Value)>,
+    /// Cells over the union of the old and new regions: value and number
+    /// format. `Value::Empty` clears the value but keeps the cell's other
+    /// formatting. Other style attributes are never touched by a pivot.
+    pub cells: Vec<PivotCell>,
+}
+
+/// One cell of a pivot state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PivotCell {
+    pub row: u32,
+    pub col: u32,
+    pub value: Value,
+    pub number_format: NumberFormat,
 }
 
 impl PivotState {
@@ -33,8 +44,8 @@ impl PivotState {
         let cell_bytes: usize = self
             .cells
             .iter()
-            .map(|(_, _, v)| {
-                24 + match v {
+            .map(|c| {
+                64 + match &c.value {
                     Value::Text(s) | Value::Error(s) => s.len(),
                     _ => 0,
                 }
@@ -129,6 +140,25 @@ impl Workbook {
         Ok((pivot::capture_snapshot(sheet, &table.source, &table.definition), sheet.edit_generation()))
     }
 
+    /// Rows appended directly below a pivot's source: the last row of the
+    /// contiguous block of rows under `end_row` that hold data in any of the
+    /// source's columns. `None` if the next row is empty. The caller offers to
+    /// extend the source; it is never extended silently (a totals row under the
+    /// data would otherwise be summed).
+    pub fn pivot_source_growth(&self, table: &PivotTable) -> Option<u32> {
+        let sheet = self.sheet_by_id(table.source.sheet_id)?;
+        let (c0, c1) = (table.source.start_col as usize, table.source.end_col as usize);
+        let row_has_data = |r: usize| (c0..=c1).any(|c| !sheet.get_raw(r, c).is_empty());
+        let mut r = table.source.end_row as usize + 1;
+        let limit = sheet.rows.min(NUM_ROWS);
+        let mut last = None;
+        while r < limit && row_has_data(r) {
+            last = Some(r as u32);
+            r += 1;
+        }
+        last
+    }
+
     /// The source sheet's current edit generation (for stale checks before apply).
     pub fn pivot_source_generation(&self, table: &PivotTable) -> Option<u64> {
         self.sheet_by_id(table.source.sheet_id).map(|s| s.edit_generation())
@@ -210,22 +240,35 @@ impl Workbook {
             }
         }
 
-        let before_cells: Vec<(u32, u32, Value)> = coords
+        let current_format = |r: usize, c: usize| sheet.get_format(r, c).number_format.clone();
+        let before_cells: Vec<PivotCell> = coords
             .iter()
-            .map(|&(r, c)| {
-                let v = if in_old(r, c) { owned_value(sheet, r, c) } else { Value::Empty };
-                (r as u32, c as u32, v)
+            .map(|&(r, c)| PivotCell {
+                row: r as u32,
+                col: c as u32,
+                value: if in_old(r, c) { owned_value(sheet, r, c) } else { Value::Empty },
+                number_format: current_format(r, c),
             })
             .collect();
-        let after_cells: Vec<(u32, u32, Value)> = coords
+        let after_cells: Vec<PivotCell> = coords
             .iter()
             .map(|&(r, c)| {
-                let v = if r >= r0 && r <= r1 && c >= c0 && c <= c1 {
-                    output.cells[r - r0][c - c0].clone()
-                } else {
-                    Value::Empty
-                };
-                (r as u32, c as u32, v)
+                let inside = r >= r0 && r <= r1 && c >= c0 && c <= c1;
+                let value = if inside { output.cells[r - r0][c - c0].clone() } else { Value::Empty };
+                // Value cells take their field's format; everything else keeps
+                // whatever the cell has, so user formatting survives refresh.
+                let field_format = inside
+                    .then(|| r - r0 >= output.header_rows)
+                    .filter(|&is_data| is_data)
+                    .and_then(|_| output.value_columns.get(c - c0).copied().flatten())
+                    .and_then(|vi| table.definition.values.get(vi))
+                    .and_then(|v| v.number_format.clone());
+                PivotCell {
+                    row: r as u32,
+                    col: c as u32,
+                    value,
+                    number_format: field_format.unwrap_or_else(|| current_format(r, c)),
+                }
             })
             .collect();
 
@@ -249,8 +292,9 @@ impl Workbook {
         if let Some((r0, c0, r1, c1)) = table.region() {
             for r in r0..=r1 {
                 for c in c0..=c1 {
-                    before_cells.push((r as u32, c as u32, owned_value(sheet, r, c)));
-                    after_cells.push((r as u32, c as u32, Value::Empty));
+                    let nf = sheet.get_format(r, c).number_format.clone();
+                    before_cells.push(PivotCell { row: r as u32, col: c as u32, value: owned_value(sheet, r, c), number_format: nf.clone() });
+                    after_cells.push(PivotCell { row: r as u32, col: c as u32, value: Value::Empty, number_format: nf });
                 }
             }
         }
@@ -271,17 +315,22 @@ impl Workbook {
             // Remove the object first, so the writer is the only thing that
             // touches its cells.
             sheet.pivots.retain(|p| p.id != state.pivot_id);
-            for (r, c, v) in &state.cells {
-                sheet.write_pivot_cell(*r as usize, *c as usize, v);
+            for cell in &state.cells {
+                let (r, c) = (cell.row as usize, cell.col as usize);
+                sheet.write_pivot_cell(r, c, &cell.value);
+                if sheet.get_format(r, c).number_format != cell.number_format {
+                    sheet.set_number_format(r, c, cell.number_format.clone());
+                }
             }
             if let Some(t) = &state.table {
                 sheet.pivots.push(t.clone());
                 sheet.pivots.sort_by_key(|p| p.id);
             }
         }
-        for (r, c, _) in &state.cells {
-            self.update_cell_deps(state.sheet_id, *r as usize, *c as usize);
-            self.note_cell_changed(CellId::new(state.sheet_id, *r as usize, *c as usize));
+        for cell in &state.cells {
+            let (r, c) = (cell.row as usize, cell.col as usize);
+            self.update_cell_deps(state.sheet_id, r, c);
+            self.note_cell_changed(CellId::new(state.sheet_id, r, c));
         }
         Ok(self.end_batch())
     }
@@ -431,7 +480,7 @@ mod tests {
             definition: PivotDefinition {
                 rows: vec![PivotField { offset: 0, header: "Region".into() }],
                 column: None,
-                values: vec![PivotValueField { field: PivotField { offset: 1, header: "Amount".into() }, aggregation: Aggregation::Sum }],
+                values: vec![PivotValueField { field: PivotField { offset: 1, header: "Amount".into() }, aggregation: Aggregation::Sum, number_format: None }],
             },
             anchor_row: 0,
             anchor_col: 0,
@@ -515,10 +564,12 @@ mod tests {
         wider.definition.values.push(PivotValueField {
             field: PivotField { offset: 1, header: "Amount".into() },
             aggregation: Aggregation::Count,
+            number_format: None,
         });
         wider.definition.values.push(PivotValueField {
             field: PivotField { offset: 1, header: "Amount".into() },
             aggregation: Aggregation::Max,
+            number_format: None,
         });
         let (snap, gen) = wb.pivot_snapshot(&wider).unwrap();
         let output = aggregate(&wider.definition, &snap).unwrap();
@@ -535,6 +586,7 @@ mod tests {
         t.definition.values.push(PivotValueField {
             field: PivotField { offset: 1, header: "Amount".into() },
             aggregation: Aggregation::Count,
+            number_format: None,
         });
         refresh(&mut wb, out, t.clone());
         let oi = wb.sheet_index_by_id(out).unwrap();
@@ -588,6 +640,94 @@ mod tests {
     }
 
     #[test]
+    fn formats_follow_their_field_and_user_styling_survives_refresh() {
+        let (mut wb, data, out) = book();
+        let mut t = table(&wb, data);
+        let money = NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None };
+        t.definition.values[0].number_format = Some(money.clone());
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        // Data and grand-total cells in the value column get the field's format;
+        // header and label cells keep General.
+        assert_eq!(wb.sheet(oi).unwrap().get_format(1, 1).number_format, money);
+        assert_eq!(wb.sheet(oi).unwrap().get_format(3, 1).number_format, money);
+        assert_eq!(wb.sheet(oi).unwrap().get_format(0, 1).number_format, NumberFormat::General);
+        assert_eq!(wb.sheet(oi).unwrap().get_format(1, 0).number_format, NumberFormat::General);
+
+        // The user bolds a label cell; a refresh leaves it bold.
+        wb.sheet_mut(oi).unwrap().set_bold(1, 0, true);
+        let t2 = wb.find_pivot(id).unwrap().1.clone();
+        refresh(&mut wb, out, t2);
+        assert!(wb.sheet(oi).unwrap().get_format(1, 0).bold);
+
+        // Rearranging (adding a Count field before Sum) moves the currency
+        // format with the Sum field to its new column; the Count column is plain.
+        let mut t3 = wb.find_pivot(id).unwrap().1.clone();
+        t3.definition.values.insert(
+            0,
+            PivotValueField {
+                field: PivotField { offset: 1, header: "Amount".into() },
+                aggregation: Aggregation::Count,
+                number_format: crate::pivot::default_number_format(Aggregation::Count, &money),
+            },
+        );
+        refresh(&mut wb, out, t3.clone());
+        assert_eq!(wb.sheet(oi).unwrap().get_format(1, 2).number_format, money);
+        assert!(matches!(wb.sheet(oi).unwrap().get_format(1, 1).number_format, NumberFormat::Number { decimals: 0, .. }));
+
+        // Undo restores the previous formats exactly.
+        let (snap, gen) = wb.pivot_snapshot(&t3).unwrap();
+        let output = crate::pivot::aggregate(&t3.definition, &snap).unwrap();
+        let again = wb.prepare_pivot_commit(out, t3, &output, gen, 0).unwrap();
+        wb.apply_pivot_state(&again.after).unwrap();
+        wb.apply_pivot_state(&again.before).unwrap();
+        assert_eq!(wb.sheet(oi).unwrap().get_format(1, 2).number_format, money);
+    }
+
+    #[test]
+    fn blank_result_cells_keep_their_formatting() {
+        let (mut wb, data, out) = book();
+        let di = wb.sheet_index_by_id(data).unwrap();
+        // Cross-tab with a missing intersection: East has no row with Month=Q2.
+        wb.sheet_mut(di).unwrap().set_value(0, 2, "Q");
+        wb.sheet_mut(di).unwrap().set_value(1, 2, "Q1");
+        wb.sheet_mut(di).unwrap().set_value(2, 2, "Q1");
+        wb.sheet_mut(di).unwrap().set_value(3, 2, "Q2");
+        let mut t = table(&wb, data);
+        t.source.end_col = 2;
+        t.definition.column = Some(PivotField { offset: 2, header: "Q".into() });
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        // Rows: header(2), East, West, Grand. East × Q2 is blank at (2, 2).
+        assert_eq!(wb.sheet(oi).unwrap().get_display(2, 2), "");
+        wb.sheet_mut(oi).unwrap().set_background_color(2, 2, Some([255, 255, 0, 255]));
+        let t2 = wb.find_pivot(id).unwrap().1.clone();
+        refresh(&mut wb, out, t2);
+        assert_eq!(wb.sheet(oi).unwrap().get_format(2, 2).background_color, Some([255, 255, 0, 255]));
+    }
+
+    #[test]
+    fn appended_rows_below_the_source_are_detected_not_absorbed() {
+        let (mut wb, data, out) = book();
+        let t = table(&wb, data);
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let p = wb.find_pivot(id).unwrap().1.clone();
+        assert_eq!(wb.pivot_source_growth(&p), None);
+        let di = wb.sheet_index_by_id(data).unwrap();
+        wb.set_cell_value_tracked(di, 4, 0, "North");
+        wb.set_cell_value_tracked(di, 4, 1, "7");
+        wb.set_cell_value_tracked(di, 5, 1, "1");
+        // A gap, then something else: not part of the appended block.
+        wb.set_cell_value_tracked(di, 7, 0, "Note");
+        assert_eq!(wb.pivot_source_growth(&p), Some(5));
+        // The source itself is unchanged until the user accepts.
+        assert_eq!(wb.find_pivot(id).unwrap().1.source.end_row, 3);
+    }
+
+    #[test]
     fn commit_is_bounded_to_the_regions_not_the_workbook() {
         let (mut wb, data, out) = book();
         let t = table(&wb, data);
@@ -595,7 +735,7 @@ mod tests {
         // 4 rows × 2 cols output; before has the same 8 coords, all empty.
         assert_eq!(c.after.cells.len(), 8);
         assert_eq!(c.before.cells.len(), 8);
-        assert!(c.before.cells.iter().all(|(_, _, v)| *v == Value::Empty));
+        assert!(c.before.cells.iter().all(|cell| cell.value == Value::Empty));
         assert!(c.approx_bytes() < 4096);
     }
 }
