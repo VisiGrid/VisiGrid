@@ -614,29 +614,33 @@ impl Sheet {
                 // Keep the cell's formatting: a blank result inside the output
                 // (a missing intersection) must not strip the user's styling.
                 self.spill_values.remove(&(row, col));
-                if let Some(cell) = self.cells.get_mut(&cell_key(row, col)) {
+                self.cells.update(row, col, |cell| {
                     cell.value = CellValue::Empty;
                     cell.clear_spill_state();
-                }
+                });
             }
             Value::Number(n) => {
-                let cell = self.cell_with_inherited_format(row, col);
-                cell.value = CellValue::Number(*n);
-                cell.clear_spill_state();
+                let n = *n;
+                self.with_cell(row, col, |cell| {
+                    cell.value = CellValue::Number(n);
+                    cell.clear_spill_state();
+                });
             }
             Value::Text(t) => {
-                let cell = self.cell_with_inherited_format(row, col);
-                cell.value = CellValue::Text(t.clone());
-                cell.clear_spill_state();
+                self.with_cell(row, col, |cell| {
+                    cell.value = CellValue::Text(t.clone());
+                    cell.clear_spill_state();
+                });
             }
             Value::Boolean(b) => {
-                let cell = self.cell_with_inherited_format(row, col);
-                cell.set(if *b { "TRUE" } else { "FALSE" });
+                let b = *b;
+                self.with_cell(row, col, |cell| cell.set(if b { "TRUE" } else { "FALSE" }));
             }
             Value::Error(e) => {
-                let cell = self.cell_with_inherited_format(row, col);
-                cell.value = CellValue::Text(e.clone());
-                cell.clear_spill_state();
+                self.with_cell(row, col, |cell| {
+                    cell.value = CellValue::Text(e.clone());
+                    cell.clear_spill_state();
+                });
             }
         }
     }
