@@ -276,6 +276,15 @@ actions!(sheets, [
     AddSheet,
 ]);
 
+// Pivot tables
+actions!(pivot, [
+    InsertPivotTable,   // Insert a pivot table from the selection / current region
+    RefreshPivot,       // Refresh the pivot under the cursor (Alt+F5)
+    RefreshAllPivots,   // Refresh every pivot in the workbook (Ctrl+Alt+F5)
+    EditPivotFields,    // Open the field list for the pivot under the cursor
+    DeletePivot,        // Delete the pivot under the cursor and clear its output
+]);
+
 // Data actions (sort/filter/validation)
 actions!(data, [
     SortAscending,   // Sort current column ascending

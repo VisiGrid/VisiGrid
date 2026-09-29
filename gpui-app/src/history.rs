@@ -202,6 +202,16 @@ pub enum UndoAction {
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    /// Pivot table action (create, apply fields, refresh, delete). Scoped to
+    /// the pivot object and its output cells; never a workbook snapshot.
+    PivotCommit {
+        commit: Box<visigrid_engine::workbook::PivotCommit>,
+        /// When the action created the pivot's output sheet: its index and the
+        /// sheet as created (empty, named), for undo to remove and redo to
+        /// restore with the same id.
+        created_sheet: Option<(usize, Box<visigrid_engine::sheet::Sheet>)>,
+        description: String,
+    },
     /// Rows inserted (for undo: delete the inserted rows)
     RowsInserted {
         sheet_index: usize,
@@ -425,6 +435,7 @@ impl UndoAction {
                 format!("Apply reviewed plan {}", commit.plan_id.0)
             }
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
+            UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
                 if *count == 1 {
                     "Insert row".to_string()
@@ -1556,6 +1567,16 @@ impl History {
                     }
                 }
             }
+            UndoAction::PivotCommit { commit, created_sheet, .. } => {
+                if let Some((index, sheet)) = created_sheet {
+                    if workbook.sheet_index_by_id(sheet.id).is_none() {
+                        workbook.restore_sheet(*index, (**sheet).clone());
+                    }
+                }
+                workbook
+                    .apply_pivot_state(&commit.after)
+                    .map_err(|e| PreviewBuildError::InvariantViolation(e.to_string()))?;
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
@@ -1705,6 +1726,7 @@ pub enum UndoActionKind {
     Group,
     PlanCommit,
     WorkbookSnapshot,
+    PivotCommit,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1742,6 +1764,7 @@ impl UndoActionKind {
             UndoActionKind::Group => true,
             UndoActionKind::PlanCommit => true,
             UndoActionKind::WorkbookSnapshot => true,
+            UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
             UndoActionKind::ColsInserted => true,
@@ -1785,6 +1808,7 @@ impl UndoActionKind {
             UndoActionKind::Group => "Group",
             UndoActionKind::PlanCommit => "Reviewed plan",
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
+            UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
             UndoActionKind::ColsInserted => "Insert columns",
@@ -1821,6 +1845,7 @@ impl UndoActionKind {
             UndoActionKind::Group => 0x07,
             UndoActionKind::PlanCommit => 0x1A,
             UndoActionKind::WorkbookSnapshot => 0x1B,
+            UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
             UndoActionKind::ColsInserted => 0x0A,
@@ -1857,6 +1882,7 @@ impl UndoAction {
             UndoAction::Group { .. } => UndoActionKind::Group,
             UndoAction::PlanCommit { .. } => UndoActionKind::PlanCommit,
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
+            UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
             UndoAction::ColsInserted { .. } => UndoActionKind::ColsInserted,

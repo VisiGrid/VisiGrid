@@ -689,8 +689,8 @@ impl Spreadsheet {
         use visigrid_engine::formula::eval::Value;
         const CAP: usize = 200;
 
+        let mut problems = self.pivot_problems(cx);
         let wb = self.workbook.read(cx);
-        let mut problems = Vec::new();
         let mut truncated = false;
         'outer: for (sheet_idx, sheet) in wb.sheets().iter().enumerate() {
             let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).collect();

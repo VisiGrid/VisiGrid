@@ -531,6 +531,7 @@ impl Spreadsheet {
     pub fn cut(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
+        if self.block_if_selection_in_pivot("cut", cx) { return; }
 
         self.copy(cx);
 
@@ -738,6 +739,7 @@ impl Spreadsheet {
 
             // If single cell and multi-selection, broadcast to all selected cells
             if is_single_cell && self.is_multi_selection() {
+                if self.block_if_selection_in_pivot("paste", cx) { return; }
                 let single_value = lines[0].to_string();
                 let primary_cell = self.view_state.selected;
                 let primary_data_row = self.row_view.view_to_data(primary_cell.0);
@@ -853,6 +855,11 @@ impl Spreadsheet {
             );
             let paste_max_row = (data_start_row + paste_rows).saturating_sub(1);
             let paste_max_col = (start_col + paste_cols).saturating_sub(1);
+
+            // Refuse the whole paste if any target cell is pivot output.
+            if self.block_if_pivot(start_row, start_col, start_row + paste_rows - 1, paste_max_col, "paste", cx) {
+                return;
+            }
 
             // Block if paste would split a merged region
             if let Some((mr, mc)) = self.paste_would_split_merge(data_start_row, start_col, paste_max_row, paste_max_col, cx) {
@@ -1769,6 +1776,7 @@ impl Spreadsheet {
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
+        if self.block_if_selection_in_pivot("clear", cx) { return; }
 
         let mut changes = Vec::new();
         let mut skipped_spill_receivers = false;

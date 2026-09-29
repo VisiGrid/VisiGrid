@@ -19,7 +19,7 @@ fn col_to_letter(col: usize) -> String {
     Spreadsheet::col_letter(col)
 }
 impl Spreadsheet {
-    fn finish_workbook_snapshot_restore(
+    pub(crate) fn finish_workbook_snapshot_restore(
         &mut self,
         row_view: visigrid_engine::filter::RowView,
         cx: &mut Context<Self>,
@@ -130,6 +130,10 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
                     self.status_message = Some(format!("Undo: {}", commit.description));
+                }
+                UndoAction::PivotCommit { commit, created_sheet, description } => {
+                    self.pivot_undo(&commit, &created_sheet, cx);
+                    self.status_message = Some(format!("Undo: {}", description));
                 }
                 UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                     // Undo insert by deleting the rows
@@ -551,6 +555,9 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
+            UndoAction::PivotCommit { commit, created_sheet, .. } => {
+                self.pivot_undo(&commit, &created_sheet, cx);
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -903,6 +910,9 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
+            UndoAction::PivotCommit { commit, created_sheet, .. } => {
+                self.pivot_redo(&commit, &created_sheet, cx);
+            }
             UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
@@ -1209,6 +1219,10 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
                     self.status_message = Some(format!("Redo: {}", commit.description));
+                }
+                UndoAction::PivotCommit { commit, created_sheet, description } => {
+                    self.pivot_redo(&commit, &created_sheet, cx);
+                    self.status_message = Some(format!("Redo: {}", description));
                 }
                 // These four route through apply_redo_action, which redoes the
                 // edit via Workbook::structural_edit, so formula references,

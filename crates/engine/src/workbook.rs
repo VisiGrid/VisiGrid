@@ -1,4 +1,8 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+
+#[path = "workbook_pivot.rs"]
+mod pivot_ops;
+pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
 use crate::cell_id::CellId;
@@ -319,6 +323,40 @@ impl Workbook {
             self.active_sheet -= 1;
         }
 
+        true
+    }
+
+    /// Remove a sheet and hand it back whole, for an undo that must restore it
+    /// exactly (same id, same contents). Refuses to remove the last sheet.
+    pub fn take_sheet(&mut self, index: usize) -> Option<Sheet> {
+        if self.sheets.len() <= 1 || index >= self.sheets.len() {
+            return None;
+        }
+        let sheet = self.sheets.remove(index);
+        if self.active_sheet >= self.sheets.len() {
+            self.active_sheet = self.sheets.len() - 1;
+        } else if self.active_sheet > index {
+            self.active_sheet -= 1;
+        }
+        self.rebuild_dep_graph();
+        Some(sheet)
+    }
+
+    /// Put back a sheet removed by [`take_sheet`](Self::take_sheet), at the
+    /// same position and with the same id. Refuses if a sheet with that id or
+    /// name already exists.
+    pub fn restore_sheet(&mut self, index: usize, sheet: Sheet) -> bool {
+        if self.sheets.iter().any(|s| s.id == sheet.id || s.name_key == sheet.name_key) {
+            return false;
+        }
+        let index = index.min(self.sheets.len());
+        self.next_sheet_id = self.next_sheet_id.max(sheet.id.0 + 1);
+        self.sheets.insert(index, sheet);
+        if self.active_sheet >= index && self.sheets.len() > 1 && index <= self.active_sheet {
+            // Keep the same sheet active.
+            self.active_sheet += 1;
+        }
+        self.rebuild_dep_graph();
         true
     }
 
@@ -2175,6 +2213,14 @@ impl Workbook {
             }
         }
 
+        // Pivot outputs move as a whole or not at all: an edit that would cut
+        // through one is refused before anything changes.
+        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
+            return Err(format!(
+                "this would cut through {name}; move or delete the pivot table first"
+            ));
+        }
+
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
             let sheet = &mut self.sheets[sheet_index];
@@ -2191,6 +2237,9 @@ impl Workbook {
         // 3. Named ranges (workbook-level, so missed by any sheet-local pass).
         self.named_ranges
             .shift_for_structural(sheet_index, at, count, delete, is_row);
+
+        // 3b. Pivot outputs on this sheet, and pivot sources that live on it.
+        self.shift_pivots_for_structural(sheet_index, is_row, at, count, delete);
 
         // 4. Formulas on EVERY sheet: unqualified refs move only on the edited
         //    sheet, qualified refs move from anywhere.

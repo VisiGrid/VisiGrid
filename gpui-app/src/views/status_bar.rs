@@ -580,6 +580,8 @@ fn render_status_message(
         hint.to_string()
     } else if let Some(msg) = &app.status_message {
         msg.clone()
+    } else if let Some(pivot) = app.pivot_status_text(cx) {
+        if mode_text.is_empty() { pivot } else { format!("{mode_text} \u{00b7} {pivot}") }
     } else {
         mode_text.to_string()
     };

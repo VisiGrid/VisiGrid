@@ -180,7 +180,7 @@ fn render_dropdown(
         Menu::File => render_file_menu(highlight, text_primary, text_muted, selection_bg, panel_border, cx),
         Menu::Edit => render_edit_menu(highlight, text_primary, text_muted, selection_bg, panel_border, cx),
         Menu::View => render_view_menu(highlight, text_primary, text_muted, selection_bg, panel_border, cx),
-        Menu::Insert => render_insert_menu(text_disabled, panel_border),
+        Menu::Insert => render_insert_menu(highlight, text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
         Menu::Format => render_format_menu(highlight, text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
         Menu::Data => render_data_menu(highlight, text_primary, text_muted, text_disabled, selection_bg, panel_border, cx),
         Menu::Help => render_help_menu(highlight, text_primary, selection_bg, panel_border, cx),
@@ -275,12 +275,17 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Approve Model", None, 14, h(14), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.approve_model(None, cx); }))
 }
 
-fn render_insert_menu(text_disabled: Hsla, border: Hsla) -> Div {
+// Item indices here must follow menu_model's order of selectable entries:
+// keyboard navigation executes menu_model's action at the highlighted index.
+fn render_insert_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hsla, text_disabled: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
+    let h = |i: usize| highlight == Some(i);
     div()
         .flex()
         .flex_col()
         .child(menu_item_disabled("Rows", text_disabled))
         .child(menu_item_disabled("Columns", text_disabled))
+        .child(menu_separator(border))
+        .child(menu_item("PivotTable...", None, 0, h(0), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.insert_pivot_table(cx); }))
         .child(menu_separator(border))
         .child(menu_item_disabled("Function...", text_disabled))
 }
@@ -339,8 +344,13 @@ fn render_data_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item_disabled("Sort...", text_disabled))
         .child(menu_item_disabled("Filter", text_disabled))
         .child(menu_separator(border))
-        .child(menu_item("AI Formula...", Some("Ctrl+Shift+A"), 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_ask_ai(cx); }))
-        .child(menu_item("Analyze with AI", Some("Ctrl+Shift+E"), 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_analyze(cx); }))
+        .child(menu_item("PivotTable Fields", None, 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.edit_pivot_fields(cx); }))
+        .child(menu_item("Refresh PivotTable", Some("Alt+F5"), 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.refresh_pivot(cx); }))
+        .child(menu_item("Refresh All PivotTables", Some("Ctrl+Alt+F5"), 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.refresh_all_pivots(cx); }))
+        .child(menu_item("Delete PivotTable", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.delete_pivot(cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("AI Formula...", Some("Ctrl+Shift+A"), 11, h(11), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_ask_ai(cx); }))
+        .child(menu_item("Analyze with AI", Some("Ctrl+Shift+E"), 12, h(12), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_analyze(cx); }))
 }
 
 fn render_help_menu(highlight: Option<usize>, text_primary: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {

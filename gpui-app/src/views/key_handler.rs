@@ -100,6 +100,9 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // The pivot field list takes its keys in Spreadsheet::intercept_pivot_keys,
+    // which runs before key bindings; a key-down listener here would run after.
+
     // Let AI dialogs handle their own keys
     if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
         return;
@@ -134,6 +137,10 @@ pub(crate) fn handle_key_down(
                 let choice = this.close_confirm_focused;
                 this.resolve_close_confirm(choice, window, cx);
             }
+            // Letter shortcuts shown on the buttons. N is Windows' "Do&n't
+            // Save" mnemonic, kept as an alias for muscle memory.
+            "s" if !event.keystroke.modifiers.modified() => this.resolve_close_confirm(2, window, cx),
+            "d" | "n" if !event.keystroke.modifiers.modified() => this.resolve_close_confirm(1, window, cx),
             _ => {}
         }
         return;
