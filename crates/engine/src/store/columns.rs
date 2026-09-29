@@ -474,7 +474,20 @@ impl FormatTable {
     }
 }
 
-/// A cell's stored pieces, moved around by structural edits without
+/// Add a cell after every cell already in `chunks` (rows must arrive in
+/// ascending order), opening a new chunk when the row crosses into one.
+fn append(chunks: &mut Vec<(u32, Chunk)>, row: usize, slot: Slot, format: FormatId) {
+    let (idx, off) = split(row);
+    if chunks.last().map(|c| c.0) != Some(idx) {
+        chunks.push((idx, Chunk::new(format)));
+    }
+    let chunk = &mut chunks.last_mut().expect("chunk just ensured").1;
+    chunk.count += 1;
+    chunk.cells.set(off, slot, chunk.count as usize);
+    chunk.formats.set(off, format, chunk.count == 1);
+}
+
+/// A cell's stored pieces, lifted out and put back by edits without
 /// touching the pools.
 struct Raw {
     slot: Slot,
@@ -553,7 +566,41 @@ impl ColumnStore {
         out
     }
 
-    /// Store an owned cell, moving its text and formula into the pools.
+    /// Store a cell, replacing whatever is there. The loaders use this: a
+    /// document naming the same coordinates twice keeps the later cell, as
+    /// the hash store did, instead of corrupting the counts.
+    fn insert_replacing(&mut self, row: usize, col: usize, cell: Cell) {
+        if let Some(old) = self.take(row, col) {
+            self.release_slot(old.slot);
+        }
+        self.insert(row, col, cell);
+    }
+
+    /// Give a cell a new format without touching its value, creating it from
+    /// `init` if there is none. A format edit used to materialize the cell
+    /// and write it back, copying and re-interning its text for nothing.
+    pub fn set_format(&mut self, row: usize, col: usize, init: impl FnOnce() -> Cell, format: Arc<CellFormat>) {
+        let (idx, off) = split(row);
+        let present = self
+            .columns
+            .get(col)
+            .and_then(|c| c.chunk(idx))
+            .is_some_and(|chunk| chunk.cells.get(off).is_some());
+        if !present {
+            let mut cell = init();
+            cell.format = format;
+            self.insert(row, col, cell);
+            return;
+        }
+        let id = self.formats.intern(format);
+        let column = &mut self.columns[col];
+        let i = column.chunks.binary_search_by_key(&idx, |c| c.0).expect("present chunk");
+        let chunk = &mut column.chunks[i].1;
+        chunk.formats.set(off, id, chunk.count == 1);
+    }
+
+    /// Store an owned cell at an empty position, moving its text and formula
+    /// into the pools.
     fn insert(&mut self, row: usize, col: usize, cell: Cell) {
         let (value, format, extras) = cell.into_parts();
         let slot = match value {
@@ -612,17 +659,6 @@ impl ColumnStore {
         Some(Raw { slot, format, extras })
     }
 
-    /// Give a removed cell's pool references back.
-    fn release(&mut self, raw: &Raw) {
-        match raw.slot {
-            Slot::Text(id) => self.strings.release(id),
-            Slot::Formula(id) => {
-                self.formulas.remove(id);
-            }
-            Slot::Empty | Slot::Number(_) => {}
-        }
-    }
-
     pub fn remove(&mut self, row: usize, col: usize) -> Option<Cell> {
         let raw = self.take(row, col)?;
         let value = match raw.slot {
@@ -645,56 +681,131 @@ impl ColumnStore {
     /// Move cells at or below `at` down by `count` rows, dropping any that
     /// would land at or past `limit`.
     pub fn insert_rows(&mut self, at: usize, count: usize, limit: usize) {
-        self.shift(|(r, c)| if r >= at { (r + count < limit).then_some((r + count, c)) } else { Some((r, c)) });
+        self.remap_rows(|r| if r >= at { (r + count < limit).then_some(r + count) } else { Some(r) });
     }
 
     /// Delete `count` rows from `start`; cells below move up.
     pub fn delete_rows(&mut self, start: usize, count: usize) {
         let end = start + count;
-        self.shift(|(r, c)| {
-            if (start..end).contains(&r) {
+        self.remap_rows(|r| {
+            if r < start {
+                Some(r)
+            } else if r < end {
                 None
-            } else if r >= end {
-                Some((r - count, c))
             } else {
-                Some((r, c))
+                Some(r - count)
             }
         });
     }
 
-    /// Move cells at or right of `at` right by `count` columns, dropping any
-    /// that would land at or past `limit`.
+    /// Move columns at or right of `at` right by `count`, dropping any that
+    /// would land at or past `limit`. Columns move as whole containers; no
+    /// cell is touched unless its column is dropped.
     pub fn insert_cols(&mut self, at: usize, count: usize, limit: usize) {
-        self.shift(|(r, c)| if c >= at { (c + count < limit).then_some((r, c + count)) } else { Some((r, c)) });
+        if at >= self.columns.len() {
+            return;
+        }
+        let cut = at.max(limit.saturating_sub(count));
+        if cut < self.columns.len() {
+            let dropped = self.columns.split_off(cut);
+            for (i, column) in dropped.into_iter().enumerate() {
+                self.drop_column(cut + i, column);
+            }
+        }
+        self.rekey_extras_cols(|c| if c >= at { c + count } else { c });
+        let at = at.min(self.columns.len());
+        self.columns.splice(at..at, std::iter::repeat_with(Column::default).take(count));
     }
 
-    /// Delete `count` columns from `start`; cells to the right move left.
+    /// Delete `count` columns from `start`; columns to the right move left
+    /// as whole containers.
     pub fn delete_cols(&mut self, start: usize, count: usize) {
-        let end = start + count;
-        self.shift(|(r, c)| {
-            if (start..end).contains(&c) {
-                None
-            } else if c >= end {
-                Some((r, c - count))
-            } else {
-                Some((r, c))
-            }
-        });
+        if start >= self.columns.len() {
+            return;
+        }
+        let end = (start + count).min(self.columns.len());
+        let removed: Vec<Column> = self.columns.drain(start..end).collect();
+        for (i, column) in removed.into_iter().enumerate() {
+            self.drop_column(start + i, column);
+        }
+        self.rekey_extras_cols(|c| if c >= start + count { c - count } else { c });
     }
 
-    /// Move every cell through `to`, dropping those it maps to `None`. Cells
-    /// that stay put are untouched; the rest are lifted out first and then
-    /// placed, so a move never lands on a cell that has not moved yet.
-    fn shift(&mut self, to: impl Fn((usize, usize)) -> Option<(usize, usize)>) {
-        let moving: Vec<(usize, usize)> =
-            self.iter().map(|(pos, _)| pos).filter(|&pos| to(pos) != Some(pos)).collect();
-        let lifted: Vec<((usize, usize), Raw)> =
-            moving.into_iter().filter_map(|pos| self.take(pos.0, pos.1).map(|raw| (pos, raw))).collect();
-        for (pos, raw) in lifted {
-            match to(pos) {
-                Some((r, c)) => self.put(r, c, raw),
-                None => self.release(&raw),
+    /// Re-row every column through `to`, which must keep the order of the
+    /// rows it keeps (true of row inserts and deletes). Each column is rebuilt
+    /// alone, streaming its cells into new chunks while the old chunks are
+    /// dropped, so the extra memory is bounded by one column, not the sheet.
+    fn remap_rows(&mut self, to: impl Fn(usize) -> Option<usize>) {
+        for col in 0..self.columns.len() {
+            let old = std::mem::take(&mut self.columns[col].chunks);
+            if old.is_empty() {
+                continue;
             }
+            // This column's metadata, keyed by old row, to follow its cells.
+            let mut extras: HashMap<usize, CellExtras> = HashMap::new();
+            for (idx, chunk) in old.iter().filter(|(_, c)| c.extras > 0) {
+                for (off, _) in chunk.cells.slots() {
+                    let row = join(*idx, off);
+                    if let Some(e) = self.extras.remove(&(row as u32, col as u32)) {
+                        extras.insert(row, e);
+                    }
+                }
+            }
+            let mut built: Vec<(u32, Chunk)> = Vec::new();
+            for (idx, chunk) in old {
+                for (off, slot) in chunk.cells.slots() {
+                    let row = join(idx, off);
+                    let extra = extras.remove(&row);
+                    match to(row) {
+                        Some(new_row) => {
+                            append(&mut built, new_row, slot, chunk.formats.get(off));
+                            if let Some(e) = extra {
+                                built.last_mut().expect("just appended").1.extras += 1;
+                                self.extras.insert((new_row as u32, col as u32), e);
+                            }
+                        }
+                        None => {
+                            self.release_slot(slot);
+                            self.len -= 1;
+                        }
+                    }
+                }
+            }
+            self.columns[col].chunks = built;
+        }
+    }
+
+    /// Give back everything a removed column held.
+    fn drop_column(&mut self, col: usize, column: Column) {
+        for (idx, chunk) in column.chunks {
+            for (off, slot) in chunk.cells.slots() {
+                self.release_slot(slot);
+                self.len -= 1;
+                if chunk.extras > 0 {
+                    self.extras.remove(&(join(idx, off) as u32, col as u32));
+                }
+            }
+        }
+    }
+
+    /// Move metadata keys to follow their columns.
+    fn rekey_extras_cols(&mut self, to: impl Fn(usize) -> usize) {
+        if self.extras.is_empty() {
+            return;
+        }
+        self.extras = std::mem::take(&mut self.extras)
+            .into_iter()
+            .map(|((r, c), e)| ((r, to(c as usize) as u32), e))
+            .collect();
+    }
+
+    fn release_slot(&mut self, slot: Slot) {
+        match slot {
+            Slot::Text(id) => self.strings.release(id),
+            Slot::Formula(id) => {
+                self.formulas.remove(id);
+            }
+            Slot::Empty | Slot::Number(_) => {}
         }
     }
 }
@@ -759,14 +870,14 @@ impl<'de> serde::Deserialize<'de> for ColumnStore {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ColumnStore, A::Error> {
                 let mut store = ColumnStore::default();
                 while let Some(((row, col), cell)) = map.next_entry::<(u32, u32), Cell>()? {
-                    store.insert(row as usize, col as usize, cell);
+                    store.insert_replacing(row as usize, col as usize, cell);
                 }
                 Ok(store)
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<ColumnStore, A::Error> {
                 let mut store = ColumnStore::default();
                 while let Some(((row, col), cell)) = seq.next_element::<((u32, u32), Cell)>()? {
-                    store.insert(row as usize, col as usize, cell);
+                    store.insert_replacing(row as usize, col as usize, cell);
                 }
                 Ok(store)
             }

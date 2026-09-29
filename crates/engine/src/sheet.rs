@@ -1159,6 +1159,22 @@ impl Sheet {
             .cloned().unwrap_or_default()
     }
 
+    /// Give a cell a new format without rebuilding its value, creating it
+    /// (with any inherited row/column format) if it does not exist.
+    fn set_cell_format(&mut self, row: usize, col: usize, format: Arc<CellFormat>) {
+        let row_formats = &self.row_formats;
+        let col_formats = &self.col_formats;
+        self.cells.set_format(
+            row,
+            col,
+            || match row_formats.get(&row).or_else(|| col_formats.get(&col)) {
+                Some(inherited) => Cell::with_format(Arc::new(inherited.clone())),
+                None => Cell::default(),
+            },
+            format,
+        );
+    }
+
     fn with_cell<R>(&mut self, row: usize, col: usize, f: impl FnOnce(&mut Cell) -> R) -> R {
         let row_formats = &self.row_formats;
         let col_formats = &self.col_formats;
@@ -1196,13 +1212,16 @@ impl Sheet {
     /// Change one cell's format: copy it out, edit, re-intern. Editing in
     /// place would fork the shared allocation and lose the sharing.
     fn edit_format(&mut self, row: usize, col: usize, edit: impl FnOnce(&mut CellFormat)) {
-        let mut fmt = self.with_cell(row, col, |cell| (*cell.format).clone());
+        let mut fmt = match self.cells.get(row, col) {
+            Some(cell) => cell.format().clone(),
+            None => self.inherited_format(row, col),
+        };
         edit(&mut fmt);
         if !self.has_any_borders && fmt.has_any_border() {
             self.has_any_borders = true;
         }
         let shared = self.intern_format(fmt);
-        self.with_cell(row, col, |cell| cell.format = shared);
+        self.set_cell_format(row, col, shared);
     }
 
     /// Cells in `count` rows from `start_row` that carry a value or a
@@ -1282,7 +1301,7 @@ impl Sheet {
             self.has_any_borders = true;
         }
         let shared = self.intern_format(format);
-        self.with_cell(row, col, |cell| cell.format = shared);
+        self.set_cell_format(row, col, shared);
     }
 
     /// Set the style_id on a cell (imported style provenance).
@@ -1297,7 +1316,7 @@ impl Sheet {
             self.has_any_borders = true;
         }
         let shared = self.intern_format(format);
-        self.with_cell(row, col, |cell| cell.format = shared);
+        self.set_cell_format(row, col, shared);
     }
 
     pub fn toggle_bold(&mut self, row: usize, col: usize) {

@@ -31,6 +31,7 @@ mod differential {
         fn cells(&self) -> Vec<((usize, usize), CellRef<'_>)>;
         fn get(&self, row: usize, col: usize) -> Option<CellRef<'_>>;
         fn upsert_with(&mut self, row: usize, col: usize, f: &dyn Fn(&mut Cell));
+        fn set_format_to(&mut self, row: usize, col: usize, format: Arc<CellFormat>);
         fn update_with(&mut self, row: usize, col: usize, f: &dyn Fn(&mut Cell)) -> bool;
         fn remove(&mut self, row: usize, col: usize) -> Option<Cell>;
         fn insert_rows(&mut self, at: usize, count: usize, limit: usize);
@@ -47,6 +48,9 @@ mod differential {
                 fn get(&self, row: usize, col: usize) -> Option<CellRef<'_>> { <$t>::get(self, row, col) }
                 fn upsert_with(&mut self, row: usize, col: usize, f: &dyn Fn(&mut Cell)) {
                     self.upsert(row, col, Cell::default, |c| f(c))
+                }
+                fn set_format_to(&mut self, row: usize, col: usize, format: Arc<CellFormat>) {
+                    self.set_format(row, col, Cell::default, format)
                 }
                 fn update_with(&mut self, row: usize, col: usize, f: &dyn Fn(&mut Cell)) -> bool {
                     self.update(row, col, |c| f(c)).is_some()
@@ -151,9 +155,15 @@ mod differential {
             }
             4 => {
                 let fmt = Arc::new(format(rng));
-                let f = move |cell: &mut Cell| cell.format = Arc::clone(&fmt);
-                a.upsert_with(r, c, &f);
-                b.upsert_with(r, c, &f);
+                if rng.below(2) == 0 {
+                    let f = move |cell: &mut Cell| cell.format = Arc::clone(&fmt);
+                    a.upsert_with(r, c, &f);
+                    b.upsert_with(r, c, &f);
+                } else {
+                    // The format-only path: value untouched, cell created if absent.
+                    a.set_format_to(r, c, Arc::clone(&fmt));
+                    b.set_format_to(r, c, fmt);
+                }
             }
             5 => {
                 let which = rng.below(5);
@@ -261,5 +271,46 @@ mod differential {
         for seed in 1..=200u64 {
             run(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 2_000);
         }
+    }
+
+    // A document naming the same coordinates twice keeps the later cell,
+    // as the hash store did, and the counts stay true. Both readers.
+    fn cell(value: &str) -> Cell {
+        let mut c = Cell::default();
+        c.set(value);
+        c
+    }
+
+    fn check_duplicate_load(store: ColumnStore) {
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.iter().count(), 1);
+        assert_eq!(store.get(0, 0).map(|c| c.raw_display()), Some("second".to_string()));
+        let mut store = store;
+        assert!(store.remove(0, 0).is_some());
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.iter().count(), 0);
+    }
+
+    #[test]
+    fn duplicate_coordinates_through_the_sequence_reader() {
+        let json = serde_json::json!([
+            [[0, 0], serde_json::to_value(cell("first")).unwrap()],
+            [[0, 0], serde_json::to_value(cell("second")).unwrap()],
+        ]);
+        let store: ColumnStore = serde_json::from_value(json).unwrap();
+        check_duplicate_load(store);
+    }
+
+    #[test]
+    fn duplicate_coordinates_through_the_map_reader() {
+        use serde::de::value::{MapDeserializer, SeqDeserializer};
+        use serde::Deserialize;
+        type Key = SeqDeserializer<std::vec::IntoIter<u32>, serde_json::Error>;
+        let entries: Vec<(Key, serde_json::Value)> = vec![
+            (SeqDeserializer::new(vec![0u32, 0].into_iter()), serde_json::to_value(cell("first")).unwrap()),
+            (SeqDeserializer::new(vec![0u32, 0].into_iter()), serde_json::to_value(cell("second")).unwrap()),
+        ];
+        let store = ColumnStore::deserialize(MapDeserializer::<_, serde_json::Error>::new(entries.into_iter())).unwrap();
+        check_duplicate_load(store);
     }
 }

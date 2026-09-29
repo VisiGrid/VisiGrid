@@ -70,6 +70,12 @@ impl HashStore {
         f(self.map.entry(key(row, col)).or_insert_with(init))
     }
 
+    /// Give a cell a new format without touching its value, creating it from
+    /// `init` if there is none.
+    pub fn set_format(&mut self, row: usize, col: usize, init: impl FnOnce() -> Cell, format: std::sync::Arc<crate::cell::CellFormat>) {
+        self.map.entry(key(row, col)).or_insert_with(init).format = format;
+    }
+
     pub fn remove(&mut self, row: usize, col: usize) -> Option<Cell> {
         self.map.remove(&key(row, col))
     }
