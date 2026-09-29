@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.39.0
+
+### Pivot tables
+
+- **Insert PivotTable** builds a summary table from a range: group by row fields and one column field, and total each value field with Sum, Count, Distinct Count, Average, Min or Max, with grand totals. The field list is a drawer you can drive from the keyboard. `Alt+F5` refreshes the pivot under the cursor and `Ctrl+Alt+F5` refreshes every pivot. Refresh, create and delete are each one undo step.
+- **Pivot output belongs to the pivot.** Typing, pasting, filling or clearing inside it is refused as a whole rather than half-applied. A pivot is marked stale when its source changes, and notices rows added below the source. Each value field's number format is kept across refreshes.
+- **Pivots are saved** in `.sheet` files and in cloud sheets, and survive saves from app.visigrid.app.
+
+### Formulas
+
+- **ROUND, ROUNDUP, ROUNDDOWN and TRUNC no longer gain or lose a cent.** They were off on ordinary values because of binary floating point: `ROUND(1.005,2)` gave 1, `ROUNDDOWN(4.35,2)` gave 4.34, `ROUNDUP(1.1,2)` gave 1.11 and `TRUNC(0.29,2)` gave 0.28. They now give 1.01, 4.35, 1.1 and 0.29, as Excel does.
+- **MOD follows the sign of the divisor**, as in Excel: `MOD(-10,3)` is 2, not -1.
+- **CEILING and FLOOR take a significance:** `CEILING(12,5)` is 15 and `FLOOR(12,5)` is 10. Both used to accept only one argument.
+- **RAND gives independent values in the browser.** Twenty `=RAND()` cells recalculated together all showed the same number. `RANDBETWEEN(1.9,1.9)` is now `#NUM!`, as in Excel.
+- **ISBLANK was inverted and is fixed:** it is TRUE for an empty cell and FALSE for `""`.
+- **Results that aren't finite numbers show an error.** `POWER(-8,1/3)`, `EXP(1000)` and `10^400` show `#NUM!` instead of NaN or inf, and `POWER(0,-1)` shows `#DIV/0!`.
+- **Formulas accept scientific notation:** `=1E3` is 1000 instead of an error.
+- **The text `NaN`, `inf` or `infinity` in a cell is text, not a number.** Typing `NaN` into a range that MEDIAN read crashed the app. ([#34](https://github.com/VisiGrid/VisiGrid/issues/34))
+- **`vgrid list-functions` lists all 134 functions.** Eleven working functions were missing from the list, including XMATCH, SEARCH and WORKDAY.
+- **A range written backwards, such as `=SUM(A5:A1)`, updates when its cells change.** It used to keep its first result.
+
+### Performance
+
+- **Running totals are fast on large sheets.** A formula like `=SUM($A$1:A1)` filled down used to make the recalculation graph track every cell of every range, which grows with the square of the row count. 8,000 rows took 2.5 GB and 32 seconds to set up, and 100,000 rows couldn't be opened at all. Ranges are now indexed instead: 8,000 rows take 6 MB and 19 ms, and 100,000 rows take 77 MB and a third of a second. A running total over a column of *formulas* is still slow; that is tracked in [#29](https://github.com/VisiGrid/VisiGrid/issues/29).
+- **Whole-column formulas set up instantly and recalculate faster.** 2,000 `=SUM(A:A)` formulas over 100,000 values took 49 seconds to set up and now take none. Recalculating them dropped from 47 seconds to 4. SUM, AVERAGE, COUNT and similar functions now read only the cells that hold data, so a mostly empty range costs almost nothing: a sparse AVERAGE went from 4.8 seconds to 0.2. ([#29](https://github.com/VisiGrid/VisiGrid/issues/29))
+- **Formula results are stored with their formulas** instead of in a separate table, which saves a little memory on formula-heavy sheets. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+- **SUM of very large integers agrees with `+`.** Values at or above 2^63 used to be cut short when summed over a range.
+
 ## 0.38.0
 
 ### Performance
