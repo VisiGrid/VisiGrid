@@ -181,4 +181,27 @@ fn main() {
         calc_heap as f64 / 200_002.0
     );
     println!("check        {} / {}", wb.sheets()[0].get_display(1, 3), sum as u64 % 1000);
+
+    // Snapshots (#18 phase 3): the desktop keeps a clone of the workbook for
+    // rewind preview, and preview clones that again. Measure a clone, then
+    // what the first edits cost while the snapshot is alive.
+    let snap = wb.clone();
+    timed_peak("clone calc", "200k-formula workbook", || drop(wb.clone()));
+    let before = LIVE.load(Ordering::Relaxed);
+    wb.set_cell_value_tracked(0, 5, 0, "7");
+    println!("  edit       +{:.1} MiB  (one formula input, snapshot alive)", mib(LIVE.load(Ordering::Relaxed).saturating_sub(before)));
+    drop(snap);
+    drop(wb);
+
+    let mut data = Workbook::from_sheets(vec![build()], 0);
+    let mut kept = None;
+    timed_peak("clone 1Mx5", "5M cells", || kept = Some(data.clone()));
+    let before = LIVE.load(Ordering::Relaxed);
+    data.set_cell_value_tracked(0, 10, 1, "renamed");
+    data.set_cell_value_tracked(0, 500_000, 2, "42");
+    println!("  2 edits    +{:.1} MiB  (text + number, snapshot alive)", mib(LIVE.load(Ordering::Relaxed).saturating_sub(before)));
+    timed_peak("  insert row", "at row 500k, snapshot alive", || {
+        let _ = data.structural_edit(0, visigrid_engine::structural::Axis::Row, 500_000, 1, false);
+    });
+    drop(kept);
 }

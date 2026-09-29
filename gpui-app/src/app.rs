@@ -378,7 +378,7 @@ pub struct Spreadsheet {
     pub workbook: Entity<Workbook>,
     pub history: History,
     /// Base workbook state for replay (captured on load/new, never mutated).
-    /// None above REWIND_SNAPSHOT_MAX_CELLS: see `capture_base_workbook`.
+    /// Shares storage with the live workbook: see `capture_base_workbook`.
     pub base_workbook: Option<Workbook>,
     /// Soft-rewind preview state (Phase 8A)
     pub rewind_preview: RewindPreviewState,
@@ -1020,23 +1020,14 @@ impl Default for NamedRangeUsageCache {
     }
 }
 
-/// Above this many stored cells, the desktop keeps no load-time copy of the
-/// workbook, so rewind preview is unavailable. The copy duplicates every cell:
-/// ~470 MB extra for a 1M-row x 5-column file (#18).
-pub(crate) const REWIND_SNAPSHOT_MAX_CELLS: usize = 1_000_000;
-
 impl Spreadsheet {
-    /// Record the current workbook as the state rewind preview replays from,
-    /// unless it is too large to keep a second copy of.
+    /// Record the current workbook as the state rewind preview replays from.
+    /// A clone shares its cells, pools and dependency graph with the live
+    /// workbook until one of them is edited (#18 phase 3), so it costs about
+    /// nothing at any size and afterwards only the chunks edits touch.
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
-        // Drop the old snapshot first so the two never coexist.
-        self.base_workbook = None;
-        let snapshot = {
-            let wb = self.wb(cx);
-            let cells: usize = wb.sheets().iter().map(|s| s.populated_cell_count()).sum();
-            (cells <= REWIND_SNAPSHOT_MAX_CELLS).then(|| wb.clone())
-        };
-        self.base_workbook = snapshot;
+        let snapshot = self.wb(cx).clone();
+        self.base_workbook = Some(snapshot);
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {

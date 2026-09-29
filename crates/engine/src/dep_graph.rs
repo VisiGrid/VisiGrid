@@ -301,6 +301,13 @@ impl DepGraph {
         self.preds.contains_key(&cell)
     }
 
+    /// Whether `clear_cell` would change anything: the cell has edges or
+    /// ranges of its own. Lets a value edit leave a graph shared with a
+    /// workbook clone uncopied.
+    pub fn has_own_deps(&self, cell: CellId) -> bool {
+        self.preds.contains_key(&cell) || self.range_refs.contains_key(&cell)
+    }
+
     /// Returns the number of formula cells (cells with precedents) in the graph.
     pub fn formula_cell_count(&self) -> usize {
         self.preds.len()

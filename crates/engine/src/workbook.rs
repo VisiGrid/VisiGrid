@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 #[path = "workbook_pivot.rs"]
@@ -74,8 +75,10 @@ pub struct Workbook {
 
     /// Dependency graph for formula cells.
     /// Rebuilt on load, updated incrementally on cell changes.
+    /// Shared with clones until a formula edit changes it: rewind preview
+    /// keeps a clone of the workbook, and most edits change only values.
     #[serde(skip)]
-    dep_graph: DepGraph,
+    dep_graph: Arc<DepGraph>,
     /// Settlement failures from incremental recalcs, which have no report to
     /// carry them. Taken by whoever surfaces recalc problems (the status
     /// line, a session log); never persisted.
@@ -153,7 +156,7 @@ impl Workbook {
             next_sheet_id: 2, // Next ID will be 2
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
-            dep_graph: DepGraph::new(),
+            dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -477,7 +480,7 @@ impl Workbook {
             next_sheet_id: max_id + 1,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
-            dep_graph: DepGraph::new(),
+            dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -502,7 +505,7 @@ impl Workbook {
             next_sheet_id,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
-            dep_graph: DepGraph::new(),
+            dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -1013,7 +1016,7 @@ impl Workbook {
     /// Call this after loading a workbook to populate the graph.
     /// Iterates all formula cells and extracts their references.
     pub fn rebuild_dep_graph(&mut self) {
-        self.dep_graph = DepGraph::new();
+        self.dep_graph = Arc::default();
 
         // Iterate all sheets and cells
         for sheet in &self.sheets {
@@ -1029,16 +1032,16 @@ impl Workbook {
 
                     let formula_cell = CellId::new(sheet_id, row, col);
                     if !refs.is_empty() {
-                        self.dep_graph.replace_edges(formula_cell, refs);
+                        Arc::make_mut(&mut self.dep_graph).replace_edges(formula_cell, refs);
                     } else {
                         // Leaf formula (no cell refs, e.g. =1/0, =PI())
                         // Must still be tracked so recompute evaluates it.
-                        self.dep_graph.register_leaf_formula(formula_cell);
+                        Arc::make_mut(&mut self.dep_graph).register_leaf_formula(formula_cell);
                     }
                     // Links the formulas already inside these ranges...
-                    self.dep_graph.set_ranges(formula_cell, ranges);
+                    Arc::make_mut(&mut self.dep_graph).set_ranges(formula_cell, ranges);
                     // ...and this formula to ranges registered before it.
-                    self.dep_graph.track_range_cell(formula_cell);
+                    Arc::make_mut(&mut self.dep_graph).track_range_cell(formula_cell);
                 }
             }
         }
@@ -1061,24 +1064,30 @@ impl Workbook {
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
             let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
 
-            self.dep_graph.replace_edges(cell_id, refs);
-            self.dep_graph.set_ranges(cell_id, ranges);
+            Arc::make_mut(&mut self.dep_graph).replace_edges(cell_id, refs);
+            Arc::make_mut(&mut self.dep_graph).set_ranges(cell_id, ranges);
             // replace_edges skips registering a cell that has no precedents, so a formula
             // with no static cell references (=1+1, =TODAY(), =INDIRECT("A1")) would be left
             // out of the dep graph and never evaluated by recompute. Register it as a leaf
             // formula so it is always recomputed.
-            self.dep_graph.register_leaf_formula(cell_id);
-        } else {
-            // Not a formula, clear any existing edges
-            self.dep_graph.clear_cell(cell_id);
+            Arc::make_mut(&mut self.dep_graph).register_leaf_formula(cell_id);
+        } else if self.dep_graph.has_own_deps(cell_id) {
+            // No longer a formula: clear its edges. A value that never was a
+            // formula leaves the graph alone, so a clone keeps sharing it.
+            Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
         }
-        self.dep_graph.track_range_cell(cell_id);
+        // Only a formula is linked to the ranges it sits in.
+        if self.dep_graph.is_formula_cell(cell_id) {
+            Arc::make_mut(&mut self.dep_graph).track_range_cell(cell_id);
+        }
     }
 
     /// Clear dependencies for a cell (e.g., when the cell is deleted or cleared).
     pub fn clear_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
         let cell_id = CellId::new(sheet_id, row, col);
-        self.dep_graph.clear_cell(cell_id);
+        if self.dep_graph.has_own_deps(cell_id) {
+            Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
+        }
     }
 
     /// Get the precedents (cells this formula depends on) for a cell: its
@@ -1939,7 +1948,7 @@ impl Workbook {
                 break;
             }
             for cell in &touched {
-                self.dep_graph.track_range_cell(*cell);
+                Arc::make_mut(&mut self.dep_graph).track_range_cell(*cell);
                 if affected_set.insert(*cell) {
                     affected.push(*cell);
                 }
