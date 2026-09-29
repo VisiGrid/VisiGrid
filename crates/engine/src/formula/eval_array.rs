@@ -1,7 +1,8 @@
 // Array/spill functions: SEQUENCE, TRANSPOSE, FILTER, UNIQUE, SORT, SPARKLINE
 
 use super::eval::{evaluate, CellLookup, EvalResult, Value, Array2D};
-use super::eval_helpers::{collect_numbers, value_compare};
+use super::eval_helpers::{collect_numbers, read_cell_value, value_compare};
+use crate::sheet::SheetRef;
 use super::parser::{BoundExpr, Expr};
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -62,32 +63,26 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
 
         "TRANSPOSE" => {
-            // TRANSPOSE(array)
-            // Returns the transpose of an array/range
+            // TRANSPOSE(array): rows become columns. Values keep their type —
+            // this used to read every cell as a number, so text became 0.
             if args.len() != 1 {
                 return Some(EvalResult::Error("TRANSPOSE requires exactly one argument".to_string()));
             }
-
-            // Get the input - if it's a range, build an array from it
-            match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                    let in_rows = end_row - start_row + 1;
-                    let in_cols = end_col - start_col + 1;
-
-                    // Build transposed array (swap rows and cols)
+            match range_values(&args[0], lookup) {
+                Some(Ok((in_rows, in_cols, rows))) => {
                     let mut array = Array2D::new(in_cols, in_rows);
-                    for r in 0..in_rows {
-                        for c in 0..in_cols {
-                            let val = lookup.get_value(start_row + r, start_col + c);
-                            array.set(c, r, Value::Number(val));
+                    for (r, row) in rows.into_iter().enumerate() {
+                        for (c, val) in row.into_iter().enumerate() {
+                            // An empty cell transposes to 0, as in Excel.
+                            let val = if matches!(val, Value::Empty) { Value::Number(0.0) } else { val };
+                            array.set(c, r, val);
                         }
                     }
                     EvalResult::Array(array)
                 }
-                _ => {
-                    // Single value - just return it (1x1 transpose is identity)
-                    evaluate(&args[0], lookup)
-                }
+                Some(Err(e)) => EvalResult::Error(e),
+                // Single value - just return it (1x1 transpose is identity)
+                None => evaluate(&args[0], lookup),
             }
         }
 
@@ -99,31 +94,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
 
             // Get the data range dimensions and values
-            let (data_rows, data_cols, data): (usize, usize, Vec<Vec<Value>>) = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                    let r_count = end_row - start_row + 1;
-                    let c_count = end_col - start_col + 1;
-                    let mut row_data = Vec::with_capacity(r_count);
-                    for r in 0..r_count {
-                        let mut row = Vec::with_capacity(c_count);
-                        for c in 0..c_count {
-                            let text = lookup.get_text(start_row + r, start_col + c);
-                            let val = lookup.get_value(start_row + r, start_col + c);
-                            if text.is_empty() {
-                                row.push(Value::Empty);
-                            } else if text.starts_with('#') {
-                                row.push(Value::Error(text));
-                            } else if text.parse::<f64>().is_ok() {
-                                row.push(Value::Number(val));
-                            } else {
-                                row.push(Value::Text(text));
-                            }
-                        }
-                        row_data.push(row);
-                    }
-                    (r_count, c_count, row_data)
-                }
-                _ => {
+            let (data_rows, data_cols, data) = match range_values(&args[0], lookup) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return Some(EvalResult::Error(e)),
+                None => {
                     return Some(EvalResult::Error("#VALUE! FILTER requires a range as first argument".to_string()));
                 }
             };
@@ -142,13 +116,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                         return Some(EvalResult::Error(format!("#VALUE! Include has {} rows but data has {} rows", inc_rows, data_rows)));
                     }
 
-                    let mut criteria = Vec::with_capacity(inc_rows);
-                    for r in 0..inc_rows {
-                        let val = lookup.get_value(start_row + r, *start_col);
-                        // Treat non-zero as TRUE, zero as FALSE
-                        criteria.push(val != 0.0);
-                    }
-                    criteria
+                    // Read the include column typed. It was read as numbers, so a
+                    // column of TRUE/FALSE — which a typed cell stores as text —
+                    // selected nothing at all.
+                    let Some(Ok((_, _, cells))) = range_values(&args[1], lookup) else {
+                        return Some(EvalResult::Error("#REF!".to_string()));
+                    };
+                    cells.into_iter().map(|row| include_flag(&row[0])).collect()
                 }
                 _ => {
                     // Try evaluating as a single value (scalar comparison result)
@@ -258,7 +232,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
 
         "SORT" => {
-            // SORT(array_or_range, [sort_col], [is_asc])
+            // SORT(array, [sort_index], [sort_order])
             if args.is_empty() || args.len() > 3 {
                 return Some(EvalResult::Error("SORT requires 1-3 arguments".to_string()));
             }
@@ -274,65 +248,41 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 1
             };
 
-            // Get ascending flag (default true)
-            let is_asc = if args.len() >= 3 {
-                match evaluate(&args[2], lookup).to_bool() {
-                    Ok(b) => b,
-                    Err(e) => return Some(EvalResult::Error(e)),
+            // Excel's sort_order is 1 (ascending) or -1 (descending). This used to be
+            // read as a boolean, and -1 is truthy, so every SORT(x,1,-1) written for
+            // Excel sorted ascending. TRUE/FALSE are still accepted for sheets that
+            // relied on the old reading.
+            let descending = if args.len() >= 3 {
+                match evaluate(&args[2], lookup) {
+                    EvalResult::Boolean(b) => !b,
+                    EvalResult::Number(n) if n == 1.0 => false,
+                    EvalResult::Number(n) if n == -1.0 => true,
+                    EvalResult::Error(e) => return Some(EvalResult::Error(e)),
+                    _ => return Some(EvalResult::Error("#VALUE! Sort order must be 1 or -1".to_string())),
                 }
             } else {
-                true
+                false
             };
 
-            // Build rows from range
-            let (in_rows, in_cols, mut rows): (usize, usize, Vec<Vec<Value>>) = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                    let r_count = end_row - start_row + 1;
-                    let c_count = end_col - start_col + 1;
-                    let mut row_data = Vec::with_capacity(r_count);
-                    for r in 0..r_count {
-                        let mut row = Vec::with_capacity(c_count);
-                        for c in 0..c_count {
-                            let text = lookup.get_text(start_row + r, start_col + c);
-                            let val = lookup.get_value(start_row + r, start_col + c);
-                            // Determine value type
-                            if text.is_empty() {
-                                row.push(Value::Empty);
-                            } else if text.starts_with('#') {
-                                row.push(Value::Error(text));
-                            } else if text.parse::<f64>().is_ok() {
-                                row.push(Value::Number(val));
-                            } else {
-                                row.push(Value::Text(text));
-                            }
-                        }
-                        row_data.push(row);
-                    }
-                    (r_count, c_count, row_data)
-                }
-                _ => {
-                    // Single value - can't sort meaningfully
-                    return Some(evaluate(&args[0], lookup));
-                }
+            let (in_rows, in_cols, mut rows) = match range_values(&args[0], lookup) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return Some(EvalResult::Error(e)),
+                // Single value - can't sort meaningfully
+                None => return Some(evaluate(&args[0], lookup)),
             };
 
             // Validate sort column
             if sort_col_1idx > in_cols {
                 return Some(EvalResult::Error(format!("#VALUE! Sort column {} exceeds range width {}", sort_col_1idx, in_cols)));
             }
-            let sort_col_0idx = sort_col_1idx - 1;
+            let key = sort_col_1idx - 1;
 
-            // Sort rows by the key column (stable sort)
+            // Stable in both directions: reversing an ascending sort would also
+            // reverse the order of rows with equal keys.
             rows.sort_by(|a, b| {
-                let key_a = &a[sort_col_0idx];
-                let key_b = &b[sort_col_0idx];
-                value_compare(key_a, key_b)
+                let ord = value_compare(&a[key], &b[key]);
+                if descending { ord.reverse() } else { ord }
             });
-
-            // Reverse if descending
-            if !is_asc {
-                rows.reverse();
-            }
 
             // Build result array
             let mut array = Array2D::new(in_rows, in_cols);
@@ -404,4 +354,38 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         _ => return None,
     };
     Some(result)
+}
+
+/// The cells of a range argument, typed and read from the sheet the range names.
+///
+/// None when the argument is not a range. SORT, TRANSPOSE and FILTER each used to
+/// read the current sheet by text and guess the type back, which lost text in
+/// TRANSPOSE and ignored the sheet in a reference like Data!A1:A9.
+fn range_values<L: CellLookup>(
+    arg: &BoundExpr,
+    lookup: &L,
+) -> Option<Result<(usize, usize, Vec<Vec<Value>>), String>> {
+    let Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } = arg else {
+        return None;
+    };
+    if matches!(sheet, SheetRef::RefError { .. }) {
+        return Some(Err("#REF!".to_string()));
+    }
+    let (r0, r1) = (*start_row.min(end_row), *start_row.max(end_row));
+    let (c0, c1) = (*start_col.min(end_col), *start_col.max(end_col));
+    let rows = (r0..=r1)
+        .map(|r| (c0..=c1).map(|c| read_cell_value(lookup, sheet, r, c)).collect())
+        .collect();
+    Some(Ok((r1 - r0 + 1, c1 - c0 + 1, rows)))
+}
+
+/// Whether one cell of FILTER's include column selects its row.
+fn include_flag(v: &Value) -> bool {
+    match v {
+        Value::Boolean(b) => *b,
+        Value::Number(n) => *n != 0.0,
+        // A typed TRUE is stored as text.
+        Value::Text(s) => s.eq_ignore_ascii_case("TRUE"),
+        Value::Empty | Value::Error(_) => false,
+    }
 }
