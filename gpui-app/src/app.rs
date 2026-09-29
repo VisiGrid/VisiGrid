@@ -751,6 +751,8 @@ pub struct Spreadsheet {
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
+    pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
+    pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
     /// Per-cell conditional format override cache, keyed by (cells_rev, cf_rules_rev).
     /// Heavy predicates (COUNTIF over large ranges) are evaluated once per
@@ -1300,6 +1302,8 @@ impl Spreadsheet {
             cf_preview_id: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
+            pivot_panel: None,
+            pivot_errors: std::collections::HashMap::new(),
             cf_edit_backup: None,
             cf_rules_rev: 1,
             cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2485,6 +2489,11 @@ impl Spreadsheet {
             CommandId::NextSheet => self.next_sheet(cx),
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
+            CommandId::InsertPivotTable => self.insert_pivot_table(cx),
+            CommandId::RefreshPivot => self.refresh_pivot(cx),
+            CommandId::RefreshAllPivots => self.refresh_all_pivots(cx),
+            CommandId::EditPivotFields => self.edit_pivot_fields(cx),
+            CommandId::DeletePivot => self.delete_pivot(cx),
 
             // Data (sort/filter)
             CommandId::SortAscending => {

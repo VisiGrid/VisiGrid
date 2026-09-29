@@ -100,6 +100,14 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // Pivot field list: while open (and no cell is being edited) it takes keys.
+    if this.pivot_panel.is_some() && !this.mode.is_editing() && this.mode.is_overlay() == false {
+        if this.pivot_panel_handle_key(event, cx) {
+            cx.stop_propagation();
+            return;
+        }
+    }
+
     // Let AI dialogs handle their own keys
     if matches!(this.mode, Mode::AISettings | Mode::AiDialog) {
         return;

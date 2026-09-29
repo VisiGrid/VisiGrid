@@ -137,3 +137,814 @@ impl Spreadsheet {
         false
     }
 }
+
+// ---------------------------------------------------------------------------
+// Field-list drawer state, and the create / apply / refresh / delete flow.
+// ---------------------------------------------------------------------------
+
+use visigrid_engine::cell::NumberFormat;
+use visigrid_engine::formula::eval::Value;
+use visigrid_engine::pivot::{
+    self, Aggregation, PivotDefinition, PivotError, PivotField, PivotOutput, PivotSnapshot, PivotSource,
+    PivotTable, PivotValueField,
+};
+
+/// Sources with more data rows than this aggregate on a background thread.
+const BACKGROUND_ROWS: u32 = 100_000;
+
+/// What the drawer is building.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PivotPanelMode {
+    /// A new pivot, not yet applied. No output sheet exists until Apply.
+    New,
+    /// Editing an existing pivot.
+    Edit { pivot_id: u64 },
+}
+
+/// One line of the drawer's keyboard list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PivotPanelItem {
+    Field(usize),
+    Row(usize),
+    Column,
+    Value(usize),
+}
+
+/// The field-list drawer. Edits a draft definition; nothing changes in the
+/// workbook until Apply.
+#[derive(Debug, Clone)]
+pub(crate) struct PivotPanel {
+    pub mode: PivotPanelMode,
+    pub source: PivotSource,
+    pub headers: Vec<String>,
+    /// Per source column: first non-empty data cell's number format, and
+    /// whether it holds a number (drives the default aggregation).
+    pub column_formats: Vec<NumberFormat>,
+    pub column_numeric: Vec<bool>,
+    pub draft: PivotDefinition,
+    pub cursor: usize,
+    pub message: Option<String>,
+    /// Last row of data appended below the source, if detected.
+    pub growth: Option<u32>,
+    pub busy: bool,
+}
+
+impl PivotPanel {
+    /// The keyboard list: every source field, then the Rows, Column and
+    /// Values wells.
+    pub fn items(&self) -> Vec<PivotPanelItem> {
+        let mut v: Vec<PivotPanelItem> = (0..self.headers.len()).map(PivotPanelItem::Field).collect();
+        v.extend((0..self.draft.rows.len()).map(PivotPanelItem::Row));
+        if self.draft.column.is_some() {
+            v.push(PivotPanelItem::Column);
+        }
+        v.extend((0..self.draft.values.len()).map(PivotPanelItem::Value));
+        v
+    }
+
+    pub fn current(&self) -> Option<PivotPanelItem> {
+        self.items().get(self.cursor).copied()
+    }
+
+    fn field(&self, offset: usize) -> PivotField {
+        PivotField { offset: offset as u32, header: self.headers[offset].clone() }
+    }
+
+    fn move_cursor_to(&mut self, item: PivotPanelItem) {
+        if let Some(i) = self.items().iter().position(|x| *x == item) {
+            self.cursor = i;
+        }
+    }
+
+    pub fn source_label(&self) -> String {
+        format!(
+            "{}{}:{}{}",
+            Spreadsheet::col_letter(self.source.start_col as usize),
+            self.source.start_row + 1,
+            Spreadsheet::col_letter(self.source.end_col as usize),
+            self.source.end_row + 1
+        )
+    }
+
+    /// Assign the field under the cursor. Returns a message if nothing happened.
+    fn assign(&mut self, target: char) -> Option<String> {
+        let Some(PivotPanelItem::Field(i)) = self.current() else {
+            return Some("Move to a field in the list first.".into());
+        };
+        let f = self.field(i);
+        match target {
+            'r' => {
+                if self.draft.rows.iter().any(|x| x.offset == f.offset)
+                    || self.draft.column.as_ref().is_some_and(|c| c.offset == f.offset)
+                {
+                    return Some(format!("{} is already a row or column field.", f.header));
+                }
+                self.draft.rows.push(f);
+            }
+            'c' => {
+                if self.draft.rows.iter().any(|x| x.offset == f.offset) {
+                    return Some(format!("{} is already a row field.", f.header));
+                }
+                self.draft.column = Some(f);
+            }
+            'v' => {
+                let aggregation = if self.column_numeric.get(i).copied().unwrap_or(false) {
+                    Aggregation::Sum
+                } else {
+                    Aggregation::Count
+                };
+                let number_format =
+                    pivot::default_number_format(aggregation, self.column_formats.get(i).unwrap_or(&NumberFormat::General));
+                self.draft.values.push(PivotValueField { field: f, aggregation, number_format });
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn remove_current(&mut self) {
+        match self.current() {
+            Some(PivotPanelItem::Row(k)) => {
+                self.draft.rows.remove(k);
+            }
+            Some(PivotPanelItem::Column) => self.draft.column = None,
+            Some(PivotPanelItem::Value(k)) => {
+                self.draft.values.remove(k);
+            }
+            _ => return,
+        }
+        self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
+    }
+
+    fn reorder(&mut self, up: bool) {
+        match self.current() {
+            Some(PivotPanelItem::Row(k)) => {
+                let j = if up { k.checked_sub(1) } else { (k + 1 < self.draft.rows.len()).then_some(k + 1) };
+                if let Some(j) = j {
+                    self.draft.rows.swap(k, j);
+                    self.move_cursor_to(PivotPanelItem::Row(j));
+                }
+            }
+            Some(PivotPanelItem::Value(k)) => {
+                let j = if up { k.checked_sub(1) } else { (k + 1 < self.draft.values.len()).then_some(k + 1) };
+                if let Some(j) = j {
+                    self.draft.values.swap(k, j);
+                    self.move_cursor_to(PivotPanelItem::Value(j));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Cycle the aggregation of the value field under the cursor. The number
+    /// format follows: counts become whole numbers, other aggregations take
+    /// the source column's format again.
+    fn cycle_aggregation(&mut self, forward: bool) {
+        let Some(PivotPanelItem::Value(k)) = self.current() else { return };
+        let all = Aggregation::ALL;
+        let cur = all.iter().position(|a| *a == self.draft.values[k].aggregation).unwrap_or(0);
+        let next = if forward { (cur + 1) % all.len() } else { (cur + all.len() - 1) % all.len() };
+        self.set_aggregation(k, all[next]);
+    }
+
+    fn set_aggregation(&mut self, k: usize, agg: Aggregation) {
+        let offset = self.draft.values[k].field.offset as usize;
+        let src = self.column_formats.get(offset).cloned().unwrap_or_default();
+        let v = &mut self.draft.values[k];
+        let was_count = v.aggregation.is_count();
+        v.aggregation = agg;
+        // Re-derive the format only when it was a default (count ↔ value).
+        if was_count != agg.is_count() {
+            v.number_format = pivot::default_number_format(agg, &src);
+        }
+    }
+
+    /// Apply the aggregation under the cursor to every value field.
+    fn apply_aggregation_to_all(&mut self) -> Option<String> {
+        let Some(PivotPanelItem::Value(k)) = self.current() else {
+            return Some("Move to a value field first.".into());
+        };
+        let agg = self.draft.values[k].aggregation;
+        for i in 0..self.draft.values.len() {
+            self.set_aggregation(i, agg);
+        }
+        Some(format!("All value fields now use {}.", agg.label()))
+    }
+}
+
+/// A computation in flight: what to place once the output is ready.
+struct PivotJob {
+    mode: PivotPanelMode,
+    table: PivotTable,
+    source_generation: u64,
+    description: String,
+}
+
+impl Spreadsheet {
+    // ---- opening the drawer -------------------------------------------------
+
+    /// Insert → PivotTable: the selection (if more than one cell) or the
+    /// current region around the cursor becomes the source.
+    pub(crate) fn insert_pivot_table(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) {
+            return;
+        }
+        if self.row_view.is_sorted() || self.row_view.is_filtered() {
+            self.status_message = Some("Clear sorting and filters before creating a pivot table.".into());
+            cx.notify();
+            return;
+        }
+        let ((r0, c0), (r1, c1)) = self.selection_range();
+        let (r0, c0, r1, c1) = if r0 == r1 && c0 == c1 {
+            crate::ai::find_current_region(self.sheet(cx), r0, c0)
+        } else {
+            (r0, c0, r1, c1)
+        };
+        if r1 <= r0 {
+            self.status_message = Some("A pivot needs a header row and at least one data row. Select the table first.".into());
+            cx.notify();
+            return;
+        }
+        if let Some(name) = self.pivot_in_view_rect(r0, c0, r1, c1, cx) {
+            self.status_message = Some(format!("The selection includes {name}'s output. Select the source data instead."));
+            cx.notify();
+            return;
+        }
+        let source = PivotSource {
+            sheet_id: self.sheet(cx).id,
+            start_row: r0 as u32,
+            start_col: c0 as u32,
+            end_row: r1 as u32,
+            end_col: c1 as u32,
+        };
+        match self.build_pivot_panel(PivotPanelMode::New, source, PivotDefinition::default(), cx) {
+            Ok(panel) => {
+                self.pivot_panel = Some(panel);
+                self.cf_panel_visible = false;
+            }
+            Err(msg) => self.status_message = Some(msg),
+        }
+        cx.notify();
+    }
+
+    /// Open the field list for the pivot under the cursor.
+    pub(crate) fn edit_pivot_fields(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.pivot_under_cursor(cx) else {
+            self.status_message = Some("Put the cursor in a pivot table to edit its fields.".into());
+            cx.notify();
+            return;
+        };
+        match self.build_pivot_panel(PivotPanelMode::Edit { pivot_id: table.id }, table.source, table.definition.clone(), cx) {
+            Ok(mut panel) => {
+                panel.growth = self.wb(cx).pivot_source_growth(&table);
+                self.pivot_panel = Some(panel);
+                self.cf_panel_visible = false;
+            }
+            Err(msg) => self.status_message = Some(msg),
+        }
+        cx.notify();
+    }
+
+    fn build_pivot_panel(
+        &self,
+        mode: PivotPanelMode,
+        source: PivotSource,
+        draft: PivotDefinition,
+        cx: &App,
+    ) -> Result<PivotPanel, String> {
+        let wb = self.wb(cx);
+        let sheet = wb.sheet_by_id(source.sheet_id).ok_or("The pivot's source sheet no longer exists.")?;
+        let hr = source.start_row as usize;
+        let headers: Vec<String> = (source.start_col..=source.end_col)
+            .map(|c| sheet.get_display(hr, c as usize).trim().to_string())
+            .collect();
+        pivot::validate_headers(&headers).map_err(|e| e.to_string())?;
+        let mut column_formats = Vec::with_capacity(headers.len());
+        let mut column_numeric = Vec::with_capacity(headers.len());
+        for c in source.start_col..=source.end_col {
+            let first = (source.start_row + 1..=source.end_row.min(source.start_row + 200))
+                .map(|r| (r as usize, c as usize))
+                .find(|&(r, c)| !matches!(sheet.get_computed_value(r, c), Value::Empty));
+            match first {
+                Some((r, c)) => {
+                    column_formats.push(sheet.get_format(r, c).number_format.clone());
+                    column_numeric.push(matches!(sheet.get_computed_value(r, c), Value::Number(_)));
+                }
+                None => {
+                    column_formats.push(NumberFormat::General);
+                    column_numeric.push(false);
+                }
+            }
+        }
+        Ok(PivotPanel {
+            mode,
+            source,
+            headers,
+            column_formats,
+            column_numeric,
+            draft,
+            cursor: 0,
+            message: None,
+            growth: None,
+            busy: false,
+        })
+    }
+
+    /// The pivot whose output contains the cursor, on the active sheet.
+    pub(crate) fn pivot_under_cursor(&self, cx: &App) -> Option<PivotTable> {
+        let (vr, c) = self.view_state.selected;
+        let r = self.row_view.view_to_data(vr);
+        self.sheet(cx).pivot_at(r, c).cloned()
+    }
+
+    pub(crate) fn close_pivot_panel(&mut self, cx: &mut Context<Self>) {
+        self.pivot_panel = None;
+        cx.notify();
+    }
+
+    // ---- keyboard ---------------------------------------------------------------
+
+    /// Keys for the open drawer. Returns true if the key was handled.
+    pub(crate) fn pivot_panel_handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(panel) = self.pivot_panel.as_mut() else { return false };
+        let key = event.keystroke.key.as_str();
+        let m = &event.keystroke.modifiers;
+        if panel.busy && key != "escape" {
+            return true;
+        }
+        let n = panel.items().len();
+        let mut apply = false;
+        match key {
+            "escape" => {
+                self.pivot_panel = None;
+                cx.notify();
+                return true;
+            }
+            "up" if m.alt => panel.reorder(true),
+            "down" if m.alt => panel.reorder(false),
+            "up" => panel.cursor = panel.cursor.saturating_sub(1),
+            "down" => panel.cursor = (panel.cursor + 1).min(n.saturating_sub(1)),
+            "home" => panel.cursor = 0,
+            "end" => panel.cursor = n.saturating_sub(1),
+            "left" => panel.cycle_aggregation(false),
+            "right" => panel.cycle_aggregation(true),
+            "delete" | "backspace" => panel.remove_current(),
+            "enter" => apply = true,
+            "f5" if m.alt => apply = true,
+            _ if !m.control && !m.alt && !m.platform => match key {
+                "r" | "c" | "v" => panel.message = panel.assign(key.chars().next().unwrap()),
+                "=" => panel.message = panel.apply_aggregation_to_all(),
+                "x" => {
+                    if let Some(last) = panel.growth.take() {
+                        let added = last - panel.source.end_row;
+                        panel.source.end_row = last;
+                        panel.message = Some(format!(
+                            "Source extended by {added} row{} to {}. Apply to use it.",
+                            if added == 1 { "" } else { "s" },
+                            panel.source_label()
+                        ));
+                    } else {
+                        panel.message = Some("No new rows were found below the source.".into());
+                    }
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
+        if apply {
+            self.pivot_apply(cx);
+        }
+        cx.notify();
+        true
+    }
+
+    // ---- apply / refresh --------------------------------------------------------
+
+    /// Apply the drawer's draft: create the pivot on a new sheet, or update
+    /// the existing one.
+    pub(crate) fn pivot_apply(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = self.pivot_panel.clone() else { return };
+        let table = match &panel.mode {
+            PivotPanelMode::New => PivotTable {
+                id: self.wb(cx).next_pivot_id(),
+                name: self.wb(cx).next_pivot_name(),
+                source: panel.source,
+                definition: panel.draft.clone(),
+                anchor_row: 0,
+                anchor_col: 0,
+                extent: None,
+                last_refresh: None,
+                stale: false,
+                source_generation: None,
+            },
+            PivotPanelMode::Edit { pivot_id } => match self.wb(cx).find_pivot(*pivot_id) {
+                Some((_, t)) => PivotTable { source: panel.source, definition: panel.draft.clone(), ..t.clone() },
+                None => {
+                    self.set_pivot_panel_message("This pivot table no longer exists.".into());
+                    return;
+                }
+            },
+        };
+        let description = match panel.mode {
+            PivotPanelMode::New => format!("Create {}", table.name),
+            PivotPanelMode::Edit { .. } => format!("Update {}", table.name),
+        };
+        self.run_pivot_job(PivotJob { mode: panel.mode.clone(), table, source_generation: 0, description }, cx);
+    }
+
+    /// Refresh the pivot under the cursor (or the one in the open drawer).
+    pub(crate) fn refresh_pivot(&mut self, cx: &mut Context<Self>) {
+        let table = match self.pivot_panel.as_ref().map(|p| p.mode.clone()) {
+            Some(PivotPanelMode::Edit { pivot_id }) => self.wb(cx).find_pivot(pivot_id).map(|(_, t)| t.clone()),
+            _ => self.pivot_under_cursor(cx),
+        };
+        let Some(table) = table else {
+            self.status_message = Some("Put the cursor in a pivot table to refresh it (Ctrl+Alt+F5 refreshes all).".into());
+            cx.notify();
+            return;
+        };
+        let description = format!("Refresh {}", table.name);
+        let mode = PivotPanelMode::Edit { pivot_id: table.id };
+        self.run_pivot_job(PivotJob { mode, table, source_generation: 0, description }, cx);
+    }
+
+    /// Refresh every pivot in the workbook, one after another.
+    pub(crate) fn refresh_all_pivots(&mut self, cx: &mut Context<Self>) {
+        let tables: Vec<PivotTable> = self.wb(cx).pivots().into_iter().map(|(_, t)| t.clone()).collect();
+        if tables.is_empty() {
+            self.status_message = Some("This workbook has no pivot tables.".into());
+            cx.notify();
+            return;
+        }
+        let count = tables.len();
+        let mut failed = 0;
+        for table in tables {
+            let description = format!("Refresh {}", table.name);
+            let mode = PivotPanelMode::Edit { pivot_id: table.id };
+            if !self.run_pivot_job_sync(PivotJob { mode, table, source_generation: 0, description }, cx) {
+                failed += 1;
+            }
+        }
+        if failed == 0 {
+            self.status_message = Some(format!("Refreshed {count} pivot table{}.", if count == 1 { "" } else { "s" }));
+        } else {
+            self.status_message = Some(format!("Refreshed {} of {count} pivot tables; see Problems for the rest.", count - failed));
+        }
+        cx.notify();
+    }
+
+    /// Delete the pivot under the cursor (or in the open drawer) and clear its
+    /// output. One undo step.
+    pub(crate) fn delete_pivot(&mut self, cx: &mut Context<Self>) {
+        let id = match self.pivot_panel.as_ref().map(|p| p.mode.clone()) {
+            Some(PivotPanelMode::Edit { pivot_id }) => Some(pivot_id),
+            _ => self.pivot_under_cursor(cx).map(|t| t.id),
+        };
+        let Some(id) = id else {
+            self.status_message = Some("Put the cursor in a pivot table to delete it.".into());
+            cx.notify();
+            return;
+        };
+        let commit = match self.wb(cx).prepare_pivot_delete(id) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status_message = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let name = commit.before.table.as_ref().map(|t| t.name.clone()).unwrap_or_default();
+        let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
+        self.record_pivot_commit(commit, None, format!("Delete {name}"));
+        self.pivot_panel = None;
+        self.pivot_errors.remove(&id);
+        self.status_message = Some(format!("Deleted {name}."));
+        self.bump_cells_rev();
+        self.is_modified = true;
+        cx.notify();
+    }
+
+    fn set_pivot_panel_message(&mut self, msg: String) {
+        if let Some(p) = self.pivot_panel.as_mut() {
+            p.message = Some(msg.clone());
+            p.busy = false;
+        }
+        self.status_message = Some(msg);
+    }
+
+    /// Validate, snapshot and compute; large sources aggregate on a background
+    /// thread and are placed when done.
+    fn run_pivot_job(&mut self, mut job: PivotJob, cx: &mut Context<Self>) {
+        let (snapshot, generation) = match self.pivot_prepare_snapshot(&job, cx) {
+            Ok(s) => s,
+            Err(msg) => {
+                self.pivot_job_failed(&job, msg, cx);
+                return;
+            }
+        };
+        job.source_generation = generation;
+        if job.table.source.data_rows() <= BACKGROUND_ROWS {
+            let result = pivot::aggregate(&job.table.definition, &snapshot);
+            self.pivot_finish(job, result, cx);
+            return;
+        }
+        if let Some(p) = self.pivot_panel.as_mut() {
+            p.busy = true;
+            p.message = Some(format!("Computing over {} rows…", job.table.source.data_rows()));
+        }
+        self.status_message = Some(format!("Computing {}…", job.table.name));
+        cx.notify();
+        let def = job.table.definition.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { pivot::aggregate(&def, &snapshot) }).await;
+            let _ = this.update(cx, |this, cx| this.pivot_finish(job, result, cx));
+        })
+        .detach();
+    }
+
+    /// The synchronous path, for Refresh All. Returns false on failure.
+    fn run_pivot_job_sync(&mut self, mut job: PivotJob, cx: &mut Context<Self>) -> bool {
+        match self.pivot_prepare_snapshot(&job, cx) {
+            Ok((snapshot, generation)) => {
+                job.source_generation = generation;
+                let result = pivot::aggregate(&job.table.definition, &snapshot);
+                self.pivot_finish(job, result, cx)
+            }
+            Err(msg) => {
+                self.pivot_job_failed(&job, msg, cx);
+                false
+            }
+        }
+    }
+
+    fn pivot_prepare_snapshot(&self, job: &PivotJob, cx: &App) -> Result<(PivotSnapshot, u64), String> {
+        if job.table.definition.is_empty() {
+            return Err(PivotError::NoFields.to_string());
+        }
+        self.wb(cx).pivot_snapshot(&job.table).map_err(|e| e.to_string())
+    }
+
+    fn pivot_job_failed(&mut self, job: &PivotJob, msg: String, cx: &mut Context<Self>) {
+        if job.mode != PivotPanelMode::New {
+            self.pivot_errors.insert(job.table.id, msg.clone());
+        }
+        self.set_pivot_panel_message(msg);
+        cx.notify();
+    }
+
+    /// Place a computed output. Returns true on success. On any failure the
+    /// workbook is unchanged and the last committed output stays.
+    fn pivot_finish(
+        &mut self,
+        job: PivotJob,
+        result: Result<PivotOutput, PivotError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(p) = self.pivot_panel.as_mut() {
+            p.busy = false;
+        }
+        let output = match result {
+            Ok(o) => o,
+            Err(e) => {
+                self.pivot_job_failed(&job, e.to_string(), cx);
+                return false;
+            }
+        };
+        // The source must not have changed while we computed.
+        if self.wb(cx).pivot_source_generation(&job.table) != Some(job.source_generation) {
+            self.pivot_job_failed(&job, "The source changed while computing. Refresh again.".into(), cx);
+            return false;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let rows = output.height();
+        let cols = output.width();
+
+        match job.mode {
+            PivotPanelMode::New => {
+                // Create the output sheet only now, so a failed or cancelled
+                // create never leaves an empty sheet behind.
+                let (sheet_index, created) = self.workbook.update(cx, |wb, _| {
+                    let name = crate::structured_results::unique_sheet_name(wb, "Pivot");
+                    let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
+                    (idx, wb.sheet(idx).cloned())
+                });
+                let Some(created) = created else { return false };
+                let sheet_id = created.id;
+                let prepared = self.wb(cx).prepare_pivot_commit(sheet_id, job.table.clone(), &output, job.source_generation, now);
+                let commit = match prepared {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.workbook.update(cx, |wb, _| {
+                            if let Some(i) = wb.sheet_index_by_id(sheet_id) {
+                                wb.take_sheet(i);
+                            }
+                        });
+                        self.pivot_job_failed(&job, e.to_string(), cx);
+                        return false;
+                    }
+                };
+                let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
+                self.record_pivot_commit(commit, Some((sheet_index, Box::new(created))), job.description.clone());
+                self.activate_sheet(sheet_index, cx);
+                self.row_view = RowView::new(NUM_ROWS);
+                self.clear_selection_state();
+                if let Some(p) = self.pivot_panel.as_mut() {
+                    if p.mode == PivotPanelMode::New {
+                        p.mode = PivotPanelMode::Edit { pivot_id: job.table.id };
+                    }
+                    p.message = Some(format!("{} created: {rows} × {cols}.", job.table.name));
+                }
+                self.status_message = Some(format!("{} created on a new sheet.", job.table.name));
+            }
+            PivotPanelMode::Edit { pivot_id } => {
+                let Some((idx, _)) = self.wb(cx).find_pivot(pivot_id) else {
+                    self.pivot_job_failed(&job, "This pivot table no longer exists.".into(), cx);
+                    return false;
+                };
+                let sheet_id = self.wb(cx).sheet(idx).map(|s| s.id).unwrap();
+                let commit = match self.wb(cx).prepare_pivot_commit(sheet_id, job.table.clone(), &output, job.source_generation, now) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.pivot_job_failed(&job, e.to_string(), cx);
+                        return false;
+                    }
+                };
+                let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
+                self.record_pivot_commit(commit, None, job.description.clone());
+                let growth = self.wb(cx).pivot_source_growth(&job.table);
+                let note = growth.map(|last| {
+                    format!(
+                        " {} new row{} below the source: open the field list and press X to include them.",
+                        last - job.table.source.end_row,
+                        if last - job.table.source.end_row == 1 { "" } else { "s" }
+                    )
+                });
+                if let Some(p) = self.pivot_panel.as_mut() {
+                    p.growth = growth;
+                    p.message = Some(format!("{}: {rows} × {cols}.", job.description));
+                }
+                self.status_message = Some(format!("{}.{}", job.description, note.unwrap_or_default()));
+            }
+        }
+        self.pivot_errors.remove(&job.table.id);
+        self.bump_cells_rev();
+        self.is_modified = true;
+        cx.notify();
+        true
+    }
+
+    fn record_pivot_commit(
+        &mut self,
+        commit: PivotCommit,
+        created_sheet: Option<(usize, Box<Sheet>)>,
+        description: String,
+    ) {
+        self.history.record_action_with_provenance(
+            crate::history::UndoAction::PivotCommit { commit: Box::new(commit), created_sheet, description },
+            None,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Status bar and Problems.
+// ---------------------------------------------------------------------------
+
+impl Spreadsheet {
+    /// Status-bar text when the cursor is inside a pivot's output.
+    pub(crate) fn pivot_status_text(&self, cx: &App) -> Option<String> {
+        let t = self.pivot_under_cursor(cx)?;
+        let wb = self.wb(cx);
+        let source_sheet = wb.sheet_by_id(t.source.sheet_id).map(|s| s.name.clone()).unwrap_or_else(|| "?".into());
+        let range = format!(
+            "{}{}:{}{}",
+            Spreadsheet::col_letter(t.source.start_col as usize),
+            t.source.start_row + 1,
+            Spreadsheet::col_letter(t.source.end_col as usize),
+            t.source.end_row + 1
+        );
+        let state = if self.pivot_errors.contains_key(&t.id) {
+            "refresh failed (see Problems)".to_string()
+        } else if wb.is_pivot_stale(&t) {
+            "out of date · Alt+F5 refreshes".to_string()
+        } else {
+            "up to date".to_string()
+        };
+        Some(format!("{} · {}!{} · {}", t.name, source_sheet, range, state))
+    }
+
+    /// Pivot entries for the Problems panel: failed refreshes and stale pivots,
+    /// each anchored at the pivot's top-left output cell.
+    pub(crate) fn pivot_problems(&self, cx: &App) -> Vec<crate::rewind_state::Problem> {
+        let wb = self.wb(cx);
+        let mut out = Vec::new();
+        for (sheet_idx, t) in wb.pivots() {
+            let sheet_name = wb.sheet(sheet_idx).map(|s| s.name.clone()).unwrap_or_default();
+            let (row, col) = (t.anchor_row as usize, t.anchor_col as usize);
+            if let Some(err) = self.pivot_errors.get(&t.id) {
+                out.push(crate::rewind_state::Problem {
+                    sheet_idx,
+                    sheet_name,
+                    row,
+                    col,
+                    error: "Pivot refresh failed".into(),
+                    formula: format!("{}: {}", t.name, err),
+                });
+            } else if wb.is_pivot_stale(t) {
+                out.push(crate::rewind_state::Problem {
+                    sheet_idx,
+                    sheet_name,
+                    row,
+                    col,
+                    error: "Pivot out of date".into(),
+                    formula: format!("{}: its source changed. Alt+F5 refreshes.", t.name),
+                });
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::{PivotPanel, PivotPanelItem, PivotPanelMode};
+    use visigrid_engine::cell::NumberFormat;
+    use visigrid_engine::pivot::{Aggregation, PivotDefinition, PivotSource};
+    use visigrid_engine::sheet::SheetId;
+
+    fn panel() -> PivotPanel {
+        let money = NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None };
+        PivotPanel {
+            mode: PivotPanelMode::New,
+            source: PivotSource { sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: 10, end_col: 2 },
+            headers: vec!["Region".into(), "Customer".into(), "Amount".into()],
+            column_formats: vec![NumberFormat::General, NumberFormat::General, money],
+            column_numeric: vec![false, false, true],
+            draft: PivotDefinition::default(),
+            cursor: 0,
+            message: None,
+            growth: None,
+            busy: false,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn assign_fields_with_sensible_defaults() {
+        let mut p = panel();
+        p.cursor = 0;
+        assert!(p.assign('r').is_none());
+        p.cursor = 2;
+        assert!(p.assign('v').is_none()); // numeric → Sum, currency format
+        p.cursor = 1;
+        assert!(p.assign('v').is_none()); // text → Count, whole numbers
+        assert_eq!(p.draft.rows[0].header, "Region");
+        assert_eq!(p.draft.values[0].aggregation, Aggregation::Sum);
+        assert!(matches!(p.draft.values[0].number_format, Some(NumberFormat::Currency { .. })));
+        assert_eq!(p.draft.values[1].aggregation, Aggregation::Count);
+        assert!(matches!(p.draft.values[1].number_format, Some(NumberFormat::Number { decimals: 0, .. })));
+        // A field can't be both a row and the column field.
+        p.cursor = 0;
+        assert!(p.assign('c').is_some());
+        // Items list: 3 fields, 1 row, 2 values.
+        assert_eq!(p.items().len(), 6);
+    }
+
+    #[::core::prelude::v1::test]
+    fn cycle_aggregation_moves_format_with_count_boundary_and_bulk_applies() {
+        let mut p = panel();
+        p.cursor = 2;
+        p.assign('v');
+        p.cursor = 1;
+        p.assign('v');
+        let first_value = p.items().iter().position(|i| *i == PivotPanelItem::Value(0)).unwrap();
+        p.cursor = first_value;
+        p.cycle_aggregation(true); // Sum → Count
+        assert_eq!(p.draft.values[0].aggregation, Aggregation::Count);
+        assert!(matches!(p.draft.values[0].number_format, Some(NumberFormat::Number { decimals: 0, .. })));
+        p.cycle_aggregation(false); // back to Sum: currency again
+        assert!(matches!(p.draft.values[0].number_format, Some(NumberFormat::Currency { .. })));
+        // "=" applies Sum to every value field.
+        assert!(p.apply_aggregation_to_all().is_some());
+        assert!(p.draft.values.iter().all(|v| v.aggregation == Aggregation::Sum));
+    }
+
+    #[::core::prelude::v1::test]
+    fn reorder_and_remove_keep_cursor_on_the_item() {
+        let mut p = panel();
+        p.cursor = 0;
+        p.assign('r');
+        p.cursor = 1;
+        p.assign('r');
+        let second_row = p.items().iter().position(|i| *i == PivotPanelItem::Row(1)).unwrap();
+        p.cursor = second_row;
+        p.reorder(true);
+        assert_eq!(p.draft.rows[0].header, "Customer");
+        assert_eq!(p.current(), Some(PivotPanelItem::Row(0)));
+        p.remove_current();
+        assert_eq!(p.draft.rows.len(), 1);
+        assert_eq!(p.draft.rows[0].header, "Region");
+    }
+}

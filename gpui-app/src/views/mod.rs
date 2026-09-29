@@ -50,6 +50,7 @@ mod actions_ui;
 mod key_handler;
 mod f1_help;
 mod cf_rules_panel;
+mod pivot_panel;
 mod problems_panel;
 mod cond_format_dialog;
 mod named_range_dialogs;
@@ -728,6 +729,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     })
                     .child(cf_rules_panel::render_cf_rules_panel(app, cx))
             )
+        })
+        // Pivot field list (right-side drawer). Clicking outside keeps it
+        // open: the draft is only discarded with Esc or the close button.
+        .when(app.pivot_panel.is_some(), |d| {
+            d.child(pivot_panel::render_pivot_panel(app, cx))
         })
         // Profiler panel (right-side drawer, mutually exclusive with inspector)
         .when(show_profiler, |d| {

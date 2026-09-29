@@ -118,6 +118,10 @@ impl Spreadsheet {
                 // Canonical cloud storage is visigrid-json, not the SQLite .sheet
                 // on disk. Reading the file would write a format the browser cannot
                 // parse, and after any cross-client save the key's extension lies.
+                // Persist pivots' stale flags in the synced copy too.
+                this.workbook.update(cx, |wb, _| {
+                    wb.update_pivot_staleness();
+                });
                 let wb = this.wb(cx).clone();
                 let layouts = this.build_json_sheet_layouts(cx);
                 let active = wb.active_sheet_index();

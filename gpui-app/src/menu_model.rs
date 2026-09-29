@@ -33,6 +33,7 @@ pub enum MenuAction {
     FillDown, FillRight,
     CircleInvalid, ClearCircles,
     InsertFormulaAI, AnalyzeAI,
+    InsertPivot, RefreshPivot, RefreshAllPivots, EditPivotFields, DeletePivot,
     OpenDocs, About, License,
 }
 
@@ -106,6 +107,8 @@ pub fn insert_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Disabled("Rows"),
         MenuEntry::Disabled("Columns"),
         MenuEntry::Separator,
+        MenuEntry::Item { label: "PivotTable...", shortcut: None, action: MenuAction::InsertPivot, accel: None },
+        MenuEntry::Separator,
         MenuEntry::Disabled("Function..."),
     ]
 }
@@ -162,6 +165,11 @@ pub fn data_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Separator,
         MenuEntry::Disabled("Sort..."),
         MenuEntry::Disabled("Filter"),
+        MenuEntry::Separator,
+        MenuEntry::Item { label: "PivotTable Fields", shortcut: None, action: MenuAction::EditPivotFields, accel: None },
+        MenuEntry::Item { label: "Refresh PivotTable", shortcut: Some("Alt+F5"), action: MenuAction::RefreshPivot, accel: None },
+        MenuEntry::Item { label: "Refresh All PivotTables", shortcut: Some("Ctrl+Alt+F5"), action: MenuAction::RefreshAllPivots, accel: None },
+        MenuEntry::Item { label: "Delete PivotTable", shortcut: None, action: MenuAction::DeletePivot, accel: None },
         MenuEntry::Separator,
         MenuEntry::Item { label: "AI Formula...", shortcut: Some("Ctrl+Shift+A"), action: MenuAction::InsertFormulaAI, accel: Some('f') },
         MenuEntry::Item { label: "Analyze with AI", shortcut: Some("Ctrl+Shift+E"), action: MenuAction::AnalyzeAI, accel: Some('a') },
@@ -292,6 +300,11 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ExcludeValidation => app.exclude_from_validation(cx),
         MenuAction::ClearExclusions => app.clear_validation_exclusions(cx),
         MenuAction::FillDown => app.fill_down(cx),
+        MenuAction::InsertPivot => app.insert_pivot_table(cx),
+        MenuAction::RefreshPivot => app.refresh_pivot(cx),
+        MenuAction::RefreshAllPivots => app.refresh_all_pivots(cx),
+        MenuAction::EditPivotFields => app.edit_pivot_fields(cx),
+        MenuAction::DeletePivot => app.delete_pivot(cx),
         MenuAction::FillRight => app.fill_right(cx),
         MenuAction::CircleInvalid => app.circle_invalid_data(cx),
         MenuAction::ClearCircles => app.clear_invalid_circles(cx),
