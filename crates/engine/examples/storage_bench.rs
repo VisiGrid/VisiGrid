@@ -150,6 +150,7 @@ fn main() {
 
     // Recalculation: 200k formulas over the numeric columns, then a full
     // ordered recompute, then SUM over whole columns.
+    let heap_before_calc = LIVE.load(Ordering::Relaxed);
     let mut calc = Sheet::new(SheetId(2), NUM_ROWS, NUM_COLS);
     for r in 0..200_000 {
         calc.set_value_deferred(r, 0, &format!("{}", r % 1000));
@@ -157,12 +158,27 @@ fn main() {
     }
     calc.set_value_deferred(0, 3, "=SUM(A1:A200000)");
     calc.set_value_deferred(1, 3, "=SUM(B1:B200000)");
+    let after_cells = LIVE.load(Ordering::Relaxed).saturating_sub(heap_before_calc);
     let mut wb = Workbook::from_sheets(vec![calc], 0);
     let t = Instant::now();
     wb.rebuild_dep_graph();
     println!("dep graph    {:>9.1} ms   (200k formulas)", ms(t));
+    let after_graph = LIVE.load(Ordering::Relaxed).saturating_sub(heap_before_calc);
     let t = Instant::now();
     wb.recompute_full_ordered();
     println!("recompute    {:>9.1} ms   (200k formulas + 2 SUMs)", ms(t));
+    let calc_heap = LIVE.load(Ordering::Relaxed).saturating_sub(heap_before_calc);
+    let per = |b: usize| b as f64 / 200_002.0;
+    println!(
+        "  cells+ASTs {:>7.1} MiB ({:.0} B/formula)   dep graph {:>6.1} MiB ({:.0} B)   results {:>5.1} MiB ({:.0} B)",
+        mib(after_cells), per(after_cells),
+        mib(after_graph - after_cells), per(after_graph - after_cells),
+        mib(calc_heap.saturating_sub(after_graph)), per(calc_heap.saturating_sub(after_graph)),
+    );
+    println!(
+        "formula heap {:>9.1} MiB  ({:.0} B per formula cell, sheet + results + dep graph)",
+        mib(calc_heap),
+        calc_heap as f64 / 200_002.0
+    );
     println!("check        {} / {}", wb.sheets()[0].get_display(1, 3), sum as u64 % 1000);
 }

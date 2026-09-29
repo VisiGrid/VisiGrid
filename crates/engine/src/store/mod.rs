@@ -313,4 +313,96 @@ mod differential {
         let store = ColumnStore::deserialize(MapDeserializer::<_, serde_json::Error>::new(entries.into_iter())).unwrap();
         check_duplicate_load(store);
     }
+
+    // Phase 2: computed results live with their formulas.
+    mod computed {
+        use super::super::columns::ColumnStore;
+        use crate::cell::{Cell, SpillInfo};
+        use crate::formula::eval::Value;
+
+        fn store_with_formula(row: usize, col: usize) -> ColumnStore {
+            let mut s = ColumnStore::default();
+            s.upsert(row, col, Cell::default, |c| c.set("=A1+1"));
+            s.set_computed(row, col, Value::Number(42.0));
+            s
+        }
+
+        fn result(s: &ColumnStore, row: usize, col: usize) -> Option<Value> {
+            s.with_computed(row, col, |v| v.cloned())
+        }
+
+        #[test]
+        fn a_write_that_keeps_the_formula_keeps_its_result() {
+            let mut s = store_with_formula(5, 1);
+            s.upsert(5, 1, Cell::default, |c| c.set_spill_info(Some(SpillInfo { rows: 2, cols: 1 })));
+            assert_eq!(result(&s, 5, 1), Some(Value::Number(42.0)));
+            s.update(5, 1, |c| c.set_style_id(Some(3)));
+            assert_eq!(result(&s, 5, 1), Some(Value::Number(42.0)));
+            s.set_format(5, 1, Cell::default, std::sync::Arc::new(Default::default()));
+            assert_eq!(result(&s, 5, 1), Some(Value::Number(42.0)));
+        }
+
+        #[test]
+        fn an_explicit_clear_or_a_non_formula_value_drops_it() {
+            let mut s = store_with_formula(5, 1);
+            s.clear_computed(5, 1);
+            assert_eq!(result(&s, 5, 1), None);
+
+            let mut s = store_with_formula(5, 1);
+            s.upsert(5, 1, Cell::default, |c| c.set("7"));
+            assert_eq!(result(&s, 5, 1), None, "no longer a formula");
+        }
+
+        #[test]
+        fn a_different_formula_starts_uncomputed_even_without_a_clear() {
+            let mut s = store_with_formula(5, 1);
+            s.upsert(5, 1, Cell::default, |c| c.set("=B1*2"));
+            assert_eq!(result(&s, 5, 1), None, "new formula, no stale result");
+            let mut s = store_with_formula(5, 1);
+            s.update(5, 1, |c| c.set("=A1+1"));
+            assert_eq!(result(&s, 5, 1), Some(Value::Number(42.0)), "same formula keeps it");
+        }
+
+        #[test]
+        fn a_reused_formula_id_starts_uncomputed() {
+            let mut s = store_with_formula(5, 1);
+            s.remove(5, 1);
+            s.upsert(9, 2, Cell::default, |c| c.set("=B1*2"));
+            assert_eq!(result(&s, 9, 2), None);
+        }
+
+        #[test]
+        fn results_move_with_their_cells() {
+            let mut s = store_with_formula(5, 1);
+            s.insert_rows(0, 3, 1_000);
+            assert_eq!(result(&s, 8, 1), Some(Value::Number(42.0)));
+            s.insert_cols(0, 2, 100);
+            assert_eq!(result(&s, 8, 3), Some(Value::Number(42.0)));
+            s.delete_rows(0, 3);
+            s.delete_cols(0, 2);
+            assert_eq!(result(&s, 5, 1), Some(Value::Number(42.0)));
+            s.delete_rows(5, 1);
+            assert_eq!(s.computed_count(), 0, "deleted formula takes its result with it");
+        }
+
+        #[test]
+        fn a_result_where_there_is_no_formula_is_ignored() {
+            let mut s = ColumnStore::default();
+            s.upsert(0, 0, Cell::default, |c| c.set("text"));
+            s.set_computed(0, 0, Value::Number(1.0));
+            s.set_computed(3, 3, Value::Number(1.0));
+            assert_eq!(result(&s, 0, 0), None);
+            assert_eq!(s.computed_count(), 0);
+        }
+
+        #[test]
+        fn clear_all_forgets_every_result() {
+            let mut s = store_with_formula(5, 1);
+            s.upsert(6, 1, Cell::default, |c| c.set("=A1*3"));
+            s.set_computed(6, 1, Value::Number(3.0));
+            assert_eq!(s.computed_count(), 2);
+            s.clear_all_computed();
+            assert_eq!(s.computed_count(), 0);
+        }
+    }
 }

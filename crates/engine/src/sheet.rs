@@ -298,11 +298,6 @@ pub struct Sheet {
     /// Spilled values from array formulas: (row, col) -> Value
     #[serde(skip)]
     spill_values: HashMap<(usize, usize), Value>,
-    /// Computed value cache: populated during topological recalc, read during evaluation.
-    /// Stores typed Value (not String) to avoid lossy conversions.
-    /// Getters NEVER evaluate on cache miss — only the topo recalc pass populates this.
-    #[serde(skip)]
-    computed_cache: RefCell<HashMap<(usize, usize), Value>>,
     /// Cells whose value was kept because this build could not recompute the
     /// formula — a custom function it has no definition for.
     ///
@@ -402,10 +397,9 @@ impl CellLookup for Sheet {
                 ValueRef::Formula { ast: Some(_), .. } => {
                     // Cache-only: never evaluate on cache miss.
                     // Topo recalc populates the cache; miss means not yet computed.
-                    let cache = self.computed_cache.borrow();
-                    cache.get(&(row, col))
-                        .map(|v| v.to_number().unwrap_or(0.0))
-                        .unwrap_or(0.0)
+                    self.cells.with_computed(row, col, |v| {
+                        v.map(|v| v.to_number().unwrap_or(0.0)).unwrap_or(0.0)
+                    })
                 }
                 ValueRef::Formula { ast: None, .. } => 0.0,
             },
@@ -442,10 +436,7 @@ impl CellLookup for Sheet {
                 ValueRef::Formula { ast: Some(_), .. } => {
                     // Cache-only: never evaluate on cache miss.
                     // Topo recalc populates the cache; miss means not yet computed.
-                    let cache = self.computed_cache.borrow();
-                    cache.get(&(row, col))
-                        .map(|v| v.to_text())
-                        .unwrap_or_default()
+                    self.cells.with_computed(row, col, |v| v.map(|v| v.to_text()).unwrap_or_default())
                 }
                 ValueRef::Formula { ast: None, .. } => String::new(),
             },
@@ -495,7 +486,6 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
-            computed_cache: RefCell::new(HashMap::new()),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
@@ -525,7 +515,6 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
-            computed_cache: RefCell::new(HashMap::new()),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
@@ -545,28 +534,32 @@ impl Sheet {
     /// Cache a computed Value for a formula cell.
     /// Called ONLY during topological recalc (workbook.evaluate_cell).
     /// Getters read from this cache but never write to it.
+    ///
+    /// Results live with their formulas in the cell store (#18 phase 2), so
+    /// a value cached where there is no formula is dropped: every reader
+    /// consults results only for formula cells.
     pub fn cache_computed(&self, row: usize, col: usize, value: Value) {
-        self.computed_cache.borrow_mut().insert((row, col), value);
+        self.cells.set_computed(row, col, value);
     }
 
     /// Get the number of entries in the computed cache (for diagnostics).
     pub fn computed_cache_len(&self) -> usize {
-        self.computed_cache.borrow().len()
+        self.cells.computed_count()
     }
 
     /// Clear the computed value cache (before a new recalc pass).
     pub fn clear_computed_cache(&self) {
-        self.computed_cache.borrow_mut().clear();
+        self.cells.clear_all_computed();
     }
 
     /// Clear a single entry from the computed cache (for incremental recalc).
     pub fn clear_cached(&self, row: usize, col: usize) {
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
     }
 
     /// Get a cached computed value (for iterative calculation snapshot).
     pub fn get_cached_value(&self, row: usize, col: usize) -> Option<Value> {
-        self.computed_cache.borrow().get(&(row, col)).cloned()
+        self.cells.with_computed(row, col, |v| v.cloned())
     }
 
     /// The pivot table whose owned output contains this cell, if any.
@@ -608,7 +601,7 @@ impl Sheet {
     pub(crate) fn write_pivot_cell(&mut self, row: usize, col: usize, value: &crate::formula::eval::Value) {
         use crate::formula::eval::Value;
         self.clear_spill_from(row, col);
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
         match value {
             Value::Empty => {
                 // Keep the cell's formatting: a blank result inside the output
@@ -663,7 +656,7 @@ impl Sheet {
         self.clear_spill_from(row, col);
 
         // Invalidate computed cache (cell changed, dependents may need recompute)
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
 
         self.with_cell(row, col, |cell| cell.set(value));
 
@@ -681,7 +674,7 @@ impl Sheet {
             return;
         }
         self.clear_spill_from(row, col);
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set_text(text));
     }
 
@@ -702,7 +695,7 @@ impl Sheet {
             return;
         }
         self.clear_spill_from(row, col);
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set(value));
     }
 
@@ -1161,8 +1154,7 @@ impl Sheet {
                     ValueRef::Number(n) => Value::Number(n),
                     ValueRef::Formula { ast: Some(_), .. } => {
                         // Cache-only: never evaluate on cache miss.
-                        let cache = self.computed_cache.borrow();
-                        cache.get(&(row, col)).cloned().unwrap_or(Value::Empty)
+                        self.cells.with_computed(row, col, |v| v.cloned().unwrap_or(Value::Empty))
                     }
                     ValueRef::Text(s) => Value::Text(s.to_string()),
                     ValueRef::Empty => return String::new(),
@@ -1212,8 +1204,7 @@ impl Sheet {
                     ValueRef::Number(n) => Value::Number(n),
                     ValueRef::Formula { ast: Some(_), .. } => {
                         // Cache-only: never evaluate on cache miss.
-                        let cache = self.computed_cache.borrow();
-                        cache.get(&(row, col)).cloned().unwrap_or(Value::Empty)
+                        self.cells.with_computed(row, col, |v| v.cloned().unwrap_or(Value::Empty))
                     }
                     ValueRef::Formula { ast: None, .. } => Value::Error("#ERR".to_string()),
                 }
@@ -1243,8 +1234,7 @@ impl Sheet {
             }
             ValueRef::Formula { ast: Some(_), .. } => {
                 // Cache-only: never evaluate on cache miss.
-                let cache = self.computed_cache.borrow();
-                match cache.get(&(row, col)) {
+                self.cells.with_computed(row, col, |v| match v {
                     Some(Value::Number(n)) => {
                         if n.fract() == 0.0 {
                             format!("{}", *n as i64)
@@ -1255,7 +1245,7 @@ impl Sheet {
                     Some(Value::Error(e)) => e.clone(),
                     Some(v) => v.to_text(),
                     None => String::new(),
-                }
+                })
             }
             ValueRef::Formula { ast: None, .. } => "#ERR".to_string(),
         }
@@ -2371,6 +2361,31 @@ mod tests {
         sheet.delete_cols(0, 2);
         assert_eq!(sheet.get_format(900, 0), column);
         assert!(sheet.cells_iter().count() < 10);
+    }
+
+    /// #18 phase 2, through the public API: results live with their
+    /// formulas. Replacing the formula drops the result; restyling keeps it.
+    #[test]
+    fn formula_results_follow_the_formula_not_the_cell() {
+        use crate::formula::eval::Value;
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
+        sheet.set_value(0, 0, "2");
+        sheet.set_value(1, 0, "=A1*21");
+        sheet.cache_computed(1, 0, Value::Number(42.0));
+
+        sheet.toggle_bold(1, 0);
+        sheet.set_style_id(1, 0, 7);
+        assert_eq!(sheet.get_cached_value(1, 0), Some(Value::Number(42.0)), "restyling keeps the result");
+
+        // set_value evaluates on the spot: the new formula's value, not 42.
+        sheet.set_value(1, 0, "=A1*3");
+        assert_eq!(sheet.get_cached_value(1, 0), Some(Value::Number(6.0)), "the new formula's own result");
+        // set_value_deferred (bulk loads) leaves it for the ordered recompute.
+        sheet.set_value_deferred(1, 0, "=A1*4");
+        assert_eq!(sheet.get_cached_value(1, 0), None, "a deferred formula starts uncomputed");
+
+        sheet.cache_computed(5, 5, Value::Number(1.0));
+        assert_eq!(sheet.get_cached_value(5, 5), None, "no formula there, nothing kept");
     }
 
     use super::*;

@@ -21,10 +21,12 @@
 //! Lookups are O(log C) in the column's non-empty chunks, which is a
 //! handful of comparisons.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cell::{Cell, CellExtras, CellFormat, CellRef, CellValue, ValueRef};
+use crate::formula::eval::Value;
 use crate::formula::parser::ParsedExpr;
 
 const CHUNK_BITS: usize = 10;
@@ -404,11 +406,16 @@ struct Formula {
 struct FormulaTable {
     entries: Vec<Option<Formula>>,
     free: Vec<FormulaId>,
+    /// Each formula's last computed result, by the same id (#18 phase 2).
+    /// Written during recalculation through `&self`, as the position-keyed
+    /// cache it replaces was. `None` means not computed yet; readers never
+    /// evaluate on a miss.
+    values: RefCell<Vec<Option<Value>>>,
 }
 
 impl FormulaTable {
     fn insert(&mut self, f: Formula) -> FormulaId {
-        match self.free.pop() {
+        let id = match self.free.pop() {
             Some(id) => {
                 self.entries[id as usize] = Some(f);
                 id
@@ -417,7 +424,14 @@ impl FormulaTable {
                 self.entries.push(Some(f));
                 (self.entries.len() - 1) as FormulaId
             }
+        };
+        // A reused id must not inherit the previous formula's result.
+        let values = self.values.get_mut();
+        if values.len() <= id as usize {
+            values.resize(id as usize + 1, None);
         }
+        values[id as usize] = None;
+        id
     }
 
     fn get(&self, id: FormulaId) -> &Formula {
@@ -426,8 +440,26 @@ impl FormulaTable {
 
     fn remove(&mut self, id: FormulaId) -> Formula {
         let f = self.entries[id as usize].take().expect("live formula id");
+        if let Some(v) = self.values.get_mut().get_mut(id as usize) {
+            *v = None;
+        }
         self.free.push(id);
         f
+    }
+
+    fn with_value<R>(&self, id: FormulaId, f: impl FnOnce(Option<&Value>) -> R) -> R {
+        let values = self.values.borrow();
+        f(values.get(id as usize).and_then(Option::as_ref))
+    }
+
+    fn set_value(&self, id: FormulaId, value: Option<Value>) {
+        if let Some(slot) = self.values.borrow_mut().get_mut(id as usize) {
+            *slot = value;
+        }
+    }
+
+    fn take_value(&self, id: FormulaId) -> Option<Value> {
+        self.values.borrow_mut().get_mut(id as usize).and_then(Option::take)
     }
 }
 
@@ -546,9 +578,11 @@ impl ColumnStore {
 
     /// Change a cell that exists; `None` when there is no cell there.
     pub fn update<R>(&mut self, row: usize, col: usize, f: impl FnOnce(&mut Cell) -> R) -> Option<R> {
+        let carried = self.take_computed(row, col);
         let mut cell = self.remove(row, col)?;
         let out = f(&mut cell);
         self.insert(row, col, cell);
+        self.restore_computed(row, col, carried);
         Some(out)
     }
 
@@ -560,10 +594,76 @@ impl ColumnStore {
         init: impl FnOnce() -> Cell,
         f: impl FnOnce(&mut Cell) -> R,
     ) -> R {
+        let carried = self.take_computed(row, col);
         let mut cell = self.remove(row, col).unwrap_or_else(init);
         let out = f(&mut cell);
         self.insert(row, col, cell);
+        self.restore_computed(row, col, carried);
         out
+    }
+
+    fn formula_id(&self, row: usize, col: usize) -> Option<FormulaId> {
+        let (idx, off) = split(row);
+        match self.columns.get(col)?.chunk(idx)?.cells.get(off)? {
+            Slot::Formula(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Read the computed result of the formula at `(row, col)`. `None` when
+    /// there is no formula there or it has not been computed.
+    pub fn with_computed<R>(&self, row: usize, col: usize, f: impl FnOnce(Option<&Value>) -> R) -> R {
+        match self.formula_id(row, col) {
+            Some(id) => self.formulas.with_value(id, f),
+            None => f(None),
+        }
+    }
+
+    /// Record a formula's computed result. Ignored where there is no formula:
+    /// every reader consults results only for formula cells.
+    pub fn set_computed(&self, row: usize, col: usize, value: Value) {
+        if let Some(id) = self.formula_id(row, col) {
+            self.formulas.set_value(id, Some(value));
+        }
+    }
+
+    pub fn clear_computed(&self, row: usize, col: usize) {
+        if let Some(id) = self.formula_id(row, col) {
+            self.formulas.set_value(id, None);
+        }
+    }
+
+    /// Forget every computed result (before a full recalculation).
+    pub fn clear_all_computed(&self) {
+        for v in self.formulas.values.borrow_mut().iter_mut() {
+            *v = None;
+        }
+    }
+
+    /// Number of formulas with a computed result (diagnostics).
+    pub fn computed_count(&self) -> usize {
+        self.formulas.values.borrow().iter().filter(|v| v.is_some()).count()
+    }
+
+    /// A write that keeps the same formula keeps its result (a style, spill
+    /// or metadata change), as it did when results were keyed by position.
+    /// Returns the result with the formula source it belongs to.
+    fn take_computed(&self, row: usize, col: usize) -> Option<(Value, String)> {
+        let id = self.formula_id(row, col)?;
+        let value = self.formulas.take_value(id)?;
+        Some((value, self.formulas.get(id).source.clone()))
+    }
+
+    /// Put a carried result back only if the cell still holds the same
+    /// formula. A different formula starts uncomputed, whether or not the
+    /// caller remembered to clear first.
+    fn restore_computed(&self, row: usize, col: usize, carried: Option<(Value, String)>) {
+        let Some((value, source)) = carried else { return };
+        if let Some(id) = self.formula_id(row, col) {
+            if self.formulas.get(id).source == source {
+                self.formulas.set_value(id, Some(value));
+            }
+        }
     }
 
     /// Store a cell, replacing whatever is there. The loaders use this: a
