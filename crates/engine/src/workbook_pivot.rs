@@ -344,6 +344,19 @@ impl Workbook {
         Ok(self.end_batch())
     }
 
+    /// Is this pivot stale right now? Read-only: the saved flag, or a source
+    /// edit since the last refresh, or a missing source sheet.
+    pub fn is_pivot_stale(&self, p: &PivotTable) -> bool {
+        if p.stale {
+            return true;
+        }
+        match (p.source_generation, self.pivot_source_generation(p)) {
+            (Some(recorded), Some(now)) => recorded != now,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        }
+    }
+
     /// Mark pivots stale whose source sheet has been edited since their last
     /// refresh. Cheap; call after edits. Returns true if any flag changed.
     ///
@@ -830,6 +843,36 @@ mod tests {
         bad[0].table.id = 99;
         let w = wb2.restore_pivots(1, bad);
         assert!(w[0].contains("source sheet is missing"));
+    }
+
+    #[test]
+    fn take_and_restore_sheet_keeps_id_position_and_contents() {
+        let (mut wb, data, out) = book();
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        wb.sheet_mut(oi).unwrap().set_value(0, 0, "kept");
+        let taken = wb.take_sheet(oi).unwrap();
+        assert!(wb.sheet_index_by_id(out).is_none());
+        assert!(wb.restore_sheet(oi, taken));
+        assert_eq!(wb.sheet_index_by_id(out), Some(oi));
+        assert_eq!(wb.sheet(oi).unwrap().get_display(0, 0), "kept");
+        // A new sheet never reuses the restored id.
+        let n = wb.add_sheet();
+        assert_ne!(wb.sheet(n).unwrap().id, out);
+        assert!(wb.sheet_index_by_id(data).is_some());
+    }
+
+    #[test]
+    fn is_pivot_stale_is_read_only() {
+        let (mut wb, data, out) = book();
+        let t = table(&wb, data);
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let p = wb.find_pivot(id).unwrap().1.clone();
+        assert!(!wb.is_pivot_stale(&p));
+        let di = wb.sheet_index_by_id(data).unwrap();
+        wb.set_cell_value_tracked(di, 1, 1, "1");
+        assert!(wb.is_pivot_stale(&p));
+        assert!(!wb.find_pivot(id).unwrap().1.stale, "flag itself unchanged");
     }
 
     #[test]

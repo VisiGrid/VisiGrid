@@ -114,6 +114,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        if self.block_if_pivot(row, col, row, col, "edit", cx) { return; }
 
         self.edit_original = self.sheet(cx).get_raw(row, col);
         self.edit_value = self.edit_original.clone();
@@ -191,6 +192,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        if self.block_if_pivot(row, col, row, col, "edit", cx) { return; }
 
         self.edit_original = self.sheet(cx).get_raw(row, col);
         self.edit_value = String::new();
@@ -1257,6 +1259,7 @@ impl Spreadsheet {
                 cx.notify();
                 return;
             }
+            if self.block_if_pivot(row, col, row, col, "edit", cx) { return; }
 
             self.edit_original = self.sheet(cx).get_raw(row, col);
             self.clear_edit_marks();
@@ -1424,6 +1427,7 @@ impl Spreadsheet {
         use visigrid_engine::provenance::MutationOp;
 
         if self.block_if_merged("fill selection", cx) { return; }
+        if self.block_if_selection_in_pivot("fill", cx) { return; }
 
         let primary_cell = self.view_state.selected;
         let base_value = self.sheet(cx).get_raw(primary_cell.0, primary_cell.1);

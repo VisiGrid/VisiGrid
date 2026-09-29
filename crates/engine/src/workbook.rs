@@ -326,6 +326,40 @@ impl Workbook {
         true
     }
 
+    /// Remove a sheet and hand it back whole, for an undo that must restore it
+    /// exactly (same id, same contents). Refuses to remove the last sheet.
+    pub fn take_sheet(&mut self, index: usize) -> Option<Sheet> {
+        if self.sheets.len() <= 1 || index >= self.sheets.len() {
+            return None;
+        }
+        let sheet = self.sheets.remove(index);
+        if self.active_sheet >= self.sheets.len() {
+            self.active_sheet = self.sheets.len() - 1;
+        } else if self.active_sheet > index {
+            self.active_sheet -= 1;
+        }
+        self.rebuild_dep_graph();
+        Some(sheet)
+    }
+
+    /// Put back a sheet removed by [`take_sheet`](Self::take_sheet), at the
+    /// same position and with the same id. Refuses if a sheet with that id or
+    /// name already exists.
+    pub fn restore_sheet(&mut self, index: usize, sheet: Sheet) -> bool {
+        if self.sheets.iter().any(|s| s.id == sheet.id || s.name_key == sheet.name_key) {
+            return false;
+        }
+        let index = index.min(self.sheets.len());
+        self.next_sheet_id = self.next_sheet_id.max(sheet.id.0 + 1);
+        self.sheets.insert(index, sheet);
+        if self.active_sheet >= index && self.sheets.len() > 1 && index <= self.active_sheet {
+            // Keep the same sheet active.
+            self.active_sheet += 1;
+        }
+        self.rebuild_dep_graph();
+        true
+    }
+
     /// Rename a sheet by index
     /// Returns false if:
     /// - Index is invalid
