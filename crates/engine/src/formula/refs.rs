@@ -6,6 +6,7 @@
 use rustc_hash::FxHashSet;
 
 use crate::cell_id::CellId;
+use crate::dep_graph::RangeRef;
 use crate::named_range::NamedRangeStore;
 use crate::sheet::{SheetId, SheetRef};
 
@@ -38,18 +39,67 @@ pub fn extract_cell_ids<F>(
 where
     F: Fn(usize) -> Option<SheetId>,
 {
-    let mut refs = FxHashSet::default();
-    collect_refs(expr, context_sheet, named_ranges, &sheet_id_at_idx, &mut refs);
-    refs.into_iter().collect()
+    let mut out = Refs { cells: FxHashSet::default(), ranges: Vec::new(), keep_ranges: false };
+    collect(expr, context_sheet, named_ranges, &sheet_id_at_idx, &mut out);
+    out.cells.into_iter().collect()
+}
+
+/// Extract a formula's references for the dependency graph, keeping ranges
+/// as ranges (#29).
+///
+/// Single cells come back as `CellId`s; bounded ranges and named ranges that
+/// target a range come back as `RangeRef` rectangles, never expanded. A 1x1
+/// range is a single cell. Whole-row and whole-column references are not
+/// included here: `whole_range::extract_whole_ranges` returns them.
+pub fn extract_refs<F>(
+    expr: &BoundExpr,
+    context_sheet: SheetId,
+    named_ranges: &NamedRangeStore,
+    sheet_id_at_idx: F,
+) -> (FxHashSet<CellId>, Vec<RangeRef>)
+where
+    F: Fn(usize) -> Option<SheetId>,
+{
+    let mut out = Refs { cells: FxHashSet::default(), ranges: Vec::new(), keep_ranges: true };
+    collect(expr, context_sheet, named_ranges, &sheet_id_at_idx, &mut out);
+    let mut seen = FxHashSet::default();
+    out.ranges.retain(|r| seen.insert(*r));
+    (out.cells, out.ranges)
+}
+
+struct Refs {
+    cells: FxHashSet<CellId>,
+    ranges: Vec<RangeRef>,
+    /// false: expand every range into cells (the `extract_cell_ids` contract).
+    keep_ranges: bool,
+}
+
+impl Refs {
+    fn range(&mut self, sheet: SheetId, start_row: usize, start_col: usize, end_row: usize, end_col: usize) {
+        // The parser keeps corners as written, so A5:A1 and C5:B9 arrive
+        // reversed. The evaluator normalizes them; the graph must too, or
+        // the range is empty (stale results) or its bounds invert (panic).
+        let (start_row, end_row) = (start_row.min(end_row), start_row.max(end_row));
+        let (start_col, end_col) = (start_col.min(end_col), start_col.max(end_col));
+        if !self.keep_ranges || (start_row == end_row && start_col == end_col) {
+            for row in start_row..=end_row {
+                for col in start_col..=end_col {
+                    self.cells.insert(CellId::new(sheet, row, col));
+                }
+            }
+        } else {
+            self.ranges.push(RangeRef { sheet, start_row, start_col, end_row, end_col });
+        }
+    }
 }
 
 /// Recursively collect cell references from an expression.
-fn collect_refs<F>(
+fn collect<F>(
     expr: &BoundExpr,
     context_sheet: SheetId,
     named_ranges: &NamedRangeStore,
     sheet_id_at_idx: &F,
-    refs: &mut FxHashSet<CellId>,
+    refs: &mut Refs,
 ) where
     F: Fn(usize) -> Option<SheetId>,
 {
@@ -62,7 +112,7 @@ fn collect_refs<F>(
 
         Expr::CellRef { sheet, row, col, .. } => {
             if let Some(sheet_id) = resolve_sheet_ref(sheet, context_sheet) {
-                refs.insert(CellId::new(sheet_id, *row, *col));
+                refs.cells.insert(CellId::new(sheet_id, *row, *col));
             }
             // If SheetRef::RefError, skip (formula will error anyway)
         }
@@ -76,12 +126,7 @@ fn collect_refs<F>(
             ..
         } => {
             if let Some(sheet_id) = resolve_sheet_ref(sheet, context_sheet) {
-                // Expand range to individual cells
-                for row in *start_row..=*end_row {
-                    for col in *start_col..=*end_col {
-                        refs.insert(CellId::new(sheet_id, row, col));
-                    }
-                }
+                refs.range(sheet_id, *start_row, *start_col, *end_row, *end_col);
             }
         }
 
@@ -95,13 +140,13 @@ fn collect_refs<F>(
         Expr::Function { args, .. } => {
             // Recurse into function arguments
             for arg in args {
-                collect_refs(arg, context_sheet, named_ranges, sheet_id_at_idx, refs);
+                collect(arg, context_sheet, named_ranges, sheet_id_at_idx, refs);
             }
         }
 
         Expr::BinaryOp { left, right, .. } => {
-            collect_refs(left, context_sheet, named_ranges, sheet_id_at_idx, refs);
-            collect_refs(right, context_sheet, named_ranges, sheet_id_at_idx, refs);
+            collect(left, context_sheet, named_ranges, sheet_id_at_idx, refs);
+            collect(right, context_sheet, named_ranges, sheet_id_at_idx, refs);
         }
     }
 }
@@ -121,7 +166,7 @@ fn resolve_sheet_ref(sheet_ref: &SheetRef, context_sheet: SheetId) -> Option<She
 fn expand_named_range_target<F>(
     target: &crate::named_range::NamedRangeTarget,
     sheet_id_at_idx: &F,
-    refs: &mut FxHashSet<CellId>,
+    refs: &mut Refs,
 ) where
     F: Fn(usize) -> Option<SheetId>,
 {
@@ -130,7 +175,7 @@ fn expand_named_range_target<F>(
     match target {
         NamedRangeTarget::Cell { sheet, row, col } => {
             if let Some(sheet_id) = sheet_id_at_idx(*sheet) {
-                refs.insert(CellId::new(sheet_id, *row, *col));
+                refs.cells.insert(CellId::new(sheet_id, *row, *col));
             }
         }
         NamedRangeTarget::Range {
@@ -141,11 +186,7 @@ fn expand_named_range_target<F>(
             end_col,
         } => {
             if let Some(sheet_id) = sheet_id_at_idx(*sheet) {
-                for row in *start_row..=*end_row {
-                    for col in *start_col..=*end_col {
-                        refs.insert(CellId::new(sheet_id, row, col));
-                    }
-                }
+                refs.range(sheet_id, *start_row, *start_col, *end_row, *end_col);
             }
         }
     }

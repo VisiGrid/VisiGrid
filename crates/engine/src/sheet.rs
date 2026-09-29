@@ -1376,11 +1376,7 @@ impl Sheet {
 
     /// Get coordinates of non-empty cells within a range
     pub fn cells_in_range(&self, min_row: usize, max_row: usize, min_col: usize, max_col: usize) -> Vec<(usize, usize)> {
-        self.cells
-            .iter()
-            .map(|(pos, _)| pos)
-            .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
-            .collect()
+        self.cells.positions_in(min_row, max_row, min_col, max_col)
     }
 
     /// Clear a cell completely (remove from HashMap)

@@ -576,6 +576,35 @@ impl ColumnStore {
         CellRef::from_parts(self.value_ref(slot), self.formats.get(chunk.formats.get(off)), extras)
     }
 
+    /// Positions of the stored cells inside a rectangle, column by column.
+    /// Visits only the chunks the rectangle overlaps, so a whole-column
+    /// query costs that column, not the sheet.
+    pub fn positions_in(&self, min_row: usize, max_row: usize, min_col: usize, max_col: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        if self.columns.is_empty() || min_row > max_row || min_col > max_col {
+            return out;
+        }
+        let last_col = max_col.min(self.columns.len() - 1);
+        let (lo, _) = split(min_row);
+        let (hi, _) = split(max_row);
+        for col in min_col..=last_col {
+            let chunks = &self.columns[col].chunks;
+            let start = chunks.partition_point(|c| c.0 < lo);
+            for (idx, chunk) in &chunks[start..] {
+                if *idx > hi {
+                    break;
+                }
+                for (off, _) in chunk.cells.slots() {
+                    let row = join(*idx, off);
+                    if (min_row..=max_row).contains(&row) {
+                        out.push((row, col));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Change a cell that exists; `None` when there is no cell there.
     pub fn update<R>(&mut self, row: usize, col: usize, f: impl FnOnce(&mut Cell) -> R) -> Option<R> {
         let carried = self.take_computed(row, col);
