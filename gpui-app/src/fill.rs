@@ -39,6 +39,7 @@ impl Spreadsheet {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_merged("fill down", cx) { return; }
+        if self.block_if_selection_in_pivot("fill", cx) { return; }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
@@ -133,6 +134,7 @@ impl Spreadsheet {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_merged("fill right", cx) { return; }
+        if self.block_if_selection_in_pivot("fill", cx) { return; }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
@@ -682,6 +684,11 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         if self.block_if_merged("fill", cx) { return; }
+        {
+            let (r0, r1) = (anchor.0.min(source_end.0).min(end.0), anchor.0.max(source_end.0).max(end.0));
+            let (c0, c1) = (anchor.1.min(source_end.1), anchor.1.max(source_end.1).max(end.1));
+            if self.block_if_pivot(r0, c0, r1, c1, "fill", cx) { return; }
+        }
 
         let col = anchor.1;
         let src_min_row = anchor.0.min(source_end.0);
@@ -850,6 +857,11 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         if self.block_if_merged("fill", cx) { return; }
+        {
+            let (c0, c1) = (anchor.1.min(source_end.1).min(end.1), anchor.1.max(source_end.1).max(end.1));
+            let (r0, r1) = (anchor.0.min(source_end.0), anchor.0.max(source_end.0).max(end.0));
+            if self.block_if_pivot(r0, c0, r1, c1, "fill", cx) { return; }
+        }
 
         let row = anchor.0;
         let src_min_col = anchor.1.min(source_end.1);

@@ -751,6 +751,8 @@ pub struct Spreadsheet {
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
+    pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
+    pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
     /// Per-cell conditional format override cache, keyed by (cells_rev, cf_rules_rev).
     /// Heavy predicates (COUNTIF over large ranges) are evaluated once per
@@ -783,6 +785,11 @@ pub struct Spreadsheet {
     // OS appearance observer — kept alive so System theme tracks OS dark/light
     #[allow(dead_code)]
     appearance_subscription: Option<gpui::Subscription>,
+
+    // Routes keys to the pivot field list before key bindings run (see
+    // Spreadsheet::intercept_pivot_keys). Kept alive for the window's life.
+    #[allow(dead_code)]
+    pivot_key_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -1100,6 +1107,8 @@ impl Spreadsheet {
             }
         });
 
+        let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
+
         // Session server channel: requests from TCP server → GUI thread
         let (session_tx, session_rx) = std::sync::mpsc::channel();
         let session_server = crate::session_server::SessionServer::new();
@@ -1300,6 +1309,8 @@ impl Spreadsheet {
             cf_preview_id: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
+            pivot_panel: None,
+            pivot_errors: std::collections::HashMap::new(),
             cf_edit_backup: None,
             cf_rules_rev: 1,
             cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -1319,6 +1330,7 @@ impl Spreadsheet {
             show_f2_tip: false,
             settings_subscription,
             appearance_subscription: Some(appearance_subscription),
+            pivot_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -2485,6 +2497,11 @@ impl Spreadsheet {
             CommandId::NextSheet => self.next_sheet(cx),
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
+            CommandId::InsertPivotTable => self.insert_pivot_table(cx),
+            CommandId::RefreshPivot => self.refresh_pivot(cx),
+            CommandId::RefreshAllPivots => self.refresh_all_pivots(cx),
+            CommandId::EditPivotFields => self.edit_pivot_fields(cx),
+            CommandId::DeletePivot => self.delete_pivot(cx),
 
             // Data (sort/filter)
             CommandId::SortAscending => {
@@ -3395,7 +3412,7 @@ impl Spreadsheet {
     /// (the import-time path has no window) it falls back to an estimate over
     /// CHARACTERS — the old code multiplied `str::len()`, which is bytes, so
     /// "café" measured as 5 and CJK as 3× its true width.
-    fn measure_columns(
+    pub(crate) fn measure_columns(
         &self,
         cols: &[usize],
         window: Option<&Window>,

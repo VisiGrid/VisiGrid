@@ -50,6 +50,7 @@ mod actions_ui;
 mod key_handler;
 mod f1_help;
 mod cf_rules_panel;
+mod pivot_panel;
 mod problems_panel;
 mod cond_format_dialog;
 mod named_range_dialogs;
@@ -729,6 +730,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     .child(cf_rules_panel::render_cf_rules_panel(app, cx))
             )
         })
+        // Pivot field list (right-side drawer). Clicking outside keeps it
+        // open: the draft is only discarded with Esc or the close button.
+        .when(app.pivot_panel.is_some(), |d| {
+            d.child(pivot_panel::render_pivot_panel(app, cx))
+        })
         // Profiler panel (right-side drawer, mutually exclusive with inspector)
         .when(show_profiler, |d| {
             d.child(
@@ -1054,6 +1060,23 @@ fn render_merge_confirm_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
         )
 }
 
+/// A small key cap shown inside a dialog button, naming its keyboard shortcut.
+fn key_hint(key: &'static str, text: Hsla, border: Hsla) -> Div {
+    div()
+        .px(px(4.0))
+        .min_w(px(16.0))
+        .flex()
+        .justify_center()
+        .border_1()
+        .border_color(border)
+        .rounded(px(3.0))
+        .text_size(px(10.0))
+        .line_height(px(14.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(text)
+        .child(key)
+}
+
 /// Render the close-window save confirmation dialog.
 fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     use crate::ui::{modal_backdrop, Button, DialogFrame, DialogSize};
@@ -1093,18 +1116,24 @@ fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut
     // Footer buttons with focus ring
     let cancel_btn = Button::new("close-cancel-btn", "Cancel")
         .secondary(if focused == 0 { accent } else { panel_border }, if focused == 0 { text_primary } else { text_muted })
+        .flex().items_center().gap(px(6.0))
+        .child(key_hint("Esc", text_muted, panel_border))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.resolve_close_confirm(0, window, cx);
         }));
 
     let dont_save_btn = Button::new("close-dont-save-btn", "Don't Save")
         .secondary(if focused == 1 { accent } else { panel_border }, if focused == 1 { text_primary } else { text_muted })
+        .flex().items_center().gap(px(6.0))
+        .child(key_hint("D", text_muted, panel_border))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.resolve_close_confirm(1, window, cx);
         }));
 
     let save_btn = Button::new("close-save-btn", "Save")
         .primary(accent, rgb(0xffffff).into())
+        .flex().items_center().gap(px(6.0))
+        .child(key_hint("S", hsla(0.0, 0.0, 1.0, 0.85), hsla(0.0, 0.0, 1.0, 0.45)))
         .when(focused == 2, |b| b.border_1().border_color(hsla(0.0, 0.0, 1.0, 1.0)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.resolve_close_confirm(2, window, cx);

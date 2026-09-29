@@ -298,11 +298,6 @@ pub struct Sheet {
     /// Spilled values from array formulas: (row, col) -> Value
     #[serde(skip)]
     spill_values: HashMap<(usize, usize), Value>,
-    /// Computed value cache: populated during topological recalc, read during evaluation.
-    /// Stores typed Value (not String) to avoid lossy conversions.
-    /// Getters NEVER evaluate on cache miss — only the topo recalc pass populates this.
-    #[serde(skip)]
-    computed_cache: RefCell<HashMap<(usize, usize), Value>>,
     /// Cells whose value was kept because this build could not recompute the
     /// formula — a custom function it has no definition for.
     ///
@@ -342,6 +337,16 @@ pub struct Sheet {
     /// Initial/saved freeze configuration (rows, columns).
     #[serde(default)]
     pub frozen_panes: (usize, usize),
+    /// Pivot tables whose output this sheet shows. Each owns its output
+    /// rectangle: ordinary value writes inside it are refused here, at the
+    /// engine boundary, whatever the caller (typing, paste, fill, scripts,
+    /// plans, undo of unrelated edits). Only the pivot writer changes them.
+    #[serde(default)]
+    pub pivots: Vec<crate::pivot::PivotTable>,
+    /// Bumped on every accepted value write. Pivots compare it with the
+    /// generation recorded at refresh to know their source may have changed.
+    #[serde(skip)]
+    edit_generation: u64,
     /// Fast lookup: (row, col) → index into merged_regions
     #[serde(skip)]
     merge_index: HashMap<(usize, usize), usize>,
@@ -392,10 +397,9 @@ impl CellLookup for Sheet {
                 ValueRef::Formula { ast: Some(_), .. } => {
                     // Cache-only: never evaluate on cache miss.
                     // Topo recalc populates the cache; miss means not yet computed.
-                    let cache = self.computed_cache.borrow();
-                    cache.get(&(row, col))
-                        .map(|v| v.to_number().unwrap_or(0.0))
-                        .unwrap_or(0.0)
+                    self.cells.with_computed(row, col, |v| {
+                        v.map(|v| v.to_number().unwrap_or(0.0)).unwrap_or(0.0)
+                    })
                 }
                 ValueRef::Formula { ast: None, .. } => 0.0,
             },
@@ -432,10 +436,7 @@ impl CellLookup for Sheet {
                 ValueRef::Formula { ast: Some(_), .. } => {
                     // Cache-only: never evaluate on cache miss.
                     // Topo recalc populates the cache; miss means not yet computed.
-                    let cache = self.computed_cache.borrow();
-                    cache.get(&(row, col))
-                        .map(|v| v.to_text())
-                        .unwrap_or_default()
+                    self.cells.with_computed(row, col, |v| v.map(|v| v.to_text()).unwrap_or_default())
                 }
                 ValueRef::Formula { ast: None, .. } => String::new(),
             },
@@ -506,7 +507,6 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
-            computed_cache: RefCell::new(HashMap::new()),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
@@ -516,6 +516,8 @@ impl Sheet {
             col_formats: HashMap::new(),
             frozen_panes: (0, 0),
             merged_regions: Vec::new(),
+            pivots: Vec::new(),
+            edit_generation: 0,
             merge_index: HashMap::new(),
             has_any_borders: false,
         }
@@ -534,7 +536,6 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
-            computed_cache: RefCell::new(HashMap::new()),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
@@ -544,6 +545,8 @@ impl Sheet {
             col_formats: HashMap::new(),
             frozen_panes: (0, 0),
             merged_regions: Vec::new(),
+            pivots: Vec::new(),
+            edit_generation: 0,
             merge_index: HashMap::new(),
             has_any_borders: false,
         }
@@ -552,28 +555,108 @@ impl Sheet {
     /// Cache a computed Value for a formula cell.
     /// Called ONLY during topological recalc (workbook.evaluate_cell).
     /// Getters read from this cache but never write to it.
+    ///
+    /// Results live with their formulas in the cell store (#18 phase 2), so
+    /// a value cached where there is no formula is dropped: every reader
+    /// consults results only for formula cells.
     pub fn cache_computed(&self, row: usize, col: usize, value: Value) {
-        self.computed_cache.borrow_mut().insert((row, col), value);
+        self.cells.set_computed(row, col, value);
     }
 
     /// Get the number of entries in the computed cache (for diagnostics).
     pub fn computed_cache_len(&self) -> usize {
-        self.computed_cache.borrow().len()
+        self.cells.computed_count()
     }
 
     /// Clear the computed value cache (before a new recalc pass).
     pub fn clear_computed_cache(&self) {
-        self.computed_cache.borrow_mut().clear();
+        self.cells.clear_all_computed();
     }
 
     /// Clear a single entry from the computed cache (for incremental recalc).
     pub fn clear_cached(&self, row: usize, col: usize) {
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
     }
 
     /// Get a cached computed value (for iterative calculation snapshot).
     pub fn get_cached_value(&self, row: usize, col: usize) -> Option<Value> {
-        self.computed_cache.borrow().get(&(row, col)).cloned()
+        self.cells.with_computed(row, col, |v| v.cloned())
+    }
+
+    /// The pivot table whose owned output contains this cell, if any.
+    pub fn pivot_at(&self, row: usize, col: usize) -> Option<&crate::pivot::PivotTable> {
+        self.pivots.iter().find(|p| p.contains(row, col))
+    }
+
+    /// Is this cell inside a pivot table's owned output?
+    #[inline]
+    pub fn is_pivot_owned(&self, row: usize, col: usize) -> bool {
+        !self.pivots.is_empty() && self.pivots.iter().any(|p| p.contains(row, col))
+    }
+
+    /// The first pivot whose owned output intersects the rectangle (inclusive).
+    pub fn pivot_in_rect(&self, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<&crate::pivot::PivotTable> {
+        self.pivots.iter().find(|p| p.intersects(r0, c0, r1, c1))
+    }
+
+    /// Counter of accepted value writes on this sheet (runtime only).
+    pub fn edit_generation(&self) -> u64 {
+        self.edit_generation
+    }
+
+    /// Guard for ordinary value writes: refuse inside a pivot's output, and
+    /// count the write otherwise.
+    #[inline]
+    fn accept_value_write(&mut self, row: usize, col: usize) -> bool {
+        if self.is_pivot_owned(row, col) {
+            return false;
+        }
+        self.edit_generation = self.edit_generation.wrapping_add(1);
+        true
+    }
+
+    /// Write one pivot output cell, bypassing the ownership guard. Numbers stay
+    /// numbers; text is stored as text without type inference (numeric-looking
+    /// labels stay text); booleans and errors are written the way Paste Values
+    /// writes them. `Value::Empty` clears the cell.
+    pub(crate) fn write_pivot_cell(&mut self, row: usize, col: usize, value: &crate::formula::eval::Value) {
+        use crate::formula::eval::Value;
+        self.clear_spill_from(row, col);
+        self.cells.clear_computed(row, col);
+        match value {
+            Value::Empty => {
+                // Keep the cell's formatting: a blank result inside the output
+                // (a missing intersection) must not strip the user's styling.
+                self.spill_values.remove(&(row, col));
+                self.cells.update(row, col, |cell| {
+                    cell.value = CellValue::Empty;
+                    cell.clear_spill_state();
+                });
+            }
+            Value::Number(n) => {
+                let n = *n;
+                self.with_cell(row, col, |cell| {
+                    cell.value = CellValue::Number(n);
+                    cell.clear_spill_state();
+                });
+            }
+            Value::Text(t) => {
+                self.with_cell(row, col, |cell| {
+                    cell.value = CellValue::Text(t.clone());
+                    cell.clear_spill_state();
+                });
+            }
+            Value::Boolean(b) => {
+                let b = *b;
+                self.with_cell(row, col, |cell| cell.set(if b { "TRUE" } else { "FALSE" }));
+            }
+            Value::Error(e) => {
+                self.with_cell(row, col, |cell| {
+                    cell.value = CellValue::Text(e.clone());
+                    cell.clear_spill_state();
+                });
+            }
+        }
     }
 
     /// Update the sheet name (also updates name_key)
@@ -586,12 +669,15 @@ impl Sheet {
     pub fn set_value(&mut self, row: usize, col: usize, value: &str) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
 
         // Clear any existing spill from this cell before setting new value
         self.clear_spill_from(row, col);
 
         // Invalidate computed cache (cell changed, dependents may need recompute)
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
 
         self.with_cell(row, col, |cell| cell.set(value));
 
@@ -605,8 +691,11 @@ impl Sheet {
     /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
     pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
         self.clear_spill_from(row, col);
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set_text(text));
     }
 
@@ -623,8 +712,11 @@ impl Sheet {
     /// Callers must run an ordered recompute afterwards.
     pub fn set_value_deferred(&mut self, row: usize, col: usize, value: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
         self.clear_spill_from(row, col);
-        self.computed_cache.borrow_mut().remove(&(row, col));
+        self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set(value));
     }
 
@@ -655,6 +747,9 @@ impl Sheet {
     pub fn set_cycle_error(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
 
         // Store #CYCLE! as the cell value while preserving the formula source
         // For now, we just set a text value - the original formula is lost
@@ -866,6 +961,11 @@ impl Sheet {
                 let r = parent_row + dr;
                 let c = parent_col + dc;
 
+                // A pivot's owned output blocks a spill, blank cells included.
+                if self.is_pivot_owned(r, c) {
+                    return Err((r, c));
+                }
+
                 // Check if cell exists and has content
                 if let Some(cell) = self.cells.get(r, c) {
                     // Check if it has its own value (not a spill receiver from us)
@@ -1075,8 +1175,7 @@ impl Sheet {
                     ValueRef::Number(n) => Value::Number(n),
                     ValueRef::Formula { ast: Some(_), .. } => {
                         // Cache-only: never evaluate on cache miss.
-                        let cache = self.computed_cache.borrow();
-                        cache.get(&(row, col)).cloned().unwrap_or(Value::Empty)
+                        self.cells.with_computed(row, col, |v| v.cloned().unwrap_or(Value::Empty))
                     }
                     ValueRef::Text(s) => Value::Text(s.to_string()),
                     ValueRef::Empty => return String::new(),
@@ -1126,8 +1225,7 @@ impl Sheet {
                     ValueRef::Number(n) => Value::Number(n),
                     ValueRef::Formula { ast: Some(_), .. } => {
                         // Cache-only: never evaluate on cache miss.
-                        let cache = self.computed_cache.borrow();
-                        cache.get(&(row, col)).cloned().unwrap_or(Value::Empty)
+                        self.cells.with_computed(row, col, |v| v.cloned().unwrap_or(Value::Empty))
                     }
                     ValueRef::Formula { ast: None, .. } => Value::Error("#ERR".to_string()),
                 }
@@ -1242,8 +1340,7 @@ impl Sheet {
             }
             ValueRef::Formula { ast: Some(_), .. } => {
                 // Cache-only: never evaluate on cache miss.
-                let cache = self.computed_cache.borrow();
-                match cache.get(&(row, col)) {
+                self.cells.with_computed(row, col, |v| match v {
                     Some(Value::Number(n)) => {
                         if n.fract() == 0.0 {
                             format!("{}", *n as i64)
@@ -1254,7 +1351,7 @@ impl Sheet {
                     Some(Value::Error(e)) => e.clone(),
                     Some(v) => v.to_text(),
                     None => String::new(),
-                }
+                })
             }
             ValueRef::Formula { ast: None, .. } => "#ERR".to_string(),
         }
@@ -1392,6 +1489,9 @@ impl Sheet {
     pub fn clear_cell(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
 
         self.clear_spill_from(row, col);
         self.cells.remove(row, col);
@@ -2363,6 +2463,31 @@ mod tests {
         sheet.delete_cols(0, 2);
         assert_eq!(sheet.get_format(900, 0), column);
         assert!(sheet.cells_iter().count() < 10);
+    }
+
+    /// #18 phase 2, through the public API: results live with their
+    /// formulas. Replacing the formula drops the result; restyling keeps it.
+    #[test]
+    fn formula_results_follow_the_formula_not_the_cell() {
+        use crate::formula::eval::Value;
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
+        sheet.set_value(0, 0, "2");
+        sheet.set_value(1, 0, "=A1*21");
+        sheet.cache_computed(1, 0, Value::Number(42.0));
+
+        sheet.toggle_bold(1, 0);
+        sheet.set_style_id(1, 0, 7);
+        assert_eq!(sheet.get_cached_value(1, 0), Some(Value::Number(42.0)), "restyling keeps the result");
+
+        // set_value evaluates on the spot: the new formula's value, not 42.
+        sheet.set_value(1, 0, "=A1*3");
+        assert_eq!(sheet.get_cached_value(1, 0), Some(Value::Number(6.0)), "the new formula's own result");
+        // set_value_deferred (bulk loads) leaves it for the ordered recompute.
+        sheet.set_value_deferred(1, 0, "=A1*4");
+        assert_eq!(sheet.get_cached_value(1, 0), None, "a deferred formula starts uncomputed");
+
+        sheet.cache_computed(5, 5, Value::Number(1.0));
+        assert_eq!(sheet.get_cached_value(5, 5), None, "no formula there, nothing kept");
     }
 
     use super::*;

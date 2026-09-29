@@ -908,6 +908,12 @@ impl Spreadsheet {
     fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
+        // Persist pivots' stale flags, so a reopened workbook never claims
+        // results are current after its source was edited.
+        self.workbook.update(cx, |wb, _| {
+            wb.update_pivot_staleness();
+        });
+
         // For .sheet files, use full save (workbook + scripts + run records)
         // For CSV, use sheet-level export (named ranges not supported in CSV)
         let result = match extension.to_lowercase().as_str() {
