@@ -1,0 +1,1430 @@
+{
+  "fixture_version": 1,
+  "now": "2026-09-29T00:00:00Z",
+  "test_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "public_keys": {
+    "fixture-only-001": "IVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI=",
+    "fixture-only-002": "Ivwpd5Lwtv/Av8/bftsMCqFOAlo2XsDjQuhuOCnLdLY="
+  },
+  "cases": [
+    {
+      "name": "yearly_pro_with_explicit_nulls",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "monthly_pro",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "monthly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2026-10-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "6KOMZCn7LJt3M5bac9eCoP1fGyZlR5NZIffZQrTAopFW1zjqYauoZy/YE47ZI0hr/f68ygf6NJTvpxvSUlZdAA==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2026-10-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"monthly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "perpetual_pro_plus",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro_plus",
+          "plan": "perpetual",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": null,
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "plugins",
+              "advanced_transforms"
+            ],
+            "limits": {
+              "max_plugins": null,
+              "max_rows_fast_mode": null
+            }
+          },
+          "pro_plus": {
+            "publish": true,
+            "cloud_sync": true,
+            "visihub_included": true,
+            "version_history": true,
+            "priority_support": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": null
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "AQAo0FZa6lde6KZmJRNTds72Yf3IN55+1fOZoYaRcdQfUU/POcqw1OzfttVEmqbl1OqA8ZpbT1Vo39SDqeONDQ==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro_plus\",\"entitlements\":{\"features\":[\"plugins\",\"advanced_transforms\"],\"limits\":{\"max_plugins\":null,\"max_rows_fast_mode\":null}},\"expires_at\":null,\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"perpetual\",\"pro_plus\":{\"cloud_sync\":true,\"priority_support\":true,\"publish\":true,\"version_history\":true,\"visihub_included\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":null}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "unicode_escapes_and_unknown_fields",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": "Zoë 東京 🚀",
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": "quote: \" slash: / backslash: \\ newline:\n tab:\t",
+          "nonce": "fixture-nonce-001",
+          "future_field": {
+            "z": [
+              null,
+              true,
+              false,
+              {
+                "b": 2,
+                "a": 1
+              }
+            ],
+            "a": "extension"
+          }
+        },
+        "signature": "FCqxhA9jCgc7GF2uY++nPMe+Hb1XM8ffKlFO+3aKVdrFghgVdshhCcWq2go8Gy4UKWyLek9tQHDeILFkY0JyDA==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":\"Zoë 東京 🚀\"},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"future_field\":{\"a\":\"extension\",\"z\":[null,true,false,{\"a\":1,\"b\":2}]},\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":\"quote: \\\" slash: / backslash: \\\\ newline:\\n tab:\\t\",\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "timestamp_offset_preserved",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T01:00:00+01:00",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "kCXh5GPqpHZRFPFDo/IiSZZ3r7wa+xa6SVjzQ1Ubq42D1KOk3krKcfMWDdtkdnCeM3+MlubH4CsyR7PLl3IWDw==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T01:00:00+01:00\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "in_grace",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "expired",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2026-09-28T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "n7Z1CFF2QyN3+kJsVkoPUnWkqPV5My6QEIrMZK6m5TKjP/vyCC8SB891+XjR8/NRVznTR1oUz+898DQFEyT/BQ==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2026-09-28T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"expired\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": true
+    },
+    {
+      "name": "past_grace",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "expired",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2026-09-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "uHY9v9aO05YzjuKiSUMc4jRjObjNErVeJpbevU7dsYDZyJlEXOJPNlRCtyIfQ4Qr9R3ZgibnKsLu4bCMMC3CDQ==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2026-09-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"expired\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "future_start",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-10-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "EveVikAplC0NE7F2to2GxI6OdTF/Ki3246/vQ3Hz84YNeAIPAJkajihMBqhsJtPazMflFD/ppRWKWOUAEDFjBw==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-10-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "revoked",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "revoked",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "WK4ZjPy7dD0BJjLzVIB37almJVNigKV5IB+g6LnUqiTyNHt5oVzHxHw8SCSBuYreRmQUaefyleKbOVtNgwiOAQ==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"revoked\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "wrong_product",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visibooks",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "enw8WVnyemebgZ37DB9XFtQRcv3qGaCqL/jmonu3DUgT+oEEJM966W4RbdZywaiIOHAo5BShk4Y4JZ+YnyMwDg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visibooks\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "exact_grace_end",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2026-09-15T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "gSBA+GZJq8BsWLPdA0OC+LDwLXsvR/AopLONKVxREKOk0Vkn/+S8MYKliydngNI7OAHCmYSac78a4o61Rme4CA==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2026-09-15T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": true
+    },
+    {
+      "name": "exact_start",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-09-29T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "iiqFP5GElO0lXwmq8mcWRK/c/FY6W7WQ6sT5pqiUhbG81ZFUDMySd0EWJzhUoVx4tbb3wXa3IbsjA2c8Qh6pBQ==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-09-29T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "rotated_key",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "yvDB9/532eoG6aWmSohHaBSoufiIxWxLBdls2RJICpJN8w1SrO/72F+qV9Sap1fwxii5pn5K4YKOE2668lo3DQ==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-002"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "reordered_payload",
+      "envelope": {
+        "payload": {
+          "nonce": "fixture-nonce-001",
+          "notes": null,
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "grace_days": 14,
+          "expires_at": "2027-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "status": "active",
+          "plan": "yearly",
+          "edition": "pro",
+          "product": "visigrid",
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "schema_version": 1
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": true,
+      "license_valid": true,
+      "in_grace_period": false
+    },
+    {
+      "name": "tampered_edition",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro_plus",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro_plus\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "tampered_customer",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "other@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"other@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "tampered_expiry",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2099-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2099-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "tampered_limit",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 999
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":999,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "removed_null",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "added_unknown_field",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001",
+          "unsigned_extension": true
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"unsigned_extension\":true,\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "reordered_features",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "inspector",
+              "fast_large_files",
+              "lua"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"inspector\",\"fast_large_files\",\"lua\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "unknown_key",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "untrusted-key"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "wrong_trusted_key",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-002"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "unsupported_algorithm",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "cKAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "rsa",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "invalid_base64",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "not base64!",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "short_signature",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    },
+    {
+      "name": "corrupt_signature",
+      "envelope": {
+        "payload": {
+          "schema_version": 1,
+          "license_id": "VG-FIXTURE-ONLY-001",
+          "product": "visigrid",
+          "edition": "pro",
+          "plan": "yearly",
+          "status": "active",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "starts_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2027-01-01T00:00:00Z",
+          "grace_days": 14,
+          "customer": {
+            "name": null,
+            "email": "fixture@example.invalid"
+          },
+          "entitlements": {
+            "features": [
+              "lua",
+              "fast_large_files",
+              "inspector"
+            ],
+            "limits": {
+              "max_rows_fast_mode": 1000000,
+              "max_plugins": 5
+            }
+          },
+          "pro_plus": {
+            "publish": true
+          },
+          "device_binding": {
+            "type": "soft",
+            "max_devices": 3,
+            "device_ids": []
+          },
+          "update_policy": {
+            "updates_until": "2027-01-01T00:00:00Z"
+          },
+          "notes": null,
+          "nonce": "fixture-nonce-001"
+        },
+        "signature": "caAtlwM90KXoxlSTO67dRaIr05HawqVFO0wUu2GaBi7iKfcXTUuK5FpTsJSU9MkgcnbT4pghbkn2byUwPf1PCg==",
+        "sig_alg": "ed25519",
+        "key_id": "fixture-only-001"
+      },
+      "canonical": "{\"customer\":{\"email\":\"fixture@example.invalid\",\"name\":null},\"device_binding\":{\"device_ids\":[],\"max_devices\":3,\"type\":\"soft\"},\"edition\":\"pro\",\"entitlements\":{\"features\":[\"lua\",\"fast_large_files\",\"inspector\"],\"limits\":{\"max_plugins\":5,\"max_rows_fast_mode\":1000000}},\"expires_at\":\"2027-01-01T00:00:00Z\",\"grace_days\":14,\"issued_at\":\"2026-01-01T00:00:00Z\",\"license_id\":\"VG-FIXTURE-ONLY-001\",\"nonce\":\"fixture-nonce-001\",\"notes\":null,\"plan\":\"yearly\",\"pro_plus\":{\"publish\":true},\"product\":\"visigrid\",\"schema_version\":1,\"starts_at\":\"2026-01-01T00:00:00Z\",\"status\":\"active\",\"update_policy\":{\"updates_until\":\"2027-01-01T00:00:00Z\"}}",
+      "signature_valid": false,
+      "license_valid": false,
+      "in_grace_period": false
+    }
+  ]
+}

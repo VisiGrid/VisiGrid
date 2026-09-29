@@ -54,6 +54,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: License compatibility with commercial and ordered JSON features
+        run: cargo test --locked -p visigrid-license --features commercial,serde_json/preserve_order
+
       # A first contribution should not fail on a lint the project has hundreds
       # of already, and it will not: clippy exits 0 when it only has warnings.
       # So `|| true` never protected anyone from the backlog — its only effect
