@@ -355,6 +355,16 @@ pub struct Sheet {
     /// Initial/saved freeze configuration (rows, columns).
     #[serde(default)]
     pub frozen_panes: (usize, usize),
+    /// Pivot tables whose output this sheet shows. Each owns its output
+    /// rectangle: ordinary value writes inside it are refused here, at the
+    /// engine boundary, whatever the caller (typing, paste, fill, scripts,
+    /// plans, undo of unrelated edits). Only the pivot writer changes them.
+    #[serde(default)]
+    pub pivots: Vec<crate::pivot::PivotTable>,
+    /// Bumped on every accepted value write. Pivots compare it with the
+    /// generation recorded at refresh to know their source may have changed.
+    #[serde(skip)]
+    edit_generation: u64,
     /// Fast lookup: (row, col) → index into merged_regions
     #[serde(skip)]
     merge_index: HashMap<(usize, usize), usize>,
@@ -508,6 +518,8 @@ impl Sheet {
             col_formats: HashMap::new(),
             frozen_panes: (0, 0),
             merged_regions: Vec::new(),
+            pivots: Vec::new(),
+            edit_generation: 0,
             merge_index: HashMap::new(),
             has_any_borders: false,
         }
@@ -536,6 +548,8 @@ impl Sheet {
             col_formats: HashMap::new(),
             frozen_panes: (0, 0),
             merged_regions: Vec::new(),
+            pivots: Vec::new(),
+            edit_generation: 0,
             merge_index: HashMap::new(),
             has_any_borders: false,
         }
@@ -568,6 +582,73 @@ impl Sheet {
         self.computed_cache.borrow().get(&(row, col)).cloned()
     }
 
+    /// The pivot table whose owned output contains this cell, if any.
+    pub fn pivot_at(&self, row: usize, col: usize) -> Option<&crate::pivot::PivotTable> {
+        self.pivots.iter().find(|p| p.contains(row, col))
+    }
+
+    /// Is this cell inside a pivot table's owned output?
+    #[inline]
+    pub fn is_pivot_owned(&self, row: usize, col: usize) -> bool {
+        !self.pivots.is_empty() && self.pivots.iter().any(|p| p.contains(row, col))
+    }
+
+    /// The first pivot whose owned output intersects the rectangle (inclusive).
+    pub fn pivot_in_rect(&self, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<&crate::pivot::PivotTable> {
+        self.pivots.iter().find(|p| p.intersects(r0, c0, r1, c1))
+    }
+
+    /// Counter of accepted value writes on this sheet (runtime only).
+    pub fn edit_generation(&self) -> u64 {
+        self.edit_generation
+    }
+
+    /// Guard for ordinary value writes: refuse inside a pivot's output, and
+    /// count the write otherwise.
+    #[inline]
+    fn accept_value_write(&mut self, row: usize, col: usize) -> bool {
+        if self.is_pivot_owned(row, col) {
+            return false;
+        }
+        self.edit_generation = self.edit_generation.wrapping_add(1);
+        true
+    }
+
+    /// Write one pivot output cell, bypassing the ownership guard. Numbers stay
+    /// numbers; text is stored as text without type inference (numeric-looking
+    /// labels stay text); booleans and errors are written the way Paste Values
+    /// writes them. `Value::Empty` clears the cell.
+    pub(crate) fn write_pivot_cell(&mut self, row: usize, col: usize, value: &crate::formula::eval::Value) {
+        use crate::formula::eval::Value;
+        self.clear_spill_from(row, col);
+        self.computed_cache.borrow_mut().remove(&(row, col));
+        match value {
+            Value::Empty => {
+                self.cells.remove(&cell_key(row, col));
+                self.spill_values.remove(&(row, col));
+            }
+            Value::Number(n) => {
+                let cell = self.cell_with_inherited_format(row, col);
+                cell.value = CellValue::Number(*n);
+                cell.clear_spill_state();
+            }
+            Value::Text(t) => {
+                let cell = self.cell_with_inherited_format(row, col);
+                cell.value = CellValue::Text(t.clone());
+                cell.clear_spill_state();
+            }
+            Value::Boolean(b) => {
+                let cell = self.cell_with_inherited_format(row, col);
+                cell.set(if *b { "TRUE" } else { "FALSE" });
+            }
+            Value::Error(e) => {
+                let cell = self.cell_with_inherited_format(row, col);
+                cell.value = CellValue::Text(e.clone());
+                cell.clear_spill_state();
+            }
+        }
+    }
+
     /// Update the sheet name (also updates name_key)
     pub fn set_name(&mut self, name: &str) {
         let trimmed = name.trim();
@@ -578,6 +659,9 @@ impl Sheet {
     pub fn set_value(&mut self, row: usize, col: usize, value: &str) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
 
         // Clear any existing spill from this cell before setting new value
         self.clear_spill_from(row, col);
@@ -598,6 +682,9 @@ impl Sheet {
     /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
     pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
         self.clear_spill_from(row, col);
         self.computed_cache.borrow_mut().remove(&(row, col));
         let cell = self.cell_with_inherited_format(row, col);
@@ -617,6 +704,9 @@ impl Sheet {
     /// Callers must run an ordered recompute afterwards.
     pub fn set_value_deferred(&mut self, row: usize, col: usize, value: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
         self.clear_spill_from(row, col);
         self.computed_cache.borrow_mut().remove(&(row, col));
         let cell = self.cell_with_inherited_format(row, col);
@@ -650,6 +740,9 @@ impl Sheet {
     pub fn set_cycle_error(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
 
         // Store #CYCLE! as the cell value while preserving the formula source
         // For now, we just set a text value - the original formula is lost
@@ -862,6 +955,11 @@ impl Sheet {
                 }
                 let r = parent_row + dr;
                 let c = parent_col + dc;
+
+                // A pivot's owned output blocks a spill, blank cells included.
+                if self.is_pivot_owned(r, c) {
+                    return Err((r, c));
+                }
 
                 // Check if cell exists and has content
                 if let Some(cell) = self.cells.get(&cell_key(r, c)) {
@@ -1291,6 +1389,9 @@ impl Sheet {
     pub fn clear_cell(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        if !self.accept_value_write(row, col) {
+            return;
+        }
 
         self.clear_spill_from(row, col);
         self.cells.remove(&cell_key(row, col));

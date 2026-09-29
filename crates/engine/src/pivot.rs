@@ -160,6 +160,63 @@ impl PivotSource {
     }
 }
 
+/// When a pivot was last refreshed and against what.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefreshRecord {
+    /// Source data rows read.
+    pub source_rows: u64,
+    /// Seconds since the Unix epoch.
+    pub refreshed_at: i64,
+}
+
+/// A pivot table, stored on the sheet that shows its output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PivotTable {
+    /// Stable, workbook-unique id.
+    pub id: u64,
+    /// Display name, e.g. "PivotTable1".
+    pub name: String,
+    pub source: PivotSource,
+    pub definition: PivotDefinition,
+    /// Top-left output cell.
+    pub anchor_row: u32,
+    pub anchor_col: u32,
+    /// Size (rows, cols) of the last committed output. `None` until the first
+    /// successful refresh. The owned region is exactly this rectangle.
+    #[serde(default)]
+    pub extent: Option<(u32, u32)>,
+    #[serde(default)]
+    pub last_refresh: Option<RefreshRecord>,
+    /// The source may have changed since the last refresh. Persisted, so a
+    /// reopened workbook never claims to be fresh.
+    #[serde(default)]
+    pub stale: bool,
+    /// Runtime only: the source sheet's edit generation at the last refresh.
+    #[serde(skip)]
+    pub source_generation: Option<u64>,
+}
+
+impl PivotTable {
+    /// The owned rectangle, inclusive: (start_row, start_col, end_row, end_col).
+    pub fn region(&self) -> Option<(usize, usize, usize, usize)> {
+        let (h, w) = self.extent?;
+        if h == 0 || w == 0 {
+            return None;
+        }
+        let (r, c) = (self.anchor_row as usize, self.anchor_col as usize);
+        Some((r, c, r + h as usize - 1, c + w as usize - 1))
+    }
+
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        self.region().is_some_and(|(r0, c0, r1, c1)| row >= r0 && row <= r1 && col >= c0 && col <= c1)
+    }
+
+    /// Does the owned region intersect this rectangle (inclusive)?
+    pub fn intersects(&self, r0: usize, c0: usize, r1: usize, c1: usize) -> bool {
+        self.region().is_some_and(|(a0, b0, a1, b1)| a0 <= r1 && r0 <= a1 && b0 <= c1 && c0 <= b1)
+    }
+}
+
 /// Snapshot of the source handed to [`aggregate`]: header texts for every
 /// source column, and the data rows of the columns the definition uses.
 pub struct PivotSnapshot {

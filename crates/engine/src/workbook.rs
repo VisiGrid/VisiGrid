@@ -1,4 +1,8 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+
+#[path = "workbook_pivot.rs"]
+mod pivot_ops;
+pub use pivot_ops::{PivotCommit, PivotOpError, PivotState};
 use serde::{Deserialize, Serialize};
 use crate::cell::{CellFormat, CellValue};
 use crate::cell_id::CellId;
@@ -2179,6 +2183,14 @@ impl Workbook {
             }
         }
 
+        // Pivot outputs move as a whole or not at all: an edit that would cut
+        // through one is refused before anything changes.
+        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
+            return Err(format!(
+                "this would cut through {name}; move or delete the pivot table first"
+            ));
+        }
+
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
             let sheet = &mut self.sheets[sheet_index];
@@ -2195,6 +2207,9 @@ impl Workbook {
         // 3. Named ranges (workbook-level, so missed by any sheet-local pass).
         self.named_ranges
             .shift_for_structural(sheet_index, at, count, delete, is_row);
+
+        // 3b. Pivot outputs on this sheet, and pivot sources that live on it.
+        self.shift_pivots_for_structural(sheet_index, is_row, at, count, delete);
 
         // 4. Formulas on EVERY sheet: unqualified refs move only on the edited
         //    sheet, qualified refs move from anywhere.
