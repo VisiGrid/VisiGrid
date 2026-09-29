@@ -42,7 +42,7 @@ fn content(rng: &mut Rng, row: usize, col: usize) -> String {
     }
     let src = col_letter(rng.below(col));
     let r = row + 1;
-    match rng.below(6) {
+    match rng.below(7) {
         // running total: every row reads all rows above it
         0 => format!("=SUM(${src}$1:{src}{r})"),
         // a rectangle over several columns to the left
@@ -55,6 +55,11 @@ fn content(rng: &mut Rng, row: usize, col: usize) -> String {
         // single references
         3 => format!("={src}{}*2+{src}{}", rng.below(ROWS) + 1, rng.below(ROWS) + 1),
         4 => format!("=COUNT({src}1:{src}{})", rng.below(ROWS) + 1),
+        // written bottom-up and right-to-left: A9:A2, C5:A1
+        5 => {
+            let (a, b) = (rng.below(ROWS) + 1, rng.below(ROWS) + 1);
+            format!("=SUM({}{}:A{})", col_letter(col - 1), a.max(b), a.min(b))
+        }
         _ => format!("=MAX({src}{}:{src}{})", r.min(ROWS), ROWS),
     }
 }
@@ -135,4 +140,20 @@ fn incremental_recalc_matches_full_recompute_with_ranges_long() {
     for seed in 1..=200u64 {
         run(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 400);
     }
+}
+
+/// A range written bottom-up (A5:A1) used to reach the graph reversed:
+/// a panic in the range index, and on main a formula that never updated.
+#[test]
+fn reversed_ranges_are_tracked() {
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "=1+1");
+    wb.set_cell_value_tracked(0, 2, 0, "3");
+    wb.set_cell_value_tracked(0, 0, 1, "=SUM(A5:A1)");
+    wb.set_cell_value_tracked(0, 0, 2, "=SUM(B5:A1)");
+    assert_eq!(wb.active_sheet().get_display(0, 1), "5");
+    wb.set_cell_value_tracked(0, 2, 0, "13");
+    assert_eq!(wb.active_sheet().get_display(0, 1), "15");
+    assert_eq!(wb.active_sheet().get_display(0, 2), "30");
+    assert_eq!(snapshot(&wb), oracle(&wb));
 }
