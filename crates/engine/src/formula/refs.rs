@@ -76,6 +76,11 @@ struct Refs {
 
 impl Refs {
     fn range(&mut self, sheet: SheetId, start_row: usize, start_col: usize, end_row: usize, end_col: usize) {
+        // The parser keeps corners as written, so A5:A1 and C5:B9 arrive
+        // reversed. The evaluator normalizes them; the graph must too, or
+        // the range is empty (stale results) or its bounds invert (panic).
+        let (start_row, end_row) = (start_row.min(end_row), start_row.max(end_row));
+        let (start_col, end_col) = (start_col.min(end_col), start_col.max(end_col));
         if !self.keep_ranges || (start_row == end_row && start_col == end_col) {
             for row in start_row..=end_row {
                 for col in start_col..=end_col {

@@ -270,9 +270,16 @@ impl DepGraph {
         concrete.into_iter().flat_map(|s| s.iter().copied()).chain(through_ranges)
     }
 
-    /// Number of ordering precedents for a cell. O(1) — reads FxHashSet::len().
+    /// Number of cells a formula reads: its single references plus its ranges.
+    ///
+    /// Counts the cells each range covers, as the expanded edges once did,
+    /// so the profiler still ranks a wide SUM as the heavy formula it is.
+    /// A whole column counts its full height, not its occupied cells.
     pub fn precedent_count(&self, cell: CellId) -> usize {
-        self.preds.get(&cell).map_or(0, |s| s.len())
+        let edges = self.preds.get(&cell).map_or(0, |s| s.len());
+        self.precedent_ranges(cell).iter().fold(edges, |n, r| {
+            n.saturating_add((r.end_row - r.start_row + 1).saturating_mul(r.end_col - r.start_col + 1))
+        })
     }
 
     /// Number of dependents, including range readers.
@@ -413,6 +420,10 @@ impl DepGraph {
         if ranges.is_empty() {
             return;
         }
+        debug_assert!(
+            ranges.iter().all(|r| r.start_row <= r.end_row && r.start_col <= r.end_col),
+            "ranges reach the graph normalized: {ranges:?}"
+        );
         // A formula with ranges is a formula, even with no single references;
         // registering it first also catches a range that contains itself.
         self.preds.entry(formula).or_default();
