@@ -15,6 +15,13 @@ use crate::sheet::{SheetId, NUM_COLS, NUM_ROWS};
 
 use super::Workbook;
 
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The pivot object and the output cells it covers, at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PivotState {
@@ -290,6 +297,73 @@ impl Workbook {
             before: PivotState { sheet_id, pivot_id: table.id, table: old, cells: before_cells },
             after: PivotState { sheet_id, pivot_id: table.id, table: Some(table), cells: after_cells },
         })
+    }
+
+    /// Create a pivot on a new sheet without an undo stack (headless hosts).
+    /// Same output and styling as the desktop's create; the new sheet is
+    /// named "Pivot" (or "Pivot (2)", …) and does not become active. On any
+    /// failure the workbook is unchanged. Returns the pivot id and the new
+    /// sheet's index.
+    pub fn create_pivot(&mut self, source: pivot::PivotSource, definition: pivot::PivotDefinition) -> Result<(u64, usize), String> {
+        let mut table = PivotTable {
+            id: self.next_pivot_id(),
+            name: self.next_pivot_name(),
+            source,
+            definition,
+            anchor_row: 0,
+            anchor_col: 0,
+            extent: None,
+            last_refresh: None,
+            stale: false,
+            source_generation: None,
+        };
+        let (snapshot, generation) = self.pivot_snapshot(&table).map_err(|e| e.to_string())?;
+        let output = pivot::aggregate(&table.definition, &snapshot).map_err(|e| e.to_string())?;
+        pivot::format_new_pivot_values(&mut table.definition, &output);
+
+        let mut name = "Pivot".to_string();
+        let mut n = 2;
+        while self.sheet_name_exists(&name) {
+            name = format!("Pivot ({n})");
+            n += 1;
+        }
+        let idx = self.add_sheet_named(&name).unwrap_or_else(|| self.add_sheet());
+        let sheet_id = self.sheets[idx].id;
+        pivot::style_new_pivot(&mut self.sheets[idx], &table, &output);
+        let commit = match self.prepare_pivot_commit(sheet_id, table.clone(), &output, generation, now_secs()) {
+            Ok(c) => c,
+            Err(e) => {
+                self.take_sheet(idx);
+                return Err(e.to_string());
+            }
+        };
+        self.apply_pivot_state(&commit.after).map_err(|e| e.to_string())?;
+        self.bump_revision_for_structure();
+        Ok((table.id, idx))
+    }
+
+    /// Refresh one pivot in place without an undo stack (headless hosts).
+    /// Returns the new output size (rows, cols).
+    pub fn refresh_pivot(&mut self, pivot_id: u64) -> Result<(usize, usize), String> {
+        let (idx, table) = self.find_pivot(pivot_id).ok_or_else(|| PivotOpError::NotFound(pivot_id).to_string())?;
+        let table = table.clone();
+        let sheet_id = self.sheets[idx].id;
+        let (snapshot, generation) = self.pivot_snapshot(&table).map_err(|e| e.to_string())?;
+        let output = pivot::aggregate(&table.definition, &snapshot).map_err(|e| e.to_string())?;
+        let commit = self
+            .prepare_pivot_commit(sheet_id, table, &output, generation, now_secs())
+            .map_err(|e| e.to_string())?;
+        self.apply_pivot_state(&commit.after).map_err(|e| e.to_string())?;
+        Ok((output.height(), output.width()))
+    }
+
+    /// Find a pivot by name (case-insensitive) or by numeric id.
+    pub fn find_pivot_by_name(&self, name: &str) -> Option<(usize, &PivotTable)> {
+        let want = name.trim();
+        self.pivots()
+            .into_iter()
+            .find(|(_, t)| t.name.eq_ignore_ascii_case(want))
+            .or_else(|| want.parse::<u64>().ok().and_then(|id| self.find_pivot(id)))
     }
 
     /// Prepare deleting a pivot and clearing its output.
@@ -885,5 +959,52 @@ mod tests {
         assert_eq!(c.before.cells.len(), 8);
         assert!(c.before.cells.iter().all(|cell| cell.value == Value::Empty));
         assert!(c.approx_bytes() < 4096);
+    }
+
+    #[test]
+    fn headless_create_names_fields_and_refresh_follows_edits() {
+        let (mut wb, data, _) = book();
+        let headers = vec!["Region".to_string(), "Amount".to_string()];
+        let def = PivotDefinition::from_names(&headers, &["region".into()], None, &[(Some(Aggregation::Sum), "AMOUNT".into())], &[]).unwrap();
+        let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
+        let active = wb.active_sheet_index();
+        let (id, idx) = wb.create_pivot(source, def).unwrap();
+        assert_eq!(wb.active_sheet_index(), active, "creation does not steal the active sheet");
+        assert_eq!(wb.sheet(idx).unwrap().name, "Pivot");
+        let out = wb.sheet(idx).unwrap();
+        assert_eq!(out.get_display(0, 1), "Sum of Amount");
+        assert_eq!(out.get_display(1, 0), "East");
+        assert_eq!(out.get_display(2, 1), "12");
+        assert_eq!(out.get_display(3, 0), "Grand Total");
+
+        wb.sheet_mut(0).unwrap().set_value(1, 1, "100");
+        assert_eq!(wb.refresh_pivot(id).unwrap(), (4, 2));
+        assert_eq!(wb.sheet(idx).unwrap().get_display(2, 1), "102");
+        assert_eq!(wb.find_pivot_by_name("pivottable1").map(|(_, t)| t.id), Some(id));
+
+        // A second pivot gets the next free sheet name.
+        let def = PivotDefinition::from_names(&headers, &[], None, &[(Some(Aggregation::Count), "Region".into())], &[]).unwrap();
+        let (_, idx2) = wb.create_pivot(source, def).unwrap();
+        assert_eq!(wb.sheet(idx2).unwrap().name, "Pivot (2)");
+    }
+
+    #[test]
+    fn headless_create_refusals_leave_the_workbook_unchanged() {
+        let (mut wb, data, _) = book();
+        let headers = vec!["Region".to_string(), "Amount".to_string()];
+        let err = PivotDefinition::from_names(&headers, &["Month".into()], None, &[], &[]).unwrap_err();
+        assert!(err.contains("no column headed \"Month\"") && err.contains("Region, Amount"), "{err}");
+        assert!(PivotDefinition::from_names(&headers, &[], None, &[], &[]).is_err());
+        assert_eq!(Aggregation::parse("Distinct-Count"), Some(Aggregation::DistinctCount));
+        assert_eq!(Aggregation::parse("mean"), Some(Aggregation::Average));
+        assert_eq!(Aggregation::parse("median"), None);
+
+        // Source headers changed under a stored field: refused, no sheet added.
+        let sheets = wb.sheets().len();
+        let def = PivotDefinition::from_names(&headers, &["Region".into()], None, &[], &[]).unwrap();
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "Area");
+        let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
+        assert!(wb.create_pivot(source, def).is_err());
+        assert_eq!(wb.sheets().len(), sheets);
     }
 }

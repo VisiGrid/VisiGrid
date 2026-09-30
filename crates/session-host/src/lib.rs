@@ -29,7 +29,7 @@ pub use coalesce::coalesce_cells_to_ranges;
 pub use discovery::{discovery_dir, list_sessions, DiscoveryFile, DiscoveryManager};
 pub use events::{BroadcastEvent, ConnectionSubscriptions, EventBroadcaster, TOPIC_CELLS};
 pub use handlers::{
-    apply_ops, apply_structure, inspect, structure_target_sheet, validate_inspect_target,
+    apply_ops, apply_structure, inspect, resolve_create_pivot, resolve_refresh_pivots, structure_target_sheet, validate_inspect_target,
     validate_session_op, validate_structure_op, ApplyOutcome, FormatPatch, ValueChange,
     MAX_SESSION_FORMAT_CELLS, MAX_SESSION_INSPECT_CELLS, MAX_STRUCTURE_COUNT, NUM_COLS, NUM_ROWS,
 };

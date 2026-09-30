@@ -68,8 +68,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() != 1 {
                 return Some(EvalResult::Error("TRANSPOSE requires exactly one argument".to_string()));
             }
-            match range_values(&args[0], lookup) {
-                Some(Ok((in_rows, in_cols, rows))) => {
+            // A computed array (FILTER(...), UNIQUE(...)) transposes like a range;
+            // it used to come back unchanged.
+            match grid_values(&args[0], lookup) {
+                Ok((in_rows, in_cols, rows)) => {
                     let mut array = Array2D::new(in_cols, in_rows);
                     for (r, row) in rows.into_iter().enumerate() {
                         for (c, val) in row.into_iter().enumerate() {
@@ -80,9 +82,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     }
                     EvalResult::Array(array)
                 }
-                Some(Err(e)) => EvalResult::Error(e),
-                // Single value - just return it (1x1 transpose is identity)
-                None => evaluate(&args[0], lookup),
+                Err(e) => EvalResult::Error(e),
             }
         }
 
@@ -147,35 +147,11 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("UNIQUE requires exactly one argument".to_string()));
             }
 
-            // Build rows from range
-            let (in_cols, rows): (usize, Vec<Vec<Value>>) = match &args[0] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                    let r_count = end_row - start_row + 1;
-                    let c_count = end_col - start_col + 1;
-                    let mut row_data = Vec::with_capacity(r_count);
-                    for r in 0..r_count {
-                        let mut row = Vec::with_capacity(c_count);
-                        for c in 0..c_count {
-                            let text = lookup.get_text(start_row + r, start_col + c);
-                            let val = lookup.get_value(start_row + r, start_col + c);
-                            if text.is_empty() {
-                                row.push(Value::Empty);
-                            } else if text.starts_with('#') {
-                                row.push(Value::Error(text));
-                            } else if text.parse::<f64>().is_ok() {
-                                row.push(Value::Number(val));
-                            } else {
-                                row.push(Value::Text(text));
-                            }
-                        }
-                        row_data.push(row);
-                    }
-                    (c_count, row_data)
-                }
-                _ => {
-                    // Single value - return as-is
-                    return Some(evaluate(&args[0], lookup));
-                }
+            // Rows from a range or a computed array, typed. A computed array
+            // (UNIQUE(FILTER(...))) used to come back unchanged, duplicates and all.
+            let (_, in_cols, rows) = match grid_values(&args[0], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
 
             // Find unique rows (first occurrence wins, case-insensitive for text)
@@ -247,11 +223,11 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 false
             };
 
-            let (in_rows, in_cols, mut rows) = match range_values(&args[0], lookup) {
-                Some(Ok(v)) => v,
-                Some(Err(e)) => return Some(EvalResult::Error(e)),
-                // Single value - can't sort meaningfully
-                None => return Some(evaluate(&args[0], lookup)),
+            // A computed array sorts like a range. SORT(UNIQUE(x)) used to return
+            // UNIQUE's result untouched, which looks sorted until it isn't.
+            let (in_rows, in_cols, mut rows) = match grid_values(&args[0], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
             };
 
             // Validate sort column

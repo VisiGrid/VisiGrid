@@ -3092,13 +3092,18 @@ impl Spreadsheet {
 
     /// Set column width for the current sheet
     pub fn set_col_width(&mut self, col: usize, width: f32) {
+        self.set_col_width_on(self.cached_sheet_id, col, width);
+    }
+
+    /// `set_col_width` for any sheet, active or not.
+    pub(crate) fn set_col_width_on(&mut self, sheet_id: SheetId, col: usize, width: f32) {
         // Deliberately not `clamp`. For a NaN input `max(20.0)` yields
         // 20.0, because f32::max prefers the non-NaN operand, while
         // `clamp` propagates NaN into the size map.
         // Sizes are persisted with the session, so it would outlive a restart.
         #[allow(clippy::manual_clamp)]
         let width = width.max(20.0).min(500.0); // 20-500px
-        let sheet_widths = self.col_widths.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
+        let sheet_widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
         // A manual resize is explicit even when it equals today's preference.
         sheet_widths.insert(col, width);
     }
@@ -3417,11 +3422,20 @@ impl Spreadsheet {
         window: Option<&Window>,
         cx: &App,
     ) -> HashMap<usize, f32> {
+        self.measure_columns_in(self.sheet(cx), cols, window)
+    }
+
+    /// `measure_columns` for any sheet, active or not.
+    pub(crate) fn measure_columns_in(
+        &self,
+        sheet: &visigrid_engine::sheet::Sheet,
+        cols: &[usize],
+        window: Option<&Window>,
+    ) -> HashMap<usize, f32> {
         use std::collections::HashSet;
 
         let wanted: HashSet<usize> = cols.iter().copied().collect();
         let mut widths: HashMap<usize, f32> = cols.iter().map(|c| (*c, MIN_AUTOFIT_WIDTH)).collect();
-        let sheet = self.sheet(cx);
 
         let coords: Vec<(usize, usize)> = sheet
             .cells_iter()

@@ -1012,6 +1012,22 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         bounded = args.iter().map(|arg| super::whole_range::bound_for_evaluation(arg, lookup)).collect::<Vec<_>>();
         bounded.as_slice()
     } else { args };
+    // Value-only functions go element by element over arrays, and return an
+    // error argument rather than reading it (lift.rs, #43).
+    let lifted_args;
+    let args = match super::lift::lift(
+        name,
+        args,
+        &|a: &BoundExpr| operand(a, lookup),
+        &|a: &[BoundExpr]| evaluate_function(name, a, lookup),
+    ) {
+        super::lift::Lifted::Done(r) => return r,
+        super::lift::Lifted::Args(a) => {
+            lifted_args = a;
+            lifted_args.as_slice()
+        }
+        super::lift::Lifted::No => args,
+    };
     let result = None
         .or_else(|| super::eval_math::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_logical::try_evaluate(name, args, lookup))

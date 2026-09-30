@@ -25,7 +25,7 @@ fn structural_span(op: &visigrid_protocol::StructureOp) -> Option<(usize, usize,
         S::DeleteRows { at, count, .. } => Some((*at, *count, true, true)),
         S::InsertCols { at, count, .. } => Some((*at, *count, false, false)),
         S::DeleteCols { at, count, .. } => Some((*at, *count, true, false)),
-        S::AddSheet { .. } | S::RenameSheet { .. } => None,
+        S::AddSheet { .. } | S::RenameSheet { .. } | S::CreatePivot { .. } | S::RefreshPivot { .. } => None,
     }
 }
 
@@ -266,15 +266,22 @@ pub fn cmd_serve(
                         )),
                         ..Default::default()
                     },
-                    None => match host::apply_structure(&mut wb, &op) {
-                        Err(msg) => host::StructureOutcome {
+                    None => match { let before = wb.revision(); (host::apply_structure(&mut wb, &op), before) } {
+                        (Err(msg), before) => {
+                        // A partial refresh-all changed the workbook before
+                        // failing: persist what did change.
+                        if wb.revision() != before {
+                            dirty = true;
+                        }
+                        host::StructureOutcome {
                             revision: wb.revision(),
                             sheet_count: wb.sheets().len(),
                             active_sheet: wb.active_sheet_index(),
                             error: Some(("invalid_op".to_string(), msg)),
                             ..Default::default()
-                        },
-                        Ok(description) => {
+                        }
+                        }
+                        (Ok(description), _) => {
                         dirty = true;
                         // Layout side-cars are keyed by index, so they must
                         // follow the edit — widths, frozen panes, filters, and

@@ -1,7 +1,9 @@
 // Financial functions: PMT, IPMT, PPMT, CUMPRINC, CUMIPMT, FV, PV, NPV, IRR
 
-use super::eval::{evaluate, CellLookup, EvalResult};
-use super::parser::{BoundExpr, Expr, col_to_letters};
+use super::eval::{evaluate, CellLookup, EvalResult, Value};
+use super::eval_helpers::read_cell_value;
+use crate::sheet::SheetRef;
+use super::parser::{BoundExpr, Expr};
 
 /// Compute PMT (payment for a loan with constant payments and interest rate)
 fn compute_pmt(rate: f64, nper: f64, pv: f64, fv: f64, pmt_type: f64) -> f64 {
@@ -454,22 +456,14 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     let (min_row, min_col) = (*start_row.min(end_row), *start_col.min(end_col));
                     let (max_row, max_col) = (*start_row.max(end_row), *start_col.max(end_col));
                     let mut vals = Vec::new();
-                    eprintln!("[IRR] context: {}", lookup.debug_context());
-                    eprintln!("[IRR] range {}{}:{}{} (0-indexed r{}:r{}, c{}:c{})",
-                        col_to_letters(min_col), min_row + 1,
-                        col_to_letters(max_col), max_row + 1,
-                        min_row, max_row, min_col, max_col);
                     for r in min_row..=max_row {
                         for c in min_col..=max_col {
                             let text = lookup.get_text(r, c);
                             let val = lookup.get_value(r, c);
-                            eprintln!("[IRR]   {}{}: get_value={}, get_text=\"{}\"",
-                                col_to_letters(c), r + 1, val, text);
                             if text.is_empty() {
                                 continue; // Skip blanks (Excel ignores blanks in IRR)
                             }
                             if text.starts_with('#') {
-                                eprintln!("[IRR]   → error propagated: {}", text);
                                 return Some(EvalResult::Error(text));
                             }
                             if val.is_finite() {
@@ -483,7 +477,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
 
             if values.len() < 2 {
-                eprintln!("[IRR] #NUM!: only {} cashflow(s) collected: {:?}", values.len(), values);
                 return Some(EvalResult::Error("#NUM!".to_string()));
             }
 
@@ -491,7 +484,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let has_positive = values.iter().any(|&v| v > 0.0);
             let has_negative = values.iter().any(|&v| v < 0.0);
             if !has_positive || !has_negative {
-                eprintln!("[IRR] #NUM!: need both signs. cashflows: {:?}, has_pos={}, has_neg={}", values, has_positive, has_negative);
                 return Some(EvalResult::Error("#NUM!".to_string()));
             }
 
@@ -585,12 +577,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
 
             if lo.is_nan() {
-                eprintln!("[IRR] #NUM!: no bracket found. cashflows: {:?}", values);
-                eprintln!("[IRR]   Newton guess={}, rate after Newton={}", guess, rate);
-                for &r in search_rates {
-                    let npv = npv_at(r);
-                    eprintln!("[IRR]   rate={:.4} → NPV={:.4}", r, npv);
-                }
                 return Some(EvalResult::Error("#NUM!".to_string()));
             }
 
@@ -616,7 +602,231 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             // After 200 bisection iterations, return best midpoint
             EvalResult::Number((lo + hi) / 2.0)
         }
+        "XNPV" => {
+            // XNPV(rate, values, dates): NPV with each cash flow discounted by its
+            // own date, (d - d0)/365 years from the first.
+            if args.len() != 3 {
+                return Some(EvalResult::Error("XNPV requires exactly 3 arguments".to_string()));
+            }
+            let rate = match evaluate(&args[0], lookup).to_number() {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let flows = match dated_flows(&args[1], &args[2], lookup) {
+                Ok(f) => f,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            if rate <= -1.0 {
+                return Some(EvalResult::Error("#NUM!".to_string()));
+            }
+            EvalResult::Number(xnpv(rate, &flows))
+        }
+        "XIRR" => {
+            // XIRR(values, dates, [guess]): the rate at which XNPV is zero.
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error("XIRR requires 2 or 3 arguments".to_string()));
+            }
+            let flows = match dated_flows(&args[0], &args[1], lookup) {
+                Ok(f) => f,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            if !flows.iter().any(|f| f.0 > 0.0) || !flows.iter().any(|f| f.0 < 0.0) {
+                return Some(EvalResult::Error("#NUM!".to_string()));
+            }
+            let guess = match optional_number(args, 2, 0.1, lookup) {
+                Ok(g) => g,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            match solve_rate(|r| xnpv(r, &flows), guess) {
+                Some(r) => EvalResult::Number(r),
+                None => EvalResult::Error("#NUM!".to_string()),
+            }
+        }
+        "RATE" => {
+            // RATE(nper, pmt, pv, [fv], [type], [guess]): the per-period rate that
+            // makes the payments pay off pv (leaving fv).
+            if args.len() < 3 || args.len() > 6 {
+                return Some(EvalResult::Error("RATE requires 3 to 6 arguments".to_string()));
+            }
+            let n = |i: usize, default: f64| optional_number(args, i, default, lookup);
+            let (nper, pmt, pv, fv, typ, guess) = match (n(0, 0.0), n(1, 0.0), n(2, 0.0), n(3, 0.0), n(4, 0.0), n(5, 0.1)) {
+                (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, if e != 0.0 { 1.0 } else { 0.0 }, f),
+                (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), ..) | (_, _, _, Err(e), ..) | (_, _, _, _, Err(e), _) | (.., Err(e)) => {
+                    return Some(EvalResult::Error(e))
+                }
+            };
+            if nper <= 0.0 {
+                return Some(EvalResult::Error("#NUM!".to_string()));
+            }
+            // The time-value equation, zero at the answer.
+            let balance = |r: f64| {
+                if r.abs() < 1e-12 {
+                    pv + pmt * nper + fv
+                } else {
+                    let g = (1.0 + r).powf(nper);
+                    pv * g + pmt * (1.0 + r * typ) * (g - 1.0) / r + fv
+                }
+            };
+            match solve_rate(balance, guess) {
+                Some(r) => EvalResult::Number(r),
+                None => EvalResult::Error("#NUM!".to_string()),
+            }
+        }
+        "NPER" => {
+            // NPER(rate, pmt, pv, [fv], [type]): how many payments it takes.
+            if args.len() < 3 || args.len() > 5 {
+                return Some(EvalResult::Error("NPER requires 3 to 5 arguments".to_string()));
+            }
+            let n = |i: usize, default: f64| optional_number(args, i, default, lookup);
+            let (rate, pmt, pv, fv, typ) = match (n(0, 0.0), n(1, 0.0), n(2, 0.0), n(3, 0.0), n(4, 0.0)) {
+                (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e)) => (a, b, c, d, if e != 0.0 { 1.0 } else { 0.0 }),
+                (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), ..) | (_, _, _, Err(e), _) | (.., Err(e)) => {
+                    return Some(EvalResult::Error(e))
+                }
+            };
+            if rate == 0.0 {
+                if pmt == 0.0 {
+                    return Some(EvalResult::Error("#NUM!".to_string()));
+                }
+                return Some(EvalResult::Number(-(pv + fv) / pmt));
+            }
+            let adj = pmt * (1.0 + rate * typ);
+            let ratio = (adj - fv * rate) / (adj + pv * rate);
+            if !(ratio > 0.0) || rate <= -1.0 {
+                return Some(EvalResult::Error("#NUM!".to_string()));
+            }
+            EvalResult::Number(ratio.ln() / (1.0 + rate).ln())
+        }
         _ => return None,
     };
     Some(result)
+}
+
+/// An optional numeric argument, or `default` when absent or left empty.
+fn optional_number<L: CellLookup>(args: &[BoundExpr], i: usize, default: f64, lookup: &L) -> Result<f64, String> {
+    match args.get(i).map(|a| evaluate(a, lookup)) {
+        None | Some(EvalResult::Empty) => Ok(default),
+        Some(v) => v.to_number(),
+    }
+}
+
+/// The numbers in a range or array argument, in order.
+fn number_list<L: CellLookup>(arg: &BoundExpr, lookup: &L) -> Result<Vec<Value>, String> {
+    let values: Vec<Value> = match arg {
+        Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+            if matches!(sheet, SheetRef::RefError { .. }) {
+                return Err("#REF!".to_string());
+            }
+            let (r0, r1) = (*start_row.min(end_row), *start_row.max(end_row));
+            let (c0, c1) = (*start_col.min(end_col), *start_col.max(end_col));
+            (r0..=r1)
+                .flat_map(|r| (c0..=c1).map(move |c| (r, c)))
+                .map(|(r, c)| read_cell_value(lookup, sheet, r, c))
+                .collect()
+        }
+        _ => match evaluate(arg, lookup) {
+            EvalResult::Array(a) => (0..a.rows())
+                .flat_map(|r| (0..a.cols()).map(move |c| (r, c)))
+                .map(|(r, c)| a.get(r, c).cloned().unwrap_or(Value::Empty))
+                .collect(),
+            EvalResult::Error(e) => return Err(e),
+            other => vec![other.to_value()],
+        },
+    };
+    Ok(values)
+}
+
+/// Pair cash flows with their dates, validating as Excel does: the same count,
+/// numbers only, and no date before the first.
+fn dated_flows<L: CellLookup>(values: &BoundExpr, dates: &BoundExpr, lookup: &L) -> Result<Vec<(f64, f64)>, String> {
+    let vs = number_list(values, lookup)?;
+    let ds = number_list(dates, lookup)?;
+    if vs.len() != ds.len() || vs.len() < 2 {
+        return Err("#NUM!".to_string());
+    }
+    let mut flows = Vec::with_capacity(vs.len());
+    for (v, d) in vs.iter().zip(&ds) {
+        let num = |x: &Value| match x {
+            Value::Number(n) => Ok(*n),
+            Value::Error(e) => Err(e.clone()),
+            other => EvalResult::from_value(other).to_number().map_err(|_| "#VALUE!".to_string()),
+        };
+        flows.push((num(v)?, num(d)?.trunc()));
+    }
+    let first = flows[0].1;
+    if flows.iter().any(|f| f.1 < first) {
+        return Err("#NUM!".to_string());
+    }
+    Ok(flows)
+}
+
+/// XNPV for (amount, date) pairs.
+fn xnpv(rate: f64, flows: &[(f64, f64)]) -> f64 {
+    let d0 = flows[0].1;
+    flows.iter().map(|&(v, d)| v / (1.0 + rate).powf((d - d0) / 365.0)).sum()
+}
+
+/// A rate r > -1 at which `f(r)` is zero: Newton's method from `guess`, then a
+/// bracketing search and bisection if Newton wanders off, as IRR does.
+fn solve_rate(f: impl Fn(f64) -> f64, guess: f64) -> Option<f64> {
+    let mut r = guess;
+    for _ in 0..100 {
+        let y = f(r);
+        if !y.is_finite() {
+            break;
+        }
+        if y.abs() < 1e-10 {
+            return Some(r);
+        }
+        let h = 1e-7 * r.abs().max(1.0);
+        let dy = (f(r + h) - f(r - h)) / (2.0 * h);
+        if !dy.is_finite() || dy.abs() < 1e-30 {
+            break;
+        }
+        let next = r - y / dy;
+        if !next.is_finite() || next <= -1.0 {
+            break;
+        }
+        if (next - r).abs() < 1e-12 * next.abs().max(1.0) {
+            return Some(next);
+        }
+        r = next;
+    }
+    // Bracket a sign change, then bisect.
+    const GRID: &[f64] = &[
+        -0.99, -0.95, -0.9, -0.8, -0.5, -0.3, -0.1, -0.01, 0.0, 0.01, 0.05, 0.1, 0.2, 0.3,
+        0.5, 0.8, 1.0, 2.0, 5.0, 10.0, 100.0,
+    ];
+    let mut prev: Option<(f64, f64)> = None;
+    for &x in GRID {
+        let y = f(x);
+        if !y.is_finite() {
+            prev = None;
+            continue;
+        }
+        if y == 0.0 {
+            return Some(x);
+        }
+        if let Some((px, py)) = prev {
+            if py.signum() != y.signum() {
+                let (mut lo, mut hi, mut ylo) = (px, x, py);
+                for _ in 0..300 {
+                    let mid = (lo + hi) / 2.0;
+                    let ym = f(mid);
+                    if ym.abs() < 1e-10 || (hi - lo) < 1e-14 {
+                        return Some(mid);
+                    }
+                    if ym.signum() == ylo.signum() {
+                        lo = mid;
+                        ylo = ym;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                return Some((lo + hi) / 2.0);
+            }
+        }
+        prev = Some((x, y));
+    }
+    None
 }

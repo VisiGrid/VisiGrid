@@ -208,6 +208,41 @@ pub enum StructureOp {
         sheet: Option<usize>,
         name: String,
     },
+    /// Create a pivot table on a new sheet (added 2026-09-30, additive).
+    /// The source's first row is its header row; fields are named by header
+    /// text, case-insensitively. GUI hosts record one undo step.
+    CreatePivot {
+        /// Sheet holding the source; omit for the active sheet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+        /// A1 range of the source including its header row (e.g. "A1:D500").
+        /// Omit to use the sheet's whole data area from A1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default)]
+        rows: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        column: Option<String>,
+        #[serde(default)]
+        values: Vec<PivotValueSpec>,
+    },
+    /// Recompute a pivot from its source (added 2026-09-30, additive).
+    /// `pivot` is a pivot name ("PivotTable1") or id; omit to refresh all.
+    RefreshPivot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pivot: Option<String>,
+    },
+}
+
+/// One value field of a `create_pivot` op.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PivotValueSpec {
+    /// Source header text.
+    pub field: String,
+    /// sum | count | distinct_count | average | min | max. Omit for the
+    /// desktop's default: sum for a numeric column, count otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation: Option<String>,
 }
 
 fn default_count() -> usize {

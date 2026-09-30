@@ -1,4 +1,5 @@
 pub mod data;
+mod ops;
 
 use std::io::{self, stdout, Write};
 use std::time::Duration;
@@ -34,8 +35,37 @@ struct TuiApp {
     show_help: bool,
     /// Width of the row-number gutter, computed from max file row number
     row_num_width: usize,
-    /// Whether this is a multi-sheet workbook
+    /// Whether there is more than one tab (workbook sheets or derived tabs)
     multi_sheet: bool,
+    /// Per tab: display order of data rows (indices into `data.rows`).
+    /// The cursor and scroll positions index this order.
+    order: Vec<Vec<usize>>,
+    /// Per tab: the tab a derived tab (frequency, pivot) was made from.
+    parent: Vec<Option<usize>>,
+    /// Per tab: (cursor_row, cursor_col, scroll_row, scroll_col), restored
+    /// when the tab is shown again.
+    positions: Vec<(usize, usize, usize, usize)>,
+    /// Text entry on the status line (search or pivot spec).
+    prompt: Option<Prompt>,
+    /// Last search query, for n / N.
+    search: Option<String>,
+    /// One-shot status message, cleared on the next key.
+    message: Option<String>,
+    /// A slow entry (formula or pivot over many rows), run after the next
+    /// frame so "computing…" is on screen while it works.
+    pending: Option<Prompt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PromptKind {
+    Search,
+    Pivot,
+    Formula,
+}
+
+struct Prompt {
+    kind: PromptKind,
+    input: String,
 }
 
 impl TuiApp {
@@ -56,7 +86,15 @@ impl TuiApp {
             show_help: false,
             row_num_width,
             multi_sheet: false,
+            order: Vec::new(),
+            parent: vec![None],
+            positions: Vec::new(),
+            prompt: None,
+            search: None,
+            message: None,
+            pending: None,
         }
+        .with_identity_orders()
     }
 
     fn new_multi(sheets: Vec<SheetData>, file_name: String, initial_sheet: usize) -> Self {
@@ -75,6 +113,206 @@ impl TuiApp {
             show_help: false,
             row_num_width,
             multi_sheet: multi,
+            order: Vec::new(),
+            parent: Vec::new(),
+            positions: Vec::new(),
+            prompt: None,
+            search: None,
+            message: None,
+            pending: None,
+        }
+        .with_identity_orders()
+    }
+
+    fn with_identity_orders(mut self) -> Self {
+        self.order = self.sheets.iter().map(|s| (0..s.data.num_rows).collect()).collect();
+        self.parent = vec![None; self.sheets.len()];
+        self.positions = vec![(0, 0, 0, 0); self.sheets.len()];
+        self
+    }
+
+    /// Data row index behind a view position.
+    fn row_at(&self, pos: usize) -> usize {
+        self.order[self.active_sheet].get(pos).copied().unwrap_or(pos)
+    }
+
+    fn cell(&self, pos: usize, col: usize) -> &str {
+        self.data().rows.get(self.row_at(pos)).and_then(|r| r.get(col)).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    fn col_name(&self, col: usize) -> String {
+        self.data().col_names.get(col).cloned().unwrap_or_else(|| util::col_to_letter(col))
+    }
+
+    /// Open a derived tab and switch to it.
+    fn push_tab(&mut self, name: String, data: PeekData) {
+        let from = self.active_sheet;
+        if self.sheets[from].name.is_empty() {
+            self.sheets[from].name = self.file_name.clone();
+        }
+        self.order.push((0..data.num_rows).collect());
+        self.sheets.push(SheetData { name, data });
+        self.parent.push(Some(from));
+        self.positions.push((0, 0, 0, 0));
+        self.multi_sheet = true;
+        self.switch_sheet(self.sheets.len() - 1);
+    }
+
+    /// Close the active derived tab and return to the tab it came from.
+    fn close_tab(&mut self) {
+        let i = self.active_sheet;
+        let Some(back) = self.parent[i] else { return };
+        self.sheets.remove(i);
+        self.order.remove(i);
+        self.parent.remove(i);
+        self.positions.remove(i);
+        for p in self.parent.iter_mut().flatten() {
+            if *p == i {
+                *p = back;
+            } else if *p > i {
+                *p -= 1;
+            }
+        }
+        self.multi_sheet = self.sheets.len() > 1;
+        self.active_sheet = usize::MAX; // force switch_sheet to reset state
+        self.switch_sheet(if back > i { back - 1 } else { back });
+    }
+
+    /// Suffix for derived tab names when the preview is not the whole file.
+    fn partial_note(&self) -> &'static str {
+        let d = self.data();
+        if d.total_rows.is_some_and(|t| t > d.num_rows) { " (loaded rows)" } else { "" }
+    }
+
+    fn sort(&mut self, descending: bool) {
+        let col = self.cursor_col;
+        let keep = self.row_at(self.cursor_row);
+        let order = ops::sorted_order(self.data(), &self.order[self.active_sheet], col, descending);
+        self.cursor_row = order.iter().position(|&r| r == keep).unwrap_or(0);
+        self.order[self.active_sheet] = order;
+        self.message = Some(format!(
+            "sorted by {} {}{}",
+            self.col_name(col),
+            if descending { "descending" } else { "ascending" },
+            if self.partial_note().is_empty() { "" } else { " (loaded rows only)" }
+        ));
+    }
+
+    fn search_next(&mut self, backward: bool) {
+        let Some(query) = self.search.clone() else {
+            self.message = Some("no search yet: press / to search".into());
+            return;
+        };
+        match ops::find(self.data(), &self.order[self.active_sheet], (self.cursor_row, self.cursor_col), &query, backward) {
+            Some((pos, col)) => {
+                self.cursor_row = pos;
+                self.cursor_col = col;
+                let n = ops::count_matches(self.data(), &query);
+                self.message = Some(format!("/{query}  {n} match{}", if n == 1 { "" } else { "es" }));
+            }
+            None => self.message = Some(format!("/{query}  not found")),
+        }
+    }
+
+    /// Rows above which formula and pivot entries show "computing…" first.
+    const SLOW_ROWS: usize = 20_000;
+
+    fn submit_prompt(&mut self, prompt: Prompt) {
+        let slow = matches!(prompt.kind, PromptKind::Formula | PromptKind::Pivot)
+            && self.data().num_rows > Self::SLOW_ROWS;
+        if slow {
+            self.message = Some(format!("computing over {} rows…", self.data().num_rows));
+            self.pending = Some(prompt);
+        } else {
+            self.run_prompt(prompt);
+        }
+    }
+
+    fn run_prompt(&mut self, prompt: Prompt) {
+        match prompt.kind {
+            PromptKind::Search => {
+                if prompt.input.is_empty() {
+                    return;
+                }
+                self.search = Some(prompt.input);
+                // Start just before the cursor so a match in the current cell counts.
+                let cols = self.data().num_cols.max(1);
+                let rows = self.order[self.active_sheet].len().max(1);
+                let flat = (self.cursor_row * cols + self.cursor_col + rows * cols - 1) % (rows * cols);
+                let (r, c) = (flat / cols, flat % cols);
+                let (save_r, save_c) = (self.cursor_row, self.cursor_col);
+                self.cursor_row = r;
+                self.cursor_col = c;
+                self.search_next(false);
+                if self.message.as_deref().is_some_and(|m| m.ends_with("not found")) {
+                    self.cursor_row = save_r;
+                    self.cursor_col = save_c;
+                }
+            }
+            PromptKind::Formula => match ops::computed_column(self.data(), &prompt.input) {
+                Ok((name, values, formulas)) => {
+                    let errors = values.iter().filter(|v| v.starts_with('#') && v.ends_with(['!', '?', 'A'])).count();
+                    let data = &mut self.sheets[self.active_sheet].data;
+                    let width = util::display_width(&name).max(values.iter().take(500).map(|v| util::display_width(v)).max().unwrap_or(0)).clamp(3, 40);
+                    for (row, v) in data.rows.iter_mut().zip(values) {
+                        row.push(v);
+                    }
+                    if let Some(raw) = data.raw.as_mut() {
+                        for (row, f) in raw.iter_mut().zip(formulas) {
+                            row.push(f);
+                        }
+                    }
+                    data.col_names.push(name.clone());
+                    data.col_widths.push(width);
+                    data.num_cols += 1;
+                    self.cursor_col = data.num_cols - 1;
+                    self.message = Some(format!(
+                        "added {name}{}{}",
+                        if errors > 0 { format!("  ({errors} error cells)") } else { String::new() },
+                        if self.partial_note().is_empty() { "" } else { "  (loaded rows only)" }
+                    ));
+                }
+                Err(e) => {
+                    self.message = Some(e);
+                    // Keep what was typed so it can be fixed.
+                    self.prompt = Some(Prompt { kind: PromptKind::Formula, input: prompt.input });
+                }
+            },
+            PromptKind::Pivot => match ops::pivot(self.data(), &prompt.input) {
+                Ok((data, label)) => {
+                    let name = format!("{label}{}", self.partial_note());
+                    let headerless = !self.data().has_headers;
+                    self.push_tab(name, data);
+                    self.message = Some(if headerless {
+                        "pivot: first row used as headers (open with --headers to show them) · q returns".into()
+                    } else {
+                        "pivot: q returns to the source".into()
+                    });
+                }
+                Err(e) => self.message = Some(format!("pivot: {e}")),
+            },
+        }
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) {
+        let Some(prompt) = self.prompt.as_mut() else { return };
+        if !matches!(key.code, KeyCode::Enter) {
+            self.message = None;
+        }
+        match key.code {
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Enter => {
+                let p = self.prompt.take().unwrap();
+                self.submit_prompt(p);
+            }
+            KeyCode::Backspace => {
+                if prompt.input.pop().is_none() {
+                    self.prompt = None;
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => prompt.input.clear(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => prompt.input.push(c),
+            _ => {}
         }
     }
 
@@ -96,11 +334,12 @@ impl TuiApp {
         if idx >= self.sheets.len() || idx == self.active_sheet {
             return;
         }
+        if let Some(p) = self.positions.get_mut(self.active_sheet) {
+            *p = (self.cursor_row, self.cursor_col, self.scroll_row, self.scroll_col);
+        }
         self.active_sheet = idx;
-        self.cursor_row = 0;
-        self.cursor_col = 0;
-        self.scroll_row = 0;
-        self.scroll_col = 0;
+        (self.cursor_row, self.cursor_col, self.scroll_row, self.scroll_col) =
+            self.positions.get(idx).copied().unwrap_or((0, 0, 0, 0));
         self.row_num_width = Self::compute_row_num_width(self.data());
     }
 
@@ -128,9 +367,50 @@ impl TuiApp {
             self.show_help = false;
             return;
         }
+        if self.prompt.is_some() {
+            self.handle_prompt_key(key);
+            return;
+        }
+        self.message = None;
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if self.parent[self.active_sheet].is_some() {
+                    self.close_tab();
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char('/') => self.prompt = Some(Prompt { kind: PromptKind::Search, input: String::new() }),
+            KeyCode::Char('n') => self.search_next(false),
+            KeyCode::Char('N') => self.search_next(true),
+            KeyCode::Char('[') => self.sort(false),
+            KeyCode::Char(']') => self.sort(true),
+            KeyCode::Char('R') => {
+                let keep = self.row_at(self.cursor_row);
+                self.order[self.active_sheet] = (0..self.data().num_rows).collect();
+                self.cursor_row = keep;
+                self.message = Some("file order".into());
+            }
+            KeyCode::Char('F') if self.data().num_cols > 0 => {
+                let col = self.cursor_col;
+                let data = ops::frequency(self.data(), col);
+                let name = format!("freq {}{}", self.col_name(col), self.partial_note());
+                self.push_tab(name, data);
+            }
+            KeyCode::Char('=') if self.data().num_cols > 0 => {
+                self.prompt = Some(Prompt { kind: PromptKind::Formula, input: "=".into() });
+            }
+            KeyCode::Char('P') if self.data().num_cols > 0 => {
+                // The header row is the first row in file order, not whatever
+                // sorts first.
+                let field = if self.data().has_headers {
+                    self.col_name(self.cursor_col)
+                } else {
+                    self.data().rows.first().and_then(|r| r.get(self.cursor_col)).cloned().unwrap_or_default()
+                };
+                self.prompt = Some(Prompt { kind: PromptKind::Pivot, input: format!("rows={field} values=count:{field}") });
+            }
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1, 0),
             KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1, 0),
@@ -412,10 +692,11 @@ impl TuiApp {
         let mut lines: Vec<Line> = Vec::with_capacity(visible_rows + 1);
         lines.push(Line::from(header_spans));
 
+        let query = self.search.as_deref().map(str::to_lowercase).unwrap_or_default();
         for r in self.scroll_row..end_row {
-            let row_data = &data.rows[r];
+            let row_data = &data.rows[self.row_at(r)];
             let is_cursor_row = r == self.cursor_row;
-            let file_row = data.file_row(r);
+            let file_row = data.file_row(self.row_at(r));
 
             let row_num_style = if is_cursor_row {
                 Style::default()
@@ -442,6 +723,8 @@ impl TuiApp {
                         .add_modifier(Modifier::BOLD)
                 } else if is_cursor_row {
                     Style::default().fg(Color::White)
+                } else if ops::cell_matches(value, &query) {
+                    Style::default().fg(Color::Black).bg(Color::Yellow)
                 } else if c == self.cursor_col {
                     Style::default().fg(Color::Gray)
                 } else {
@@ -460,12 +743,28 @@ impl TuiApp {
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
         let data = self.data();
-        let cell_value = data
-            .rows
-            .get(self.cursor_row)
-            .and_then(|row| row.get(self.cursor_col))
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        if let Some(p) = &self.prompt {
+            let label = match p.kind {
+                PromptKind::Search => "/".to_string(),
+                PromptKind::Pivot => "pivot: ".to_string(),
+                PromptKind::Formula => format!(
+                    "new column (row {} = first row; [Header] ok): ",
+                    self.data().first_data_file_row
+                ),
+            };
+            let mut spans = vec![
+                Span::styled(format!(" {label}{}", p.input), Style::default().fg(Color::White)),
+                Span::styled("█", Style::default().fg(Color::Yellow)),
+            ];
+            if let Some(m) = &self.message {
+                spans.push(Span::styled(format!("   {m}"), Style::default().fg(Color::LightRed)));
+            }
+            let para = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(Color::Black));
+            frame.render_widget(para, area);
+            return;
+        }
+        let cell_value = self.cell(self.cursor_row, self.cursor_col);
 
         let col_name = data
             .col_names
@@ -473,7 +772,7 @@ impl TuiApp {
             .map(|s| s.as_str())
             .unwrap_or("?");
 
-        let file_row = data.file_row(self.cursor_row);
+        let file_row = data.file_row(self.row_at(self.cursor_row));
         let total = data.total_data_rows();
 
         // Column locator: show visible column range
@@ -501,20 +800,25 @@ impl TuiApp {
 
         // Show formula when raw differs from display (i.e. cell contains a formula)
         let formula_info = data.raw.as_ref()
-            .and_then(|raw| raw.get(self.cursor_row))
+            .and_then(|raw| raw.get(self.row_at(self.cursor_row)))
             .and_then(|row| row.get(self.cursor_col))
             .filter(|raw| raw.starts_with('='))
             .map(|raw| format!("  {}", raw))
             .unwrap_or_default();
 
-        let left = format!(" {}{} = {:?}{}{}", col_name, file_row, cell_value, formula_info, sheet_info);
+        let left = match &self.message {
+            Some(m) => format!(" {m}"),
+            None => format!(" {}{} = {:?}{}{}", col_name, file_row, cell_value, formula_info, sheet_info),
+        };
         let right = format!(
             "Row {}/{}  {}  ?: help ",
             file_row, total, col_range
         );
 
+        let room = (area.width as usize).saturating_sub(right.chars().count() + 1);
+        let left = if util::display_width(&left) > room { util::truncate_display(&left, room) } else { left };
         let padding = (area.width as usize)
-            .saturating_sub(left.chars().count() + right.chars().count());
+            .saturating_sub(util::display_width(&left) + right.chars().count());
         let status = format!("{}{:pad$}{}", left, "", right, pad = padding);
 
         let para = Paragraph::new(Line::from(vec![Span::styled(
@@ -553,9 +857,21 @@ impl TuiApp {
 
         help_lines.extend_from_slice(&[
             "",
+            "  Find and summarize",
+            "  ------------------",
+            "  /                 Search all cells",
+            "  n / N             Next / previous match",
+            "  [ / ]             Sort column asc / desc",
+            "  R                 Restore file order",
+            "  F                 Frequency of column",
+            "  P                 Pivot (rows= column=",
+            "                      values=sum:Field)",
+            "  =                 New column from a formula",
+            "                      (=[Amount]*1.08, Tax =D2*0.1)",
+            "",
             "  General",
             "  -------",
-            "  q / Esc           Quit",
+            "  q / Esc           Close tab / quit",
             "  ?                 Toggle this help",
             "",
         ]);
@@ -648,6 +964,10 @@ fn run_app(mut app: TuiApp) -> Result<(), String> {
         terminal
             .draw(|frame| app.draw(frame))
             .map_err(|e| format!("draw error: {}", e))?;
+        if let Some(p) = app.pending.take() {
+            app.run_prompt(p);
+            continue;
+        }
 
         if event::poll(Duration::from_millis(100))
             .map_err(|e| format!("event poll error: {}", e))?
@@ -747,6 +1067,91 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.should_quit, "first Escape dismisses help");
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.should_quit);
+    }
+
+    fn press(app: &mut TuiApp, keys: &str) {
+        for ch in keys.chars() {
+            let code = match ch {
+                '\n' => KeyCode::Enter,
+                '\x1b' => KeyCode::Esc,
+                c => KeyCode::Char(c),
+            };
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+    }
+
+    fn screen(app: &TuiApp) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn keys_sort_search_frequency_and_pivot_tabs() {
+        let f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+        std::fs::write(f.path(), "Region,Amount\nWest,10\nEast,5\nWest,2.5\nNorth,40\n").unwrap();
+        let data = data::load_csv(f.path(), b',', Some(true), 0, 0).unwrap();
+        let mut app = TuiApp::new(data, "sales.csv".into());
+
+        // Sort by Amount descending: North (file row 5) comes first.
+        press(&mut app, "l]");
+        assert_eq!(app.cell(0, 0), "North");
+        assert!(screen(&app).contains("sorted by Amount descending"));
+        press(&mut app, "R");
+        assert_eq!(app.cell(0, 0), "West");
+
+        // Search lands on the next match and n wraps.
+        press(&mut app, "g0/east\n");
+        assert_eq!((app.cursor_row, app.cursor_col), (1, 0));
+        assert!(screen(&app).contains("/east  1 match"));
+        press(&mut app, "/nope\n");
+        assert_eq!((app.cursor_row, app.cursor_col), (1, 0), "a miss leaves the cursor");
+
+        // Frequency tab, then q returns to the source instead of quitting.
+        press(&mut app, "0F");
+        assert_eq!(app.sheets.len(), 2);
+        assert_eq!(app.cell(0, 0), "West");
+        assert_eq!(app.cell(0, 1), "2");
+        assert!(screen(&app).contains("freq Region"));
+        press(&mut app, "q");
+        assert_eq!((app.sheets.len(), app.active_sheet, app.should_quit), (1, 0, false));
+        assert_eq!((app.cursor_row, app.cursor_col), (1, 0), "returning keeps the source cursor");
+
+        // Pivot prompt starts prefilled from the cursor column; edit and run.
+        press(&mut app, "P");
+        app.prompt.as_mut().unwrap().input = "rows=Region values=sum:Amount".into();
+        press(&mut app, "\n");
+        assert_eq!(app.sheets[1].name, "Sum of Amount");
+        assert_eq!(app.cell(2, 1), "12.50");
+        assert_eq!(app.cell(3, 0), "Grand Total");
+        assert_eq!(app.cell(3, 1), "57.50");
+        press(&mut app, "P\x1b");
+        assert!(app.prompt.is_none());
+
+        // Computed column on the pivot tab's source: back to the data first.
+        press(&mut app, "q");
+        press(&mut app, "=");
+        app.prompt.as_mut().unwrap().input = "Tax =[Amount]*0.1".into();
+        press(&mut app, "\n");
+        assert_eq!(app.data().col_names.last().unwrap(), "Tax");
+        assert_eq!(app.cursor_col, 2);
+        assert_eq!(app.cell(0, 2), "1");
+        // A bad formula keeps the prompt open with the error beside it.
+        press(&mut app, "=");
+        app.prompt.as_mut().unwrap().input = "=[Price]*2".into();
+        press(&mut app, "\n");
+        assert!(app.prompt.is_some());
+        assert!(screen(&app).contains("no column headed \"Price\""));
+        press(&mut app, "\x1b");
+        // The new column sorts and pivots like any other.
+        press(&mut app, "]");
+        assert_eq!(app.cell(0, 0), "North");
+        press(&mut app, "qq");
         assert!(app.should_quit);
     }
 }

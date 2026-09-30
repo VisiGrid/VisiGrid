@@ -18,7 +18,7 @@ vgrid sheet fingerprint model.sheet --json
 vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
 ```
 
-138 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
+142 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
 
 ## Why VisiGrid
 
@@ -53,7 +53,7 @@ VisiGrid was influenced by keyboard-first environments such as [Omarchy](https:/
 - Conditional formatting as typed rules with live grid preview and match counts
 - Multi-select editing across non-adjacent cells
 - Format Painter (single-shot and locked mode)
-- 123 formula functions with autocomplete
+- 142 formula functions with autocomplete
 - Instant startup and smooth scrolling
 - 5 built-in themes including System (follows OS dark/light)
 
@@ -175,7 +175,15 @@ Preview files in a read-only terminal grid with `vgrid peek data.parquet`.
 CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
 Use `--shape` for dimensions, `--json` for structured output, or `--plain` for
 a text table. Previews default to 5,000 rows; `--max-rows` changes the limit.
-See [terminal viewer parity and next steps](docs/tui-parity.md).
+In the viewer, `/` searches, `[` `]` sort, `F` shows a column's frequencies,
+`P` builds a pivot and `=` adds a column from an Excel formula
+(`=IF([Amount]>2500,"high","normal")`), computed by the same engine as the app. See [terminal viewer parity and next steps](docs/tui-parity.md).
+
+Summarize a file without opening it: `vgrid pivot sales.csv --rows Region
+--column Month --values sum:Amount` prints the pivot (`--csv` or `--json` for
+machines). With `--session` the pivot is created on a new sheet of the running
+workbook instead, and `vgrid pivot --session --refresh` recomputes it; agents get
+the same through the `create_pivot` and `refresh_pivot` MCP tools.
 
 For users who treat spreadsheets as part of a larger system, VisiGrid includes a full CLI and headless execution mode built on the same engine.
 

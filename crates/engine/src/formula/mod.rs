@@ -19,3 +19,4 @@ pub(crate) mod eval_datetime;
 pub(crate) mod eval_statistical;
 pub(crate) mod eval_trig;
 pub(crate) mod eval_array;
+pub(crate) mod lift;
