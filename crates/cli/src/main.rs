@@ -548,11 +548,13 @@ Examples:
         width: usize,
     },
 
-    /// View a file in the terminal — CSV, TSV, XLSX, ODS, .sheet
+    /// View a file in the terminal — delimited text, Parquet, Excel, ODS, .sheet/.vgrid
     #[command(after_help = "\
 Examples:
   vgrid peek data.csv
   vgrid peek sales.tsv --headers
+  vgrid peek orders.parquet                   # schema headers, bounded preview
+  vgrid peek orders.parquet --json            # preserve numeric-looking text
   vgrid peek report.xlsx                      # Excel workbook (multi-tab)
   vgrid peek report.xlsx --sheet summary       # open specific sheet
   vgrid peek data.ods                          # OpenDocument spreadsheet
@@ -574,15 +576,15 @@ TTY behavior:
   --no-tui / --plain  forces plain preview.
   Safe for pipes, CI, and agents — no raw-mode crash in headless environments.
 
-Safety: preview is capped by row count (200k) and cell count (10M for xlsx/ods). \
-Use --force to override.")]
+Safety: default preview is 5000 rows. Loading all rows above 200k requires --force. \
+Workbook and Parquet previews have a 10M-cell guard. Parquet also respects sheet capacity.")]
     Peek {
         /// File to view
         file: PathBuf,
-        /// First row is column headers
+        /// First row is column headers (delimited text; Parquet uses schema names)
         #[arg(long)]
         headers: bool,
-        /// First row is NOT headers (override auto-detect)
+        /// First row is data (the default for delimited text)
         #[arg(long, conflicts_with = "headers")]
         no_headers: bool,
         /// Sheet name or 0-based index for multi-sheet files
@@ -591,7 +593,7 @@ Use --force to override.")]
         /// Maximum rows to load (default: 5000; use --max-rows 0 for all)
         #[arg(long, default_value = "5000")]
         max_rows: usize,
-        /// Override safety limits (>200k rows or >10M cells in workbooks)
+        /// Override preview guards (>200k rows when loading all, >10M workbook/Parquet cells)
         #[arg(long)]
         force: bool,
         /// Rows to scan for column width sizing (0 = all loaded rows)
@@ -606,7 +608,7 @@ Use --force to override.")]
         /// Override delimiter: single char, or name (tab, comma, pipe, semicolon)
         #[arg(long)]
         delimiter: Option<String>,
-        /// Recompute formulas after import (xlsx/ods only; default: show cached values)
+        /// Recompute formulas after Excel/ODS import (default: show cached values)
         #[arg(long)]
         recompute: bool,
         /// Force non-interactive output even in a TTY
@@ -1855,12 +1857,16 @@ fn main() -> ExitCode {
             cmd_view(session, range, sheet, follow, width)
         }
         Some(Commands::Peek {
-            file, headers, no_headers: _, sheet, max_rows,
+            file, headers, no_headers, sheet, max_rows,
             force, width_scan_rows, shape, plain, delimiter, recompute,
             no_tui, tui: force_tui, json,
         }) => {
-            if json {
-                cmd_peek_json(file, headers, sheet, max_rows, force, delimiter)
+            let is_parquet = file.extension().and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+            if is_parquet && (no_headers || sheet.is_some() || delimiter.is_some() || recompute) {
+                Err(CliError::args("Parquet uses schema headers and has one table with no formulas; --no-headers, --sheet, --delimiter and --recompute do not apply"))
+            } else if json {
+                cmd_peek_json(file, headers, sheet, max_rows, force, delimiter, recompute)
             } else {
                 // TTY detection: interactive only when stdin+stdout are TTY and not --no-tui
                 let stdin_tty = atty::is(atty::Stream::Stdin);
@@ -4132,6 +4138,7 @@ fn cmd_peek_json(
     max_rows: usize,
     force: bool,
     delimiter_override: Option<String>,
+    recompute: bool,
 ) -> Result<(), CliError> {
     let ext = file
         .extension()
@@ -4139,39 +4146,32 @@ fn cmd_peek_json(
         .unwrap_or("")
         .to_lowercase();
 
-    // .sheet files use a completely separate path
-    if ext == "sheet" {
-        let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
-        let sheets = tui::data::load_sheet(&file, effective_max, 0)
+    if ext == "parquet" {
+        let data = tui::data::load_parquet(&file, max_rows, force, 0, true)
             .map_err(CliError::io)?;
-        // Select sheet
-        let data = if let Some(ref name) = sheet {
-            if let Ok(idx) = name.parse::<usize>() {
-                sheets.into_iter().nth(idx)
-            } else {
-                sheets.into_iter().find(|s| s.name == *name)
-            }
-        } else {
-            sheets.into_iter().next()
-        }.ok_or_else(|| CliError::args("sheet not found"))?;
-        return peek_json_output(&data.data);
+        return peek_json_output(&data);
     }
 
-    // xlsx/ods use the workbook import path
-    if ext == "xlsx" || ext == "ods" {
+    // Native and imported workbooks share selection and safety semantics.
+    if matches!(ext.as_str(), "sheet" | "vgrid" | "xlsx" | "xls" | "xlsb" | "xlsm" | "ods") {
         let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
-        let sheets = tui::data::load_workbook_peek(&file, effective_max, 0, false, force)
-            .map_err(CliError::io)?;
-        let data = if let Some(ref name) = sheet {
-            if let Ok(idx) = name.parse::<usize>() {
-                sheets.into_iter().nth(idx)
-            } else {
-                sheets.into_iter().find(|s| s.name == *name)
-            }
+        let sheets = if matches!(ext.as_str(), "sheet" | "vgrid") {
+            tui::data::load_sheet(&file, effective_max, 0, force)
         } else {
-            sheets.into_iter().next()
-        }.ok_or_else(|| CliError::args("sheet not found"))?;
-        return peek_json_output(&data.data);
+            tui::data::load_workbook_peek(&file, effective_max, 0, recompute, force)
+        }.map_err(CliError::io)?;
+        if sheets.is_empty() {
+            return Err(CliError::io("workbook has no sheets"));
+        }
+        if max_rows == 0 && !force && sheets.iter().any(|s| s.data.num_rows > PEEK_FORCE_CAP) {
+            return Err(CliError::args("workbook has >200k rows; use --max-rows to preview fewer rows or --force to override"));
+        }
+        let index = if sheet.is_some() {
+            resolve_peek_sheet(&sheet, &sheets)?
+        } else {
+            0
+        };
+        return peek_json_output(&sheets[index].data);
     }
 
     let delimiter = if let Some(ref d) = delimiter_override {
@@ -4204,7 +4204,15 @@ fn cmd_peek_json(
 /// Write PeekData as JSON to stdout: `{"columns":[...], "rows":[[...],...]}`
 fn peek_json_output(data: &tui::data::PeekData) -> Result<(), CliError> {
     use serde_json::{json, Value};
+    if data.num_rows < data.total_data_rows() {
+        eprintln!("Showing {} of {} rows; use --max-rows to change the preview limit", data.num_rows, data.total_data_rows());
+    }
     let columns: Vec<Value> = data.col_names.iter().map(|s| Value::String(s.clone())).collect();
+    if let Some(rows) = &data.json_rows {
+        let output = json!({ "columns": columns, "rows": rows });
+        println!("{}", serde_json::to_string(&output).unwrap());
+        return Ok(());
+    }
     let rows: Vec<Value> = data.rows.iter().map(|row| {
         let cells: Vec<Value> = row.iter().map(|s| string_to_json_value(s)).collect();
         Value::Array(cells)
@@ -4233,13 +4241,26 @@ fn cmd_peek(
         .to_lowercase();
 
     // .sheet files use a completely separate path
-    if ext == "sheet" {
+    if matches!(ext.as_str(), "sheet" | "vgrid") {
         return cmd_peek_sheet(file, sheet, max_rows, force, width_scan_rows, shape, interactive);
     }
 
     // xlsx/ods use the workbook import path
-    if ext == "xlsx" || ext == "ods" {
+    if matches!(ext.as_str(), "xlsx" | "xls" | "xlsb" | "xlsm" | "ods") {
         return cmd_peek_workbook(file, sheet, max_rows, force, width_scan_rows, shape, interactive, recompute);
+    }
+
+    if ext == "parquet" {
+        let data = tui::data::load_parquet(&file, max_rows, force, width_scan_rows, false)
+            .map_err(CliError::io)?;
+        if shape {
+            return cmd_peek_shape(&data, &file);
+        }
+        if !interactive {
+            return tui::print_plain(&data, 0).map_err(CliError::io);
+        }
+        let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        return tui::run(data, name).map_err(CliError::io);
     }
 
     let delimiter = if let Some(ref d) = delimiter_override {
@@ -4250,7 +4271,7 @@ fn cmd_peek(
             "csv" | "txt" | "" => b',',
             other => {
                 return Err(CliError::args(format!(
-                    "unsupported file extension '.{}' (supported: csv, tsv, txt, xlsx, ods, sheet)\n\
+                    "unsupported file extension '.{}' (supported: csv, tsv, txt, parquet, xlsx, xls, xlsb, xlsm, ods, sheet, vgrid)\n\
                      hint: use --delimiter to specify a custom delimiter for delimited text files",
                     other
                 )));
@@ -4312,7 +4333,7 @@ fn cmd_peek_sheet(
         max_rows
     };
 
-    let sheets = tui::data::load_sheet(&file, effective_max, width_scan_rows)
+    let sheets = tui::data::load_sheet(&file, effective_max, width_scan_rows, force)
         .map_err(CliError::io)?;
 
     if sheets.is_empty() {
@@ -4340,7 +4361,7 @@ fn cmd_peek_sheet(
     }
 
     if !interactive {
-        if sheets.len() > 1 {
+        if sheets.len() > 1 && sheet.is_none() {
             for (i, sd) in sheets.iter().enumerate() {
                 if i > 0 {
                     println!();
@@ -4413,7 +4434,7 @@ fn cmd_peek_workbook(
     }
 
     if !interactive {
-        if sheets.len() > 1 {
+        if sheets.len() > 1 && sheet.is_none() {
             for (i, sd) in sheets.iter().enumerate() {
                 if i > 0 {
                     println!();
@@ -4505,6 +4526,7 @@ fn cmd_peek_sheet_shape(sheets: &[tui::data::SheetData], file: &std::path::Path)
 
 fn cmd_peek_shape(data: &tui::data::PeekData, file: &std::path::Path) -> Result<(), CliError> {
     let delim_name = match data.delimiter {
+        0 => "none (Parquet)",
         b'\t' => "tab (TSV)",
         b',' => "comma (CSV)",
         b';' => "semicolon",

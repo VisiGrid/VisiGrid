@@ -604,13 +604,13 @@ impl TuiApp {
     }
 }
 
-/// Run the interactive TUI viewer for a single CSV/TSV file.
+/// Run the interactive TUI viewer for a single table.
 pub fn run(data: PeekData, file_name: String) -> Result<(), String> {
     let app = TuiApp::new(data, file_name);
     run_app(app)
 }
 
-/// Run the interactive TUI viewer for a multi-sheet .sheet workbook.
+/// Run the interactive TUI viewer for a multi-sheet workbook.
 pub fn run_multi(sheets: Vec<SheetData>, file_name: String, initial_sheet: usize) -> Result<(), String> {
     let app = TuiApp::new_multi(sheets, file_name, initial_sheet);
     run_app(app)
@@ -709,10 +709,44 @@ pub fn print_plain(data: &PeekData, max_rows: usize) -> Result<(), String> {
         writeln!(w).map_err(|e| e.to_string())?;
     }
 
-    if limit < data.num_rows {
-        writeln!(w, "... ({} more rows)", data.num_rows - limit)
+    if limit < data.total_data_rows() {
+        writeln!(w, "... (showing {} of {} rows)", limit, data.total_data_rows())
             .map_err(|e| e.to_string())?;
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn parquet_preview_renders_and_navigates_with_schema_headers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parquet_orders.parquet");
+        let data = data::load_parquet(&path, 2, false, 0, false).unwrap();
+        let mut app = TuiApp::new(data, "orders.parquet".into());
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect();
+        assert!(screen.contains("order_id"));
+        assert!(screen.contains("007"));
+        assert!(screen.contains("2026-09-01 14:02:00"));
+        assert!(screen.contains("3 rows x 5 cols (showing 2)"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(app.data().file_row(app.cursor_row), 2);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect();
+        assert!(screen.contains("Keybindings"));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.should_quit, "first Escape dismisses help");
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.should_quit);
+    }
 }

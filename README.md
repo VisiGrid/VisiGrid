@@ -171,6 +171,12 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## Advanced: Automation, CLI, and Reproducible Workflows
 
+Preview files in a read-only terminal grid with `vgrid peek data.parquet`.
+CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
+Use `--shape` for dimensions, `--json` for structured output, or `--plain` for
+a text table. Previews default to 5,000 rows; `--max-rows` changes the limit.
+See [terminal viewer parity and next steps](docs/tui-parity.md).
+
 For users who treat spreadsheets as part of a larger system, VisiGrid includes a full CLI and headless execution mode built on the same engine.
 
 ### Headless Spreadsheet Workflows
