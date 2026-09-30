@@ -661,7 +661,8 @@ pub struct Spreadsheet {
     pub selected_history_id: Option<u64>,  // Selected entry in History tab (Phase 4.3)
     pub history_filter_query: String,  // Filter query for History tab (Phase 4.3)
     pub history_filter_mode: HistoryFilterMode,  // Filter mode (Phase 7B)
-    pub history_view_start: usize,  // Virtual scroll start index (Phase 7C)
+    pub history_view_start: usize,  // Start of the bounded history page
+    pub history_scroll_handle: ScrollHandle,
     /// Highlighted range for history entry preview (sheet_index, start_row, start_col, end_row, end_col)
     pub history_highlight_range: Option<(usize, usize, usize, usize, usize)>,
     /// Current diff report (Explain Differences feature)
@@ -1282,6 +1283,7 @@ impl Spreadsheet {
             history_filter_query: String::new(),
             history_filter_mode: HistoryFilterMode::default(),
             history_view_start: 0,
+            history_scroll_handle: ScrollHandle::new(),
             history_highlight_range: None,
             diff_report: None,
             diff_ai_only_filter: false,
