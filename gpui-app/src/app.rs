@@ -811,6 +811,7 @@ pub struct Spreadsheet {
 
     // Import report state (for Excel imports)
     pub import_result: Option<visigrid_io::xlsx::ImportResult>,
+    pub import_report_details_expanded: bool,
     pub import_filename: Option<String>,         // Original filename for display
     pub import_source_dir: Option<PathBuf>,      // Original directory for Save As default
 
@@ -1349,6 +1350,7 @@ impl Spreadsheet {
             extract_focus: CreateNameFocus::default(),
 
             import_result: None,
+            import_report_details_expanded: false,
             import_filename: None,
             import_source_dir: None,
 

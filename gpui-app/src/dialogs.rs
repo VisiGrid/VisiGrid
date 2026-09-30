@@ -489,6 +489,7 @@ impl Spreadsheet {
 
     pub fn show_import_report(&mut self, cx: &mut Context<Self>) {
         if self.import_result.is_some() {
+            self.import_report_details_expanded = false;
             self.lua_console.visible = false;
             self.mode = Mode::ImportReport;
             cx.notify();
