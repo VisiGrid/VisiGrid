@@ -12,6 +12,10 @@ use std::ops::Range;
 pub mod pdf;
 #[cfg(feature = "pdf")]
 pub mod snapshot;
+#[cfg(feature = "preview")]
+pub mod preview;
+#[cfg(feature = "pdf")]
+pub mod setup;
 
 pub const GRID_UNIT_PT: f64 = 72.0 / 96.0;
 pub const MAX_PAGES: usize = 1_000;
@@ -73,6 +77,8 @@ pub struct PageSettings {
     pub scale: Scale,
     /// Fixed footer reservation, in physical points (not scaled).
     pub footer: bool,
+    /// Print cell gridlines inside the captured scope, independently of grid UI settings.
+    pub gridlines: bool,
     /// Counts of leading *visible* rows/columns to repeat, not sheet coordinates.
     pub repeat_rows: usize,
     pub repeat_columns: usize,
@@ -86,6 +92,7 @@ impl Default for PageSettings {
             margins: Margins::default(),
             scale: Scale::FitColumns,
             footer: false,
+            gridlines: false,
             repeat_rows: 0,
             repeat_columns: 0,
         }

@@ -122,8 +122,8 @@ impl Spreadsheet {
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
                 self.view_state.additional_selections.clear();
-                self.view_state.scroll_row = 0;
-                self.view_state.scroll_col = 0;
+                self.view_state.scroll_row = self.view_state.frozen_rows;
+                self.view_state.scroll_col = self.view_state.frozen_cols;
                 self.status_message = Some("Jumped to A1".into());
                 cx.notify();
             }

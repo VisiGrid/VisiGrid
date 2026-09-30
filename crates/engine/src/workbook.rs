@@ -2330,6 +2330,15 @@ impl Workbook {
         Ok(rewrites)
     }
 
+    /// Update presentation only, without invalidating formula caches.
+    pub fn set_print_setup(&mut self, id: SheetId, setup: crate::print_setup::PrintSetup) -> Result<crate::print_setup::PrintSetup, String> {
+        setup.validate()?;
+        let sheet = self.sheet_by_id_mut(id).ok_or("Sheet no longer exists")?;
+        let before = std::mem::replace(&mut sheet.print_setup, setup);
+        if before != sheet.print_setup { self.increment_revision(); }
+        Ok(before)
+    }
+
     /// Bump the revision for a structural change the recalc path doesn't see
     /// (sheet add/rename). Optimistic concurrency depends on every visible
     /// change moving the revision.

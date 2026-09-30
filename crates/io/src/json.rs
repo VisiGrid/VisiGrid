@@ -403,6 +403,8 @@ struct SheetBody {
     /// Sheet tab colour as "#RRGGBB".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tab_color: Option<String>,
+    #[serde(default, skip_serializing_if = "visigrid_engine::print_setup::PrintSetup::is_default")]
+    print_setup: visigrid_engine::print_setup::PrintSetup,
     #[serde(default, skip_serializing_if = "is_zero")]
     frozen_rows: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -754,6 +756,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
 
     SheetBody {
         name: sheet.name.clone(),
+        print_setup: sheet.print_setup.clone(),
         tab_color: sheet.tab_color.map(|[r, g, b, _]| format!("#{:02X}{:02X}{:02X}", r, g, b)),
         cells,
         merges,
@@ -943,6 +946,8 @@ fn cached_formula_values(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook
 
 fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
     let mut sheet = Sheet::new(id, visigrid_engine::sheet::NUM_ROWS, visigrid_engine::sheet::NUM_COLS);
+    body.print_setup.validate()?;
+    sheet.print_setup = body.print_setup.clone();
     // Quoted values that read as numbers. Ours are deliberate — the writer only
     // quotes text — but a foreign document may have quoted a number by accident,
     // and it now stays text. Said out loud so that is discoverable rather than

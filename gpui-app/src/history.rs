@@ -138,6 +138,11 @@ pub enum FormatActionKind {
 /// An undoable action
 #[derive(Clone, Debug)]
 pub enum UndoAction {
+    PrintSetupChanged {
+        sheet_id: SheetId,
+        before: visigrid_engine::print_setup::PrintSetup,
+        after: visigrid_engine::print_setup::PrintSetup,
+    },
     /// Cell value changes
     Values {
         sheet_index: usize,
@@ -215,6 +220,7 @@ pub enum UndoAction {
     /// Rows inserted (for undo: delete the inserted rows)
     RowsInserted {
         sheet_index: usize,
+        print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
         /// Formulas rewritten by the edit, anywhere in the workbook:
@@ -227,6 +233,7 @@ pub enum UndoAction {
     /// Rows deleted (for undo: re-insert rows and restore cell data)
     RowsDeleted {
         sheet_index: usize,
+        print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
         /// Deleted cell data: (row, col, value, format)
@@ -240,6 +247,7 @@ pub enum UndoAction {
     /// Columns inserted (for undo: delete the inserted columns)
     ColsInserted {
         sheet_index: usize,
+        print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_col: usize,
         count: usize,
         /// See RowsInserted::formula_rewrites.
@@ -249,6 +257,7 @@ pub enum UndoAction {
     /// Columns deleted (for undo: re-insert columns and restore cell data)
     ColsDeleted {
         sheet_index: usize,
+        print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_col: usize,
         count: usize,
         /// Deleted cell data: (row, col, value, format)
@@ -434,6 +443,7 @@ impl UndoAction {
             UndoAction::PlanCommit { commit, .. } => {
                 format!("Apply reviewed plan {}", commit.plan_id.0)
             }
+            UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
             UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
@@ -1547,6 +1557,9 @@ impl History {
                     Self::apply_action_forward(workbook, view_state, sub_action)?;
                 }
             }
+            UndoAction::PrintSetupChanged { sheet_id, after, .. } => {
+                workbook.set_print_setup(*sheet_id, after.clone()).map_err(PreviewBuildError::InvariantViolation)?;
+            }
             UndoAction::PlanCommit { commit, .. } => {
                 *workbook = commit.applied.clone();
             }
@@ -1715,6 +1728,7 @@ impl History {
 /// Classification of undo action types for replay support checking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoActionKind {
+    PrintSetupChanged,
     CondFormatAdded,
     CondFormatsCleared,
     Values,
@@ -1763,6 +1777,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeDescriptionChanged => true,
             UndoActionKind::Group => true,
             UndoActionKind::PlanCommit => true,
+            UndoActionKind::PrintSetupChanged => true,
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
@@ -1807,6 +1822,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeDescriptionChanged => "Change description",
             UndoActionKind::Group => "Group",
             UndoActionKind::PlanCommit => "Reviewed plan",
+            UndoActionKind::PrintSetupChanged => "Print setup",
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
@@ -1844,6 +1860,7 @@ impl UndoActionKind {
             UndoActionKind::NamedRangeDescriptionChanged => 0x06,
             UndoActionKind::Group => 0x07,
             UndoActionKind::PlanCommit => 0x1A,
+            UndoActionKind::PrintSetupChanged => 0x1D,
             UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
@@ -1881,6 +1898,7 @@ impl UndoAction {
             UndoAction::NamedRangeDescriptionChanged { .. } => UndoActionKind::NamedRangeDescriptionChanged,
             UndoAction::Group { .. } => UndoActionKind::Group,
             UndoAction::PlanCommit { .. } => UndoActionKind::PlanCommit,
+            UndoAction::PrintSetupChanged { .. } => UndoActionKind::PrintSetupChanged,
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
@@ -1965,6 +1983,35 @@ pub enum PreviewBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_setup_replay_targets_sheet_identity_and_preserves_values() {
+        use visigrid_engine::print_setup::{PrintRows, PrintSetup};
+        let mut workbook = Workbook::new();
+        let index = workbook.add_sheet_named("Report").unwrap();
+        let sheet = workbook.sheet_mut(index).unwrap();
+        sheet.set_value(0, 0, "Title");
+        let sheet_id = sheet.id;
+        let after = PrintSetup {
+            gridlines: true,
+            repeat_rows: Some(PrintRows { start: 0, end: 2 }),
+            ..Default::default()
+        };
+        let action = UndoAction::PrintSetupChanged {
+            sheet_id,
+            before: PrintSetup::default(),
+            after: after.clone(),
+        };
+        let sheet = workbook.take_sheet(index).unwrap();
+        assert!(workbook.restore_sheet(0, sheet));
+        let mut view = crate::app::PreviewViewState::default();
+        History::apply_action_forward(&mut workbook, &mut view, &action).unwrap();
+        assert_eq!(workbook.sheet(0).unwrap().print_setup, after);
+        assert!(workbook.sheet(1).unwrap().print_setup.is_default());
+        assert_eq!(workbook.sheet(0).unwrap().get_raw(0, 0), "Title");
+        workbook.take_sheet(0).unwrap();
+        assert!(History::apply_action_forward(&mut workbook, &mut view, &action).is_err());
+    }
 
     /// Large workbooks keep no load-time copy (#18); preview must say so
     /// rather than replay from something that isn't there.
@@ -2174,6 +2221,7 @@ mod tests {
             UndoActionKind::NamedRangeDescriptionChanged,
             UndoActionKind::Group,
             UndoActionKind::PlanCommit,
+            UndoActionKind::PrintSetupChanged,
             UndoActionKind::WorkbookSnapshot,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,

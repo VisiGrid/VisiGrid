@@ -74,6 +74,18 @@ pub fn engine_commit() -> String {
     env!("VISIGRID_ENGINE_COMMIT").to_string()
 }
 
+/// Every built-in function name, sorted — the engine's own FUNCTION_NAMES.
+///
+/// Callers that state how many functions the engine has (the website says it
+/// on several pages) read it from here, so the number follows the engine
+/// instead of being retyped each release. It was 96+, 100+, 123 and 132 on
+/// different pages at different times, each written by hand.
+#[wasm_bindgen]
+pub fn function_names() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&visigrid_engine::formula::functions::list_functions())
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 /// Build a workbook from raw input sheets and recompute it (shared by every
 /// export). Cells are written directly onto sheets, so the dependency graph
 /// is rebuilt before the ordered recompute (io::json::import_any pattern).
