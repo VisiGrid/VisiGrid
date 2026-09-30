@@ -652,7 +652,7 @@ impl CommandId {
             Self::Save => "write",
             Self::SaveAs => "write export",
             Self::ExportCsv => "save comma",
-            Self::ExportPdf => "print portable document paper page",
+            Self::ExportPdf => "print preview portable document paper page gridlines",
             Self::ExportTsv => "save tab separated",
             Self::ExportJson => "save array",
             Self::SelectTheme => "appearance color scheme dark light",

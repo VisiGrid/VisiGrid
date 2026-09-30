@@ -349,8 +349,8 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
             if this.mode.is_overlay() { return; }
             this.view_state.selected = (0, 0);
-            this.view_state.scroll_row = 0;
-            this.view_state.scroll_col = 0;
+            this.view_state.scroll_row = this.view_state.frozen_rows;
+            this.view_state.scroll_col = this.view_state.frozen_cols;
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &MoveToEnd, _, cx| {
@@ -362,6 +362,7 @@ pub(crate) fn bind(
             this.ensure_visible(cx);
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
+            if this.mode == Mode::ExportPdf { this.pdf_preview_page(-1, cx); return; }
             if this.guard_terminal_focus(window, cx, "PageUp") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {
@@ -376,6 +377,7 @@ pub(crate) fn bind(
             this.page_up(cx);
         }))
         .on_action(cx.listener(|this, _: &PageDown, window, cx| {
+            if this.mode == Mode::ExportPdf { this.pdf_preview_page(1, cx); return; }
             if this.guard_terminal_focus(window, cx, "PageDown") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {

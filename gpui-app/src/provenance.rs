@@ -252,7 +252,7 @@ impl UndoAction {
                     range_ref(range.start_row, range.start_col, range.end_row, range.end_col)
                 ))
             }
-            UndoAction::FreezePanesChanged { .. } => {
+            UndoAction::PrintSetupChanged { .. } | UndoAction::FreezePanesChanged { .. } => {
                 // View-only - no executable Lua
                 None
             }
@@ -463,7 +463,7 @@ impl UndoAction {
                 let op = if description.starts_with("Unmerge") { "unmerge" } else { "merge" };
                 vec![format!("{}:{}", op, sheet_index + 1)]
             }
-            UndoAction::FreezePanesChanged { .. } => {
+            UndoAction::PrintSetupChanged { .. } | UndoAction::FreezePanesChanged { .. } => {
                 // View-only — not hashed
                 vec![]
             }
@@ -927,7 +927,7 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         }
         UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } | UndoAction::PivotCommit { .. } => true,
         // View-only, include everywhere
-        UndoAction::FreezePanesChanged { .. } => true,
+        UndoAction::PrintSetupChanged { .. } | UndoAction::FreezePanesChanged { .. } => true,
         // Rewind is audit-only, always include
         UndoAction::Rewind { .. } => true,
         UndoAction::SetMerges { sheet_index: s, .. } => *s == sheet_index,
@@ -999,6 +999,7 @@ mod tests {
     #[test]
     fn test_rows_inserted_to_lua() {
         let action = UndoAction::RowsInserted {
+            print_setup_before: Default::default(),
             sheet_index: 0,
             at_row: 4,
             count: 3,

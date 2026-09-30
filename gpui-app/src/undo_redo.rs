@@ -122,6 +122,10 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo reviewed plan {}", commit.plan_id.0));
                 }
+                UndoAction::PrintSetupChanged { sheet_id, before, .. } => {
+                    let _ = self.workbook.update(cx, |wb, _| wb.set_print_setup(sheet_id, before));
+                    self.bump_cells_rev();
+                }
                 UndoAction::WorkbookSnapshot {
                     commit,
                     before_row_view,
@@ -135,11 +139,12 @@ impl Spreadsheet {
                     self.pivot_undo(&commit, &created_sheet, cx);
                     self.status_message = Some(format!("Undo: {}", description));
                 }
-                UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
+                UndoAction::RowsInserted { sheet_index, at_row, count, print_setup_before, formula_rewrites } => {
                     // Undo insert by deleting the rows
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.delete_rows(at_row, count);
+                            sheet.print_setup = print_setup_before.clone();
                         }
                     });
                     // Shift row heights back up (per-sheet)
@@ -167,11 +172,12 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
                 }
-                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, formula_rewrites } => {
+                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, print_setup_before, formula_rewrites } => {
                     // Undo delete by re-inserting rows and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.insert_rows(at_row, count);
+                            sheet.print_setup = print_setup_before.clone();
                         }
                         let mut guard = wb.batch_guard();
                         for (row, col, value, format) in deleted_cells {
@@ -214,11 +220,12 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} row(s)", count));
                 }
-                UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
+                UndoAction::ColsInserted { sheet_index, at_col, count, print_setup_before, formula_rewrites } => {
                     // Undo insert by deleting the columns
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.delete_cols(at_col, count);
+                            sheet.print_setup = print_setup_before.clone();
                         }
                     });
                     // Shift column widths back left (per-sheet)
@@ -246,11 +253,12 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} column(s)", count));
                 }
-                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, formula_rewrites } => {
+                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, print_setup_before, formula_rewrites } => {
                     // Undo delete by re-inserting columns and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
                             sheet.insert_cols(at_col, count);
+                            sheet.print_setup = print_setup_before.clone();
                         }
                         let mut guard = wb.batch_guard();
                         for (row, col, value, format) in deleted_cells {
@@ -547,6 +555,10 @@ impl Spreadsheet {
                 self.row_heights.insert(sheet_id, before_row_heights);
                 self.bump_cells_rev();
             }
+            UndoAction::PrintSetupChanged { sheet_id, before, .. } => {
+                let _ = self.workbook.update(cx, |wb, _| wb.set_print_setup(sheet_id, before));
+                self.bump_cells_rev();
+            }
             UndoAction::WorkbookSnapshot {
                 commit,
                 before_row_view,
@@ -558,10 +570,11 @@ impl Spreadsheet {
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_undo(&commit, &created_sheet, cx);
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, print_setup_before, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.delete_rows(at_row, count);
+                        sheet.print_setup = print_setup_before.clone();
                     }
                 });
                 // Shift row heights back up (per-sheet)
@@ -586,10 +599,11 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, formula_rewrites } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, print_setup_before, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_rows(at_row, count);
+                        sheet.print_setup = print_setup_before.clone();
                     }
                     let mut guard = wb.batch_guard();
                     for (row, col, value, format) in deleted_cells {
@@ -628,10 +642,11 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, print_setup_before, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.delete_cols(at_col, count);
+                        sheet.print_setup = print_setup_before.clone();
                     }
                 });
                 // Shift column widths back left (per-sheet)
@@ -656,10 +671,11 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, formula_rewrites } => {
+            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, print_setup_before, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_cols(at_col, count);
+                        sheet.print_setup = print_setup_before.clone();
                     }
                     let mut guard = wb.batch_guard();
                     for (row, col, value, format) in deleted_cells {
@@ -902,6 +918,10 @@ impl Spreadsheet {
                 self.row_heights.insert(sheet_id, after_row_heights);
                 self.bump_cells_rev();
             }
+            UndoAction::PrintSetupChanged { sheet_id, after, .. } => {
+                let _ = self.workbook.update(cx, |wb, _| wb.set_print_setup(sheet_id, after));
+                self.bump_cells_rev();
+            }
             UndoAction::WorkbookSnapshot {
                 commit,
                 after_row_view,
@@ -913,7 +933,7 @@ impl Spreadsheet {
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites, .. } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
                 // formulas, validations, and named ranges are re-adjusted.
@@ -957,7 +977,7 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites, .. } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
                 // formulas, validations, and named ranges are re-adjusted.
@@ -1210,6 +1230,10 @@ impl Spreadsheet {
                     self.row_heights.insert(sheet_id, after_row_heights);
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Redo reviewed plan {}", commit.plan_id.0));
+                }
+                UndoAction::PrintSetupChanged { sheet_id, after, .. } => {
+                    let _ = self.workbook.update(cx, |wb, _| wb.set_print_setup(sheet_id, after));
+                    self.bump_cells_rev();
                 }
                 UndoAction::WorkbookSnapshot {
                     commit,

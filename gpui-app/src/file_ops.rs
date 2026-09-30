@@ -41,8 +41,8 @@ impl Spreadsheet {
         self.doc_settings = DocumentSettings::default();  // Reset doc settings
         self.view_state.selected = (0, 0);
         self.view_state.selection_end = None;
-        self.view_state.scroll_row = 0;
-        self.view_state.scroll_col = 0;
+        self.view_state.scroll_row = self.view_state.frozen_rows;
+        self.view_state.scroll_col = self.view_state.frozen_cols;
         self.history.clear();
         self.bump_cells_rev();  // Invalidate cell search cache
 
@@ -162,8 +162,8 @@ impl Spreadsheet {
 
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
-                self.view_state.scroll_row = 0;
-                self.view_state.scroll_col = 0;
+                self.view_state.scroll_row = self.view_state.frozen_rows;
+                self.view_state.scroll_col = self.view_state.frozen_cols;
                 self.history.clear();
                 self.bump_cells_rev();
                 self.add_recent_file(path);
@@ -337,8 +337,8 @@ impl Spreadsheet {
                         this.doc_settings = DocumentSettings::default();
                         this.view_state.selected = (0, 0);
                         this.view_state.selection_end = None;
-                        this.view_state.scroll_row = 0;
-                        this.view_state.scroll_col = 0;
+                        this.view_state.scroll_row = this.view_state.frozen_rows;
+                        this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
@@ -483,8 +483,8 @@ impl Spreadsheet {
                         this.row_heights.clear();
                         this.view_state.selected = (0, 0);
                         this.view_state.selection_end = None;
-                        this.view_state.scroll_row = 0;
-                        this.view_state.scroll_col = 0;
+                        this.view_state.scroll_row = this.view_state.frozen_rows;
+                        this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
@@ -641,8 +641,8 @@ impl Spreadsheet {
                         this.doc_settings = DocumentSettings::default();
                         this.view_state.selected = (0, 0);
                         this.view_state.selection_end = None;
-                        this.view_state.scroll_row = 0;
-                        this.view_state.scroll_col = 0;
+                        this.view_state.scroll_row = this.view_state.frozen_rows;
+                        this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);

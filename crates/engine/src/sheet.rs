@@ -337,6 +337,9 @@ pub struct Sheet {
     /// Initial/saved freeze configuration (rows, columns).
     #[serde(default)]
     pub frozen_panes: (usize, usize),
+    /// Per-sheet print presentation, excluded from semantic fingerprints.
+    #[serde(default)]
+    pub print_setup: crate::print_setup::PrintSetup,
     /// Pivot tables whose output this sheet shows. Each owns its output
     /// rectangle: ordinary value writes inside it are refused here, at the
     /// engine boundary, whatever the caller (typing, paste, fill, scripts,
@@ -515,6 +518,7 @@ impl Sheet {
             row_formats: HashMap::new(),
             col_formats: HashMap::new(),
             frozen_panes: (0, 0),
+            print_setup: Default::default(),
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             edit_generation: 0,
@@ -544,6 +548,7 @@ impl Sheet {
             row_formats: HashMap::new(),
             col_formats: HashMap::new(),
             frozen_panes: (0, 0),
+            print_setup: Default::default(),
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             edit_generation: 0,
@@ -1872,6 +1877,7 @@ impl Sheet {
 
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
+        self.print_setup.adjust(true, at_row, count, false);
         self.cells.insert_rows(at_row, count, self.rows);
 
         // Adjust merged regions (grid-line semantics)
@@ -1893,6 +1899,7 @@ impl Sheet {
 
     /// Delete rows at the specified position, shifting remaining rows up
     pub fn delete_rows(&mut self, start_row: usize, count: usize) {
+        self.print_setup.adjust(true, start_row, count, true);
         let end_row = start_row + count; // exclusive
 
         // Remove cells in the deleted rows; those below move up
@@ -1941,6 +1948,7 @@ impl Sheet {
 
     /// Insert columns at the specified position, shifting existing columns right
     pub fn insert_cols(&mut self, at_col: usize, count: usize) {
+        self.print_setup.adjust(false, at_col, count, false);
         // Shift cells right of the insertion
         self.cells.insert_cols(at_col, count, self.cols);
 
@@ -1961,6 +1969,7 @@ impl Sheet {
 
     /// Delete columns at the specified position, shifting remaining columns left
     pub fn delete_cols(&mut self, start_col: usize, count: usize) {
+        self.print_setup.adjust(false, start_col, count, true);
         let end_col = start_col + count; // exclusive
 
         // Remove cells in the deleted columns; those right of them move left

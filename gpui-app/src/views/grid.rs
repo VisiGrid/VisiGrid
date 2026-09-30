@@ -170,8 +170,8 @@ pub fn render_grid(
 
     // Get view state based on which pane we're rendering
     let view_state = get_pane_view_state(app, pane_side);
-    let scroll_row = view_state.scroll_row;
-    let scroll_col = view_state.scroll_col;
+    let scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
+    let scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
     let frozen_rows = view_state.frozen_rows;
     let frozen_cols = view_state.frozen_cols;
 
@@ -273,6 +273,7 @@ pub fn render_grid(
             d.child(
                 div()
                     .flex()
+                    .flex_col()
                     .flex_shrink_0()
                     .children(
                         (0..frozen_rows).map(|view_row| {
@@ -2385,13 +2386,13 @@ fn overlay_regions(
         vec![(view.scroll_col, cols, 0.0, None)]
     } else {
         vec![(0, fc, 0.0, Some(frozen_width)),
-             (view.scroll_col, cols.saturating_sub(fc), frozen_width + 1.0, None)]
+             (view.scroll_col.max(fc), cols.saturating_sub(fc), frozen_width + 1.0, None)]
     };
     let ys = if fr == 0 {
         vec![(view.scroll_row, rows, 0.0, None)]
     } else {
         vec![(0, fr, 0.0, Some(frozen_height)),
-             (view.scroll_row, rows.saturating_sub(fr), frozen_height + 1.0, None)]
+             (view.scroll_row.max(fr), rows.saturating_sub(fr), frozen_height + 1.0, None)]
     };
     for (row, rows, y, height) in ys {
         for &(col, cols, x, width) in &xs {
@@ -3336,6 +3337,27 @@ mod frozen_overlay_tests {
         assert_eq!(moved[0].col, 0);
         assert_eq!(moved[0].x, 0.0);
         assert_eq!(moved[1].x + (9 - moved[1].col) as f32 * 96.0, 481.0);
+    }
+
+    #[test]
+    fn frozen_overlay_regions_never_repeat_frozen_cells_in_the_body() {
+        let mut view = WorkbookViewState::default();
+        view.frozen_rows = 4;
+        view.frozen_cols = 2;
+        // Imported views and older sessions can still contain zero scroll offsets.
+        let regions = overlay_regions(&view, 30, 12, 180.0, 112.0);
+        assert_eq!((regions[1].row, regions[1].col), (0, 2));
+        assert_eq!((regions[2].row, regions[2].col), (4, 0));
+        assert_eq!((regions[3].row, regions[3].col), (4, 2));
+        view.ensure_visible(30, 12);
+        assert_eq!((view.scroll_row, view.scroll_col), (4, 2));
+        view.selected = (60, 20);
+        view.ensure_visible(30, 12);
+        assert_eq!((view.scroll_row, view.scroll_col), (35, 11));
+        view.selected = (0, 0);
+        view.ensure_visible(30, 12);
+        assert_eq!((view.scroll_row, view.scroll_col), (35, 11),
+            "selecting an already visible frozen cell must not move the body");
     }
 
     #[test]

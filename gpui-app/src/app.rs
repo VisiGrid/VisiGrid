@@ -2284,8 +2284,8 @@ impl Spreadsheet {
             CommandId::GoToStart => {
                 self.view_state.selected = (0, 0);
                 self.view_state.selection_end = None;
-                self.view_state.scroll_row = 0;
-                self.view_state.scroll_col = 0;
+                self.view_state.scroll_row = self.view_state.frozen_rows;
+                self.view_state.scroll_col = self.view_state.frozen_cols;
                 cx.notify();
             }
             CommandId::SelectAll => self.select_all(cx),
@@ -4049,8 +4049,8 @@ impl Spreadsheet {
     pub fn extend_to_start(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
         self.view_state.selection_end = Some((0, 0));
-        self.view_state.scroll_row = 0;
-        self.view_state.scroll_col = 0;
+        self.view_state.scroll_row = self.view_state.frozen_rows;
+        self.view_state.scroll_col = self.view_state.frozen_cols;
         cx.notify();
     }
 

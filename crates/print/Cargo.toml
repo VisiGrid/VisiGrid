@@ -9,12 +9,14 @@ description = "Device-independent worksheet pagination for print and PDF"
 default = []
 pdf-spike = ["dep:krilla"]
 pdf = ["dep:krilla", "dep:cosmic-text", "dep:visigrid-engine", "dep:tempfile"]
+preview = ["pdf", "dep:hayro"]
 
 [dependencies]
 krilla = { version = "0.8.2", default-features = false, features = ["simple-text"], optional = true }
 cosmic-text = { version = "0.19", default-features = false, features = ["std", "fontconfig"], optional = true }
 visigrid-engine = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
+hayro = { version = "0.7.1", default-features = false, optional = true }
 
 [dev-dependencies]
 visigrid-io = { workspace = true }
@@ -26,3 +28,7 @@ required-features = ["pdf-spike"]
 [[example]]
 name = "export_pdf"
 required-features = ["pdf"]
+
+[[example]]
+name = "preview_pdf"
+required-features = ["preview"]

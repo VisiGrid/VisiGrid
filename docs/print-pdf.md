@@ -1,23 +1,49 @@
 # Print and PDF implementation
 
-Status: basic PDF export is wired into the desktop app on `feat/print-pdf`.
-Native printer submission and the visual page preview are still pending.
+Status: PDF export includes a visual print preview, optional printed gridlines,
+repeated top rows, and per-sheet saved print setup.
+Native printer submission remains separate work.
 
 ## Export a PDF
 
 Choose **File → Export PDF…** (also available in the command palette).
 Select Active sheet or Selected range, A4/Letter/Legal, portrait/landscape,
-Fit columns/Actual size/Fit sheet, and optional page numbers. The dialog reports
-page count, scale, and smallest cell text size before opening the native save
-prompt. Use a filename ending in `.pdf`. A successful export keeps the receipt
-visible, including clipping, small-text, and missing-font notices, with an
-explicit **Open PDF** button.
+Fit columns/Actual size/Fit sheet, optional page numbers, and **Print gridlines**
+(default off). The right pane shows the actual generated PDF on white paper.
+Previous/Next (or PgUp/PgDn) navigate pages; zoom and Fit page change only the
+preview view. Page setup changes regenerate the document in the background.
+Page count, scale, smallest text size, clipping, and font notices appear before
+export. Export saves the same cached PDF bytes shown in preview. Use a filename
+ending in `.pdf`. The receipt and an explicit **Open PDF** button remain visible
+after saving.
 
-The dialog identifies the active sheet, aligns layout controls, and scrolls its
-body in smaller windows. Success, destination, and warnings are separate items;
+**Repeat top rows** adds/removes leading visible rows from the captured print
+area. The displayed source row range repeats on every page. Hidden/filtered
+rows stay omitted; a header boundary cannot split a merge or consume all body
+rows. This first UI supports leading header bands, not arbitrary interior rows.
+
+**Use selection** sets a print area from the current selection (including
+intersecting merges). **Clear print area** returns to automatic bounds. A saved
+area is a source rectangle, so sorting does not pull unrelated cells into it.
+A sorted selection that does not form one source rectangle is rejected.
+Scope can temporarily override a saved area with Active sheet or Selected range.
+Headers must remain a leading band of that scope; incompatible scopes/sorts show
+an error rather than silently repeating other rows.
+
+Page controls edit a temporary preview. **Save setup to sheet** applies paper,
+orientation, scaling, gridlines, page numbers, print area, and repeated rows to
+that sheet as one undoable action. Save the workbook normally to persist it on
+disk. Closing without Save setup discards preview changes; exporting a PDF alone
+does not modify the workbook. Reopening preview uses the sheet's saved area and
+setup. Settings belong to the sheet, follow sheet copies/reordering, and do not
+change formula results or semantic fingerprints.
+
+The dialog identifies the captured sheet, aligns layout controls, and stacks
+settings above the preview in narrower windows. Settings and the preview canvas
+scroll independently. Success, destination, and warnings are separate items;
 changing any setting clears the previous receipt. Clicking a setting also moves
-keyboard focus to it. Progress distinguishes choosing a destination from creating
-the PDF, and the successful-export action reads **Export again…**.
+keyboard focus to it. Progress distinguishes preparing the preview, choosing a
+destination, and saving the PDF. The successful-export action reads **Export again…**.
 
 - The adapter captures current calculated display values, dimensions, effective
   conditional formats, agent roles, merges, and the active sort/filter/hide view.
@@ -29,9 +55,10 @@ the PDF, and the successful-export action reads **Export again…**.
   intentional blank formatting. Intersecting merges expand the selected scope.
   Merges made discontinuous by sorting fail with a clear explanation.
 - Capture is synchronous; encoding, shaping, and disk writes run in the background.
-  Cancel discards the render and checks between pages/cells. Saving uses a synced
-  temporary sibling followed by atomic replacement. Rendering errors cannot
-  truncate an existing destination.
+  Closing or changing settings discards stale render results and checks cancellation
+  between pages/cells. Page changes coalesce while a bitmap is rendering. Saving
+  uses a synced temporary sibling followed by atomic replacement. Rendering errors
+  cannot truncate an existing destination.
 - The optional `pdf` feature connects the engine adapter to Krilla and cosmic-text.
   Advanced shaping handles bidi and font fallback; resolved fonts are embedded in
   searchable vector output. The app's bundled IBM Plex Sans faces are always
@@ -40,21 +67,33 @@ the PDF, and the successful-export action reads **Export again…**.
   reported. Text wraps within existing row heights; export never resizes the sheet.
 - Explicit fills, font styling, alignment, borders, wrapped text, merges, and
   left-aligned overflow are rendered. Semantic styles use a light paper palette;
-  desktop selection and theme backgrounds are omitted.
+  desktop selection and theme backgrounds are omitted. Printed gridlines are a
+  separate setting from the editing grid: light gray lines within the captured
+  print area, beneath fills and explicit borders, with no internal merged-cell
+  lines. They do not add cells to the print area or modify workbook formatting.
+- The optional `preview` feature includes `pdf` and [Hayro 0.7.1](https://github.com/LaurenzV/hayro)
+  (MIT/Apache-2.0). It rasterizes the generated PDF with embedded fonts, one page
+  at a time, at a maximum 2400-pixel long edge. Zoom is 50–200% or Fit page;
+  exported text remains vector/searchable regardless of preview resolution.
+  Rasterization runs in the background and cannot be interrupted mid-page; stale
+  results are discarded. Unsupported rendering elements produce a visible preview
+  error instead of an incomplete image; the generated PDF can still be exported.
 
 This is an incremental export milestone, not the full print specification.
-Margins are fixed at 0.5 inches; there is no visual page preview, native Print
-command, workbook-wide output, saved print area, persistent settings, page-range
-control, gridline/headings controls, or repeated-title controls in the dialog.
-The core already supports repeated titles, but that UI remains to be built.
+Margins are fixed at 0.5 inches; there is no native Print command, workbook-wide
+output, custom margin controls, page-range control, printed headings, editable
+page breaks, or repeated-column controls in the dialog.
 Center-across-selection fidelity and shared grid/PDF text metrics still need work.
-External edits after capture do not change the export; reopen the dialog to
-capture them. The sheet/range choice captures a fresh snapshot.
+External edits after capture do not change the export. **Refresh preview** captures
+the sheet again; a workbook revision change shows a refresh notice. View-only
+changes that do not increment the workbook revision may not show that notice.
+The sheet/range choice also captures a fresh snapshot.
 
 Headless QA uses the same adapter and renderer (not a shipped CLI command):
 
 ```sh
-cargo run -p visigrid-print --features pdf --example export_pdf -- INPUT.xlsx OUTPUT.pdf 'Invoice'
+cargo run -p visigrid-print --features pdf --example export_pdf -- INPUT.xlsx OUTPUT.pdf 'Invoice' --gridlines
+cargo run -p visigrid-print --features preview --example preview_pdf -- OUTPUT.pdf PAGE.ppm 1
 cargo test -p visigrid-print --all-features
 ```
 
@@ -82,6 +121,25 @@ The success receipt stays open, and cancelling a second native save prompt
 returns to the settings without overwriting the file. The workbook remains an
 XLSX import. `cargo clippy --no-deps -p visigrid-print --all-features --all-targets
 -- -D warnings` passes; existing dependency warnings remain outside this crate.
+
+Preview/gridline verification (2026-09-30): all 25 print tests pass, including
+pixel checks for gridlines on/off, merged interiors, explicit white fills,
+explicit borders, bounded print scope, shaped text, invalid preview requests,
+and unchanged PDF bytes across preview resolutions. Print Clippy passes with
+all features and targets. All seven fixture pages render through Hayro; side-by-side
+Poppler comparisons preserve geometry, styling, Japanese, Arabic, and clipping.
+Gridlines preserve the 1 / 4 / 1 / 1 page counts, all 120 transaction IDs, and
+the invoice/report/annual totals.
+
+Desktop preview smoke test on Linux: the invoice renders with gridlines off/on;
+zoom and Fit page leave the export scale unchanged. The dialog fits both
+1400×1100 and the app's minimum-width 1000×800 window. PgDn navigates the
+four-page report; rapid paper/orientation changes show the final selected layout,
+and closing during regeneration then reopening does not display stale results.
+Saving from preview produces a one-page A4 PDF with visible gridlines and the
+correct invoice total; cancelling a second native save prompt returns to preview.
+The final desktop build completed successfully. macOS and Windows UI QA remains
+outstanding.
 
 The product proposal and research live in the planning repository:
 
@@ -122,6 +180,54 @@ after filtering/sorting. The optional `snapshot` module implements the first wor
 layout API itself does not resolve these inputs.
 Only nonempty displayed text origins belong in `LayoutInput::text`.
 
+## Saved setup storage and structural edits
+
+The engine owns `Sheet::print_setup`. Native schema v10 adds a versioned
+`sheet_print_setup` table; pre-v10 files default to automatic bounds, A4 portrait,
+Fit columns, no gridlines/page numbers/headers. Single-sheet, workbook, metadata,
+and full GUI/CLI native save paths all preserve setup. Unsupported setup versions
+or malformed settings fail to load rather than being silently discarded. Full
+JSON interchange includes the additive `print_setup` field. XLSX/ODS print-setup
+interchange is not implemented in this pass.
+
+Source-coordinate areas and header ranges shift when rows/columns are inserted
+before them, expand for insertions inside, shrink for partial deletions, and
+clear when fully deleted. Insertion at the first row/column shifts the range;
+insertion just after its end does not expand it. Grid bounds clamp shifted ends.
+Desktop structural undo restores the exact prior setup, including a wholly
+deleted range; redo applies the structural edit again. Saving setup uses a small
+before/after settings action rather than cloning the workbook.
+
+Linux setup verification (2026-09-30): 28 print tests, 3 native/JSON setup
+integration tests, 2 engine range tests, and the history identity/replay test
+pass. The native-file regression suite passes 40 tests with one existing ignored
+test. Print-package Clippy passes with `--no-deps --all-features --all-targets
+-- -D warnings`; dependency linting still reports pre-existing engine warnings.
+The desktop build and smoke test cover repeated rows 1:4, gridlines, setup
+undo/redo, A1:F60 print area, saving/reopening a native workbook, and keyboard
+scrolling at 1000×800. A four-page headless PDF contains all 120 transactions
+once with headers on each page; the two-page GUI export contains only the 56
+transactions inside the saved area, also once, with repeated headers. Rendered
+second pages were inspected; the fixture's existing narrow-column clipping is
+reported by preflight.
+
+Native schema v11 fixes the merge-storage issue found during reopen QA. Merges
+are stored per sheet; migration assigns legacy merge rows to the active sheet
+recorded in the file. Older writers omitted merges from other sheets, so those
+missing merges must be recovered from the original workbook. The legacy table
+remains for compatibility, while the new table is authoritative for v11 readers.
+
+Frozen-row rendering stacks the header band vertically. Grid cells and merge/text
+overlays clamp the scrolling body to the frozen boundary; Home, selection-to-start,
+and file-open navigation preserve the same boundary. This prevents duplicate
+headers and text overlays displaced into the first body rows.
+
+Follow-up verification (2026-09-30): 3 frozen-overlay/navigation tests, 5 native
+merge/print-setup integration tests, and 40 native regression tests pass (one
+existing ignored test). Linux visual checks cover the original XLSX, a migrated
+copy of the affected native file, Ctrl+Shift+Home selection, sequential row
+headers, and clicking B5 immediately below the frozen band at 1000×800.
+
 ## PDF backend spike
 
 The optional `pdf-spike` feature enables Krilla 0.8.2 (MIT/Apache-2.0) for the
@@ -160,15 +266,14 @@ qualify macOS, Windows, native printers, or arbitrary workbook rendering.
 
 ## Remaining print roadmap
 
-1. A common shaped drawing representation for visual preview and PDF; current
-   output shares geometry with the page plan but is not a GPUI page preview.
-2. Preview navigation, range/title editing, custom margins/scale, printed headings
-   and gridlines, page-range controls, and source-revision refresh notices.
+1. Arbitrary repeated-row ranges and repeated columns, custom margins/scale,
+   printed headings, and page-range controls. Preview and PDF share the exact
+   encoded document.
+2. Editable page layout and manual page breaks, with matching pagination semantics.
 3. Exact shared formatting semantics for all grid cases (including center across
    selection and extent growth from text spill), richer clipping locations and
-   blank-page diagnostics, and repeat-title controls.
-4. Persist settings with native-format migration and structural range tracking;
-   preserve them through CLI/headless saves and exclude them from semantic hashes.
+   blank-page diagnostics.
+4. XLSX print-setup import/export and platform-specific print integration.
 5. Platform QA for font resolution, bidi/CJK output, save dialogs, cancellation,
    and replacement on macOS and Windows. Linux test results do not qualify them.
 
