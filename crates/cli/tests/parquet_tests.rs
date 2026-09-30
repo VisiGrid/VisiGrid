@@ -36,6 +36,56 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[test]
+fn peek_parquet_json_preserves_ids_and_reports_preview_limit() {
+    let out = vgrid(&["peek", &fixture("parquet_orders.parquet"), "--json", "--max-rows", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let data: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(data["columns"][0], "order_id");
+    assert_eq!(data["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(data["rows"][0][0], "007");
+    assert_eq!(data["rows"][0][1], "2026-09-01 14:02:00");
+    assert_eq!(data["rows"][0][2], "2026-09-03");
+    assert_eq!(data["rows"][0][3], 1234.5);
+    assert!(stderr(&out).contains("1 of 3 rows"));
+}
+
+#[test]
+fn peek_parquet_plain_and_shape_show_total_rows() {
+    let path = fixture("parquet_70000_rows.parquet");
+    let plain = vgrid(&["peek", &path, "--plain", "--max-rows", "2"]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    assert!(stdout(&plain).contains("showing 2 of 70000 rows"));
+    let shape = vgrid(&["peek", &path, "--shape"]);
+    assert!(shape.status.success(), "{}", stderr(&shape));
+    assert!(stdout(&shape).contains("rows:       70000"));
+    assert!(stdout(&shape).contains("loaded:     5000"));
+    assert!(stdout(&shape).contains("headers:    yes"));
+}
+
+#[test]
+fn peek_parquet_all_rows_and_non_tty_fallback() {
+    let out = vgrid(&["peek", &fixture("parquet_orders.parquet"), "--max-rows", "0"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("007"));
+    assert!(stdout(&out).contains("2026-09-01 14:02:00"));
+    assert!(stdout(&out).contains("2026-09-03"));
+    assert!(!stdout(&out).contains("showing"));
+    assert!(!stdout(&out).contains('\x1b'));
+}
+
+#[test]
+fn peek_parquet_rejects_inapplicable_flags() {
+    for extra in [vec!["--no-headers"], vec!["--delimiter", "tab"], vec!["--sheet", "0"], vec!["--recompute"]] {
+        let path = fixture("parquet_orders.parquet");
+        let mut args = vec!["peek", &path, "--json"];
+        args.extend(extra);
+        let out = vgrid(&args);
+        assert!(!out.status.success());
+        assert!(stderr(&out).contains("do not apply"), "{}", stderr(&out));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Files a sheet used to be too small for
 //

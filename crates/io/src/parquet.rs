@@ -96,10 +96,22 @@ fn column_kind(ty: &Type) -> ColumnKind {
 }
 
 pub fn import(path: &Path) -> Result<ParquetImport, String> {
+    import_with_limits(path, MAX_ROWS - 1, None)
+}
+
+/// Import a bounded preview using the same value conversions as desktop import.
+/// `max_data_rows` excludes the header; zero reads schema only. The optional
+/// cell budget is checked against metadata before any records are decoded.
+/// Sheet dimensions remain a hard limit even when no cell budget is supplied.
+pub fn import_with_limits(
+    path: &Path,
+    max_data_rows: usize,
+    max_cells: Option<usize>,
+) -> Result<ParquetImport, String> {
     // The record reader panics (unimplemented!) on the few legacy column types
     // it has no conversion for, INTERVAL among them. Opening a file must not
     // take the app down with it.
-    match catch_unwind(AssertUnwindSafe(|| import_inner(path))) {
+    match catch_unwind(AssertUnwindSafe(|| import_inner(path, max_data_rows, max_cells))) {
         Ok(result) => result,
         Err(payload) => {
             let detail = payload
@@ -112,7 +124,7 @@ pub fn import(path: &Path) -> Result<ParquetImport, String> {
     }
 }
 
-fn import_inner(path: &Path) -> Result<ParquetImport, String> {
+fn import_inner(path: &Path, max_data_rows: usize, max_cells: Option<usize>) -> Result<ParquetImport, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let reader = SerializedFileReader::new(file)
         .map_err(|e| format!("Not a readable Parquet file: {}", e))?;
@@ -123,6 +135,16 @@ fn import_inner(path: &Path) -> Result<ParquetImport, String> {
     let fields = schema.get_fields();
     let total_cols = fields.len();
     let cols_loaded = total_cols.min(MAX_COLS);
+    let row_limit = max_data_rows.min(MAX_ROWS - 1);
+    let preview_rows = total_rows.min(row_limit as u64) as usize;
+    if let Some(budget) = max_cells {
+        if preview_rows.saturating_add(1).saturating_mul(cols_loaded) > budget {
+            return Err(format!(
+                "Parquet preview exceeds {} cells; reduce --max-rows or use --force",
+                budget,
+            ));
+        }
+    }
 
     // Past the column limit, project the schema down so the columns that
     // won't be shown are never decoded.
@@ -148,7 +170,7 @@ fn import_inner(path: &Path) -> Result<ParquetImport, String> {
     let rows = reader
         .get_row_iter(projection)
         .map_err(|e| format!("Failed to read Parquet rows: {}", e))?;
-    for record in rows.take(MAX_ROWS - 1) {
+    for record in rows.take(row_limit) {
         let record = record.map_err(|e| format!("Failed to read Parquet row {}: {}", rows_loaded + 1, e))?;
         let row = rows_loaded + 1;
         for (col, (_, value)) in record.get_column_iter().enumerate().take(cols_loaded) {
@@ -407,6 +429,24 @@ mod tests {
         assert_eq!(number(sheet, 1, 2), 0.1);
         assert_eq!(number(sheet, 2, 2), -2.5);
         assert_eq!(sheet.get_display(1, 3), "TRUE");
+    }
+
+    #[test]
+    fn bounded_preview_keeps_schema_and_total_count() {
+        let file = write("message m { OPTIONAL INT32 n; }", vec![
+            Col::I32(vec![Some(10), Some(20), Some(30)]),
+        ]);
+        let preview = import_with_limits(file.path(), 1, Some(2)).unwrap();
+        assert_eq!((preview.rows_loaded, preview.total_rows), (1, 3));
+        assert_eq!(text(&preview.sheet, 0, 0), "n");
+        assert_eq!(number(&preview.sheet, 1, 0), 10.0);
+        assert!(preview.sheet.get_cell(2, 0).value().is_empty());
+        assert!(preview.truncated());
+
+        let schema = import_with_limits(file.path(), 0, Some(1)).unwrap();
+        assert_eq!((schema.rows_loaded, schema.total_rows), (0, 3));
+        assert_eq!(text(&schema.sheet, 0, 0), "n");
+        assert!(import_with_limits(file.path(), 2, Some(2)).err().unwrap().contains("exceeds"));
     }
 
     #[test]
