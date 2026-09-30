@@ -79,7 +79,7 @@ fn old_files_default_and_unknown_or_corrupt_setup_is_not_silently_discarded() {
         .active_sheet()
         .print_setup
         .is_default());
-    assert_eq!(native::sheet_schema_version(&path).unwrap(), 10);
+    assert_eq!(native::sheet_schema_version(&path).unwrap(), 11);
     conn.execute("INSERT INTO sheet_print_setup VALUES (0,99,'{}')", [])
         .unwrap();
     assert!(native::load_workbook(&path)

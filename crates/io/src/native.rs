@@ -151,6 +151,15 @@ CREATE TABLE IF NOT EXISTS merged_regions (
     PRIMARY KEY (start_row, start_col)
 );
 
+CREATE TABLE IF NOT EXISTS sheet_merged_regions (
+    sheet_idx INTEGER NOT NULL,
+    start_row INTEGER NOT NULL,
+    start_col INTEGER NOT NULL,
+    end_row INTEGER NOT NULL,
+    end_col INTEGER NOT NULL,
+    PRIMARY KEY (sheet_idx, start_row, start_col)
+);
+
 CREATE TABLE IF NOT EXISTS hub_link (
     id INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton row
     repo_owner TEXT NOT NULL,
@@ -328,7 +337,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -462,6 +471,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS sheet_print_setup (
             sheet_idx INTEGER PRIMARY KEY, version INTEGER NOT NULL, settings TEXT NOT NULL
         ); PRAGMA user_version = 10;")?;
+    }
+
+    if version < 11 {
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS sheet_merged_regions (
+            sheet_idx INTEGER NOT NULL,
+            start_row INTEGER NOT NULL, start_col INTEGER NOT NULL,
+            end_row INTEGER NOT NULL, end_col INTEGER NOT NULL,
+            PRIMARY KEY (sheet_idx, start_row, start_col)
+        );")?;
+        let legacy: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='merged_regions')", [], |r| r.get(0))?;
+        if legacy {
+            // Legacy writers saved the active sheet, not necessarily sheet zero.
+            conn.execute_batch("INSERT OR IGNORE INTO sheet_merged_regions
+                SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='active_sheet'), 0),
+                       start_row, start_col, end_row, end_col FROM merged_regions;")?;
+        }
+        conn.pragma_update(None, "user_version", 11)?;
     }
 
     Ok(())
@@ -634,6 +660,7 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
 
     save_cond_formats_sheet(&conn, 0, &sheet.cond_formats)?;
     save_print_setup(&conn, 0, &sheet.print_setup)?;
+    save_sheet_merges(&conn, 0, sheet)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -857,6 +884,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
     }
 
     sheet.print_setup = load_print_setup(&conn, 0)?;
+    load_sheet_merges(&conn, 0, 0, &mut sheet)?;
     Ok(sheet)
 }
 
@@ -1449,36 +1477,14 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
         }
     }
 
-    // Load merged regions if the table exists (backward compatibility)
-    let has_merged_regions = conn
-        .prepare("SELECT start_row FROM merged_regions LIMIT 1")
-        .is_ok();
-
-    if has_merged_regions {
-        let mut stmt = conn.prepare(
-            "SELECT start_row, start_col, end_row, end_col FROM merged_regions"
-        ).map_err(|e| e.to_string())?;
-
-        let merge_iter = stmt
-            .query_map([], |row| {
-                let sr: i64 = row.get(0)?;
-                let sc: i64 = row.get(1)?;
-                let er: i64 = row.get(2)?;
-                let ec: i64 = row.get(3)?;
-                Ok((sr as usize, sc as usize, er as usize, ec as usize))
-            })
-            .map_err(|e| e.to_string())?;
-
-        if let Some(sheet) = workbook.sheet_mut(0) {
-            for merge_result in merge_iter {
-                let (sr, sc, er, ec) = merge_result.map_err(|e| e.to_string())?;
-                let region = MergedRegion::new(sr, sc, er, ec);
-                let _ = sheet.add_merge(region); // silently skip overlaps on load
-            }
+    // The legacy single-sheet loader has already restored its merges.
+    if has_sheets_table {
+        let legacy_sheet = workbook.active_sheet_index();
+        for i in 0..workbook.sheet_count() {
+            load_sheet_merges(&conn, i, legacy_sheet, workbook.sheet_mut(i).unwrap())?;
         }
     }
 
-    // Load conditional formatting rules (stored as JSON blobs in meta)
     load_cond_formats(&conn, &mut workbook);
     load_tab_colors(&conn, &mut workbook);
     load_sheet_defaults(&conn, &mut workbook);
@@ -1518,6 +1524,35 @@ fn save_cond_formats_sheet(
     Ok(())
 }
 
+fn save_sheet_merges(conn: &Connection, index: usize, sheet: &Sheet) -> Result<(), String> {
+    let mut stmt = conn.prepare("INSERT INTO sheet_merged_regions VALUES (?1, ?2, ?3, ?4, ?5)")
+        .map_err(|e| e.to_string())?;
+    for merge in &sheet.merged_regions {
+        stmt.execute(params![index as i64, merge.start.0 as i64, merge.start.1 as i64,
+            merge.end.0 as i64, merge.end.1 as i64]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_sheet_merges(conn: &Connection, index: usize, legacy_sheet: usize, sheet: &mut Sheet) -> Result<(), String> {
+    let modern: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_merged_regions')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let query = if modern {
+        "SELECT start_row,start_col,end_row,end_col FROM sheet_merged_regions WHERE sheet_idx=?1"
+    } else {
+        // Read-only old files may not have migrated.
+        let legacy: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='merged_regions')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if !legacy || index != legacy_sheet { return Ok(()); }
+        "SELECT start_row,start_col,end_row,end_col FROM merged_regions WHERE ?1>=0"
+    };
+    let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([index as i64], |r| Ok(MergedRegion::new(r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
+        .map_err(|e| e.to_string())?;
+    for region in rows {
+        sheet.add_merge(region.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn save_print_setup(conn: &Connection, index: usize, setup: &visigrid_engine::print_setup::PrintSetup) -> Result<(), String> {
     setup.validate()?;
     let raw = serde_json::to_string(setup).map_err(|e| e.to_string())?;
@@ -1544,6 +1579,7 @@ fn load_print_setup(conn: &Connection, index: usize) -> Result<visigrid_engine::
 fn save_sheet_defaults(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     for (i, sheet) in workbook.sheets().iter().enumerate() {
         save_print_setup(conn, i, &sheet.print_setup)?;
+        save_sheet_merges(conn, i, sheet)?;
         let json = serde_json::to_string(&(&sheet.row_formats, &sheet.col_formats, sheet.frozen_panes))
             .map_err(|e| e.to_string())?;
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",

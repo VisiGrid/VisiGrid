@@ -716,7 +716,7 @@ pub(crate) fn bind(
                 // Navigation mode: go to first column of current row
                 this.view_state.selected.1 = 0;
                 this.view_state.selection_end = None;
-                this.view_state.scroll_col = 0;
+                this.view_state.scroll_col = this.view_state.frozen_cols;
                 cx.notify();
             }
         }))

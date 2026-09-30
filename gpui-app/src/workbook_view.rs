@@ -147,23 +147,25 @@ impl WorkbookViewState {
     pub fn ensure_visible(&mut self, visible_rows: usize, visible_cols: usize) {
         let (row, col) = self.selected;
 
-        // Account for frozen panes
-        let effective_scroll_row = self.scroll_row + self.frozen_rows;
-        let effective_scroll_col = self.scroll_col + self.frozen_cols;
-
-        // Rows
-        if row < effective_scroll_row {
-            self.scroll_row = row.saturating_sub(self.frozen_rows);
-        } else if row >= effective_scroll_row + visible_rows.saturating_sub(self.frozen_rows) {
-            self.scroll_row = row.saturating_sub(visible_rows.saturating_sub(1)).saturating_sub(self.frozen_rows);
+        // Scroll coordinates are absolute indices, not offsets from the frozen band.
+        let rows = visible_rows.saturating_sub(self.frozen_rows);
+        let cols = visible_cols.saturating_sub(self.frozen_cols);
+        if row >= self.frozen_rows {
+            if row < self.scroll_row {
+                self.scroll_row = row;
+            } else if rows > 0 && row >= self.scroll_row + rows {
+                self.scroll_row = row - rows + 1;
+            }
         }
-
-        // Columns
-        if col < effective_scroll_col {
-            self.scroll_col = col.saturating_sub(self.frozen_cols);
-        } else if col >= effective_scroll_col + visible_cols.saturating_sub(self.frozen_cols) {
-            self.scroll_col = col.saturating_sub(visible_cols.saturating_sub(1)).saturating_sub(self.frozen_cols);
+        if col >= self.frozen_cols {
+            if col < self.scroll_col {
+                self.scroll_col = col;
+            } else if cols > 0 && col >= self.scroll_col + cols {
+                self.scroll_col = col - cols + 1;
+            }
         }
+        self.scroll_row = self.scroll_row.max(self.frozen_rows);
+        self.scroll_col = self.scroll_col.max(self.frozen_cols);
     }
 }
 

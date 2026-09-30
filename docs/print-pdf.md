@@ -211,11 +211,22 @@ transactions inside the saved area, also once, with repeated headers. Rendered
 second pages were inspected; the fixture's existing narrow-column clipping is
 reported by preflight.
 
-Existing native-format issue found during reopen QA: `merged_regions` stores
-only the active sheet's merges, and loading applies those merges to sheet 0.
-In a multi-sheet workbook this can clip or misplace merged titles after reopen,
-even though print settings persist correctly. Fixing per-sheet merge storage is
-separate follow-up work; this milestone does not claim to resolve that issue.
+Native schema v11 fixes the merge-storage issue found during reopen QA. Merges
+are stored per sheet; migration assigns legacy merge rows to the active sheet
+recorded in the file. Older writers omitted merges from other sheets, so those
+missing merges must be recovered from the original workbook. The legacy table
+remains for compatibility, while the new table is authoritative for v11 readers.
+
+Frozen-row rendering stacks the header band vertically. Grid cells and merge/text
+overlays clamp the scrolling body to the frozen boundary; Home, selection-to-start,
+and file-open navigation preserve the same boundary. This prevents duplicate
+headers and text overlays displaced into the first body rows.
+
+Follow-up verification (2026-09-30): 3 frozen-overlay/navigation tests, 5 native
+merge/print-setup integration tests, and 40 native regression tests pass (one
+existing ignored test). Linux visual checks cover the original XLSX, a migrated
+copy of the affected native file, Ctrl+Shift+Home selection, sequential row
+headers, and clicking B5 immediately below the frozen band at 1000×800.
 
 ## PDF backend spike
 
