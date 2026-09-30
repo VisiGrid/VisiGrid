@@ -7783,6 +7783,7 @@ dependencies = [
  "visigrid-engine",
  "visigrid-io",
  "visigrid-license",
+ "visigrid-print",
  "visigrid-protocol",
  "visigrid-scripting",
  "visigrid-session-host",
@@ -7846,7 +7847,11 @@ dependencies = [
 name = "visigrid-print"
 version = "0.37.1"
 dependencies = [
+ "cosmic-text",
  "krilla",
+ "tempfile",
+ "visigrid-engine",
+ "visigrid-io",
 ]
 
 [[package]]

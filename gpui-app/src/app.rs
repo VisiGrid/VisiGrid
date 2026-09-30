@@ -816,6 +816,7 @@ pub struct Spreadsheet {
     pub cold_start_ms: Option<u128>,
 
     // Export report state (for Excel exports with warnings)
+    pub pdf_export: Option<crate::pdf_export::PdfExportState>,
     pub export_result: Option<visigrid_io::xlsx::ExportResult>,
     pub export_filename: Option<String>,  // Exported filename for display
 
@@ -1345,6 +1346,7 @@ impl Spreadsheet {
             startup_instant: None,
             cold_start_ms: None,
 
+            pdf_export: None,
             export_result: None,
             export_filename: None,
 
@@ -2380,6 +2382,7 @@ impl Spreadsheet {
             CommandId::Save => self.save(cx),
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
+            CommandId::ExportPdf => self.show_pdf_export(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
 
