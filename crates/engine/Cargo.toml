@@ -19,6 +19,12 @@ rustc-hash = "2.0"
 # 4-byte ids instead of a second copy of each string. Already in the tree.
 hashbrown = { version = "0.16", default-features = false }
 ssfmt = "0.1"
+# REGEXTEST/REGEXEXTRACT/REGEXREPLACE. Already in the tree for io and cli.
+# Default features would double the browser engine (+273 KB gzipped). Without
+# "perf" (literal and DFA speedups for large haystacks, not cell-sized text) it
+# is +128 KB; unicode-perl and unicode-case keep \w, \d and (?i) correct for
+# accented and non-Latin text, which regex-lite (+25 KB) would get wrong.
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 
 # Browser clock. std::time::SystemTime::now() panics on wasm32-unknown-unknown,
 # which is why the volatile functions used to read as the Unix epoch there.
