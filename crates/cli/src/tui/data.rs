@@ -58,13 +58,14 @@ impl PeekData {
 /// Load a CSV or TSV file into PeekData.
 ///
 /// `delimiter` is b',' for CSV or b'\t' for TSV.
-/// `has_headers`: if true, first row becomes column names instead of data.
+/// `headers`: `Some(true)` makes the first row column names, `Some(false)`
+/// keeps it as data, `None` decides with [`looks_like_header`].
 /// `max_rows`: cap on data rows loaded (0 = unlimited).
 /// `width_scan_rows`: how many rows to scan for column width (0 = all loaded rows).
 pub fn load_csv(
     path: &Path,
     delimiter: u8,
-    has_headers: bool,
+    headers: Option<bool>,
     max_rows: usize,
     width_scan_rows: usize,
 ) -> Result<PeekData, String> {
@@ -80,8 +81,9 @@ pub fn load_csv(
     let mut max_cols: usize = 0;
     let mut total_count: usize = 0;
     let cap = if max_rows == 0 { usize::MAX } else { max_rows };
-    // If using headers, we need one extra row for the header row itself
-    let row_limit = if has_headers { cap.saturating_add(1) } else { cap };
+    // Read one extra row: it is the header row, or (when there is none) the
+    // sign that the preview is truncated.
+    let row_limit = cap.saturating_add(1);
     let mut capped = false;
 
     for result in rdr.records() {
@@ -96,6 +98,12 @@ pub fn load_csv(
         } else {
             capped = true;
         }
+    }
+
+    let has_headers = headers.unwrap_or_else(|| looks_like_header(&all_rows));
+    if !has_headers && all_rows.len() > cap {
+        all_rows.truncate(cap);
+        capped = true;
     }
 
     // Extract header row if requested
@@ -150,6 +158,33 @@ pub fn load_csv(
         first_data_file_row,
         total_rows,
         delimiter,
+    })
+}
+
+/// Does the first row name the columns? Biased toward yes, as most delimited
+/// files have a header (VisiData assumes one). The first row is data when it
+/// looks like data: an empty or numeric/date-like cell, two cells with the same
+/// text, or a value that recurs further down its own column.
+pub fn looks_like_header(rows: &[Vec<String>]) -> bool {
+    let Some((first, rest)) = rows.split_first() else { return false };
+    if rest.is_empty() || first.is_empty() {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for cell in first {
+        let t = cell.trim();
+        if t.is_empty() || !seen.insert(t.to_lowercase()) {
+            return false;
+        }
+        let lead = t.trim_start_matches(['-', '+', '$', '(', '€', '£']);
+        if lead.starts_with(|c: char| c.is_ascii_digit()) || matches!(t.to_lowercase().as_str(), "true" | "false") {
+            return false;
+        }
+    }
+    let sample = &rest[..rest.len().min(200)];
+    !first.iter().enumerate().any(|(c, cell)| {
+        let t = cell.trim();
+        sample.iter().any(|row| row.get(c).is_some_and(|v| v.trim().eq_ignore_ascii_case(t)))
     })
 }
 
@@ -513,7 +548,7 @@ mod tests {
     #[test]
     fn ragged_rows_padded() {
         let f = write_csv("a,b,c\n1,2\n3\n");
-        let data = load_csv(f.path(), b',', false, 0, 0).unwrap();
+        let data = load_csv(f.path(), b',', Some(false), 0, 0).unwrap();
         assert_eq!(data.num_cols, 3);
         assert_eq!(data.num_rows, 3);
         // Short rows should be padded with empty strings
@@ -524,7 +559,7 @@ mod tests {
     #[test]
     fn headers_consumed_file_row_mapping() {
         let f = write_csv("Name,Value\nAlice,100\nBob,200\n");
-        let data = load_csv(f.path(), b',', true, 0, 0).unwrap();
+        let data = load_csv(f.path(), b',', Some(true), 0, 0).unwrap();
         assert!(data.has_headers);
         assert_eq!(data.num_rows, 2); // header consumed, 2 data rows
         assert_eq!(data.col_names, vec!["Name", "Value"]);
@@ -537,7 +572,7 @@ mod tests {
     #[test]
     fn no_headers_file_row_mapping() {
         let f = write_csv("1,2\n3,4\n");
-        let data = load_csv(f.path(), b',', false, 0, 0).unwrap();
+        let data = load_csv(f.path(), b',', Some(false), 0, 0).unwrap();
         assert!(!data.has_headers);
         assert_eq!(data.first_data_file_row, 1);
         assert_eq!(data.file_row(0), 1);
@@ -551,7 +586,7 @@ mod tests {
             csv.push_str(&format!("{},{}\n", i, i * 10));
         }
         let f = write_csv(&csv);
-        let data = load_csv(f.path(), b',', true, 10, 0).unwrap();
+        let data = load_csv(f.path(), b',', Some(true), 10, 0).unwrap();
         assert_eq!(data.num_rows, 10);
         assert!(data.total_rows.is_some());
         assert_eq!(data.total_data_rows(), 100);
@@ -560,7 +595,7 @@ mod tests {
     #[test]
     fn tsv_delimiter() {
         let f = write_csv("a\tb\tc\n1\t2\t3\n");
-        let data = load_csv(f.path(), b'\t', false, 0, 0).unwrap();
+        let data = load_csv(f.path(), b'\t', Some(false), 0, 0).unwrap();
         assert_eq!(data.num_cols, 3);
         assert_eq!(data.rows[0], vec!["a", "b", "c"]);
         assert_eq!(data.delimiter, b'\t');
@@ -571,9 +606,9 @@ mod tests {
         // First 2 rows have short values, row 3 has a long value
         let f = write_csv("a,b\n1,2\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,y\n");
         // Scan only 1 row — should not see the long value
-        let data_limited = load_csv(f.path(), b',', false, 0, 1).unwrap();
+        let data_limited = load_csv(f.path(), b',', Some(false), 0, 1).unwrap();
         // Scan all — should see the long value (clamped to 40)
-        let data_all = load_csv(f.path(), b',', false, 0, 0).unwrap();
+        let data_all = load_csv(f.path(), b',', Some(false), 0, 0).unwrap();
         assert!(data_limited.col_widths[0] < data_all.col_widths[0]);
         assert_eq!(data_all.col_widths[0], 40); // clamped
     }
@@ -581,8 +616,40 @@ mod tests {
     #[test]
     fn empty_csv() {
         let f = write_csv("");
-        let data = load_csv(f.path(), b',', false, 0, 0).unwrap();
+        let data = load_csv(f.path(), b',', Some(false), 0, 0).unwrap();
         assert_eq!(data.num_rows, 0);
         assert_eq!(data.num_cols, 0);
+    }
+
+    #[test]
+    fn header_detection() {
+        let rows = |v: &[&[&str]]| v.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect::<Vec<Vec<String>>>();
+        // Typical header over mixed data, and over all-text data.
+        assert!(looks_like_header(&rows(&[&["Region", "Amount"], &["West", "10"], &["East", "5"]])));
+        assert!(looks_like_header(&rows(&[&["Name", "City"], &["Ann", "Paris"], &["Bo", "Rome"]])));
+        // First row that looks like data.
+        assert!(!looks_like_header(&rows(&[&["West", "10"], &["East", "5"]])), "numeric cell");
+        assert!(!looks_like_header(&rows(&[&["2026-01-02", "x"], &["2026-01-03", "y"]])), "date cell");
+        assert!(!looks_like_header(&rows(&[&["West", ""], &["East", "a"]])), "empty cell");
+        assert!(!looks_like_header(&rows(&[&["West", "West"], &["East", "a"]])), "duplicate cells");
+        assert!(!looks_like_header(&rows(&[&["West", "Ann"], &["East", "Bo"], &["West", "Cy"]])), "value recurs below");
+        assert!(!looks_like_header(&rows(&[&["only", "row"]])), "a lone row is data");
+        assert!(!looks_like_header(&rows(&[&["TRUE", "x"], &["FALSE", "y"]])), "boolean cell");
+    }
+
+    #[test]
+    fn detected_headers_keep_the_row_cap_exact() {
+        let f = write_csv("Region,Amount\nWest,10\nEast,5\nNorth,7\n");
+        let d = load_csv(f.path(), b',', None, 2, 0).unwrap();
+        assert!(d.has_headers);
+        assert_eq!(d.col_names, vec!["Region", "Amount"]);
+        assert_eq!((d.num_rows, d.total_rows), (2, Some(3)));
+
+        let f = write_csv("West,10\nEast,5\nNorth,7\n");
+        let d = load_csv(f.path(), b',', None, 2, 0).unwrap();
+        assert!(!d.has_headers);
+        assert_eq!((d.num_rows, d.total_rows), (2, Some(3)));
+        let d = load_csv(f.path(), b',', None, 0, 0).unwrap();
+        assert_eq!((d.num_rows, d.total_rows), (3, None));
     }
 }

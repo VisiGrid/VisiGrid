@@ -618,8 +618,9 @@ With --session, the pivot is created on a new sheet of the running workbook
     /// View a file in the terminal — delimited text, Parquet, Excel, ODS, .sheet/.vgrid
     #[command(after_help = "\
 Examples:
-  vgrid peek data.csv
-  vgrid peek sales.tsv --headers
+  vgrid peek data.csv                         # header row detected
+  vgrid peek sales.tsv --headers              # force: first row is headers
+  vgrid peek codes.csv --no-headers           # force: first row is data
   vgrid peek orders.parquet                   # schema headers, bounded preview
   vgrid peek orders.parquet --json            # preserve numeric-looking text
   vgrid peek report.xlsx                      # Excel workbook (multi-tab)
@@ -648,10 +649,12 @@ Workbook and Parquet previews have a 10M-cell guard. Parquet also respects sheet
     Peek {
         /// File to view
         file: PathBuf,
-        /// First row is column headers (delimited text; Parquet uses schema names)
+        /// First row is column headers. Delimited text detects this by default
+        /// (a first row with no numbers, dates, blanks or repeats is a header);
+        /// Parquet uses schema names
         #[arg(long)]
         headers: bool,
-        /// First row is data (the default for delimited text)
+        /// First row is data (override header detection)
         #[arg(long, conflicts_with = "headers")]
         no_headers: bool,
         /// Sheet name or 0-based index for multi-sheet files
@@ -1947,6 +1950,8 @@ fn main() -> ExitCode {
         }) => {
             let is_parquet = file.extension().and_then(|e| e.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+            // Delimited text: explicit flags win, otherwise detect.
+            let headers = if headers { Some(true) } else if no_headers { Some(false) } else { None };
             if is_parquet && (no_headers || sheet.is_some() || delimiter.is_some() || recompute) {
                 Err(CliError::args("Parquet uses schema headers and has one table with no formulas; --no-headers, --sheet, --delimiter and --recompute do not apply"))
             } else if json {
@@ -4217,7 +4222,7 @@ fn parse_delimiter(s: &str) -> Result<u8, CliError> {
 /// Values are JSON scalars (numbers, strings, booleans), not formatted display strings.
 fn cmd_peek_json(
     file: PathBuf,
-    headers: bool,
+    headers: Option<bool>,
     sheet: Option<String>,
     max_rows: usize,
     force: bool,
@@ -4308,7 +4313,7 @@ fn peek_json_output(data: &tui::data::PeekData) -> Result<(), CliError> {
 
 fn cmd_peek(
     file: PathBuf,
-    headers: bool,
+    headers: Option<bool>,
     sheet: Option<String>,
     max_rows: usize,
     force: bool,

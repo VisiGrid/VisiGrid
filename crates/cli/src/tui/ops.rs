@@ -230,6 +230,113 @@ pub fn pivot(data: &PeekData, spec: &str) -> Result<(PeekData, String), String> 
     Ok((derived(names, body), label))
 }
 
+/// A number to 15 significant digits, as Excel displays it, so binary
+/// floating-point noise (120.25000000000001) does not show.
+fn significant(n: f64) -> String {
+    if !n.is_finite() || n == 0.0 {
+        return if n == 0.0 { "0".into() } else { n.to_string() };
+    }
+    let magnitude = n.abs().log10().floor() as i32;
+    if !(-6..15).contains(&magnitude) {
+        return format!("{:e}", n);
+    }
+    let decimals = (14 - magnitude).max(0) as usize;
+    let s = format!("{:.*}", decimals, n);
+    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+    if s == "-0" { "0".into() } else { s }
+}
+
+/// Split a computed-column entry into (name, formula). `Tax =D2*0.08` names
+/// the column "Tax"; `=D2*0.08` names it after the formula.
+pub fn parse_column_spec(input: &str) -> Result<(Option<String>, String), String> {
+    let input = input.trim();
+    let eq = input.find('=').ok_or("start the formula with = (e.g. =D2*1.08, or Tax =D2*0.08)")?;
+    let name = input[..eq].trim();
+    let formula = input[eq..].trim().to_string();
+    if formula.len() < 2 {
+        return Err("the formula is empty".into());
+    }
+    Ok(((!name.is_empty()).then(|| name.to_string()), formula))
+}
+
+/// Replace `[Header]` with the header's column letter at `row` (1-based), so
+/// `=[Amount]*1.08` can be typed without looking up letters.
+fn expand_header_refs(formula: &str, names: &[String], row: usize) -> Result<String, String> {
+    let mut out = String::with_capacity(formula.len());
+    let mut rest = formula;
+    let mut in_string = false;
+    while let Some(i) = rest.find(|c| c == '[' || c == '"') {
+        out.push_str(&rest[..i]);
+        if rest.as_bytes()[i] == b'"' {
+            in_string = !in_string;
+            out.push('"');
+            rest = &rest[i + 1..];
+            continue;
+        }
+        if in_string {
+            out.push('[');
+            rest = &rest[i + 1..];
+            continue;
+        }
+        let end = rest[i..].find(']').ok_or("unclosed [ in the formula")? + i;
+        let want = rest[i + 1..end].trim();
+        let col = names
+            .iter()
+            .position(|n| n.trim().eq_ignore_ascii_case(want))
+            .ok_or_else(|| format!("no column headed \"{want}\" (columns: {})", names.join(", ")))?;
+        out.push_str(&format!("{}{}", util::col_to_letter(col), row));
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Compute a new column from an Excel formula written for the first data
+/// row, filled down like Excel: relative references move with each row,
+/// `$`-anchored ones stay. Row numbers are the ones in the gutter (file row
+/// numbers), so with a header row the first data row is row 2. Evaluated by
+/// the desktop's engine over the loaded rows, in file order. Returns the
+/// column name and one display value (and filled-down formula) per data row.
+pub fn computed_column(data: &PeekData, input: &str) -> Result<(String, Vec<String>, Vec<String>), String> {
+    use visigrid_engine::formula::parser::{adjust_formula_refs, parse};
+    let (name, formula) = parse_column_spec(input)?;
+    let base = data.first_data_file_row; // gutter number of data row 0
+    let formula = expand_header_refs(&formula, &data.col_names, base)?;
+    parse(&formula).map_err(|e| format!("formula: {e}"))?;
+    let out_col = data.num_cols;
+    let mut wb = Workbook::new();
+    let mut formulas = Vec::with_capacity(data.rows.len());
+    {
+        let sheet = wb.sheet_mut(0).ok_or("no sheet")?;
+        for (i, row) in data.rows.iter().enumerate() {
+            let r = base - 1 + i;
+            for (c, v) in row.iter().enumerate() {
+                // Loaded cells are values: "=1+1" in a CSV is text, not a formula.
+                if v.starts_with('=') {
+                    sheet.set_text(r, c, v);
+                } else if !v.is_empty() {
+                    sheet.set_value_deferred(r, c, v);
+                }
+            }
+            let f = adjust_formula_refs(&formula, i as i32, 0);
+            sheet.set_value_deferred(r, out_col, &f);
+            formulas.push(f);
+        }
+    }
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+    let sheet = wb.sheet(0).ok_or("no sheet")?;
+    // Full precision, as `vgrid calc` prints it: General display would round
+    // 0.1234 to 0.12, which hides what a new column is for checking.
+    let values = (0..data.rows.len())
+        .map(|i| match sheet.get_computed_value(base - 1 + i, out_col) {
+            visigrid_engine::formula::eval::Value::Number(n) => significant(n),
+            v => v.to_text(),
+        })
+        .collect();
+    Ok((name.unwrap_or_else(|| formula.clone()), values, formulas))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +407,44 @@ mod tests {
         assert_eq!(r, vec!["Order Date"]);
         assert_eq!(c.as_deref(), Some("Ship Mode"));
         assert_eq!(v, vec!["sum:Unit Price,count:Order ID"]);
+    }
+
+    #[test]
+    fn computed_columns_fill_down_like_excel() {
+        let mut d = table(&[&["West", "10"], &["East", "5"], &["West", "2.5"]]);
+        // A CSV with a header row: the first data row is file row 2.
+        d.first_data_file_row = 2;
+        let (name, v, f) = computed_column(&d, "Tax =B2*0.1").unwrap();
+        assert_eq!(name, "Tax");
+        assert_eq!(v, vec!["1", "0.5", "0.25"]);
+        assert_eq!(f[2], "=B4*0.1");
+        // Header names, anchors, text functions, errors.
+        let (name, v, _) = computed_column(&d, "=[amount]/$B$3").unwrap();
+        assert_eq!(name, "=B2/$B$3");
+        assert_eq!(v, vec!["2", "1", "0.5"]);
+        let (_, v, _) = computed_column(&d, "=IF([Amount]>4,UPPER([Region]),\"[small]\")").unwrap();
+        assert_eq!(v, vec!["WEST", "EAST", "[small]"]);
+        let (_, v, _) = computed_column(&d, "=B2*0.1+0.2").unwrap();
+        assert_eq!(v[0], "1.2", "no float noise");
+        assert_eq!(significant(1200.5 * 0.1 + 0.2), "120.25");
+        assert_eq!(significant(-1.0 / 3.0), "-0.333333333333333");
+        assert_eq!(significant(1e20), "1e20");
+        let mut t = table(&[&["=1+1", "10"]]);
+        t.first_data_file_row = 2;
+        let (_, v, _) = computed_column(&t, "=LEN(A2)").unwrap();
+        assert_eq!(v, vec!["4"], "a loaded =1+1 is four characters of text");
+        let (_, v, _) = computed_column(&d, "=B2/0").unwrap();
+        assert_eq!(v[0], "#DIV/0!");
+        // Refusals.
+        assert!(computed_column(&d, "B2*2").unwrap_err().contains("start the formula with ="));
+        assert!(computed_column(&d, "=[Price]*2").unwrap_err().contains("no column headed \"Price\""));
+        assert!(computed_column(&d, "=B2*(").unwrap_err().starts_with("formula:"));
+
+        // Without a header row the first data row is row 1.
+        let mut raw = d;
+        raw.has_headers = false;
+        raw.first_data_file_row = 1;
+        let (_, v, _) = computed_column(&raw, "=B1*2").unwrap();
+        assert_eq!(v, vec!["20", "10", "5"]);
     }
 }

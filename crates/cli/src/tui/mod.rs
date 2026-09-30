@@ -51,12 +51,16 @@ struct TuiApp {
     search: Option<String>,
     /// One-shot status message, cleared on the next key.
     message: Option<String>,
+    /// A slow entry (formula or pivot over many rows), run after the next
+    /// frame so "computing…" is on screen while it works.
+    pending: Option<Prompt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PromptKind {
     Search,
     Pivot,
+    Formula,
 }
 
 struct Prompt {
@@ -88,6 +92,7 @@ impl TuiApp {
             prompt: None,
             search: None,
             message: None,
+            pending: None,
         }
         .with_identity_orders()
     }
@@ -114,6 +119,7 @@ impl TuiApp {
             prompt: None,
             search: None,
             message: None,
+            pending: None,
         }
         .with_identity_orders()
     }
@@ -208,7 +214,21 @@ impl TuiApp {
         }
     }
 
+    /// Rows above which formula and pivot entries show "computing…" first.
+    const SLOW_ROWS: usize = 20_000;
+
     fn submit_prompt(&mut self, prompt: Prompt) {
+        let slow = matches!(prompt.kind, PromptKind::Formula | PromptKind::Pivot)
+            && self.data().num_rows > Self::SLOW_ROWS;
+        if slow {
+            self.message = Some(format!("computing over {} rows…", self.data().num_rows));
+            self.pending = Some(prompt);
+        } else {
+            self.run_prompt(prompt);
+        }
+    }
+
+    fn run_prompt(&mut self, prompt: Prompt) {
         match prompt.kind {
             PromptKind::Search => {
                 if prompt.input.is_empty() {
@@ -229,6 +249,35 @@ impl TuiApp {
                     self.cursor_col = save_c;
                 }
             }
+            PromptKind::Formula => match ops::computed_column(self.data(), &prompt.input) {
+                Ok((name, values, formulas)) => {
+                    let errors = values.iter().filter(|v| v.starts_with('#') && v.ends_with(['!', '?', 'A'])).count();
+                    let data = &mut self.sheets[self.active_sheet].data;
+                    let width = util::display_width(&name).max(values.iter().take(500).map(|v| util::display_width(v)).max().unwrap_or(0)).clamp(3, 40);
+                    for (row, v) in data.rows.iter_mut().zip(values) {
+                        row.push(v);
+                    }
+                    if let Some(raw) = data.raw.as_mut() {
+                        for (row, f) in raw.iter_mut().zip(formulas) {
+                            row.push(f);
+                        }
+                    }
+                    data.col_names.push(name.clone());
+                    data.col_widths.push(width);
+                    data.num_cols += 1;
+                    self.cursor_col = data.num_cols - 1;
+                    self.message = Some(format!(
+                        "added {name}{}{}",
+                        if errors > 0 { format!("  ({errors} error cells)") } else { String::new() },
+                        if self.partial_note().is_empty() { "" } else { "  (loaded rows only)" }
+                    ));
+                }
+                Err(e) => {
+                    self.message = Some(e);
+                    // Keep what was typed so it can be fixed.
+                    self.prompt = Some(Prompt { kind: PromptKind::Formula, input: prompt.input });
+                }
+            },
             PromptKind::Pivot => match ops::pivot(self.data(), &prompt.input) {
                 Ok((data, label)) => {
                     let name = format!("{label}{}", self.partial_note());
@@ -247,6 +296,9 @@ impl TuiApp {
 
     fn handle_prompt_key(&mut self, key: KeyEvent) {
         let Some(prompt) = self.prompt.as_mut() else { return };
+        if !matches!(key.code, KeyCode::Enter) {
+            self.message = None;
+        }
         match key.code {
             KeyCode::Esc => self.prompt = None,
             KeyCode::Enter => {
@@ -345,6 +397,9 @@ impl TuiApp {
                 let data = ops::frequency(self.data(), col);
                 let name = format!("freq {}{}", self.col_name(col), self.partial_note());
                 self.push_tab(name, data);
+            }
+            KeyCode::Char('=') if self.data().num_cols > 0 => {
+                self.prompt = Some(Prompt { kind: PromptKind::Formula, input: "=".into() });
             }
             KeyCode::Char('P') if self.data().num_cols > 0 => {
                 // The header row is the first row in file order, not whatever
@@ -692,11 +747,19 @@ impl TuiApp {
             let label = match p.kind {
                 PromptKind::Search => "/".to_string(),
                 PromptKind::Pivot => "pivot: ".to_string(),
+                PromptKind::Formula => format!(
+                    "new column (row {} = first row; [Header] ok): ",
+                    self.data().first_data_file_row
+                ),
             };
-            let para = Paragraph::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!(" {label}{}", p.input), Style::default().fg(Color::White)),
                 Span::styled("█", Style::default().fg(Color::Yellow)),
-            ]))
+            ];
+            if let Some(m) = &self.message {
+                spans.push(Span::styled(format!("   {m}"), Style::default().fg(Color::LightRed)));
+            }
+            let para = Paragraph::new(Line::from(spans))
             .style(Style::default().bg(Color::Black));
             frame.render_widget(para, area);
             return;
@@ -803,6 +866,8 @@ impl TuiApp {
             "  F                 Frequency of column",
             "  P                 Pivot (rows= column=",
             "                      values=sum:Field)",
+            "  =                 New column from a formula",
+            "                      (=[Amount]*1.08, Tax =D2*0.1)",
             "",
             "  General",
             "  -------",
@@ -899,6 +964,10 @@ fn run_app(mut app: TuiApp) -> Result<(), String> {
         terminal
             .draw(|frame| app.draw(frame))
             .map_err(|e| format!("draw error: {}", e))?;
+        if let Some(p) = app.pending.take() {
+            app.run_prompt(p);
+            continue;
+        }
 
         if event::poll(Duration::from_millis(100))
             .map_err(|e| format!("event poll error: {}", e))?
@@ -1026,7 +1095,7 @@ mod tests {
     fn keys_sort_search_frequency_and_pivot_tabs() {
         let f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
         std::fs::write(f.path(), "Region,Amount\nWest,10\nEast,5\nWest,2.5\nNorth,40\n").unwrap();
-        let data = data::load_csv(f.path(), b',', true, 0, 0).unwrap();
+        let data = data::load_csv(f.path(), b',', Some(true), 0, 0).unwrap();
         let mut app = TuiApp::new(data, "sales.csv".into());
 
         // Sort by Amount descending: North (file row 5) comes first.
@@ -1063,6 +1132,25 @@ mod tests {
         assert_eq!(app.cell(3, 1), "57.50");
         press(&mut app, "P\x1b");
         assert!(app.prompt.is_none());
+
+        // Computed column on the pivot tab's source: back to the data first.
+        press(&mut app, "q");
+        press(&mut app, "=");
+        app.prompt.as_mut().unwrap().input = "Tax =[Amount]*0.1".into();
+        press(&mut app, "\n");
+        assert_eq!(app.data().col_names.last().unwrap(), "Tax");
+        assert_eq!(app.cursor_col, 2);
+        assert_eq!(app.cell(0, 2), "1");
+        // A bad formula keeps the prompt open with the error beside it.
+        press(&mut app, "=");
+        app.prompt.as_mut().unwrap().input = "=[Price]*2".into();
+        press(&mut app, "\n");
+        assert!(app.prompt.is_some());
+        assert!(screen(&app).contains("no column headed \"Price\""));
+        press(&mut app, "\x1b");
+        // The new column sorts and pivots like any other.
+        press(&mut app, "]");
+        assert_eq!(app.cell(0, 0), "North");
         press(&mut app, "qq");
         assert!(app.should_quit);
     }
