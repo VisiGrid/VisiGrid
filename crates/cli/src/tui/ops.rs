@@ -311,7 +311,10 @@ pub fn computed_column(data: &PeekData, input: &str) -> Result<(String, Vec<Stri
         for (i, row) in data.rows.iter().enumerate() {
             let r = base - 1 + i;
             for (c, v) in row.iter().enumerate() {
-                if !v.is_empty() {
+                // Loaded cells are values: "=1+1" in a CSV is text, not a formula.
+                if v.starts_with('=') {
+                    sheet.set_text(r, c, v);
+                } else if !v.is_empty() {
                     sheet.set_value_deferred(r, c, v);
                 }
             }
@@ -426,6 +429,10 @@ mod tests {
         assert_eq!(significant(1200.5 * 0.1 + 0.2), "120.25");
         assert_eq!(significant(-1.0 / 3.0), "-0.333333333333333");
         assert_eq!(significant(1e20), "1e20");
+        let mut t = table(&[&["=1+1", "10"]]);
+        t.first_data_file_row = 2;
+        let (_, v, _) = computed_column(&t, "=LEN(A2)").unwrap();
+        assert_eq!(v, vec!["4"], "a loaded =1+1 is four characters of text");
         let (_, v, _) = computed_column(&d, "=B2/0").unwrap();
         assert_eq!(v[0], "#DIV/0!");
         // Refusals.
