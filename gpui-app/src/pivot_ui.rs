@@ -143,7 +143,6 @@ impl Spreadsheet {
 // ---------------------------------------------------------------------------
 
 use visigrid_engine::cell::NumberFormat;
-use visigrid_engine::formula::eval::Value;
 use visigrid_engine::pivot::{
     self, Aggregation, PivotDefinition, PivotError, PivotField, PivotOutput, PivotSnapshot, PivotSource,
     PivotTable, PivotValueField,
@@ -337,6 +336,9 @@ impl PivotPanel {
 /// A computation in flight: what to place once the output is ready.
 struct PivotJob {
     mode: PivotPanelMode,
+    /// Show the new sheet when a create finishes. False for session clients:
+    /// an agent's pivot must not move the user's view or drop their typing.
+    activate: bool,
     table: PivotTable,
     source_generation: u64,
     description: String,
@@ -421,23 +423,9 @@ impl Spreadsheet {
             .map(|c| sheet.get_display(hr, c as usize).trim().to_string())
             .collect();
         pivot::validate_headers(&headers).map_err(|e| e.to_string())?;
-        let mut column_formats = Vec::with_capacity(headers.len());
-        let mut column_numeric = Vec::with_capacity(headers.len());
-        for c in source.start_col..=source.end_col {
-            let first = (source.start_row + 1..=source.end_row.min(source.start_row + 200))
-                .map(|r| (r as usize, c as usize))
-                .find(|&(r, c)| !matches!(sheet.get_computed_value(r, c), Value::Empty));
-            match first {
-                Some((r, c)) => {
-                    column_formats.push(sheet.get_format(r, c).number_format.clone());
-                    column_numeric.push(matches!(sheet.get_computed_value(r, c), Value::Number(_)));
-                }
-                None => {
-                    column_formats.push(NumberFormat::General);
-                    column_numeric.push(false);
-                }
-            }
-        }
+        // Shared with headless and agent-created pivots, so their defaults match.
+        let (column_formats, column_numeric) =
+            pivot::column_profile(sheet, &source).into_iter().map(|p| (p.format, p.numeric)).unzip();
         Ok(PivotPanel {
             mode,
             source,
@@ -585,7 +573,7 @@ impl Spreadsheet {
             PivotPanelMode::New => format!("Create {}", table.name),
             PivotPanelMode::Edit { .. } => format!("Update {}", table.name),
         };
-        self.run_pivot_job(PivotJob { mode: panel.mode.clone(), table, source_generation: 0, description }, cx);
+        self.run_pivot_job(PivotJob { mode: panel.mode.clone(), activate: true, table, source_generation: 0, description }, cx);
     }
 
     /// Refresh the pivot under the cursor (or the one in the open drawer).
@@ -601,7 +589,7 @@ impl Spreadsheet {
         };
         let description = format!("Refresh {}", table.name);
         let mode = PivotPanelMode::Edit { pivot_id: table.id };
-        self.run_pivot_job(PivotJob { mode, table, source_generation: 0, description }, cx);
+        self.run_pivot_job(PivotJob { mode, activate: true, table, source_generation: 0, description }, cx);
     }
 
     /// Refresh every pivot in the workbook, one after another.
@@ -617,7 +605,7 @@ impl Spreadsheet {
         for table in tables {
             let description = format!("Refresh {}", table.name);
             let mode = PivotPanelMode::Edit { pivot_id: table.id };
-            if !self.run_pivot_job_sync(PivotJob { mode, table, source_generation: 0, description }, cx) {
+            if !self.run_pivot_job_sync(PivotJob { mode, activate: true, table, source_generation: 0, description }, cx) {
                 failed += 1;
             }
         }
@@ -683,7 +671,7 @@ impl Spreadsheet {
         };
         let id = table.id;
         let description = format!("Create {}", table.name);
-        let job = PivotJob { mode: PivotPanelMode::New, table, source_generation: 0, description };
+        let job = PivotJob { mode: PivotPanelMode::New, activate: false, table, source_generation: 0, description };
         if !self.run_pivot_job_sync(job, cx) {
             return Err(self.status_message.clone().unwrap_or_else(|| "Could not create the pivot table.".into()));
         }
@@ -698,7 +686,7 @@ impl Spreadsheet {
         let table = self.wb(cx).find_pivot(pivot_id).map(|(_, t)| t.clone()).ok_or("This pivot table no longer exists.")?;
         let name = table.name.clone();
         let description = format!("Refresh {name}");
-        let job = PivotJob { mode: PivotPanelMode::Edit { pivot_id }, table, source_generation: 0, description };
+        let job = PivotJob { mode: PivotPanelMode::Edit { pivot_id }, activate: false, table, source_generation: 0, description };
         if !self.run_pivot_job_sync(job, cx) {
             return Err(format!("{name}: {}", self.status_message.clone().unwrap_or_else(|| "refresh failed".into())));
         }
@@ -819,6 +807,7 @@ impl Spreadsheet {
                 });
                 let Some(created) = created else { return false };
                 let sheet_id = created.id;
+                let created_name = created.name.clone();
                 let prepared = self.wb(cx).prepare_pivot_commit(sheet_id, job.table.clone(), &output, job.source_generation, now);
                 let commit = match prepared {
                     Ok(c) => c,
@@ -833,21 +822,26 @@ impl Spreadsheet {
                     }
                 };
                 let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
-                self.activate_sheet(sheet_index, cx);
-                self.row_view = RowView::new(NUM_ROWS);
-                self.clear_selection_state();
+                if job.activate {
+                    self.activate_sheet(sheet_index, cx);
+                    self.row_view = RowView::new(NUM_ROWS);
+                    self.clear_selection_state();
+                }
                 // Widths are part of creation's single undo step. Fit once;
                 // refresh must preserve widths the user has subsequently set.
                 let columns: Vec<usize> = (job.table.anchor_col as usize..job.table.anchor_col as usize + cols).collect();
-                let widths = self.measure_columns(&columns, None, cx);
+                let widths = match self.wb(cx).sheet(sheet_index) {
+                    Some(sheet) => self.measure_columns_in(sheet, &columns, None),
+                    None => Default::default(),
+                };
                 let mut actions = vec![crate::history::UndoAction::PivotCommit {
                     commit: Box::new(commit),
                     created_sheet: Some((sheet_index, Box::new(created))),
                     description: job.description.clone(),
                 }];
                 for col in columns {
-                    let width = widths[&col].max(self.metrics.default_cell_sizes.column_width);
-                    self.set_col_width(col, width);
+                    let width = widths.get(&col).copied().unwrap_or(0.0).max(self.metrics.default_cell_sizes.column_width);
+                    self.set_col_width_on(sheet_id, col, width);
                     actions.push(crate::history::UndoAction::ColumnWidthSet { sheet_id, col, old: None, new: Some(width) });
                 }
                 self.history.record_action_with_provenance(crate::history::UndoAction::Group {
@@ -860,7 +854,11 @@ impl Spreadsheet {
                     }
                     p.message = Some(format!("{} created: {rows} × {cols}.", job.table.name));
                 }
-                self.status_message = Some(format!("{} created on a new sheet.", job.table.name));
+                self.status_message = Some(if job.activate {
+                    format!("{} created on a new sheet.", job.table.name)
+                } else {
+                    format!("{} created on sheet \"{}\".", job.table.name, created_name)
+                });
             }
             PivotPanelMode::Edit { pivot_id } => {
                 let Some((idx, _)) = self.wb(cx).find_pivot(pivot_id) else {

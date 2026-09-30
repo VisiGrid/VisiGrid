@@ -239,13 +239,10 @@ pub enum StructureOp {
 pub struct PivotValueSpec {
     /// Source header text.
     pub field: String,
-    /// sum | count | distinct_count | average | min | max
-    #[serde(default = "default_aggregation")]
-    pub aggregation: String,
-}
-
-fn default_aggregation() -> String {
-    "sum".to_string()
+    /// sum | count | distinct_count | average | min | max. Omit for the
+    /// desktop's default: sum for a numeric column, count otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation: Option<String>,
 }
 
 fn default_count() -> usize {

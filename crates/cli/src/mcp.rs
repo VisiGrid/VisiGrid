@@ -567,8 +567,16 @@ impl McpServer {
                 .map_err(|e| e.to_string());
         }
 
+        let is_pivot = matches!(op, StructureOp::CreatePivot { .. } | StructureOp::RefreshPivot { .. });
         let mut client = self.connect(args)?;
-        let r = client.structure(op).map_err(session_error_text)?;
+        let r = client.structure(op).map_err(|e| {
+            let text = session_error_text(e);
+            if is_pivot && text.contains("malformed_message") {
+                format!("{text}. This VisiGrid is older than pivot support; ask the user to update it.")
+            } else {
+                text
+            }
+        })?;
         serde_json::to_string_pretty(&json!({
             "applied": r.description,
             "revision": r.revision,
@@ -1191,7 +1199,7 @@ fn tool_definitions() -> Value {
                             "type": "object",
                             "properties": {
                                 "field": { "type": "string" },
-                                "aggregation": { "type": "string", "enum": ["sum", "count", "distinct_count", "average", "min", "max"] }
+                                "aggregation": { "type": "string", "enum": ["sum", "count", "distinct_count", "average", "min", "max"], "description": "Omit for the default: sum for a numeric column, count otherwise" }
                             },
                             "required": ["field"],
                             "additionalProperties": false

@@ -315,18 +315,30 @@ pub fn resolve_create_pivot(
     let headers: Vec<String> = (c0..=c1).map(|c| sheet.get_display(r0, c).trim().to_string()).collect();
     let values = values
         .iter()
-        .map(|v| {
-            Aggregation::parse(&v.aggregation)
-                .map(|a| (a, v.field.clone()))
-                .ok_or_else(|| ("invalid_op", format!(
-                    "unknown aggregation \"{}\" (use sum, count, distinct_count, average, min or max)", v.aggregation
-                )))
+        .map(|v| match v.aggregation.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            None => Ok((None, v.field.clone())),
+            Some(a) => Aggregation::parse(a).map(|a| (Some(a), v.field.clone())).ok_or_else(|| {
+                ("invalid_op", format!("unknown aggregation \"{a}\" (use sum, count, distinct_count, average, min or max)"))
+            }),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let definition = PivotDefinition::from_names(&headers, rows, column.as_deref(), &values)
+    let source = PivotSource { sheet_id: sheet.id, start_row: r0 as u32, start_col: c0 as u32, end_row: r1 as u32, end_col: c1 as u32 };
+    let profile = visigrid_engine::pivot::column_profile(sheet, &source);
+    let definition = PivotDefinition::from_names(&headers, rows, column.as_deref(), &values, &profile)
         .map_err(|m| ("invalid_op", m))?;
     visigrid_engine::pivot::validate(&definition, &headers).map_err(|e| ("invalid_op", e.to_string()))?;
-    let source = PivotSource { sheet_id: sheet.id, start_row: r0 as u32, start_col: c0 as u32, end_row: r1 as u32, end_col: c1 as u32 };
+    // Asked-for Sum/Average/Min/Max of a column with no numbers would show
+    // zeros or errors: say so instead.
+    for v in &definition.values {
+        let numeric_only = matches!(v.aggregation, Aggregation::Sum | Aggregation::Average | Aggregation::Min | Aggregation::Max);
+        if numeric_only && !visigrid_engine::pivot::column_has_numbers(sheet, &source, v.field.offset) {
+            return Err(("invalid_op", format!(
+                "\"{}\" has no numbers to {}; use count or distinct_count, or omit the aggregation",
+                v.field.header,
+                v.aggregation.label().to_lowercase()
+            )));
+        }
+    }
     Ok((source, definition))
 }
 
@@ -519,8 +531,13 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
             let mut done = Vec::new();
             for id in ids {
                 let name = wb.find_pivot(id).map(|(_, t)| t.name.clone()).unwrap_or_default();
-                let (rows, cols) = wb.refresh_pivot(id).map_err(|m| format!("{}: {}", name, m))?;
-                done.push(format!("{} ({} × {})", name, rows, cols));
+                match wb.refresh_pivot(id) {
+                    Ok((rows, cols)) => done.push(format!("{} ({} × {})", name, rows, cols)),
+                    // Earlier pivots stay refreshed (each is valid on its own);
+                    // say which, as the desktop does.
+                    Err(m) if done.is_empty() => return Err(format!("{}: {}", name, m)),
+                    Err(m) => return Err(format!("{}: {} (already refreshed: {})", name, m, done.join(", "))),
+                }
             }
             format!("Refreshed {}", done.join(", "))
         }
@@ -1150,7 +1167,7 @@ mod validation_tests {
             source: None,
             rows: vec!["region".into()],
             column: None,
-            values: vec![PivotValueSpec { field: "Amount".into(), aggregation: "sum".into() }],
+            values: vec![PivotValueSpec { field: "Amount".into(), aggregation: Some("sum".into()) }],
         };
         assert!(validate_structure_op(&create, &wb).is_none());
         let desc = apply_structure(&mut wb, &create).unwrap();
@@ -1170,7 +1187,7 @@ mod validation_tests {
         assert!(code(&bad_field, &wb).contains("no column headed \"Month\""));
         let bad_agg = StructureOp::CreatePivot {
             sheet: None, source: None, rows: vec![], column: None,
-            values: vec![PivotValueSpec { field: "Amount".into(), aggregation: "median".into() }],
+            values: vec![PivotValueSpec { field: "Amount".into(), aggregation: Some("median".into()) }],
         };
         assert!(code(&bad_agg, &wb).contains("unknown aggregation"));
         let bad_range = StructureOp::CreatePivot {
@@ -1184,5 +1201,70 @@ mod validation_tests {
             sheet: Some(1), source: Some("A1:B3".into()), rows: vec!["Region".into()], column: None, values: vec![],
         };
         assert!(code(&on_output, &wb).contains("overlaps PivotTable1"));
+    }
+
+    #[test]
+    fn create_pivot_uses_the_desktop_defaults() {
+        use visigrid_engine::cell::NumberFormat;
+        use visigrid_engine::pivot::Aggregation;
+        use visigrid_protocol::PivotValueSpec;
+        let mut wb = Workbook::new();
+        let currency = NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None };
+        {
+            let sh = wb.sheet_mut(0).unwrap();
+            for (c, h) in ["Region", "Amount"].iter().enumerate() {
+                sh.set_value(0, c, h);
+            }
+            for (r, (reg, amt)) in [("West", "10"), ("East", "5")].iter().enumerate() {
+                sh.set_value(r + 1, 0, reg);
+                sh.set_value(r + 1, 1, amt);
+                sh.set_number_format(r + 1, 1, currency.clone());
+            }
+        }
+        let op = |values: Vec<PivotValueSpec>| StructureOp::CreatePivot {
+            sheet: None, source: None, rows: vec!["Region".into()], column: None, values,
+        };
+        let spec = |f: &str, a: Option<&str>| PivotValueSpec { field: f.into(), aggregation: a.map(Into::into) };
+
+        // Aggregation omitted: Sum for the numeric column (keeping its
+        // currency format), Count for the text one.
+        let (_, def) = resolve_create_pivot(&op(vec![spec("Amount", None), spec("Region", None)]), &wb).unwrap();
+        assert_eq!(def.values[0].aggregation, Aggregation::Sum);
+        assert_eq!(def.values[0].number_format, Some(currency.clone()));
+        assert_eq!(def.values[1].aggregation, Aggregation::Count);
+        assert!(matches!(def.values[1].number_format, Some(NumberFormat::Number { decimals: 0, .. })));
+
+        // Asked-for Sum of a text column is refused rather than showing zeros.
+        let err = resolve_create_pivot(&op(vec![spec("Region", Some("sum"))]), &wb).unwrap_err().1;
+        assert!(err.contains("\"Region\" has no numbers to sum"), "{err}");
+        assert!(resolve_create_pivot(&op(vec![spec("Region", Some("distinct_count"))]), &wb).is_ok());
+
+        // Headless output shows the currency format.
+        apply_structure(&mut wb, &op(vec![spec("Amount", None)])).unwrap();
+        let out = wb.sheet(1).unwrap();
+        assert_eq!(out.get_format(3, 1).number_format, currency);
+    }
+
+    #[test]
+    fn refresh_all_reports_what_was_refreshed_before_a_failure() {
+        let mut wb = Workbook::new();
+        {
+            let sh = wb.sheet_mut(0).unwrap();
+            for (c, h) in ["Region", "Amount"].iter().enumerate() {
+                sh.set_value(0, c, h);
+            }
+            sh.set_value(1, 0, "West");
+            sh.set_value(1, 1, "10");
+        }
+        let create = |col: &str| StructureOp::CreatePivot {
+            sheet: Some(0), source: Some("A1:B2".into()), rows: vec![col.into()], column: None, values: vec![],
+        };
+        apply_structure(&mut wb, &create("Amount")).unwrap(); // PivotTable1
+        apply_structure(&mut wb, &create("Region")).unwrap(); // PivotTable2
+        // Renaming Region breaks only the second pivot.
+        wb.sheet_mut(0).unwrap().set_value(0, 0, "Area");
+        let err = apply_structure(&mut wb, &StructureOp::RefreshPivot { pivot: None }).unwrap_err();
+        assert!(err.starts_with("PivotTable2:"), "{err}");
+        assert!(err.ends_with("(already refreshed: PivotTable1 (2 × 1))"), "{err}");
     }
 }

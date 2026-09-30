@@ -41,13 +41,14 @@ fn flatten(items: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// `sum:Amount` → (sum, Amount). A bare field name means sum.
+/// `sum:Amount` → (sum, Amount). A bare field name takes the desktop's
+/// default: sum for a numeric column, count otherwise.
 fn value_specs(values: &[String]) -> Vec<PivotValueSpec> {
     flatten(values)
         .into_iter()
         .map(|v| match v.split_once(':') {
-            Some((agg, field)) => PivotValueSpec { field: field.trim().to_string(), aggregation: agg.trim().to_string() },
-            None => PivotValueSpec { field: v, aggregation: "sum".to_string() },
+            Some((agg, field)) => PivotValueSpec { field: field.trim().to_string(), aggregation: Some(agg.trim().to_string()) },
+            None => PivotValueSpec { field: v, aggregation: None },
         })
         .collect()
 }
@@ -143,6 +144,10 @@ pub fn cmd_pivot_file(path: &Path, args: &PivotArgs, delimiter: Option<&str>, fo
             text = String::from_utf8_lossy(&bytes).into_owned();
         }
         PivotFormat::Table => {
+            let label_cols = match &op {
+                StructureOp::CreatePivot { rows, .. } => rows.len().max(1),
+                _ => 1,
+            };
             let cells: Vec<Vec<String>> =
                 (0..h).map(|r| (0..w).map(|c| out.get_formatted_display(r, c)).collect()).collect();
             let widths: Vec<usize> =
@@ -152,8 +157,9 @@ pub fn cmd_pivot_file(path: &Path, args: &PivotArgs, delimiter: Option<&str>, fo
                     .iter()
                     .enumerate()
                     .map(|(c, v)| {
-                        // Numbers right-align, labels left-align.
-                        if c > 0 && v.chars().next().is_some_and(|ch| ch.is_ascii_digit() || ch == '-' || ch == '(') {
+                        // Numbers right-align in value columns; row labels
+                        // (a year, say) stay left.
+                        if c >= label_cols && v.chars().next().is_some_and(|ch| ch.is_ascii_digit() || ch == '-' || ch == '(') {
                             format!("{}{}", " ".repeat(widths[c] - display_width(v)), v)
                         } else {
                             pad_right(v, widths[c])
@@ -207,7 +213,15 @@ pub fn cmd_pivot_session(session_id: Option<&str>, args: &PivotArgs, refresh: Op
             create_op(args, sheet)
         }
     };
-    let r = client.structure(op).map_err(CliError::session)?;
+    let r = client.structure(op).map_err(|e| {
+        let text = e.to_string();
+        let err = CliError::session(e);
+        if text.contains("malformed_message") {
+            err.with_hint("that VisiGrid predates pivot support; update the app or `vgrid serve` to match this vgrid")
+        } else {
+            err
+        }
+    })?;
     println!("{} (revision {})", r.description, r.revision);
     Ok(())
 }
@@ -222,9 +236,9 @@ mod tests {
         assert_eq!(
             specs,
             vec![
-                PivotValueSpec { field: "Amount".into(), aggregation: "sum".into() },
-                PivotValueSpec { field: "Order".into(), aggregation: "count".into() },
-                PivotValueSpec { field: "Qty".into(), aggregation: "sum".into() },
+                PivotValueSpec { field: "Amount".into(), aggregation: Some("sum".into()) },
+                PivotValueSpec { field: "Order".into(), aggregation: Some("count".into()) },
+                PivotValueSpec { field: "Qty".into(), aggregation: None },
             ]
         );
         assert_eq!(flatten(&["Region,Rep".into(), " Month ".into()]), vec!["Region", "Rep", "Month"]);

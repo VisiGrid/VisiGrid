@@ -965,7 +965,7 @@ mod tests {
     fn headless_create_names_fields_and_refresh_follows_edits() {
         let (mut wb, data, _) = book();
         let headers = vec!["Region".to_string(), "Amount".to_string()];
-        let def = PivotDefinition::from_names(&headers, &["region".into()], None, &[(Aggregation::Sum, "AMOUNT".into())]).unwrap();
+        let def = PivotDefinition::from_names(&headers, &["region".into()], None, &[(Some(Aggregation::Sum), "AMOUNT".into())], &[]).unwrap();
         let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
         let active = wb.active_sheet_index();
         let (id, idx) = wb.create_pivot(source, def).unwrap();
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!(wb.find_pivot_by_name("pivottable1").map(|(_, t)| t.id), Some(id));
 
         // A second pivot gets the next free sheet name.
-        let def = PivotDefinition::from_names(&headers, &[], None, &[(Aggregation::Count, "Region".into())]).unwrap();
+        let def = PivotDefinition::from_names(&headers, &[], None, &[(Some(Aggregation::Count), "Region".into())], &[]).unwrap();
         let (_, idx2) = wb.create_pivot(source, def).unwrap();
         assert_eq!(wb.sheet(idx2).unwrap().name, "Pivot (2)");
     }
@@ -992,16 +992,16 @@ mod tests {
     fn headless_create_refusals_leave_the_workbook_unchanged() {
         let (mut wb, data, _) = book();
         let headers = vec!["Region".to_string(), "Amount".to_string()];
-        let err = PivotDefinition::from_names(&headers, &["Month".into()], None, &[]).unwrap_err();
+        let err = PivotDefinition::from_names(&headers, &["Month".into()], None, &[], &[]).unwrap_err();
         assert!(err.contains("no column headed \"Month\"") && err.contains("Region, Amount"), "{err}");
-        assert!(PivotDefinition::from_names(&headers, &[], None, &[]).is_err());
+        assert!(PivotDefinition::from_names(&headers, &[], None, &[], &[]).is_err());
         assert_eq!(Aggregation::parse("Distinct-Count"), Some(Aggregation::DistinctCount));
         assert_eq!(Aggregation::parse("mean"), Some(Aggregation::Average));
         assert_eq!(Aggregation::parse("median"), None);
 
         // Source headers changed under a stored field: refused, no sheet added.
         let sheets = wb.sheets().len();
-        let def = PivotDefinition::from_names(&headers, &["Region".into()], None, &[]).unwrap();
+        let def = PivotDefinition::from_names(&headers, &["Region".into()], None, &[], &[]).unwrap();
         wb.sheet_mut(0).unwrap().set_value(0, 0, "Area");
         let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
         assert!(wb.create_pivot(source, def).is_err());

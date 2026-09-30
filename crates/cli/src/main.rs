@@ -564,7 +564,8 @@ Examples:
 
 Fields are named by header text (case-insensitive); the first row of the
 source is the header row. Aggregations: sum, count, distinct, avg, min, max.
-A bare value field (--values Amount) means sum.
+A bare value field (--values Amount) sums a numeric column and counts any
+other, as the desktop's field list does.
 
 With a file, nothing is written: the pivot is computed and printed.
 With --session, the pivot is created on a new sheet of the running workbook

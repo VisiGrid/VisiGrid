@@ -90,6 +90,14 @@ fn refusals_name_the_problem() {
     assert!(!ok);
     assert!(stderr.contains("unknown aggregation \"median\""), "{stderr}");
 
+    // A text column: a bare field counts; an explicit sum is refused, not zeros.
+    let (ok, stdout, _) = run(&["pivot", path, "-r", "Region", "-v", "Rep", "--csv"]);
+    assert!(ok);
+    assert!(stdout.starts_with("Region,Count of Rep\nEast,2\n"), "{stdout}");
+    let (ok, _, stderr) = run(&["pivot", path, "-r", "Region", "-v", "sum:Rep"]);
+    assert!(!ok);
+    assert!(stderr.contains("\"Rep\" has no numbers to sum"), "{stderr}");
+
     let (ok, _, stderr) = run(&["pivot", "--rows", "Region"]);
     assert!(!ok);
     assert!(stderr.contains("give a file"), "{stderr}");

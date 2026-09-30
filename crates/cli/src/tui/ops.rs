@@ -27,10 +27,11 @@ fn sort_key(s: &str) -> Option<Key> {
     if t.is_empty() {
         return None;
     }
-    let numeric: String = t.chars().filter(|c| !matches!(c, ',' | '$' | '%' | ' ')).collect();
+    let percent = t.ends_with('%');
+    let numeric: String = t.chars().filter(|c| !matches!(c, ',' | '$' | '€' | '£' | '%' | ' ')).collect();
     let numeric = numeric.strip_prefix('(').and_then(|n| n.strip_suffix(')')).map(|n| format!("-{n}")).unwrap_or(numeric);
     match numeric.parse::<f64>() {
-        Ok(n) if n.is_finite() => Some(Key::Number(n)),
+        Ok(n) if n.is_finite() => Some(Key::Number(if percent { n / 100.0 } else { n })),
         _ => Some(Key::Text(t.to_lowercase())),
     }
 }
@@ -202,7 +203,10 @@ pub fn pivot(data: &PeekData, spec: &str) -> Result<(PeekData, String), String> 
         }
         for (r, row) in body.iter().enumerate() {
             for (c, v) in row.iter().enumerate() {
-                if !v.is_empty() {
+                // Loaded cells are values: "=1+1" in a CSV is text, not a formula.
+                if v.starts_with('=') {
+                    sheet.set_text(r + 1, c, v);
+                } else if !v.is_empty() {
                     sheet.set_value(r + 1, c, v);
                 }
             }
@@ -241,6 +245,9 @@ mod tests {
         let id: Vec<usize> = (0..6).collect();
         assert_eq!(sorted_order(&d, &id, 1, false), vec![5, 2, 0, 3, 4, 1]);
         assert_eq!(sorted_order(&d, &id, 1, true), vec![4, 3, 0, 2, 5, 1]);
+        // Percent is a fraction; euro and pound amounts are numbers.
+        let d = table(&[&["a", "5%"], &["b", "0.5"], &["c", "€10"], &["d", "€9"], &["e", "£1"]]);
+        assert_eq!(sorted_order(&d, &[0, 1, 2, 3, 4], 1, false), vec![0, 1, 4, 3, 2]);
     }
 
     #[test]
@@ -280,6 +287,11 @@ mod tests {
         raw.col_names = vec!["A".into(), "B".into()];
         let (p, _) = pivot(&raw, "rows=Region values=Amount").unwrap();
         assert_eq!(p.rows[0], vec!["West", "11"]);
+
+        // A loaded "=1+1" is text: counted, never evaluated into a number.
+        let f = table(&[&["=1+1", "3"], &["West", "4"]]);
+        let (p, _) = pivot(&f, "rows=Region values=sum:Amount").unwrap();
+        assert_eq!(p.rows[0], vec!["=1+1", "3"]);
     }
 
     #[test]

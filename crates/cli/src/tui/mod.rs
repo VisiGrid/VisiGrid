@@ -347,10 +347,12 @@ impl TuiApp {
                 self.push_tab(name, data);
             }
             KeyCode::Char('P') if self.data().num_cols > 0 => {
+                // The header row is the first row in file order, not whatever
+                // sorts first.
                 let field = if self.data().has_headers {
                     self.col_name(self.cursor_col)
                 } else {
-                    self.cell(0, self.cursor_col).to_string()
+                    self.data().rows.first().and_then(|r| r.get(self.cursor_col)).cloned().unwrap_or_default()
                 };
                 self.prompt = Some(Prompt { kind: PromptKind::Pivot, input: format!("rows={field} values=count:{field}") });
             }

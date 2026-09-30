@@ -185,13 +185,17 @@ impl PivotDefinition {
 
     /// Build a definition from header names, for callers that name fields
     /// rather than pick them (the CLI, session clients, agents). Names match
-    /// headers case-insensitively after trimming. Value fields carry no number
-    /// format; [`format_new_pivot_values`] chooses one after aggregation.
+    /// headers case-insensitively after trimming. A value field without an
+    /// aggregation gets the desktop's default (Sum for a numeric column, Count
+    /// otherwise), and every value field gets the desktop's default number
+    /// format, from `profile` (one entry per source column, see
+    /// [`column_profile`]).
     pub fn from_names(
         headers: &[String],
         rows: &[String],
         column: Option<&str>,
-        values: &[(Aggregation, String)],
+        values: &[(Option<Aggregation>, String)],
+        profile: &[ColumnProfile],
     ) -> Result<PivotDefinition, String> {
         let field = |name: &str| -> Result<PivotField, String> {
             let want = name.trim().to_lowercase();
@@ -210,7 +214,12 @@ impl PivotDefinition {
             values: values
                 .iter()
                 .map(|(aggregation, name)| {
-                    Ok(PivotValueField { field: field(name)?, aggregation: *aggregation, number_format: None })
+                    let field = field(name)?;
+                    let p = profile.get(field.offset as usize);
+                    let aggregation = aggregation
+                        .unwrap_or(if p.is_some_and(|p| p.numeric) { Aggregation::Sum } else { Aggregation::Count });
+                    let number_format = default_number_format(aggregation, p.map_or(&NumberFormat::General, |p| &p.format));
+                    Ok(PivotValueField { field, aggregation, number_format })
                 })
                 .collect::<Result<_, String>>()?,
         };
@@ -373,6 +382,43 @@ pub fn validate_headers(headers: &[String]) -> Result<(), PivotError> {
         }
     }
     Ok(())
+}
+
+/// What the desktop's field list knows about a source column: the number
+/// format and type of its first non-empty data cell (within the first 200
+/// rows). Drives default aggregations and value formats everywhere a pivot is
+/// created, so a pivot made by an agent or the CLI matches one made by hand.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnProfile {
+    pub format: NumberFormat,
+    pub numeric: bool,
+}
+
+/// One [`ColumnProfile`] per source column. The caller passes the sheet
+/// `source` names.
+pub fn column_profile(sheet: &Sheet, source: &PivotSource) -> Vec<ColumnProfile> {
+    (source.start_col..=source.end_col)
+        .map(|c| {
+            let first = (source.start_row + 1..=source.end_row.min(source.start_row + 200))
+                .map(|r| (r as usize, c as usize))
+                .find(|&(r, c)| !matches!(sheet.get_computed_value(r, c), Value::Empty));
+            match first {
+                Some((r, c)) => ColumnProfile {
+                    format: sheet.get_format(r, c).number_format.clone(),
+                    numeric: matches!(sheet.get_computed_value(r, c), Value::Number(_)),
+                },
+                None => ColumnProfile { format: NumberFormat::General, numeric: false },
+            }
+        })
+        .collect()
+}
+
+/// Does this source column hold any number at all? Sum, Average, Min and Max
+/// of a column without one are all zeros or errors, which is never what was
+/// meant.
+pub fn column_has_numbers(sheet: &Sheet, source: &PivotSource, offset: u32) -> bool {
+    let c = (source.start_col + offset) as usize;
+    (source.start_row as usize + 1..=source.end_row as usize).any(|r| matches!(sheet.get_computed_value(r, c), Value::Number(_)))
 }
 
 /// Read a snapshot of `source` from `sheet`: every header, plus the data rows
