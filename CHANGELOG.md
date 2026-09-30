@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.40.0
+
+### Export to PDF
+
+- **File → Export PDF…** (also in the command palette) exports the active sheet or the selected range. Choose A4, Letter or Legal, portrait or landscape; fit the columns to the page, print at actual size or fit the whole sheet; and add page numbers if you want them. Before you save, the dialog shows how many pages it will be, the scale, and the smallest text size. Afterwards it lists anything to check (clipped cells, very small text, missing fonts) and offers **Open PDF**. Text in the PDF is searchable, fonts are embedded, and a failed or cancelled export never overwrites an existing file. Printing directly and a page preview are still to come. ([#45](https://github.com/VisiGrid/VisiGrid/pull/45))
+
+### Formulas
+
+- **Regular expressions:** REGEXTEST (also available as REGEXMATCH, the Google Sheets name), REGEXEXTRACT and REGEXREPLACE. REGEXEXTRACT can return the first match, every match, or the capture groups, and returns `#N/A` when nothing matches. REGEXREPLACE can replace every match, the nth, or the nth from the end, and `$1`, `$2` insert capture groups. Accented and non-Latin text works: `\w+` extracts "José" whole. Lookahead and backreferences aren't supported and return `#VALUE!` rather than matching differently. ([#44](https://github.com/VisiGrid/VisiGrid/pull/44))
+
+- **Operators work on ranges.** `=B2:B5>15`, `=B2:B5*2` and `=(C2:C5="x")*B2:B5` return arrays instead of `#VALUE!`. A scalar pairs with every element, and a single row or column stretches to fit, as in Excel. This makes the standard conditional idioms work: `=SUMPRODUCT(--(B2:B5>15))` counts matching rows, `=SUMPRODUCT((C2:C5="x")*B2:B5)` sums them, and `=SUM(B2:B5*2)` works. A formula like `=B2:B5>15` on its own spills its results. ([#42](https://github.com/VisiGrid/VisiGrid/pull/42))
+- **FILTER takes real conditions:** `=FILTER(A2:A5,B2:B5>15)`, or several combined with `*`. It also accepts its third argument, the value to show when nothing matches, and its results can be read by COUNTA, ROWS, COLUMNS and INDEX. ([#42](https://github.com/VisiGrid/VisiGrid/pull/42))
+- **A multi-cell range where one value is expected is now `#VALUE!`** instead of silently using its first cell. So `=IF(B2:B5>15,1,0)` errors rather than answering from the first row. Excel would spill it; that is not supported yet.
+- **TEXT understands format codes.** `TEXT(45929,"yyyy-mm-dd")` gives 2025-09-29, `TEXT(1234.5,"#,##0.00")` gives 1,234.50, `TEXT(7,"000")` gives 007, `TEXT(0.256,"0.0%")` gives 25.6%, and `TEXT(45929,"dddd")` gives Monday. It uses the same renderer as cell number formats, so a code means the same thing in both places. ([#39](https://github.com/VisiGrid/VisiGrid/pull/39))
+- **SORT sorts descending with -1**, as in Excel (TRUE/FALSE still work). Rows with equal keys keep their order, and any other sort order is `#VALUE!`. ([#39](https://github.com/VisiGrid/VisiGrid/pull/39))
+- **TRANSPOSE keeps text**, which it used to turn into 0. FILTER with a column of typed TRUE/FALSE values returns the TRUE rows instead of "No matches". ([#39](https://github.com/VisiGrid/VisiGrid/pull/39))
+
+### Rewind and memory
+
+- **Rewind preview works on large workbooks again.** 0.37 turned it off above a million cells, because keeping the workbook's starting point for rewind meant a second full copy. Copies of a workbook now share their storage until one of them is edited, and an edit copies only the 1,024-row block it touches. A 1M-row CSV holds its rewind starting point for about 0.1 MB instead of about 42 MB, and the app sits at about 216 MB with rewind available. ([#18](https://github.com/VisiGrid/VisiGrid/issues/18))
+- **Previewing a point in history is faster on large or formula-heavy workbooks**, since the preview starts from a shared copy instead of copying everything first. Copying a workbook with 200,000 formulas took about 2 seconds and 200 MB; it now takes no measurable time or memory.
+- **Inserting or deleting rows partway down a large sheet is faster**, since everything above the edit is left as it is.
+
+### Files
+
+- **The `;;;` number format hides a value**, as in Excel. It used to display as General.
+- **Dates stored as ISO text in xlsx files import as dates** that take their number format, instead of as text.
+- **The import report is easier to read.** It has a clearer summary, a per-sheet table, compatibility warnings listed apart from formula errors, error cells you can click to jump to, expandable diagnostics and a **Copy report** button. ([#47](https://github.com/VisiGrid/VisiGrid/pull/47))
+
+### Command line
+
+- **`vgrid peek` opens Parquet files** as a fast preview. It checks the file's size before loading, shows dates readably and keeps IDs like "007" intact. It also opens `.vgrid`, `.xls`, `.xlsb` and `.xlsm`, and chooses sheets and reports truncation the same way for every format. ([#46](https://github.com/VisiGrid/VisiGrid/pull/46))
+
+### Interface
+
+- **The inspector panel is wider and clearer.** It's 380 px instead of 280. The header shows the cell and whether the inspector is pinned or following your selection, the tabs are easier to scan, and the History tab scrolls smoothly. ([#41](https://github.com/VisiGrid/VisiGrid/pull/41))
+
 ## 0.39.0
 
 ### Pivot tables
