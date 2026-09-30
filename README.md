@@ -53,7 +53,7 @@ VisiGrid was influenced by keyboard-first environments such as [Omarchy](https:/
 - Conditional formatting as typed rules with live grid preview and match counts
 - Multi-select editing across non-adjacent cells
 - Format Painter (single-shot and locked mode)
-- 123 formula functions with autocomplete
+- 138 formula functions with autocomplete
 - Instant startup and smooth scrolling
 - 5 built-in themes including System (follows OS dark/light)
 
