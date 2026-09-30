@@ -110,3 +110,28 @@ fn array_formulas_recalculate_when_a_cell_in_the_range_changes() {
     assert_eq!(show(&wb, 10, 0), "4");
     assert_eq!(show(&wb, 11, 0), "4");
 }
+
+#[test]
+fn sort_unique_and_transpose_transform_a_computed_array() {
+    // Each used to return a computed argument untouched: SORT(UNIQUE(x)) came
+    // back unsorted and UNIQUE(FILTER(...)) kept its duplicates, silently.
+    let mut wb = Workbook::new();
+    for (r, v) in ["West", "East", "West", "North", "East"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, r, 0, v);
+    }
+    formula(&mut wb, 0, 2, "=SORT(UNIQUE(A1:A5))");
+    let got: Vec<String> = (0..3).map(|r| show(&wb, r, 2)).collect();
+    assert_eq!(got, ["East", "North", "West"]);
+    assert_eq!(show(&wb, 3, 2), "", "three distinct values, no fourth");
+
+    formula(&mut wb, 0, 3, "=UNIQUE(FILTER(A1:A5,A1:A5<>\"North\"))");
+    let got: Vec<String> = (0..2).map(|r| show(&wb, r, 3)).collect();
+    assert_eq!(got, ["West", "East"]);
+    assert_eq!(show(&wb, 2, 3), "");
+
+    formula(&mut wb, 10, 0, "=TRANSPOSE(SORT(UNIQUE(A1:A5),1,-1))");
+    let got: Vec<String> = (0..3).map(|c| show(&wb, 10, c)).collect();
+    assert_eq!(got, ["West", "North", "East"]);
+
+    assert_eq!(formula(&mut wb, 12, 0, "=COUNTA(UNIQUE(A1:A5))"), "3");
+}
