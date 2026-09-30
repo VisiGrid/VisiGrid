@@ -32,6 +32,16 @@ pub(crate) fn handle_key_down(
         cx.stop_propagation();
     }
 
+    if this.mode == Mode::ExportPdf {
+        if event.keystroke.key == "space" {
+            let option = this.pdf_export.as_ref().map_or(0, |s| s.focus);
+            this.pdf_cycle_option(option, cx);
+        }
+        // Enter, Escape and Tab use their existing action handlers.
+        cx.stop_propagation();
+        return;
+    }
+
     // Terminal owns focus: don't route keys to the grid
     if this.terminal_has_focus(window) {
         #[cfg(debug_assertions)]

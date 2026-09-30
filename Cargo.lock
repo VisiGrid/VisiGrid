@@ -7732,6 +7732,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "js-sys",
  "ordered-float 4.6.0",
+ "regex",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -7784,6 +7785,7 @@ dependencies = [
  "visigrid-engine",
  "visigrid-io",
  "visigrid-license",
+ "visigrid-print",
  "visigrid-protocol",
  "visigrid-scripting",
  "visigrid-session-host",
@@ -7847,7 +7849,11 @@ dependencies = [
 name = "visigrid-print"
 version = "0.39.0"
 dependencies = [
+ "cosmic-text",
  "krilla",
+ "tempfile",
+ "visigrid-engine",
+ "visigrid-io",
 ]
 
 [[package]]

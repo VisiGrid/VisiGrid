@@ -27,6 +27,7 @@ mod diff_actions;
 mod diff_view;
 mod editing;
 mod file_ops;
+mod pdf_export;
 mod fill;
 mod find_replace;
 mod formatting;

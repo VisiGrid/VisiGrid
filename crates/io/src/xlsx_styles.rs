@@ -586,14 +586,14 @@ fn parse_num_fmts(xml: &str) -> HashMap<u16, String> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) if e.name().as_ref() == b"numFmts" => {
+            Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"numFmts" => {
                 in_num_fmts = true;
             }
-            Ok(Event::End(ref e)) if e.name().as_ref() == b"numFmts" => {
+            Ok(Event::End(ref e)) if e.local_name().as_ref() == b"numFmts" => {
                 break;
             }
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
-                if in_num_fmts && e.name().as_ref() == b"numFmt" =>
+                if in_num_fmts && e.local_name().as_ref() == b"numFmt" =>
             {
                 let mut id: Option<u16> = None;
                 let mut code: Option<String> = None;
@@ -639,7 +639,7 @@ fn parse_fonts(xml: &str, theme: &ThemePalette) -> Vec<ParsedFont> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
-                let name = e.name();
+                let name = e.local_name();
                 match name.as_ref() {
                     b"fonts" if depth == 0 => depth = 1,
                     b"font" if depth == 1 => {
@@ -654,7 +654,7 @@ fn parse_fonts(xml: &str, theme: &ThemePalette) -> Vec<ParsedFont> {
                 }
             }
             Ok(Event::Empty(ref e)) if depth == 2 => {
-                let name = e.name();
+                let name = e.local_name();
                 match name.as_ref() {
                     b"b" => current_font.bold = true,
                     b"i" => current_font.italic = true,
@@ -685,7 +685,7 @@ fn parse_fonts(xml: &str, theme: &ThemePalette) -> Vec<ParsedFont> {
                 }
             }
             Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"font" if depth == 2 => {
                         fonts.push(current_font.clone());
                         depth = 1;
@@ -718,7 +718,7 @@ fn parse_fills(xml: &str, theme: &ThemePalette, unsupported: &mut Vec<String>) -
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
-                let name = e.name();
+                let name = e.local_name();
                 match name.as_ref() {
                     b"fills" if depth == 0 => depth = 1,
                     b"fill" if depth == 1 => {
@@ -752,7 +752,7 @@ fn parse_fills(xml: &str, theme: &ThemePalette, unsupported: &mut Vec<String>) -
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                let name = e.name();
+                let name = e.local_name();
                 match name.as_ref() {
                     b"patternFill" if depth == 2 => {
                         // Self-closing <patternFill patternType="none"/>
@@ -765,7 +765,7 @@ fn parse_fills(xml: &str, theme: &ThemePalette, unsupported: &mut Vec<String>) -
                 }
             }
             Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"patternFill" => in_pattern_fill = false,
                     b"fill" if depth == 2 => {
                         fills.push(current_fill.clone());
@@ -801,7 +801,7 @@ fn parse_borders(xml: &str, theme: &ThemePalette) -> Vec<ParsedBorder> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
-                let name = e.name();
+                let name = e.local_name();
                 match name.as_ref() {
                     b"borders" if depth == 0 => depth = 1,
                     b"border" if depth == 1 => {
@@ -834,7 +834,7 @@ fn parse_borders(xml: &str, theme: &ThemePalette) -> Vec<ParsedBorder> {
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                let name = e.name();
+                let name = e.local_name();
                 match name.as_ref() {
                     b"left" | b"right" | b"top" | b"bottom" if depth == 2 => {
                         // Self-closing border side with no style
@@ -867,7 +867,7 @@ fn parse_borders(xml: &str, theme: &ThemePalette) -> Vec<ParsedBorder> {
                 }
             }
             Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"left" | b"right" | b"top" | b"bottom" if depth == 2 => {
                         if let Some(side) = current_side.take() {
                             let border = CellBorder {
@@ -932,7 +932,7 @@ fn parse_cell_xfs(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"cellXfs" => {
                         in_cell_xfs = true;
                     }
@@ -1010,7 +1010,7 @@ fn parse_cell_xfs(
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"xf" if in_cell_xfs => {
                         // Self-closing <xf .../> — parse and push immediately
                         current_xf = XfEntry::default();
@@ -1086,7 +1086,7 @@ fn parse_cell_xfs(
                 }
             }
             Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"xf" if in_xf => {
                         styles.push(resolve_xf(&current_xf, custom_num_fmts, fonts, fills, borders));
                         in_xf = false;
@@ -1233,7 +1233,7 @@ pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> She
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"row" => {
                         let mut row_idx: Option<usize> = None;
                         let mut custom_height = false;
@@ -1432,7 +1432,7 @@ pub fn parse_sheet_formatting_with_theme(xml: &str, theme: &ThemePalette) -> She
                 }
             }
             Ok(Event::End(ref e)) => {
-                if e.name().as_ref() == b"row" {
+                if e.local_name().as_ref() == b"row" {
                     _current_row = None;
                 }
             }
@@ -1630,16 +1630,16 @@ fn resolve_worksheet_paths_for_sheets(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
-                if e.name().as_ref() == b"sheet" =>
+                if e.local_name().as_ref() == b"sheet" =>
             {
                 let mut name = None;
                 let mut rid = None;
                 for attr in e.attributes().flatten() {
-                    match attr.key.as_ref() {
+                    match attr.key.local_name().as_ref() {
                         b"name" => {
-                            name = Some(String::from_utf8_lossy(&attr.value).to_string());
+                            name = Some(unescape_xml(&String::from_utf8_lossy(&attr.value)));
                         }
-                        b"r:id" => {
+                        b"id" => {
                             rid = Some(String::from_utf8_lossy(&attr.value).to_string());
                         }
                         _ => {}
@@ -1665,12 +1665,12 @@ fn resolve_worksheet_paths_for_sheets(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
-                if e.name().as_ref() == b"Relationship" =>
+                if e.local_name().as_ref() == b"Relationship" =>
             {
                 let mut id = None;
                 let mut target = None;
                 for attr in e.attributes().flatten() {
-                    match attr.key.as_ref() {
+                    match attr.key.local_name().as_ref() {
                         b"Id" => id = Some(String::from_utf8_lossy(&attr.value).to_string()),
                         b"Target" => {
                             target = Some(String::from_utf8_lossy(&attr.value).to_string());
@@ -1719,7 +1719,7 @@ fn theme_part_path(rels_xml: &str) -> String {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
-                if e.name().as_ref() == b"Relationship" =>
+                if e.local_name().as_ref() == b"Relationship" =>
             {
                 let mut is_theme = false;
                 let mut target = None;
@@ -1773,6 +1773,40 @@ fn resolve_rel_target(target: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prefixed_xml_preserves_styles_layout_visibility_and_relationships() {
+        use super::*;
+        let styles = r##"<x:styleSheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <x:numFmts><x:numFmt numFmtId="200" formatCode=";;;"/></x:numFmts>
+          <x:fonts><x:font><x:b/><x:sz val="17"/><x:name val="IBM Plex Sans"/></x:font></x:fonts>
+          <x:fills><x:fill><x:patternFill patternType="solid"><x:fgColor rgb="FF123456"/></x:patternFill></x:fill></x:fills>
+          <x:borders><x:border><x:bottom style="thin"><x:color rgb="FF000000"/></x:bottom></x:border></x:borders>
+          <x:cellXfs><x:xf fontId="0" fillId="0" borderId="0" numFmtId="200" applyFont="1" applyFill="1" applyBorder="1" applyNumberFormat="1"><x:alignment horizontal="center" wrapText="1"/></x:xf></x:cellXfs>
+        </x:styleSheet>"##;
+        let (table, _) = parse_styles_xml(styles);
+        let f = table.get(0).expect("prefixed cellXfs");
+        assert!(f.bold);
+        assert_eq!(f.font_size, Some(17.0));
+        assert_eq!(f.background_color, Some([0x12,0x34,0x56,255]));
+        assert!(f.border_bottom.is_set());
+        assert_eq!(f.number_format, NumberFormat::Custom(";;;".into()));
+        assert_eq!(f.text_overflow, TextOverflow::Wrap);
+        let xml = r#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cols><x:col min="2" max="2" width="22" customWidth="1" hidden="1"/></x:cols><x:sheetData><x:row r="3" ht="42" customHeight="1" hidden="1"><x:c r="B3" s="0"/></x:row></x:sheetData><x:mergeCells><x:mergeCell ref="A1:C1"/></x:mergeCells><x:conditionalFormatting sqref="A2:A5"><x:cfRule type="cellIs" operator="lessThan" priority="1" dxfId="0"><x:formula>0</x:formula></x:cfRule></x:conditionalFormatting></x:worksheet>"#;
+        let layout = parse_sheet_formatting(xml);
+        assert_eq!(layout.col_widths.get(&1), Some(&22.0));
+        assert_eq!(layout.row_heights.get(&2), Some(&42.0));
+        assert_eq!(layout.hidden_rows, vec![2]);
+        assert_eq!(layout.hidden_cols, vec![1]);
+        assert_eq!(layout.cell_styles, vec![(2,1,0)]);
+        assert_eq!(layout.merged_regions, vec![(0,0,0,2)]);
+        assert_eq!(layout.cond_rules.len(), 1);
+        let paths = resolve_worksheet_paths_for_sheets(
+            r#"<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:rel="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheets><x:sheet name="P&amp;L" sheetId="1" rel:id="r1"/></x:sheets></x:workbook>"#,
+            r#"<p:Relationships xmlns:p="http://schemas.openxmlformats.org/package/2006/relationships"><p:Relationship Id="r1" Target="/xl/worksheets/sheet1.xml"/></p:Relationships>"#,
+            &["P&L".into()],
+        );
+        assert_eq!(paths, vec!["xl/worksheets/sheet1.xml"]);
+    }
     use super::*;
 
     /// #22: Excel's automatic font colour must import as no colour, so the
@@ -2439,7 +2473,7 @@ pub fn parse_dxfs(xml: &str, theme: &ThemePalette) -> Vec<ParsedDxf> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"dxfs" => in_dxfs = true,
                     b"dxf" if in_dxfs => {
                         depth_dxf = true;
@@ -2475,7 +2509,7 @@ pub fn parse_dxfs(xml: &str, theme: &ThemePalette) -> Vec<ParsedDxf> {
                     _ => {}
                 }
             }
-            Ok(Event::End(ref e)) => match e.name().as_ref() {
+            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
                 b"dxfs" => in_dxfs = false,
                 b"dxf" if depth_dxf => {
                     depth_dxf = false;
@@ -2545,11 +2579,11 @@ pub fn parse_cond_formatting(xml: &str) -> Vec<ParsedCondRule> {
             // self-closing element never emits an End event — matching only on
             // End would silently drop every containsText / duplicateValues /
             // timePeriod rule in the file.
-            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"cfRule" => {
+            Ok(Event::Empty(ref e)) if e.local_name().as_ref() == b"cfRule" => {
                 rules.push(build_cf_rule(e, &current_ranges));
             }
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                match e.name().as_ref() {
+                match e.local_name().as_ref() {
                     b"conditionalFormatting" => {
                         current_ranges = Vec::new();
                         for attr in e.attributes().flatten() {
@@ -2581,7 +2615,7 @@ pub fn parse_cond_formatting(xml: &str) -> Vec<ParsedCondRule> {
                     formula_buf.push(ch);
                 }
             }
-            Ok(Event::End(ref e)) => match e.name().as_ref() {
+            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
                 b"formula" => {
                     in_formula = false;
                     if let Some(rule) = current.as_mut() {
