@@ -10,6 +10,7 @@ pub mod whole_range;
 pub(crate) mod eval_helpers;
 pub(crate) mod eval_math;
 pub(crate) mod eval_financial;
+pub(crate) mod eval_regex;
 pub(crate) mod eval_text;
 pub(crate) mod eval_logical;
 pub(crate) mod eval_conditional;

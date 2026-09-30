@@ -7732,6 +7732,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "js-sys",
  "ordered-float 4.6.0",
+ "regex",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",

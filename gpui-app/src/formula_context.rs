@@ -613,6 +613,53 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "REGEXTEST",
+        signature: "REGEXTEST(text, pattern, [case_sensitivity])",
+        description: "Returns TRUE if the text matches a regular expression.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to test.", optional: false, repeatable: false },
+            ParameterInfo { name: "pattern", description: "The regular expression.", optional: false, repeatable: false },
+            ParameterInfo { name: "case_sensitivity", description: "0 (default) case sensitive, 1 case insensitive.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "REGEXMATCH",
+        signature: "REGEXMATCH(text, pattern, [case_sensitivity])",
+        description: "Google Sheets name for REGEXTEST: TRUE if the text matches a regular expression.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to test.", optional: false, repeatable: false },
+            ParameterInfo { name: "pattern", description: "The regular expression.", optional: false, repeatable: false },
+            ParameterInfo { name: "case_sensitivity", description: "0 (default) case sensitive, 1 case insensitive.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "REGEXEXTRACT",
+        signature: "REGEXEXTRACT(text, pattern, [return_mode], [case_sensitivity])",
+        description: "Extracts text that matches a regular expression.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to search.", optional: false, repeatable: false },
+            ParameterInfo { name: "pattern", description: "The regular expression.", optional: false, repeatable: false },
+            ParameterInfo { name: "return_mode", description: "0 (default) first match, 1 all matches, 2 capture groups.", optional: true, repeatable: false },
+            ParameterInfo { name: "case_sensitivity", description: "0 (default) case sensitive, 1 case insensitive.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "REGEXREPLACE",
+        signature: "REGEXREPLACE(text, pattern, replacement, [occurrence], [case_sensitivity])",
+        description: "Replaces text that matches a regular expression. $1 in the replacement is the first group.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to modify.", optional: false, repeatable: false },
+            ParameterInfo { name: "pattern", description: "The regular expression.", optional: false, repeatable: false },
+            ParameterInfo { name: "replacement", description: "The replacement text; $1, $2 refer to capture groups.", optional: false, repeatable: false },
+            ParameterInfo { name: "occurrence", description: "0 (default) replaces all; n the nth match; -n the nth from the end.", optional: true, repeatable: false },
+            ParameterInfo { name: "case_sensitivity", description: "0 (default) case sensitive, 1 case insensitive.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
         name: "REPT",
         signature: "REPT(text, number_times)",
         description: "Repeats text a given number of times.",
