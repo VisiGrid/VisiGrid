@@ -49,7 +49,19 @@ Finding and summarizing (added after 0.40.0) work on the loaded rows:
   `rows=Region column=Month values=sum:Amount`. The result opens as a tab,
   computed by the desktop's pivot engine. Without a header row (CSV opened
   without `--headers`) the first row supplies the field names.
-- On a derived tab, `q` returns to the tab it came from.
+- `=` adds a column computed by the spreadsheet engine from an Excel formula
+  written for the first data row and filled down (relative references move,
+  `$` anchors stay): `=D2*1.08`, `Tax =[Amount]*0.1` (named, with a header
+  reference), `=IF([Amount]>2500,"high","normal")`. Row numbers are the
+  gutter's file row numbers, so with a header row the first data row is 2.
+  Values show to 15 significant digits; error cells show the error. The new
+  column sorts, searches, and feeds `F` and `P` like any other.
+- On a derived tab, `q` returns to the tab it came from, and every tab keeps
+  its own cursor.
+
+Delimited text detects a header row: the first row is data when it has an
+empty or numeric/date-like cell, repeats itself, or recurs further down a
+column; otherwise it names the columns. `--headers` / `--no-headers` override.
 
 When the preview is truncated, derived tab names say "(loaded rows)". For a
 whole-file answer use `vgrid pivot FILE`, which refuses truncated Parquet

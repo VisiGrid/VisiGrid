@@ -175,8 +175,9 @@ Preview files in a read-only terminal grid with `vgrid peek data.parquet`.
 CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
 Use `--shape` for dimensions, `--json` for structured output, or `--plain` for
 a text table. Previews default to 5,000 rows; `--max-rows` changes the limit.
-In the viewer, `/` searches, `[` `]` sort, `F` shows a column's frequencies and
-`P` builds a pivot. See [terminal viewer parity and next steps](docs/tui-parity.md).
+In the viewer, `/` searches, `[` `]` sort, `F` shows a column's frequencies,
+`P` builds a pivot and `=` adds a column from an Excel formula
+(`=IF([Amount]>2500,"high","normal")`), computed by the same engine as the app. See [terminal viewer parity and next steps](docs/tui-parity.md).
 
 Summarize a file without opening it: `vgrid pivot sales.csv --rows Region
 --column Month --values sum:Amount` prints the pivot (`--csv` or `--json` for
