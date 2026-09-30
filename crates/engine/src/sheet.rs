@@ -1515,7 +1515,11 @@ impl Sheet {
         self.cells.positions_in(min_row, max_row, min_col, max_col)
     }
 
-    /// Clear a cell completely (remove from HashMap)
+    /// Clear a cell's contents.
+    ///
+    /// The value, format, and spill state go away with the cell record.
+    /// A comment stays: Excel's Delete key clears contents and leaves the
+    /// note. Removing a note is `set_comment(..., None)`.
     pub fn clear_cell(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
@@ -1524,8 +1528,14 @@ impl Sheet {
         }
 
         self.clear_spill_from(row, col);
-        self.cells.remove(row, col);
+        let comment = self
+            .cells
+            .remove(row, col)
+            .and_then(|cell| cell.comment().cloned());
         self.spill_values.remove(&(row, col));
+        if let Some(comment) = comment {
+            self.set_comment(row, col, Some(comment));
+        }
     }
 
     pub fn set_format(&mut self, row: usize, col: usize, format: CellFormat) {

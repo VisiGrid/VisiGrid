@@ -26,7 +26,24 @@ fn comments_follow_structural_edits_and_do_not_change_values() {
     assert_eq!(
         sheet.comment(4, 3),
         Some(&note()),
-        "clear contents preserves comments"
+        "set_value(\"\") preserves comments"
+    );
+    sheet.set_value(4, 3, "again");
+    sheet.clear_cell(4, 3);
+    assert_eq!(sheet.get_raw(4, 3), "");
+    assert_eq!(
+        sheet.comment(4, 3),
+        Some(&note()),
+        "clear_cell preserves comments"
+    );
+    // Undo writes the old value back and must not disturb the note.
+    sheet.set_value(4, 3, "again");
+    assert_eq!(sheet.comment(4, 3), Some(&note()));
+    sheet.clear_cell(7, 3);
+    assert_eq!(
+        sheet.comment(7, 3),
+        Some(&note()),
+        "clearing a blank commented cell keeps the note"
     );
     let clone = sheet.clone();
     sheet.set_comment(4, 3, None);
@@ -34,6 +51,15 @@ fn comments_follow_structural_edits_and_do_not_change_values() {
     assert!(sheet.comment(4, 3).is_none());
     sheet.delete_rows(7, 1);
     assert_eq!(sheet.comments().count(), 0);
+}
+#[test]
+fn clear_cell_without_a_comment_removes_the_cell() {
+    let mut sheet = Sheet::new(SheetId(1), 10, 10);
+    sheet.set_value(1, 1, "x");
+    sheet.clear_cell(1, 1);
+    assert_eq!(sheet.get_raw(1, 1), "");
+    assert!(sheet.comment(1, 1).is_none());
+    assert!(sheet.cells_iter().all(|((r, c), _)| (r, c) != (1, 1)));
 }
 #[test]
 fn comments_serialize_on_blank_cells() {
