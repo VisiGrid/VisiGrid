@@ -128,7 +128,7 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         } else { "Preview uses a snapshot of the sheet's current calculated values." }))
         .child(Button::new("pdf-refresh", "Refresh preview").disabled(state.busy).secondary(border, text)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.refresh_pdf_preview(cx); cx.stop_propagation(); })))
-        .child(div().text_xs().text_color(muted).child("Tab: setting · Space: change · PgUp/PgDn: page · Enter: export · Esc: close"));
+        .child(div().text_xs().text_color(muted).child(if state.print_mode { "Tab: setting · Space: change · PgUp/PgDn: page · Enter/Ctrl+P: print · Esc: close" } else if cfg!(target_os = "linux") { "Tab: setting · Space: change · PgUp/PgDn: page · Enter: export · Ctrl+P: print · Esc: close" } else { "Tab: setting · Space: change · PgUp/PgDn: page · Enter: export · Esc: close" }));
 
     let (paper_width, paper_height) = (
         state.page_size.0 as f32 * 4.0 / 3.0,
@@ -306,22 +306,49 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         .when(compact, |d| d.flex_col())
         .child(settings)
         .child(preview);
+    let print_button = Button::new("pdf-print", "Print…").disabled(
+        !cfg!(target_os = "linux") || state.busy || state.preparing || state.output.is_none(),
+    );
+    let export_button = Button::new(
+        "pdf-save",
+        if state.report.is_some() {
+            "Export again…"
+        } else {
+            "Export PDF…"
+        },
+    )
+    .disabled(state.busy || state.preparing || state.output.is_none());
+    let (print_button, export_button) = if state.print_mode {
+        (
+            print_button.primary(accent, app.token(TokenKey::TextInverse)),
+            export_button.secondary(border, text),
+        )
+    } else {
+        (
+            print_button.secondary(border, text),
+            export_button.primary(accent, app.token(TokenKey::TextInverse)),
+        )
+    };
     let footer = div()
         .flex()
         .items_center()
         .justify_between()
         .gap_2()
         .child(
-            div()
-                .text_sm()
-                .text_color(muted)
-                .child(if state.choosing_path {
+            div().text_sm().text_color(muted).max_w(px(350.0)).child(
+                (if state.printing {
+                    "Use the system print dialog to continue or cancel."
+                } else if let Some(message) = &state.print_message {
+                    message.as_str()
+                } else if state.choosing_path {
                     "Choose a location in the save dialog."
                 } else if state.busy {
                     "Saving PDF…"
                 } else {
                     ""
-                }),
+                })
+                .to_owned(),
+            ),
         )
         .child(
             div()
@@ -351,35 +378,38 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
                     )
                 })
                 .child(
-                    Button::new("pdf-cancel", if state.busy { "Cancel" } else { "Close" })
-                        .secondary(border, muted)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.close_pdf_export(cx);
-                                cx.stop_propagation();
-                            }),
-                        ),
-                )
-                .child(
                     Button::new(
-                        "pdf-save",
-                        if state.report.is_some() {
-                            "Export again…"
+                        "pdf-cancel",
+                        if state.busy && !state.printing {
+                            "Cancel"
                         } else {
-                            "Export PDF…"
+                            "Close"
                         },
                     )
-                    .disabled(state.busy || state.preparing || state.output.is_none())
-                    .primary(accent, app.token(TokenKey::TextInverse))
+                    .disabled(state.printing)
+                    .secondary(border, muted)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
-                            this.save_pdf(cx);
+                            this.close_pdf_export(cx);
                             cx.stop_propagation();
                         }),
                     ),
-                ),
+                )
+                .child(print_button.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.print_pdf(cx);
+                        cx.stop_propagation();
+                    }),
+                ))
+                .child(export_button.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.save_pdf(cx);
+                        cx.stop_propagation();
+                    }),
+                )),
         );
     modal_overlay(
         "pdf-export-dialog",

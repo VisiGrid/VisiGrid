@@ -308,7 +308,7 @@ pub(crate) fn bind(
                 Mode::ColorPicker => this.color_picker_execute(window, cx),
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
                 Mode::CloudOpen => this.cloud_open_selected(cx),
-                Mode::ExportPdf => this.save_pdf(cx),
+                Mode::ExportPdf => this.confirm_pdf_action(cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),

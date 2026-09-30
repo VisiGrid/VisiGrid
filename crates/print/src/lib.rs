@@ -1,9 +1,13 @@
 //! Device-independent pagination of an already resolved, immutable sheet view.
 //!
 //! The caller captures calculation results, scope, visibility and display order.
-//! This crate does not read the workbook, query a printer, or mutate sheet sizes.
+//! Pagination does not read the workbook, query a printer, or mutate sheet sizes.
+//! The optional `native-print` adapter sends an encoded PDF to the system dialog.
 //! All dimensions are physical points. Convert unzoomed grid units at the input
 //! boundary with [`GRID_UNIT_PT`], never with screen DPI or current app zoom.
+
+#[cfg(all(feature = "native-print", target_os = "linux"))]
+pub mod native;
 
 use std::collections::HashSet;
 use std::ops::Range;

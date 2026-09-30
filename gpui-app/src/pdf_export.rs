@@ -23,6 +23,9 @@ pub struct PdfExportState {
     pub summary: Result<String, String>,
     pub busy: bool,
     pub choosing_path: bool,
+    pub printing: bool,
+    pub print_mode: bool,
+    pub print_message: Option<String>,
     pub cancel: Arc<AtomicBool>,
     pub focus: usize,
     pub settings_scroll: gpui::ScrollHandle,
@@ -104,6 +107,9 @@ impl Spreadsheet {
             summary: Ok(String::new()),
             busy: false,
             choosing_path: false,
+            printing: false,
+            print_mode: false,
+            print_message: None,
             cancel: Arc::new(AtomicBool::new(false)),
             focus: 0,
             settings_scroll: gpui::ScrollHandle::new(),
@@ -142,6 +148,7 @@ impl Spreadsheet {
         state.page_loading = false;
         state.preparing = false;
         state.preview_error = None;
+        state.print_message = None;
         state.notices.clear();
         if state.summary.is_err() {
             cx.notify();
@@ -590,6 +597,9 @@ impl Spreadsheet {
     }
 
     pub fn close_pdf_export(&mut self, cx: &mut Context<Self>) {
+        if self.pdf_export.as_ref().is_some_and(|s| s.printing) {
+            return; // Cancel in the system print dialog; do not orphan its request.
+        }
         if let Some(state) = self.pdf_export.take() {
             state.cancel.store(true, Ordering::Relaxed);
             state.preview_cancel.store(true, Ordering::Relaxed);
@@ -614,6 +624,7 @@ impl Spreadsheet {
         let cancel = state.cancel.clone();
         state.busy = true;
         state.choosing_path = true;
+        state.print_message = None;
         state.error = None;
         state.report = None;
         state.saved_path = None;

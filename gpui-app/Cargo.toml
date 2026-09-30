@@ -36,7 +36,7 @@ visigrid-core = { workspace = true }
 visigrid-io = { workspace = true }
 visigrid-config = { workspace = true }
 visigrid-license = { workspace = true }
-visigrid-print = { path = "../crates/print", features = ["preview"] }
+visigrid-print = { path = "../crates/print", features = ["preview", "native-print"] }
 image = { version = "0.25", default-features = false }
 
 # gpui — VisiGrid/zed fork: upstream v1.12.x stable (f96212f2c5) plus one

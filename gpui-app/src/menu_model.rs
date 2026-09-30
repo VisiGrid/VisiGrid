@@ -20,7 +20,7 @@ pub enum MenuAction {
     ClearCondFormats,
     NewWorkbook, Open, Save, SaveAs,
     OpenCloud, MoveToCloud,
-    ExportCsv, ExportTsv, ExportJson, ExportXlsx, ExportPdf,
+    ExportCsv, ExportTsv, ExportJson, ExportXlsx, ExportPdf, PrintPreview,
     Undo, Redo, Cut, Copy, Paste, PasteValues, Delete, Find, GoTo,
     CommandPalette, Inspector, ZoomIn, ZoomOut, ZoomReset,
     ShowFormulas, ShowZeros, FormatBar, Minimap,
@@ -61,6 +61,7 @@ pub fn file_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Export as JSON...", shortcut: None, action: MenuAction::ExportJson, accel: Some('j') },
         MenuEntry::Item { label: "Export to Excel (.xlsx)...", shortcut: None, action: MenuAction::ExportXlsx, accel: Some('x') },
         MenuEntry::Item { label: "Export PDF...", shortcut: None, action: MenuAction::ExportPdf, accel: Some('p') },
+        MenuEntry::Item { label: "Print...", shortcut: Some("Ctrl+P"), action: MenuAction::PrintPreview, accel: Some('r') },
     ]
 }
 
@@ -263,6 +264,7 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ExportJson => app.export_json(cx),
         MenuAction::ExportXlsx => app.export_xlsx(cx),
         MenuAction::ExportPdf => app.show_pdf_export(cx),
+        MenuAction::PrintPreview => app.show_print_preview(cx),
         MenuAction::Undo => app.undo(cx),
         MenuAction::Redo => app.redo(cx),
         MenuAction::Cut => app.cut(cx),
