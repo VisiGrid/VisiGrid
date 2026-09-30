@@ -36,6 +36,25 @@ a plain table. `--plain` forces a table; `--tui` requires terminal input/output.
 Arrow keys or hjkl navigate, PgUp/PgDn page, g/G jump to first/last loaded row,
 Tab switches workbook sheets, `?` opens help, and q exits.
 
+Finding and summarizing (added after 0.40.0) work on the loaded rows:
+
+- `/` searches every cell (case-insensitive); `n`/`N` step through matches,
+  which are highlighted.
+- `[` / `]` sort by the cursor column, ascending or descending. Numbers sort
+  by value (`1,200`, `$5`, `(5)` included), text case-insensitively, blanks
+  last. Sorts are stable, so sort by the tiebreak first. `R` restores file
+  order. Row numbers stay file row numbers.
+- `F` opens the cursor column's frequency table as a new tab.
+- `P` opens a pivot prompt, prefilled from the cursor column:
+  `rows=Region column=Month values=sum:Amount`. The result opens as a tab,
+  computed by the desktop's pivot engine. Without a header row (CSV opened
+  without `--headers`) the first row supplies the field names.
+- On a derived tab, `q` returns to the tab it came from.
+
+When the preview is truncated, derived tab names say "(loaded rows)". For a
+whole-file answer use `vgrid pivot FILE`, which refuses truncated Parquet
+rather than summarizing part of it.
+
 ## Current parity
 
 | Capability | Desktop | TUI after this update |
@@ -47,7 +66,8 @@ Tab switches workbook sheets, `?` opens help, and q exits.
 | Document settings | Desktop loads sidecar calculation/layout settings | Peek loaders do not apply desktop sidecars |
 | Number/date formats | Desktop cell formats | Parquet dates/times use ISO; workbook previews still use raw display values |
 | Formatting, comments, merged cells, charts | Desktop rendering | Display strings only; no visual parity |
-| Find/go-to, sort/filter | Desktop actions | Not implemented |
+| Find/go-to, sort/filter | Desktop actions | Find (`/`, `n`/`N`) and single-column sort over loaded rows; no filter or go-to |
+| Pivot tables | Field-list drawer, linked to source | `P` pivot and `F` frequency tabs (read-only, loaded rows); `vgrid pivot` for files and sessions |
 | Range selection, clipboard, fill | Desktop selection semantics | Single-cell navigation only |
 | Editing, formula entry, undo/redo, save | Supported | Not implemented |
 | `.duckdb`, SQL table/query browsing | Not implemented | Not implemented |

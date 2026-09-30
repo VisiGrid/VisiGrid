@@ -254,8 +254,104 @@ pub fn structure_target_sheet(op: &StructureOp, active: usize) -> usize {
         | StructureOp::DeleteRows { sheet, .. }
         | StructureOp::InsertCols { sheet, .. }
         | StructureOp::DeleteCols { sheet, .. }
-        | StructureOp::RenameSheet { sheet, .. } => sheet.unwrap_or(active),
-        StructureOp::AddSheet { .. } => active,
+        | StructureOp::RenameSheet { sheet, .. }
+        | StructureOp::CreatePivot { sheet, .. } => sheet.unwrap_or(active),
+        StructureOp::AddSheet { .. } | StructureOp::RefreshPivot { .. } => active,
+    }
+}
+
+/// Parse "A1" into 0-based (row, col).
+fn parse_a1_cell(s: &str) -> Option<(usize, usize)> {
+    let s = s.trim().replace('$', "");
+    let split = s.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = s.split_at(split);
+    if letters.is_empty() || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let col = letters.to_ascii_uppercase().bytes().try_fold(0usize, |acc, b| {
+        acc.checked_mul(26)?.checked_add((b - b'A' + 1) as usize)
+    })?;
+    let row: usize = digits.parse().ok()?;
+    (row >= 1 && col >= 1).then(|| (row - 1, col - 1))
+}
+
+/// Resolve a `create_pivot` op against the workbook: the source rectangle
+/// and a definition built from header names. Shared by every host so a GUI
+/// window and `vgrid serve` refuse exactly the same requests.
+pub fn resolve_create_pivot(
+    op: &StructureOp,
+    wb: &Workbook,
+) -> Result<(visigrid_engine::pivot::PivotSource, visigrid_engine::pivot::PivotDefinition), (&'static str, String)> {
+    use visigrid_engine::pivot::{Aggregation, PivotDefinition, PivotSource};
+    let StructureOp::CreatePivot { source, rows, column, values, .. } = op else {
+        return Err(("invalid_op", "not a create_pivot op".into()));
+    };
+    let target = structure_target_sheet(op, wb.active_sheet_index());
+    let sheet = wb.sheets().get(target).ok_or_else(|| {
+        ("sheet_not_found", format!("sheet index {} does not exist (workbook has {} sheets)", target, wb.sheets().len()))
+    })?;
+    let (r0, c0, r1, c1) = match source {
+        Some(range) => {
+            let (a, b) = range.split_once(':').unwrap_or((range.as_str(), range.as_str()));
+            let bad = || ("invalid_op", format!("source \"{}\" is not an A1 range like A1:D100", range));
+            let (ar, ac) = parse_a1_cell(a).ok_or_else(bad)?;
+            let (br, bc) = parse_a1_cell(b).ok_or_else(bad)?;
+            (ar.min(br), ac.min(bc), ar.max(br), ac.max(bc))
+        }
+        None => {
+            let (mr, mc) = sheet.data_extent();
+            (0, 0, mr, mc)
+        }
+    };
+    if r1 >= NUM_ROWS || c1 >= NUM_COLS {
+        return Err(("out_of_bounds", "the source runs past the grid edge".into()));
+    }
+    if r1 <= r0 {
+        return Err(("invalid_op", "a pivot source needs a header row and at least one data row".into()));
+    }
+    if let Some(p) = sheet.pivots.iter().find(|p| p.intersects(r0, c0, r1, c1)) {
+        return Err(("invalid_op", format!("the source overlaps {}'s output; point it at the data instead", p.name)));
+    }
+    let headers: Vec<String> = (c0..=c1).map(|c| sheet.get_display(r0, c).trim().to_string()).collect();
+    let values = values
+        .iter()
+        .map(|v| {
+            Aggregation::parse(&v.aggregation)
+                .map(|a| (a, v.field.clone()))
+                .ok_or_else(|| ("invalid_op", format!(
+                    "unknown aggregation \"{}\" (use sum, count, distinct_count, average, min or max)", v.aggregation
+                )))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let definition = PivotDefinition::from_names(&headers, rows, column.as_deref(), &values)
+        .map_err(|m| ("invalid_op", m))?;
+    visigrid_engine::pivot::validate(&definition, &headers).map_err(|e| ("invalid_op", e.to_string()))?;
+    let source = PivotSource { sheet_id: sheet.id, start_row: r0 as u32, start_col: c0 as u32, end_row: r1 as u32, end_col: c1 as u32 };
+    Ok((source, definition))
+}
+
+/// The pivots a `refresh_pivot` op names: one by name or id, or all.
+pub fn resolve_refresh_pivots(pivot: Option<&str>, wb: &Workbook) -> Result<Vec<u64>, (&'static str, String)> {
+    match pivot {
+        Some(name) => wb
+            .find_pivot_by_name(name)
+            .map(|(_, t)| vec![t.id])
+            .ok_or_else(|| {
+                let names: Vec<String> = wb.pivots().iter().map(|(_, t)| t.name.clone()).collect();
+                ("invalid_op", if names.is_empty() {
+                    "this workbook has no pivot tables".to_string()
+                } else {
+                    format!("no pivot named \"{}\" (pivots: {})", name, names.join(", "))
+                })
+            }),
+        None => {
+            let ids: Vec<u64> = wb.pivots().iter().map(|(_, t)| t.id).collect();
+            if ids.is_empty() {
+                Err(("invalid_op", "this workbook has no pivot tables".to_string()))
+            } else {
+                Ok(ids)
+            }
+        }
     }
 }
 
@@ -267,7 +363,7 @@ pub fn validate_structure_op(
 ) -> Option<(&'static str, String, Option<String>)> {
     let sheet_count = wb.sheets().len();
     let target = structure_target_sheet(op, wb.active_sheet_index());
-    if !matches!(op, StructureOp::AddSheet { .. }) && target >= sheet_count {
+    if !matches!(op, StructureOp::AddSheet { .. } | StructureOp::RefreshPivot { .. }) && target >= sheet_count {
         return Some((
             "sheet_not_found",
             format!("sheet index {} does not exist (workbook has {} sheet{})",
@@ -350,6 +446,10 @@ pub fn validate_structure_op(
             None => None,
         },
         StructureOp::RenameSheet { name, .. } => check_name(name, wb, Some(target)),
+        StructureOp::CreatePivot { .. } => resolve_create_pivot(op, wb).err().map(|(c, m)| (c, m, None)),
+        StructureOp::RefreshPivot { pivot } => {
+            resolve_refresh_pivots(pivot.as_deref(), wb).err().map(|(c, m)| (c, m, None))
+        }
     }
 }
 
@@ -406,6 +506,23 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
             wb.rename_sheet(target, name.trim());
             wb.bump_revision_for_structure();
             format!("Renamed sheet \"{}\" to \"{}\"", old, name.trim())
+        }
+        StructureOp::CreatePivot { .. } => {
+            let (source, definition) = resolve_create_pivot(op, wb).map_err(|(_, m)| m)?;
+            let (id, idx) = wb.create_pivot(source, definition)?;
+            let name = wb.find_pivot(id).map(|(_, t)| t.name.clone()).unwrap_or_default();
+            let (rows, cols) = wb.find_pivot(id).and_then(|(_, t)| t.extent).unwrap_or((0, 0));
+            format!("Created {} on sheet \"{}\" (index {}): {} × {}", name, wb.sheets()[idx].name, idx, rows, cols)
+        }
+        StructureOp::RefreshPivot { pivot } => {
+            let ids = resolve_refresh_pivots(pivot.as_deref(), wb).map_err(|(_, m)| m)?;
+            let mut done = Vec::new();
+            for id in ids {
+                let name = wb.find_pivot(id).map(|(_, t)| t.name.clone()).unwrap_or_default();
+                let (rows, cols) = wb.refresh_pivot(id).map_err(|m| format!("{}: {}", name, m))?;
+                done.push(format!("{} ({} × {})", name, rows, cols));
+            }
+            format!("Refreshed {}", done.join(", "))
         }
     })
 }
@@ -1011,5 +1128,61 @@ mod validation_tests {
             parse_session_number_format("#,##0.00"),
             NumberFormat::Custom("#,##0.00".to_string())
         );
+    }
+
+    #[test]
+    fn create_and_refresh_pivot_ops_headless() {
+        use visigrid_protocol::PivotValueSpec;
+        let mut wb = Workbook::new();
+        {
+            let sh = wb.sheet_mut(0).unwrap();
+            for (c, h) in ["Region", "Rep", "Amount"].iter().enumerate() {
+                sh.set_value(0, c, h);
+            }
+            for (r, row) in [["West", "Ann", "10"], ["East", "Bo", "5"], ["West", "Cy", "2"]].iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sh.set_value(r + 1, c, v);
+                }
+            }
+        }
+        let create = StructureOp::CreatePivot {
+            sheet: None,
+            source: None,
+            rows: vec!["region".into()],
+            column: None,
+            values: vec![PivotValueSpec { field: "Amount".into(), aggregation: "sum".into() }],
+        };
+        assert!(validate_structure_op(&create, &wb).is_none());
+        let desc = apply_structure(&mut wb, &create).unwrap();
+        assert!(desc.starts_with("Created PivotTable1 on sheet \"Pivot\""), "{desc}");
+        assert_eq!(wb.sheets()[1].get_display(2, 1), "12");
+
+        wb.sheet_mut(0).unwrap().set_value(3, 2, "20");
+        let refresh = StructureOp::RefreshPivot { pivot: Some("PivotTable1".into()) };
+        assert!(validate_structure_op(&refresh, &wb).is_none());
+        apply_structure(&mut wb, &refresh).unwrap();
+        assert_eq!(wb.sheets()[1].get_display(2, 1), "30");
+
+        let code = |op: &StructureOp, wb: &Workbook| validate_structure_op(op, wb).map(|e| e.1).unwrap_or_default();
+        let bad_field = StructureOp::CreatePivot {
+            sheet: None, source: Some("A1:C4".into()), rows: vec!["Month".into()], column: None, values: vec![],
+        };
+        assert!(code(&bad_field, &wb).contains("no column headed \"Month\""));
+        let bad_agg = StructureOp::CreatePivot {
+            sheet: None, source: None, rows: vec![], column: None,
+            values: vec![PivotValueSpec { field: "Amount".into(), aggregation: "median".into() }],
+        };
+        assert!(code(&bad_agg, &wb).contains("unknown aggregation"));
+        let bad_range = StructureOp::CreatePivot {
+            sheet: None, source: Some("A1".into()), rows: vec!["Region".into()], column: None, values: vec![],
+        };
+        assert!(code(&bad_range, &wb).contains("at least one data row"));
+        assert!(code(&StructureOp::RefreshPivot { pivot: Some("Nope".into()) }, &wb).contains("pivots: PivotTable1"));
+
+        // Pointing a new pivot at existing output is refused.
+        let on_output = StructureOp::CreatePivot {
+            sheet: Some(1), source: Some("A1:B3".into()), rows: vec!["Region".into()], column: None, values: vec![],
+        };
+        assert!(code(&on_output, &wb).contains("overlaps PivotTable1"));
     }
 }

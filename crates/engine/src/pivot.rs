@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cell::{NegativeStyle, NumberFormat};
+use crate::cell::{CellBorder, CellFormat, NegativeStyle, NumberFormat};
 use crate::formula::eval::Value;
 use crate::sheet::{Sheet, SheetId};
 
@@ -83,6 +83,20 @@ impl Aggregation {
     /// Counts display as whole numbers whatever the source's format.
     pub fn is_count(self) -> bool {
         matches!(self, Aggregation::Count | Aggregation::DistinctCount)
+    }
+
+    /// Parse a user-typed aggregation name: `sum`, `count`, `distinct`
+    /// (or `distinct_count`, `countd`), `avg`/`average`/`mean`, `min`, `max`.
+    pub fn parse(name: &str) -> Option<Aggregation> {
+        match name.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "sum" => Some(Aggregation::Sum),
+            "count" => Some(Aggregation::Count),
+            "distinct" | "distinct_count" | "distinctcount" | "countd" => Some(Aggregation::DistinctCount),
+            "avg" | "average" | "mean" => Some(Aggregation::Average),
+            "min" => Some(Aggregation::Min),
+            "max" => Some(Aggregation::Max),
+            _ => None,
+        }
     }
 
     /// Display name used in value-field headers ("Sum of Amount").
@@ -167,6 +181,43 @@ impl PivotDefinition {
 
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty() && self.column.is_none() && self.values.is_empty()
+    }
+
+    /// Build a definition from header names, for callers that name fields
+    /// rather than pick them (the CLI, session clients, agents). Names match
+    /// headers case-insensitively after trimming. Value fields carry no number
+    /// format; [`format_new_pivot_values`] chooses one after aggregation.
+    pub fn from_names(
+        headers: &[String],
+        rows: &[String],
+        column: Option<&str>,
+        values: &[(Aggregation, String)],
+    ) -> Result<PivotDefinition, String> {
+        let field = |name: &str| -> Result<PivotField, String> {
+            let want = name.trim().to_lowercase();
+            headers
+                .iter()
+                .position(|h| h.trim().to_lowercase() == want)
+                .map(|i| PivotField { offset: i as u32, header: headers[i].trim().to_string() })
+                .ok_or_else(|| {
+                    let known: Vec<&str> = headers.iter().map(|h| h.trim()).filter(|h| !h.is_empty()).collect();
+                    format!("no column headed \"{}\" (columns: {})", name.trim(), known.join(", "))
+                })
+        };
+        let def = PivotDefinition {
+            rows: rows.iter().map(|r| field(r)).collect::<Result<_, _>>()?,
+            column: column.map(field).transpose()?,
+            values: values
+                .iter()
+                .map(|(aggregation, name)| {
+                    Ok(PivotValueField { field: field(name)?, aggregation: *aggregation, number_format: None })
+                })
+                .collect::<Result<_, String>>()?,
+        };
+        if def.is_empty() {
+            return Err(PivotError::NoFields.to_string());
+        }
+        Ok(def)
     }
 }
 
@@ -580,6 +631,74 @@ fn new_accs(def: &PivotDefinition) -> Vec<Acc> {
 
 fn get(col: &[Value], r: usize) -> &Value {
     col.get(r).unwrap_or(&EMPTY_VALUE)
+}
+
+// ---------------------------------------------------------------------------
+// Creation defaults (shared by the desktop app and headless hosts)
+// ---------------------------------------------------------------------------
+
+/// Choose a readable format only where the source supplied no number format.
+/// Store it on the value field so it follows subsequent layout changes.
+pub fn format_new_pivot_values(definition: &mut PivotDefinition, output: &PivotOutput) {
+    let mut fractional = vec![false; definition.values.len()];
+    for row in output.cells.iter().skip(output.header_rows) {
+        for (col, value) in row.iter().enumerate() {
+            if let (Some(Some(field)), Value::Number(n)) = (output.value_columns.get(col), value) {
+                if n.is_finite() && (n - n.round()).abs() > 1e-9 {
+                    fractional[*field] = true;
+                }
+            }
+        }
+    }
+    for (i, field) in definition.values.iter_mut().enumerate() {
+        if field.number_format.as_ref().is_none_or(|f| matches!(f, NumberFormat::General)) {
+            let count = matches!(field.aggregation, Aggregation::Count | Aggregation::DistinctCount);
+            let decimals = if !count && (fractional[i] || field.aggregation == Aggregation::Average) { 2 } else { 0 };
+            field.number_format = Some(NumberFormat::Number { decimals, thousands: true, negative: Default::default() });
+        }
+    }
+}
+
+/// Creation-only defaults. The blank, styled sheet becomes the create action's
+/// sheet snapshot, so redo restores the style without a workbook-sized copy.
+/// Refresh deliberately leaves these formats and later user edits alone.
+pub fn style_new_pivot(sheet: &mut Sheet, table: &PivotTable, output: &PivotOutput) {
+    let (r0, c0) = (table.anchor_row as usize, table.anchor_col as usize);
+    let border = CellBorder { color: Some([177, 192, 213, 255]), ..CellBorder::thin() };
+    // Fill and foreground travel together, remaining legible in either theme.
+    let header = CellFormat {
+        bold: true,
+        background_color: Some([232, 239, 250, 255]),
+        font_color: Some([34, 53, 78, 255]),
+        ..CellFormat::default()
+    };
+    for r in 0..output.header_rows {
+        for c in 0..output.width() {
+            let mut format = header.clone();
+            if r + 1 == output.header_rows { format.border_bottom = border; }
+            sheet.set_format(r0 + r, c0 + c, format);
+        }
+    }
+    let has_total = !table.definition.values.is_empty() || table.definition.column.is_some();
+    if has_total && output.height() > output.header_rows {
+        let total = CellFormat {
+            background_color: Some([241, 245, 251, 255]),
+            border_top: border,
+            ..header.clone()
+        };
+        for c in 0..output.width() {
+            sheet.set_format(r0 + output.height() - 1, c0 + c, total.clone());
+        }
+    }
+    if table.definition.column.is_some() {
+        let first_total = output.width() - table.definition.values.len().max(1);
+        for r in 0..output.height() {
+            for c in first_total..output.width() {
+                sheet.set_bold(r0 + r, c0 + c, true);
+            }
+            sheet.set_border_left(r0 + r, c0 + first_total, border);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

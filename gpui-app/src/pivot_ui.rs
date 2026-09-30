@@ -142,7 +142,7 @@ impl Spreadsheet {
 // Field-list drawer state, and the create / apply / refresh / delete flow.
 // ---------------------------------------------------------------------------
 
-use visigrid_engine::cell::{CellBorder, CellFormat, NumberFormat};
+use visigrid_engine::cell::NumberFormat;
 use visigrid_engine::formula::eval::Value;
 use visigrid_engine::pivot::{
     self, Aggregation, PivotDefinition, PivotError, PivotField, PivotOutput, PivotSnapshot, PivotSource,
@@ -152,69 +152,7 @@ use visigrid_engine::pivot::{
 /// Sources with more data rows than this aggregate on a background thread.
 const BACKGROUND_ROWS: u32 = 100_000;
 
-/// Choose a readable format only where the source supplied no number format.
-/// Store it on the value field so it follows subsequent layout changes.
-fn format_new_pivot_values(definition: &mut PivotDefinition, output: &PivotOutput) {
-    let mut fractional = vec![false; definition.values.len()];
-    for row in output.cells.iter().skip(output.header_rows) {
-        for (col, value) in row.iter().enumerate() {
-            if let (Some(Some(field)), Value::Number(n)) = (output.value_columns.get(col), value) {
-                if n.is_finite() && (n - n.round()).abs() > 1e-9 {
-                    fractional[*field] = true;
-                }
-            }
-        }
-    }
-    for (i, field) in definition.values.iter_mut().enumerate() {
-        if field.number_format.as_ref().is_none_or(|f| matches!(f, NumberFormat::General)) {
-            let count = matches!(field.aggregation, Aggregation::Count | Aggregation::DistinctCount);
-            let decimals = if !count && (fractional[i] || field.aggregation == Aggregation::Average) { 2 } else { 0 };
-            field.number_format = Some(NumberFormat::Number { decimals, thousands: true, negative: Default::default() });
-        }
-    }
-}
-
-/// Creation-only defaults. The blank, styled sheet becomes the create action's
-/// sheet snapshot, so redo restores the style without a workbook-sized copy.
-/// Refresh deliberately leaves these formats and later user edits alone.
-fn style_new_pivot(sheet: &mut Sheet, table: &PivotTable, output: &PivotOutput) {
-    let (r0, c0) = (table.anchor_row as usize, table.anchor_col as usize);
-    let border = CellBorder { color: Some([177, 192, 213, 255]), ..CellBorder::thin() };
-    // Fill and foreground travel together, remaining legible in either theme.
-    let header = CellFormat {
-        bold: true,
-        background_color: Some([232, 239, 250, 255]),
-        font_color: Some([34, 53, 78, 255]),
-        ..CellFormat::default()
-    };
-    for r in 0..output.header_rows {
-        for c in 0..output.width() {
-            let mut format = header.clone();
-            if r + 1 == output.header_rows { format.border_bottom = border; }
-            sheet.set_format(r0 + r, c0 + c, format);
-        }
-    }
-    let has_total = !table.definition.values.is_empty() || table.definition.column.is_some();
-    if has_total && output.height() > output.header_rows {
-        let total = CellFormat {
-            background_color: Some([241, 245, 251, 255]),
-            border_top: border,
-            ..header.clone()
-        };
-        for c in 0..output.width() {
-            sheet.set_format(r0 + output.height() - 1, c0 + c, total.clone());
-        }
-    }
-    if table.definition.column.is_some() {
-        let first_total = output.width() - table.definition.values.len().max(1);
-        for r in 0..output.height() {
-            for c in first_total..output.width() {
-                sheet.set_bold(r0 + r, c0 + c, true);
-            }
-            sheet.set_border_left(r0 + r, c0 + first_total, border);
-        }
-    }
-}
+use visigrid_engine::pivot::{format_new_pivot_values, style_new_pivot};
 
 /// What the drawer is building.
 #[derive(Debug, Clone, PartialEq)]
@@ -720,6 +658,52 @@ impl Spreadsheet {
         self.bump_cells_rev();
         self.is_modified = true;
         cx.notify();
+    }
+
+    /// Create a pivot for a session client (agents, `vgrid apply`). Same flow
+    /// as the drawer's Apply — one undo step, new sheet — but synchronous and
+    /// reporting the outcome instead of only showing it.
+    pub(crate) fn session_create_pivot(
+        &mut self,
+        source: PivotSource,
+        definition: PivotDefinition,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let table = PivotTable {
+            id: self.wb(cx).next_pivot_id(),
+            name: self.wb(cx).next_pivot_name(),
+            source,
+            definition,
+            anchor_row: 0,
+            anchor_col: 0,
+            extent: None,
+            last_refresh: None,
+            stale: false,
+            source_generation: None,
+        };
+        let id = table.id;
+        let description = format!("Create {}", table.name);
+        let job = PivotJob { mode: PivotPanelMode::New, table, source_generation: 0, description };
+        if !self.run_pivot_job_sync(job, cx) {
+            return Err(self.status_message.clone().unwrap_or_else(|| "Could not create the pivot table.".into()));
+        }
+        let wb = self.wb(cx);
+        let (idx, t) = wb.find_pivot(id).ok_or("The pivot table was not placed.")?;
+        let (rows, cols) = t.extent.unwrap_or((0, 0));
+        Ok(format!("Created {} on sheet \"{}\" (index {}): {} × {}", t.name, wb.sheets()[idx].name, idx, rows, cols))
+    }
+
+    /// Refresh one pivot for a session client. One undo step.
+    pub(crate) fn session_refresh_pivot(&mut self, pivot_id: u64, cx: &mut Context<Self>) -> Result<String, String> {
+        let table = self.wb(cx).find_pivot(pivot_id).map(|(_, t)| t.clone()).ok_or("This pivot table no longer exists.")?;
+        let name = table.name.clone();
+        let description = format!("Refresh {name}");
+        let job = PivotJob { mode: PivotPanelMode::Edit { pivot_id }, table, source_generation: 0, description };
+        if !self.run_pivot_job_sync(job, cx) {
+            return Err(format!("{name}: {}", self.status_message.clone().unwrap_or_else(|| "refresh failed".into())));
+        }
+        let (rows, cols) = self.wb(cx).find_pivot(pivot_id).and_then(|(_, t)| t.extent).unwrap_or((0, 0));
+        Ok(format!("{name} ({rows} × {cols})"))
     }
 
     fn set_pivot_panel_message(&mut self, msg: String) {

@@ -881,8 +881,19 @@ impl Spreadsheet {
         let target = visigrid_session_host::structure_target_sheet(op, active);
         let row_col_op = !matches!(
             op,
-            StructureOp::AddSheet { .. } | StructureOp::RenameSheet { .. }
+            StructureOp::AddSheet { .. }
+                | StructureOp::RenameSheet { .. }
+                | StructureOp::CreatePivot { .. }
+                | StructureOp::RefreshPivot { .. }
         );
+        let pivot_op = matches!(op, StructureOp::CreatePivot { .. } | StructureOp::RefreshPivot { .. });
+        if pivot_op && self.pivot_panel.is_some() {
+            out.error = Some((
+                "invalid_op".to_string(),
+                "the pivot field list is open in the window — wait for the user to close it".to_string(),
+            ));
+            return out;
+        }
         if row_col_op && target != active {
             out.error = Some((
                 "invalid_op".to_string(),
@@ -936,6 +947,58 @@ impl Spreadsheet {
                 self.is_modified = true;
                 cx.notify();
                 format!("Renamed sheet \"{}\" to \"{}\"", old, new_name)
+            }
+            StructureOp::CreatePivot { .. } => {
+                let resolved = visigrid_session_host::resolve_create_pivot(op, self.workbook.read(cx));
+                let result = match resolved {
+                    Ok((source, definition)) => self.session_create_pivot(source, definition, cx),
+                    Err((_, msg)) => Err(msg),
+                };
+                match result {
+                    Ok(desc) => {
+                        if let Some(client) = client.clone() {
+                            self.history.retag_last_source(MutationSource::Agent { client });
+                        }
+                        desc
+                    }
+                    Err(msg) => {
+                        self.suppress_repeat_capture = false;
+                        out.error = Some(("invalid_op".to_string(), msg));
+                        return out;
+                    }
+                }
+            }
+            StructureOp::RefreshPivot { pivot } => {
+                let ids = visigrid_session_host::resolve_refresh_pivots(pivot.as_deref(), self.workbook.read(cx));
+                let mut done = Vec::new();
+                let mut failure = None;
+                match ids {
+                    Ok(ids) => {
+                        for id in ids {
+                            match self.session_refresh_pivot(id, cx) {
+                                Ok(d) => {
+                                    if let Some(client) = client.clone() {
+                                        self.history.retag_last_source(MutationSource::Agent { client });
+                                    }
+                                    done.push(d);
+                                }
+                                Err(msg) => {
+                                    failure = Some(msg);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err((_, msg)) => failure = Some(msg),
+                }
+                if let Some(msg) = failure {
+                    self.suppress_repeat_capture = false;
+                    let msg = if done.is_empty() { msg } else { format!("{} (already refreshed: {})", msg, done.join(", ")) };
+                    out.error = Some(("invalid_op".to_string(), msg));
+                    out.revision = self.workbook.read(cx).revision();
+                    return out;
+                }
+                format!("Refreshed {}", done.join(", "))
             }
         };
 
