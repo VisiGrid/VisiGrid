@@ -261,6 +261,11 @@ impl Spreadsheet {
 
         let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
+        if self.edit_value == old_value {
+            self.cancel_edit(cx);
+            return;
+        }
+
 
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {
@@ -991,7 +996,7 @@ impl Spreadsheet {
         self.clear_formula_ref_colors();
         self.autocomplete_visible = false;
         self.bump_cells_rev();
-        self.is_modified = true;
+        self.is_modified |= had_changes;
         self.maybe_smoke_recalc(cx);
 
         // Show cycle banner if this edit introduced circular references
@@ -1351,6 +1356,11 @@ impl Spreadsheet {
 
         let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
+        if self.edit_value == old_value {
+            self.cancel_edit(cx);
+            return true;
+        }
+
 
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {

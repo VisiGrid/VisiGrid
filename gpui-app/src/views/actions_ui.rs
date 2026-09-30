@@ -539,7 +539,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
             this.commit_pending_edit(cx);
-            if !this.is_modified {
+            if !this.is_modified && !this.is_dirty() {
                 this.prepare_close(cx);
                 window.remove_window();
                 return;
