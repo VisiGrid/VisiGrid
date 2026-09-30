@@ -168,3 +168,33 @@ fn reversed_ranges_are_tracked() {
     assert_eq!(wb.active_sheet().get_display(0, 2), "30");
     assert_eq!(snapshot(&wb), oracle(&wb));
 }
+
+/// The inspector asks `has_cycle_in_upstream` on every render. A running
+/// total whose first input sits in a cycle reports it at every row; one
+/// beside it does not; and the walk is linear, not quadratic, up the column.
+#[test]
+fn a_cycle_upstream_is_found_through_ranges() {
+    let rows = 5000;
+    let mut wb = Workbook::new();
+    // A1 and D1 read each other: a cycle.
+    wb.set_cell_value_tracked(0, 0, 0, "=D1+1");
+    wb.set_cell_value_tracked(0, 0, 3, "=A1+1");
+    for r in 1..rows {
+        wb.set_cell_value_tracked(0, r, 0, &format!("=A{}+1", r));
+    }
+    for r in 0..rows {
+        // B: running total over the A formulas; C: over values in E.
+        wb.set_cell_value_tracked(0, r, 1, &format!("=SUM($A$1:A{})", r + 1));
+        wb.set_cell_value_tracked(0, r, 4, &format!("{}", r));
+        wb.set_cell_value_tracked(0, r, 2, &format!("=SUM($E$1:E{})", r + 1));
+    }
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+    let sheet = wb.active_sheet().id;
+    let t = std::time::Instant::now();
+    assert!(wb.has_cycle_in_upstream(sheet, rows - 1, 1), "B reads A, whose top is in a cycle");
+    assert!(!wb.has_cycle_in_upstream(sheet, rows - 1, 2), "C reads only values");
+    // Base took ~0.5 s here and the first version of this change ~1.3 s;
+    // a linear walk is a few milliseconds. Generous for a loaded machine.
+    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+}

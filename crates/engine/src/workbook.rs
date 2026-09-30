@@ -1208,35 +1208,14 @@ impl Workbook {
     /// Returns true if this cell's value cannot be trusted because it depends
     /// on a circular reference somewhere in its precedent chain.
     pub fn has_cycle_in_upstream(&self, sheet_id: SheetId, row: usize, col: usize) -> bool {
-        let cell_id = CellId::new(sheet_id, row, col);
-        let mut visited = FxHashSet::default();
-        let mut queue = vec![cell_id];
-
-        // BFS through precedents
-        while let Some(current) = queue.pop() {
-            if visited.contains(&current) {
-                continue;
-            }
-            visited.insert(current);
-
-            // Check if this cell has a cycle error
-            if let Some(sheet) = self.sheet_by_id(current.sheet) {
-                if let Some(cell) = sheet.get_cell_opt(current.row, current.col) {
-                    if cell.value().is_cycle_error() {
-                        return true;
-                    }
-                }
-            }
-
-            // Add precedents to queue, including formulas inside its ranges
-            for prec in self.dep_graph.ordering_precedents(current) {
-                if !visited.contains(&prec) {
-                    queue.push(prec);
-                }
-            }
-        }
-
-        false
+        // The inspector asks this on every render, so walk ranges through
+        // the index (each node once) rather than expanding every cell's
+        // ranges from scratch, which is quadratic up a running total.
+        self.dep_graph.any_upstream(CellId::new(sheet_id, row, col), |current| {
+            self.sheet_by_id(current.sheet)
+                .and_then(|sheet| sheet.get_cell_opt(current.row, current.col))
+                .is_some_and(|cell| cell.value().is_cycle_error())
+        })
     }
 
     // =========================================================================

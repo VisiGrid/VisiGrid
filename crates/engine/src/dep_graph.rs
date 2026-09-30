@@ -515,6 +515,34 @@ impl DepGraph {
         self.range_refs.entry(formula).or_default().extend(ranges);
     }
 
+    /// Visit `cell` and everything it reads, transitively — single
+    /// references and formulas inside ranges — each once, stopping when `f`
+    /// returns true. Ranges are walked through their index nodes, and a node
+    /// is expanded once however many readers share it, so the walk is linear
+    /// in what it reaches, even up a running total.
+    pub fn any_upstream(&self, cell: CellId, mut f: impl FnMut(CellId) -> bool) -> bool {
+        let mut seen: FxHashSet<CellId> = FxHashSet::default();
+        let mut seen_nodes: FxHashSet<VNode> = FxHashSet::default();
+        let mut stack = vec![cell];
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if f(current) {
+                return true;
+            }
+            stack.extend(self.precedents(current));
+            for range in self.precedent_ranges(current) {
+                RangeIndex::nodes_of(range, |v| {
+                    if seen_nodes.insert(v) {
+                        self.formulas_under(v, |x| stack.push(x));
+                    }
+                });
+            }
+        }
+        false
+    }
+
     /// Everything a formula must be ordered after: its single references
     /// and the formulas inside its ranges. Costs the formulas in its ranges,
     /// so it is for one-off questions (the inspector, a cycle's
