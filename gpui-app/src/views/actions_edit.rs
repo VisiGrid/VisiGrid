@@ -308,6 +308,7 @@ pub(crate) fn bind(
                 Mode::ColorPicker => this.color_picker_execute(window, cx),
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
                 Mode::CloudOpen => this.cloud_open_selected(cx),
+                Mode::ExportPdf => this.save_pdf(cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
@@ -403,6 +404,8 @@ pub(crate) fn bind(
                 this.hide_theme_picker(cx);
             } else if this.mode == Mode::CloudOpen {
                 this.cloud_picker_cancel(cx);
+            } else if this.mode == Mode::ExportPdf {
+                this.close_pdf_export(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
             } else if this.mode == Mode::RenameSymbol {
@@ -476,6 +479,11 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabNext") { return; }
+            if this.mode == Mode::ExportPdf {
+                if let Some(state) = this.pdf_export.as_mut() { state.focus = (state.focus + 1) % 5; }
+                cx.notify();
+                return;
+            }
             // Close-confirm dialog traps Tab
             if this.close_confirm_visible {
                 this.close_confirm_focused = (this.close_confirm_focused + 1) % 3;
@@ -518,6 +526,11 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabPrev") { return; }
+            if this.mode == Mode::ExportPdf {
+                if let Some(state) = this.pdf_export.as_mut() { state.focus = (state.focus + 4) % 5; }
+                cx.notify();
+                return;
+            }
             // Close-confirm dialog traps Shift+Tab
             if this.close_confirm_visible {
                 this.close_confirm_focused = if this.close_confirm_focused == 0 { 2 } else { this.close_confirm_focused - 1 };

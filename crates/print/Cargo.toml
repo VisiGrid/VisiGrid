@@ -7,12 +7,22 @@ description = "Device-independent worksheet pagination for print and PDF"
 
 [features]
 default = []
-# Prototype only: the app does not yet depend on this backend.
 pdf-spike = ["dep:krilla"]
+pdf = ["dep:krilla", "dep:cosmic-text", "dep:visigrid-engine", "dep:tempfile"]
 
 [dependencies]
 krilla = { version = "0.8.2", default-features = false, features = ["simple-text"], optional = true }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "fontconfig"], optional = true }
+visigrid-engine = { workspace = true, optional = true }
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+visigrid-io = { workspace = true }
 
 [[example]]
 name = "pdf_spike"
 required-features = ["pdf-spike"]
+
+[[example]]
+name = "export_pdf"
+required-features = ["pdf"]

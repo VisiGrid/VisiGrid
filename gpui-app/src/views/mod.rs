@@ -8,6 +8,7 @@ mod cycle_banner;
 mod hub_dialogs;
 mod pairing_dialog;
 mod export_report_dialog;
+mod pdf_export_dialog;
 mod filter_dropdown;
 mod find_dialog;
 mod font_picker;
@@ -861,6 +862,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_import_report, |div| {
             div.child(import_report_dialog::render_import_report_dialog(app, cx))
+        })
+        .when(app.mode == Mode::ExportPdf, |div| {
+            div.child(pdf_export_dialog::render(app, cx))
         })
         .when(show_export_report, |div| {
             div.child(export_report_dialog::render_export_report_dialog(app, cx))

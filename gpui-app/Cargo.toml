@@ -36,6 +36,7 @@ visigrid-core = { workspace = true }
 visigrid-io = { workspace = true }
 visigrid-config = { workspace = true }
 visigrid-license = { workspace = true }
+visigrid-print = { path = "../crates/print", features = ["pdf"] }
 
 # gpui — VisiGrid/zed fork: upstream v1.12.x stable (f96212f2c5) plus one
 # commit dropping private CGS blur APIs for Mac App Store compliance.

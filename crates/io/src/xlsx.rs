@@ -324,6 +324,63 @@ const MAX_CELLS: usize = 5_000_000;
 const MAX_ROWS: usize = visigrid_engine::sheet::NUM_ROWS;
 const MAX_COLS: usize = visigrid_engine::sheet::NUM_COLS;
 
+/// Convert OOXML's ISO date cell representation to our 1900-system serial.
+/// Offset timestamps represent instants and are normalized to UTC. Bare dates
+/// and timestamps keep their supplied calendar values.
+fn iso_date_serial(value: &str) -> Option<f64> {
+    use chrono::{Datelike, Timelike};
+    let dt = chrono::DateTime::parse_from_rfc3339(value).ok().map(|d| d.naive_utc())
+        .or_else(|| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").ok())
+        .or_else(|| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?.and_hms_opt(0, 0, 0))?;
+    Some(visigrid_engine::cell::date_to_serial(dt.year(), dt.month(), dt.day())
+        + (f64::from(dt.num_seconds_from_midnight()) + f64::from(dt.nanosecond()) / 1e9) / 86400.0)
+}
+
+#[cfg(test)]
+mod iso_date_tests {
+    use super::*;
+
+    #[test]
+    fn typed_iso_dates_import_as_formattable_numbers() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.xlsx");
+        let target = dir.path().join("iso.xlsx");
+        let mut wb = XlsxWorkbook::new();
+        wb.add_worksheet().write_number_with_format(0, 0, 1.0, &Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+        wb.save(&source).unwrap();
+        let mut input = zip::ZipArchive::new(std::fs::File::open(&source).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(std::fs::File::create(&target).unwrap());
+        for i in 0..input.len() {
+            let mut entry = input.by_index(i).unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if entry.name() == "xl/worksheets/sheet1.xml" {
+                let xml = String::from_utf8(bytes).unwrap();
+                bytes = xml.replace("<c r=\"A1\"", "<c t=\"d\" r=\"A1\"")
+                    .replace("<v>1</v>", "<v>2026-09-29T00:00:00.000Z</v>").into_bytes();
+            }
+            output.start_file(entry.name(), zip::write::SimpleFileOptions::default()).unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        let (wb, stats) = import(&target).unwrap();
+        assert_eq!(stats.dates_imported, 1);
+        assert_eq!(wb.sheet(0).unwrap().get_formatted_display(0, 0), "2026-09-29");
+        assert!(matches!(wb.sheet(0).unwrap().get_computed_value(0,0), Value::Number(_)));
+    }
+
+    #[test]
+    fn iso_date_serial_preserves_time_and_rejects_invalid_dates() {
+        let day = visigrid_engine::cell::date_to_serial(2026,9,29);
+        assert_eq!(iso_date_serial("2026-09-29"), Some(day));
+        assert_eq!(iso_date_serial("2026-09-29T12:00:00"), Some(day+0.5));
+        assert_eq!(iso_date_serial("2026-09-29T14:00:00+02:00"), Some(day+0.5));
+        assert!(iso_date_serial("2026-02-30").is_none());
+        assert!(iso_date_serial("not a date").is_none());
+    }
+}
+
 /// Import an Excel file (xlsx, xls, xlsb, ods)
 pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
     import_with_options(path, &ImportOptions::default())
@@ -514,8 +571,18 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                         total_cells += 1;
                     }
                     Data::DateTimeIso(s) => {
-                        // ISO date string - store as text for now
-                        sheet.set_value(target_row, target_col, s);
+                        // OOXML t="d" is a typed date, not a display string.
+                        // Convert it before applying its imported number format.
+                        if let Some(serial) = iso_date_serial(s) {
+                            sheet.set_value(target_row, target_col, &serial.to_string());
+                            let has_time = serial.fract().abs() > 0.0001;
+                            sheet.set_number_format(target_row, target_col, if has_time {
+                                NumberFormat::DateTime
+                            } else { NumberFormat::Date { style: DateStyle::Iso } });
+                            if has_time { stats.times_imported += 1; } else { stats.dates_imported += 1; }
+                        } else {
+                            sheet.set_value(target_row, target_col, s);
+                        }
                         stats.cells_imported += 1;
                         total_cells += 1;
                     }
