@@ -3149,6 +3149,7 @@ use crate::app::Spreadsheet;
 /// Create a minimal InternalClipboard for testing
 fn make_internal_clipboard(raw_tsv: &str, id: u128) -> InternalClipboard {
     InternalClipboard {
+        comments: vec![],
         raw_tsv: raw_tsv.to_string(),
         values: vec![vec![Value::Text(raw_tsv.to_string())]],
         formats: vec![vec![CellFormat::default()]],

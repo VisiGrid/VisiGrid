@@ -72,6 +72,22 @@ pub struct CellChange {
     pub new_value: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct CommentPatch {
+    pub row: usize,
+    pub col: usize,
+    pub before: Option<visigrid_engine::cell::CellComment>,
+    pub after: Option<visigrid_engine::cell::CellComment>,
+}
+
+/// Apply only the comment metadata; never replace cell values or formats.
+pub(crate) fn apply_comment_patches(workbook: &mut Workbook, sheet_index: usize, patches: &[CommentPatch], forward: bool) {
+    if let Some(sheet) = workbook.sheet_mut(sheet_index) {
+        for p in patches { sheet.set_comment(p.row, p.col, if forward { p.after.clone() } else { p.before.clone() }); }
+        workbook.bump_revision_for_structure();
+    }
+}
+
 /// A patch for a single cell's format (before/after snapshot)
 #[derive(Clone, Debug)]
 pub struct CellFormatPatch {
@@ -143,6 +159,7 @@ pub enum UndoAction {
         before: visigrid_engine::print_setup::PrintSetup,
         after: visigrid_engine::print_setup::PrintSetup,
     },
+    Comments { sheet_index: usize, patches: Vec<CommentPatch>, description: String },
     /// Cell value changes
     Values {
         sheet_index: usize,
@@ -238,6 +255,7 @@ pub enum UndoAction {
         count: usize,
         /// Deleted cell data: (row, col, value, format)
         deleted_cells: Vec<(usize, usize, String, CellFormat)>,
+        deleted_comments: Vec<(usize, usize, visigrid_engine::cell::CellComment)>,
         /// Deleted row heights: (row, height)
         deleted_row_heights: Vec<(usize, f32)>,
         /// See RowsInserted::formula_rewrites.
@@ -262,6 +280,7 @@ pub enum UndoAction {
         count: usize,
         /// Deleted cell data: (row, col, value, format)
         deleted_cells: Vec<(usize, usize, String, CellFormat)>,
+        deleted_comments: Vec<(usize, usize, visigrid_engine::cell::CellComment)>,
         /// Deleted column widths: (col, width)
         deleted_col_widths: Vec<(usize, f32)>,
         /// See RowsInserted::formula_rewrites.
@@ -407,6 +426,7 @@ impl UndoAction {
     /// Generate a human-readable label for this action.
     pub fn label(&self) -> String {
         match self {
+            UndoAction::Comments { description, .. } => description.clone(),
             UndoAction::CondFormatAdded { .. } => "Add conditional format".to_string(),
             UndoAction::CondFormatsCleared { rules, .. } => {
                 format!("Clear {} conditional format{}", rules.len(), if rules.len() == 1 { "" } else { "s" })
@@ -1149,6 +1169,10 @@ impl History {
     /// Extract sheet index, affected cells, and bounding range from an action.
     fn extract_action_details(action: &UndoAction) -> (Option<usize>, Vec<(usize, usize, String, String)>, Option<(usize, usize, usize, usize)>) {
         match action {
+            UndoAction::Comments { sheet_index, patches, .. } => {
+                let cells: Vec<_> = patches.iter().map(|p| (p.row, p.col, String::new(), String::new())).collect();
+                (Some(*sheet_index), vec![], Self::bounding_box(&cells))
+            }
             UndoAction::Values { sheet_index, changes } => {
                 let cells: Vec<_> = changes.iter()
                     .map(|c| (c.row, c.col, c.old_value.clone(), c.new_value.clone()))
@@ -1505,6 +1529,10 @@ impl History {
         action: &UndoAction,
     ) -> Result<(), PreviewBuildError> {
         match action {
+            UndoAction::Comments { sheet_index, patches, .. } => {
+                let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Missing comment sheet".into()))?;
+                for patch in patches { sheet.set_comment(patch.row, patch.col, patch.after.clone()); }
+            }
             UndoAction::CondFormatAdded { sheet_index, rule } => {
                 if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
                     let mut r = rule.clone();
@@ -1729,6 +1757,7 @@ impl History {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoActionKind {
     PrintSetupChanged,
+    Comments,
     CondFormatAdded,
     CondFormatsCleared,
     Values,
@@ -1778,6 +1807,7 @@ impl UndoActionKind {
             UndoActionKind::Group => true,
             UndoActionKind::PlanCommit => true,
             UndoActionKind::PrintSetupChanged => true,
+            UndoActionKind::Comments => true,
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
@@ -1823,6 +1853,7 @@ impl UndoActionKind {
             UndoActionKind::Group => "Group",
             UndoActionKind::PlanCommit => "Reviewed plan",
             UndoActionKind::PrintSetupChanged => "Print setup",
+            UndoActionKind::Comments => "Comment",
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
@@ -1861,6 +1892,7 @@ impl UndoActionKind {
             UndoActionKind::Group => 0x07,
             UndoActionKind::PlanCommit => 0x1A,
             UndoActionKind::PrintSetupChanged => 0x1D,
+            UndoActionKind::Comments => 0x1E,
             UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
@@ -1899,6 +1931,7 @@ impl UndoAction {
             UndoAction::Group { .. } => UndoActionKind::Group,
             UndoAction::PlanCommit { .. } => UndoActionKind::PlanCommit,
             UndoAction::PrintSetupChanged { .. } => UndoActionKind::PrintSetupChanged,
+            UndoAction::Comments { .. } => UndoActionKind::Comments,
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
@@ -2213,6 +2246,7 @@ mod tests {
         use std::collections::HashSet;
 
         let kinds = [
+            UndoActionKind::Comments,
             UndoActionKind::Values,
             UndoActionKind::Format,
             UndoActionKind::NamedRangeCreated,
@@ -2244,5 +2278,35 @@ mod tests {
 
         let tags: HashSet<u8> = kinds.iter().map(|k| k.tag()).collect();
         assert_eq!(tags.len(), kinds.len(), "All action kind tags must be unique");
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+    use visigrid_engine::cell::CellComment;
+    #[test]
+    fn comment_undo_redo_and_history_replay_preserve_values() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_text(0, 0, "00123");
+        let before = CellComment { text: "Original".into(), author: "Alice".into() };
+        let after = CellComment { text: "Updated\n日本語".into(), author: "Alice".into() };
+        let patches = vec![CommentPatch { row: 0, col: 0, before: Some(before.clone()), after: Some(after.clone()) }];
+        apply_comment_patches(&mut wb, 0, &patches, true);
+        assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
+        let rev = wb.revision();
+        apply_comment_patches(&mut wb, 0, &patches, false);
+        assert_eq!(wb.active_sheet().comment(0,0), Some(&before));
+        assert!(wb.revision() > rev);
+        let action = UndoAction::Comments { sheet_index: 0, patches, description: "Edit comment".into() };
+        assert!(action.is_replay_supported());
+        History::apply_action_forward(&mut wb, &mut Default::default(), &action).unwrap();
+        assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
+        assert_eq!(wb.active_sheet().get_raw(0,0), "00123");
+        let delete = vec![CommentPatch {row:0,col:0,before:Some(after.clone()),after:None}];
+        apply_comment_patches(&mut wb,0,&delete,true);
+        assert!(wb.active_sheet().comment(0,0).is_none());
+        apply_comment_patches(&mut wb,0,&delete,false);
+        assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
     }
 }

@@ -1,0 +1,25 @@
+name: Headless I/O fidelity
+
+on:
+  pull_request:
+    paths:
+      - 'crates/io/**'
+      - 'crates/engine/**'
+      - 'fixtures/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/io-fidelity.yml'
+  workflow_dispatch:
+
+jobs:
+  io-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test shared spreadsheet I/O without the GUI
+        run: cargo test --locked -p visigrid-io

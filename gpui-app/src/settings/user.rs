@@ -61,6 +61,10 @@ pub struct AppearanceSettings {
     #[serde(default = "default_show_gridlines", skip_serializing_if = "Setting::is_inherit")]
     pub show_gridlines: Setting<bool>,
 
+    /// Show reading previews when hovering over commented cells.
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub show_comment_previews: Setting<bool>,
+
     /// Show format bar between formula bar and grid
     #[serde(default = "default_show_format_bar", skip_serializing_if = "Setting::is_inherit")]
     pub show_format_bar: Setting<bool>,
@@ -84,6 +88,7 @@ impl Default for AppearanceSettings {
             default_font_size: Setting::Inherit,
             show_gridlines: Setting::Value(true),
             show_format_bar: Setting::Value(true),
+            show_comment_previews: Setting::Inherit,
         }
     }
 }

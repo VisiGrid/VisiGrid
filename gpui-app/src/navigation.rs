@@ -620,6 +620,7 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn select_cell(&mut self, row: usize, col: usize, extend: bool, cx: &mut Context<Self>) {
+        self.comment_reader = None;
         // Mouse click breaks the tab-chain
         self.tab_chain_origin_col = None;
         if extend {

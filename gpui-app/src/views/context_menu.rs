@@ -30,11 +30,12 @@ pub fn render_context_menu(
     // Estimate menu height for clamping.
     // Items: ~24px each (py(5) + ~14px text). Separators: ~9px (1px + my_1 = 4+1+4).
     let (n_items, n_seps) = match state.kind {
-        ContextMenuKind::Cell => (14, 6),
+        ContextMenuKind::Cell => (16, 7),
         ContextMenuKind::RowHeader => (4, 1),
         ContextMenuKind::ColHeader => (8, 3),
     };
-    let menu_h: f32 = n_items as f32 * 24.0 + n_seps as f32 * 9.0 + 8.0; // + py_1 padding
+    // Leave room for the inherited line height as well as vertical padding.
+    let menu_h: f32 = n_items as f32 * 30.0 + n_seps as f32 * 12.0 + 8.0;
 
     // Clamp position to keep menu within window bounds
     let viewport = window.viewport_size();
@@ -131,6 +132,10 @@ fn build_cell_menu(
 ) -> Vec<AnyElement> {
     let panel_border = app.token(TokenKey::PanelBorder);
     let has_clipboard = app.internal_clipboard.is_some();
+    let (r, c) = app.view_state.selected;
+    let r = app.row_view.view_to_data(r);
+    let (r, c) = app.sheet(cx).get_merge(r,c).map(|m| m.start).unwrap_or((r,c));
+    let has_comment = app.sheet(cx).comment(r,c).is_some();
 
     // On macOS use symbol shortcuts, on other platforms use text
     #[cfg(target_os = "macos")]
@@ -192,6 +197,11 @@ fn build_cell_menu(
         menu_item("ctx-clear-formats", "Clear Formats", None, true, text_primary, text_muted, selection_bg, cx,
             |this, _, cx| this.clear_formatting_selection(cx),
         ),
+        separator(panel_border),
+        menu_item("ctx-comment", if has_comment { "Edit Comment…" } else { "New Comment…" }, None, true, text_primary, text_muted, selection_bg, cx,
+            |this, window, cx| this.open_comment(window, cx)),
+        menu_item("ctx-delete-comment", "Delete Comment", None, has_comment, text_primary, text_muted, selection_bg, cx,
+            |this, _, cx| this.delete_comment(cx)),
         separator(panel_border),
         menu_item("ctx-format-cells", "Format Cells...", Some(format_hint), true, text_primary, text_muted, selection_bg, cx,
             |this, _, cx| {

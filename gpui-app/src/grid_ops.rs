@@ -157,6 +157,7 @@ impl Spreadsheet {
         // for a one-row delete.
         let sheet = self.sheet(cx);
         let deleted_cells = sheet.occupied_cells_in_rows(at_row, count);
+        let deleted_comments = sheet.comments().filter(|((r, _), _)| (at_row..at_row + count).contains(r)).map(|((r, c), v)| (r, c, v.clone())).collect();
 
         // Capture row heights for deleted rows (per-sheet)
         let sheet_heights = self.sheet_row_heights_mut();
@@ -201,6 +202,7 @@ impl Spreadsheet {
             at_row,
             count,
             deleted_cells,
+            deleted_comments,
             deleted_row_heights,
             print_setup_before,
             formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
@@ -279,6 +281,7 @@ impl Spreadsheet {
         // See delete_rows: sparse lookup, not a full-column walk.
         let sheet = self.sheet(cx);
         let deleted_cells = sheet.occupied_cells_in_cols(at_col, count);
+        let deleted_comments = sheet.comments().filter(|((_, c), _)| (at_col..at_col + count).contains(c)).map(|((r, c), v)| (r, c, v.clone())).collect();
 
         // Capture column widths for deleted columns (per-sheet)
         let sheet_widths = self.sheet_col_widths_mut();
@@ -319,6 +322,7 @@ impl Spreadsheet {
             at_col,
             count,
             deleted_cells,
+            deleted_comments,
             deleted_col_widths,
             print_setup_before,
             formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),

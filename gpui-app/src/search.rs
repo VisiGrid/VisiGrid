@@ -105,6 +105,11 @@ pub enum CommandId {
     Paste,
     PasteValues,
     TogglePasteValuesDefault,
+    ToggleCommentPreviews,
+    NextComment,
+    PreviousComment,
+    ToggleCommentsSidebar,
+    AddEditComment,
     PasteSpecial,
     PasteFormulas,
     PasteFormats,
@@ -328,6 +333,11 @@ impl CommandId {
             Self::Paste => "Paste",
             Self::PasteValues => "Paste Values",
             Self::TogglePasteValuesDefault => "Toggle Paste Values by Default (Ctrl+V)",
+            Self::ToggleCommentPreviews => "Toggle Comment Previews",
+            Self::NextComment => "Next Comment",
+            Self::PreviousComment => "Previous Comment",
+            Self::ToggleCommentsSidebar => "Toggle Comments Sidebar",
+            Self::AddEditComment => "Add/Edit Comment",
             Self::PasteSpecial => "Paste Special...",
             Self::PasteFormulas => "Paste Formulas",
             Self::PasteFormats => "Paste Formats",
@@ -504,6 +514,10 @@ impl CommandId {
             Self::Paste => Some("Ctrl+V"),
             Self::PasteValues => Some("Ctrl+Alt+Shift+V"),
             Self::TogglePasteValuesDefault => None,
+            Self::ToggleCommentPreviews => None,
+            Self::NextComment | Self::PreviousComment => None,
+            Self::ToggleCommentsSidebar => None,
+            Self::AddEditComment => Some("Shift+F2"),
             #[cfg(target_os = "macos")]
             Self::PasteSpecial => Some("Cmd+Option+V"),
             #[cfg(not(target_os = "macos"))]
@@ -600,6 +614,11 @@ impl CommandId {
             Self::Paste => "clipboard",
             Self::PasteValues => "clipboard special values only",
             Self::TogglePasteValuesDefault => "paste default setting ctrl+v values plain formatting",
+            Self::ToggleCommentPreviews => "comments notes hover previews show hide toggle settings",
+            Self::NextComment => "next comment note navigate jump review",
+            Self::PreviousComment => "previous comment note navigate jump review back",
+            Self::ToggleCommentsSidebar => "comments notes sidebar panel search find all sheets show hide",
+            Self::AddEditComment => "add edit new insert comment note annotate selected cell",
             Self::PasteSpecial => "clipboard special dialog formulas formats values",
             Self::PasteFormulas => "clipboard special formulas reference adjust",
             Self::PasteFormats => "clipboard special formatting style",
@@ -785,6 +804,11 @@ impl CommandId {
             Self::Paste,
             Self::PasteValues,
             Self::TogglePasteValuesDefault,
+            Self::ToggleCommentPreviews,
+            Self::NextComment,
+            Self::PreviousComment,
+            Self::ToggleCommentsSidebar,
+            Self::AddEditComment,
             Self::PasteSpecial,
             Self::PasteFormulas,
             Self::PasteFormats,
@@ -977,9 +1001,14 @@ impl CommandId {
             | Self::SelectAll
             | Self::FindInCells
             | Self::GoToCell => Some(MenuCategory::Edit),
+            Self::AddEditComment => Some(MenuCategory::Edit),
 
             // View menu
             Self::ToggleInspector
+            | Self::ToggleCommentPreviews
+            | Self::NextComment
+            | Self::PreviousComment
+            | Self::ToggleCommentsSidebar
             | Self::ToggleProfiler
             | Self::ToggleMinimap
             | Self::ToggleZenMode

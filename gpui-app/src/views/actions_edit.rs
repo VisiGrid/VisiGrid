@@ -8,6 +8,12 @@ pub(crate) fn bind(
     cx: &mut Context<Spreadsheet>,
 ) -> Div {
     el
+        .on_action(cx.listener(|this, _: &AddEditComment, window, cx| {
+            this.open_comment(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleCommentsSidebar, window, cx| {
+            this.toggle_comments_sidebar(window, cx);
+        }))
         // Clipboard actions
         .on_action(cx.listener(|this, _: &Copy, window, cx| {
             // Terminal handles its own copy (Cmd+C on Mac, Ctrl+Shift+C on Linux)
@@ -440,6 +446,11 @@ pub(crate) fn bind(
             } else if this.is_previewing() {
                 // Esc exits preview mode
                 this.exit_preview(cx);
+            } else if this.comment_reader.is_some() && this.mode == Mode::Navigation {
+                this.comment_reader = None;
+                cx.notify();
+            } else if this.comments_sidebar_visible && this.mode == Mode::Navigation {
+                this.toggle_comments_sidebar(window, cx);
             } else if this.profiler_visible && this.mode == Mode::Navigation {
                 // Esc closes profiler panel when in navigation mode
                 this.profiler_visible = false;

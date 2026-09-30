@@ -294,6 +294,8 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         // View
         "view.palette" | "palette.toggle" => Some(KeyBinding::new(key, ToggleCommandPalette, context)),
         "view.inspector" | "inspector.toggle" => Some(KeyBinding::new(key, ToggleInspector, context)),
+        "comments.edit" => Some(KeyBinding::new(key, AddEditComment, context)),
+        "comments.sidebar" => Some(KeyBinding::new(key, ToggleCommentsSidebar, context)),
         "view.format" | "format.panel" => Some(KeyBinding::new(key, ShowFormatPanel, context)),
         "view.problems" | "problems.toggle" => Some(KeyBinding::new(key, ToggleProblems, context)),
         "view.zen" | "zen.toggle" => Some(KeyBinding::new(key, ToggleZenMode, context)),

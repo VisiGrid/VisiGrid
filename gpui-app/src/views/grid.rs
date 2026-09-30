@@ -33,6 +33,18 @@ fn non_interactive_overlay() -> Div {
         .inset_0()
 }
 
+/// A merge overlay already paints its full perimeter. A neighboring cell must
+/// not repeat an identical resolved edge immediately outside that perimeter.
+fn merge_owns_adjacent_edges(
+    sheet: &Sheet, row: usize, col: usize, top: CellBorder, left: CellBorder,
+) -> (bool, bool) {
+    let owns_top = top.is_set() && row > 0 && sheet.get_merge(row - 1, col)
+        .is_some_and(|m| m.end.0 == row - 1 && sheet.resolve_merge_borders(m).2 == top);
+    let owns_left = left.is_set() && col > 0 && sheet.get_merge(row, col - 1)
+        .is_some_and(|m| m.end.1 == col - 1 && sheet.resolve_merge_borders(m).1 == left);
+    (owns_top, owns_left)
+}
+
 /// Resolve regular-cell border ownership from an immutable review snapshot.
 /// Merged-cell borders are owned by the frozen merge overlay instead.
 fn frozen_cell_user_borders(
@@ -195,7 +207,7 @@ pub fn render_grid(
     let scrollable_visible_cols = total_visible_cols.saturating_sub(frozen_cols);
 
     // Get divider color for freeze pane separators
-    let divider_color = app.token(TokenKey::PanelBorder);
+    let divider_color = app.token(TokenKey::FreezeDivider);
 
     // No freeze panes - simple single-region rendering
     if frozen_rows == 0 && frozen_cols == 0 {
@@ -304,6 +316,7 @@ pub fn render_grid(
                                         div()
                                             .w(px(1.0))
                                             .h_full()
+                                            .flex_shrink_0()
                                             .bg(divider_color)
                                     )
                                 })
@@ -325,6 +338,7 @@ pub fn render_grid(
                 div()
                     .w_full()
                     .h(px(1.0))
+                    .flex_shrink_0()
                     .bg(divider_color)
             )
         })
@@ -368,6 +382,7 @@ pub fn render_grid(
                                             div()
                                                 .w(px(1.0))
                                                 .h_full()
+                                                .flex_shrink_0()
                                                 .bg(divider_color)
                                         )
                                     })
@@ -648,6 +663,10 @@ fn render_cell(
         .overflow_hidden()  // Always clip; spill is rendered in overlay layer
         .bg(cell_base_background_with_role(app, is_editing, format.background_color, cell_style.fill, role_style))
         .border_color(border_color);
+
+    if app.sheet(cx).comment(data_row, col).is_some() {
+        cell = cell.child(crate::comments::indicator(data_row, col, cx));
+    }
 
     // Background proposals stay quiet: a wash and a slim edge marker show the
     // shape of the plan without resembling a multi-cell selection. The focused
@@ -1052,13 +1071,17 @@ fn render_cell(
                     .map(rgba_to_hsla)
                     .unwrap_or_else(|| app.token(TokenKey::UserBorder));
 
+                let (merge_owns_top, merge_owns_left) = merge_owns_adjacent_edges(
+                    display_sheet, display_data_row, col, border_top, border_left,
+                );
+
                 c = c.child(
                     non_interactive_overlay()
                         .border_color(border_color)
-                        .when(user_top, |d| d.border_t_1())
+                        .when(user_top && !merge_owns_top, |d| d.border_t_1())
                         .when(user_right, |d| d.border_r_1())
                         .when(user_bottom, |d| d.border_b_1())
-                        .when(user_left, |d| d.border_l_1())
+                        .when(user_left && !merge_owns_left, |d| d.border_l_1())
                 );
             }
 
@@ -1347,9 +1370,10 @@ fn render_cell(
                 }
                 // Font family must be on text_style for StyledText to use it
                 text_style.font_family = app.cell_font_family(format.font_family.as_deref());
-                // Font color: only apply for non-editing/non-selected cells
+                // Selection is a translucent overlay, not a replacement fill.
+                // Keep explicit text colours readable on the original fill.
                 if let Some(rgba) = format.font_color {
-                    if !is_editing && !is_selected && !is_multi_edit_preview {
+                    if !is_editing && !is_multi_edit_preview {
                         text_style.color = gpui::Hsla::from(gpui::Rgba {
                             r: rgba[0] as f32 / 255.0,
                             g: rgba[1] as f32 / 255.0,
@@ -1616,7 +1640,7 @@ fn render_cell(
         }))
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle right-clicks if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
             // If right-clicking outside current selection, move active cell there
@@ -1669,6 +1693,10 @@ fn render_cell(
             // End drag selection (works for both normal and formula mode)
             this.end_drag_selection(cx);
         }));
+
+    if crate::comments::previews_enabled(cx) && app.mode.is_navigation() && app.sheet(cx).comment(data_row, col).is_some() {
+        wrapper = wrapper.hoverable_tooltip(crate::comments::preview(app, data_row, col, cx));
+    }
 
     // Add fill handle at bottom-right corner of active cell
     // Excel-style: solid dark square that overlaps selection border (corner cap feel)
@@ -2193,95 +2221,67 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
         }
     }
 
-    // Compute bounds for each range using the pane's view state
+    // Each frozen/scrolling region has its own origin and clipping bounds,
+    // exactly like cells and merge overlays. cell_rect() only accounts for the
+    // scrolling origin and used to paint B3's outline over A2 with frozen A/1.
     let view_state = get_pane_view_state(app, pane_side);
-    let scroll_row = view_state.scroll_row;
-    let scroll_col = view_state.scroll_col;
-
-    let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = ranges
-        .iter()
-        .filter_map(|(key, color_idx)| {
-            let (r1, c1, r2, c2) = match key {
-                RefKey::Cell { row, col } => (*row, *col, *row, *col),
-                RefKey::Range { r1, c1, r2, c2 } => (*r1, *c1, *r2, *c2),
-            };
-
-            // Check if any part of the range is visible
-            let visible_rows = app.visible_rows();
-            let visible_cols = app.visible_cols();
-
-            // Skip if entirely off-screen
-            if r2 < scroll_row || c2 < scroll_col {
-                return None;
-            }
-            if r1 >= scroll_row + visible_rows || c1 >= scroll_col + visible_cols {
-                return None;
-            }
-
-            // Get bounds of the range using cell_rect
-            // cell_rect returns positions relative to the cell grid (after row header)
-            // We need to add header_w offset since canvas covers entire grid div
-            let top_left = app.cell_rect(r1, c1);
-            let bottom_right = app.cell_rect(r2, c2);
-            let header_w = app.metrics.header_w;
-
-            let x = top_left.x + header_w;
-            let y = top_left.y;
-            let width = (bottom_right.x + bottom_right.width) - top_left.x;
-            let height = (bottom_right.y + bottom_right.height) - top_left.y;
-
-            let bounds = Bounds {
-                origin: Point::new(px(x), px(y)),
-                size: Size {
-                    width: px(width),
-                    height: px(height),
-                },
-            };
-
-            // Ensure full opacity for borders (rgb() should produce opaque, but be explicit)
-            let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
-            color.a = 1.0;
-
-            Some((bounds, color))
-        })
-        .collect();
-
-    if range_bounds.is_empty() {
-        return div().into_any_element();
+    let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
+    let mut layers = Vec::new();
+    for region in grid_overlay_regions(app, view_state) {
+        let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = ranges.iter()
+            .filter_map(|(key, color_idx)| {
+                let (x, y, width, height) = formula_ref_rect(
+                    key, region,
+                    |c| if app.is_col_hidden(c) { 0.0 } else { app.metrics.col_width(app.col_width(c)) },
+                    |r| if app.is_row_hidden(r) { 0.0 } else { app.metrics.row_height(app.row_height(r)) },
+                )?;
+                if width <= 0.0 || height <= 0.0 { return None; }
+                let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
+                color.a = 1.0;
+                Some((Bounds {
+                    origin: Point::new(px(x), px(y)),
+                    size: Size { width: px(width), height: px(height) },
+                }, color))
+            }).collect();
+        if range_bounds.is_empty() { continue; }
+        let borders = canvas(
+            move |_bounds, _window, _cx| range_bounds,
+            move |canvas_bounds, range_bounds, window, _cx| {
+                for (cell_bounds, color) in &range_bounds {
+                    window.paint_quad(gpui::quad(
+                        Bounds {
+                            origin: Point::new(
+                                canvas_bounds.origin.x + cell_bounds.origin.x,
+                                canvas_bounds.origin.y + cell_bounds.origin.y,
+                            ),
+                            size: cell_bounds.size,
+                        },
+                        px(0.0), gpui::transparent_black(), px(2.0), *color,
+                        BorderStyle::Dashed,
+                    ));
+                }
+            },
+        ).absolute().inset_0().size_full();
+        layers.push(overlay_region_container(region, header_width).child(borders));
     }
+    div().absolute().inset_0().children(layers).into_any_element()
+}
 
-    // Use canvas to paint dashed borders
-    canvas(
-        // Prepaint: pass range_bounds to paint
-        move |_bounds, _window, _cx| range_bounds,
-        // Paint: draw dashed borders
-        // paint_quad uses window-relative coordinates, so we add canvas origin
-        move |canvas_bounds, range_bounds, window, _cx| {
-            for (cell_bounds, color) in &range_bounds {
-                // Offset by canvas origin to convert from grid-relative to window-relative
-                let adjusted_bounds = Bounds {
-                    origin: Point::new(
-                        canvas_bounds.origin.x + cell_bounds.origin.x,
-                        canvas_bounds.origin.y + cell_bounds.origin.y,
-                    ),
-                    size: cell_bounds.size,
-                };
-                let quad = gpui::quad(
-                    adjusted_bounds,
-                    px(0.0), // no corner radius
-                    gpui::transparent_black(), // no fill (keep existing cell fills)
-                    px(2.0), // 2px border width
-                    *color,
-                    BorderStyle::Dashed,
-                );
-                window.paint_quad(quad);
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
-    .size_full()
-    .into_any_element()
+/// Preserve offscreen origins: the containing pane clips the original outline
+/// rather than inventing a new border along its clipping edge.
+fn formula_ref_rect(
+    key: &RefKey, region: OverlayRegion,
+    col_width: impl Fn(usize) -> f32, row_height: impl Fn(usize) -> f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let (r1, c1, r2, c2) = match *key {
+        RefKey::Cell { row, col } => (row, col, row, col),
+        RefKey::Range { r1, c1, r2, c2 } => (r1, c1, r2, c2),
+    };
+    let range = visigrid_engine::sheet::MergedRegion::new(r1, c1, r2, c2);
+    if !range.overlaps_viewport(region.row, region.col, region.rows, region.cols) {
+        return None;
+    }
+    Some(range.pixel_rect(region.row, region.col, col_width, row_height))
 }
 
 /// Render a dashed border overlay around the copy/cut source range.
@@ -2531,6 +2531,14 @@ fn render_merge_div(
         merge_div = merge_div.border_b_1().border_r_1();
     }
 
+    if app.sheet(cx).comment(m.origin_row, m.origin_col).is_some() {
+        merge_div = merge_div.child(crate::comments::indicator(m.origin_row, m.origin_col, cx));
+    }
+
+    if crate::comments::previews_enabled(cx) && app.mode.is_navigation() && app.sheet(cx).comment(m.origin_row, m.origin_col).is_some() {
+        merge_div = merge_div.hoverable_tooltip(crate::comments::preview(app, m.origin_row, m.origin_col, cx));
+    }
+
     // 2. Selection tint
     let is_active = view_state.selected == (m.origin_row, m.origin_col)
         || (view_state.selected.0 >= m.origin_row && view_state.selected.0 <= m.end_row
@@ -2688,6 +2696,15 @@ fn render_merge_div(
                     cx.notify();
                 }
             }
+        }))
+        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() { return; }
+            this.activate_pane(pane_side, cx);
+            this.end_drag_selection(cx);
+            this.select_cell(origin_row, origin_col, false, cx);
+            this.active_view_state_mut().selection_end = Some((end_row, end_col));
+            this.show_context_menu(crate::app::ContextMenuKind::Cell, event.position, cx);
+            cx.stop_propagation();
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
             if this.inspector_visible || this.filter_dropdown_col.is_some() {
@@ -3176,6 +3193,9 @@ fn render_region_text_spill(
                 if run.italic {
                     text_div = text_div.italic();
                 }
+                if run.underline {
+                    text_div = text_div.underline();
+                }
 
                 // Position text with calculated offset (anchored to base cell)
                 text_div.child(
@@ -3306,6 +3326,56 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
 #[cfg(test)]
 mod frozen_overlay_tests {
     use super::{overlay_regions, WorkbookViewState};
+
+    #[test]
+    fn formula_outline_b3_uses_scrolling_pane_offset_and_frozen_refs_stay_visible() {
+        use super::{formula_ref_rect, RefKey};
+        let mut view = WorkbookViewState::default();
+        view.frozen_rows = 1;
+        view.frozen_cols = 1;
+        view.scroll_row = 1;
+        view.scroll_col = 1;
+        let regions = overlay_regions(&view, 20, 12, 210.0, 38.0);
+        let b3 = RefKey::Cell { row: 2, col: 1 };
+        let widths = |c| if c == 0 { 210.0 } else { 168.0 };
+        let heights = |r| if r == 0 { 38.0 } else { 28.0 };
+        for region in &regions[..3] {
+            assert!(formula_ref_rect(&b3, *region, widths, heights).is_none());
+        }
+        let pane = regions[3];
+        let (x, y, w, h) = formula_ref_rect(&b3, pane, widths, heights).unwrap();
+        assert_eq!((pane.x + x, pane.y + y, w, h), (211.0, 67.0, 168.0, 28.0));
+        view.scroll_row = 60;
+        view.scroll_col = 8;
+        let moved = overlay_regions(&view, 20, 12, 210.0, 38.0);
+        assert_eq!(formula_ref_rect(&RefKey::Cell { row: 0, col: 0 }, moved[0], widths, heights), Some((0.0, 0.0, 210.0, 38.0)));
+        assert!(formula_ref_rect(&b3, moved[3], widths, heights).is_none());
+        // A range spanning the freeze boundary retains one original rectangle
+        // in each clipped pane instead of shifting its origin into that pane.
+        let crossing = RefKey::Range { r1: 0, c1: 0, r2: 2, c2: 1 };
+        assert_eq!(formula_ref_rect(&crossing, pane, widths, heights), Some((-210.0, -38.0, 378.0, 94.0)));
+    }
+
+    #[test]
+    fn adjacent_cells_do_not_repeat_a_merge_perimeter() {
+        use super::{merge_owns_adjacent_edges, CellBorder};
+        use visigrid_engine::{cell::BorderStyle, sheet::MergedRegion, workbook::Workbook};
+        let mut wb = Workbook::new();
+        let sheet = wb.active_sheet_mut();
+        let thin = CellBorder { style: BorderStyle::Thin, ..Default::default() };
+        let none = CellBorder::default();
+        sheet.set_border_bottom(10, 0, thin);
+        sheet.set_border_right(10, 2, thin);
+        sheet.add_merge(MergedRegion::new(10, 0, 10, 2)).unwrap();
+        for col in 0..3 {
+            assert_eq!(merge_owns_adjacent_edges(sheet, 11, col, thin, none), (true, false));
+        }
+        assert_eq!(merge_owns_adjacent_edges(sheet, 10, 3, none, thin), (false, true));
+        assert_eq!(merge_owns_adjacent_edges(sheet, 12, 0, thin, none), (false, false));
+        // An independently styled, stronger adjacent edge must still render.
+        let thick = CellBorder { style: BorderStyle::Thick, ..Default::default() };
+        assert_eq!(merge_owns_adjacent_edges(sheet, 11, 0, thick, none), (false, false));
+    }
 
     #[test]
     fn issue17_example2_preserves_merge_and_text_positions() {

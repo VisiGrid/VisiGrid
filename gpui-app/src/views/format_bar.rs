@@ -153,6 +153,13 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         .child(toolbar_separator(panel_border))
         // Cell Styles dropdown
         .child(render_cell_style_btn(text_primary, text_muted, accent, panel_border, cell_style_menu_open, cx))
+        .child(toolbar_separator(panel_border))
+        .child(div().id("toolbar-comments").px_2().py_1().rounded_sm().cursor_pointer()
+            .text_size(px(12.)).text_color(if app.comments_sidebar_visible { accent } else { text_muted })
+            .when(app.comments_sidebar_visible, |d| d.bg(accent.opacity(0.1)))
+            .hover(|d| d.bg(panel_border.opacity(0.2)))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_comments_sidebar(window, cx)))
+            .child("Comments"))
 }
 
 // ============================================================================

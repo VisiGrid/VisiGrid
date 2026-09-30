@@ -72,11 +72,11 @@ fn utf16_to_byte(s: &str, utf16: usize) -> usize {
     s.len()
 }
 
-fn byte_range_to_utf16(s: &str, r: Range<usize>) -> Range<usize> {
+pub(crate) fn byte_range_to_utf16(s: &str, r: Range<usize>) -> Range<usize> {
     byte_to_utf16(s, r.start)..byte_to_utf16(s, r.end)
 }
 
-fn utf16_range_to_byte(s: &str, r: Range<usize>) -> Range<usize> {
+pub(crate) fn utf16_range_to_byte(s: &str, r: Range<usize>) -> Range<usize> {
     utf16_to_byte(s, r.start)..utf16_to_byte(s, r.end)
 }
 
@@ -96,7 +96,7 @@ pub(crate) struct ImeBuffer {
 }
 
 impl ImeBuffer {
-    fn selection(&self) -> Range<usize> {
+    pub(crate) fn selection(&self) -> Range<usize> {
         match self.selection_anchor {
             Some(anchor) if anchor != self.cursor => {
                 anchor.min(self.cursor)..anchor.max(self.cursor)
@@ -133,8 +133,7 @@ impl ImeBuffer {
 
     /// Test model of a full commit: [`Self::begin_commit`] followed by a plain insert
     /// over the selection, standing in for the app's per-character `insert_char` calls.
-    #[cfg(test)]
-    fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+    pub(crate) fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
         self.begin_commit(range);
         let sel = self.selection();
         self.text.replace_range(sel.clone(), text);
@@ -275,6 +274,7 @@ impl Spreadsheet {
 
 impl EntityInputHandler for Spreadsheet {
     fn accepts_text_input(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.comment_editor.is_some() { return true; }
         // On macOS this decides whether an active IME may compose a printable key
         // before the app sees it. A Ready cell has to say yes, or composition cannot
         // start on the first keystroke (Excel's behaviour, and the whole point here).
@@ -306,6 +306,12 @@ impl EntityInputHandler for Spreadsheet {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if let Some(editor) = &self.comment_editor {
+            let text = &editor.buffer().text;
+            let range = utf16_range_to_byte(text, range_utf16);
+            *adjusted_range = Some(byte_range_to_utf16(text, range.clone()));
+            return Some(text[range].to_owned());
+        }
         let byte_range = utf16_range_to_byte(&self.edit_value, range_utf16);
         *adjusted_range = Some(byte_range_to_utf16(&self.edit_value, byte_range.clone()));
         Some(self.edit_value[byte_range].to_string())
@@ -317,6 +323,11 @@ impl EntityInputHandler for Spreadsheet {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        if let Some(editor) = &self.comment_editor {
+            let buf = editor.buffer();
+            let range = buf.selection();
+            return Some(UTF16Selection { reversed: buf.cursor == range.start, range: byte_range_to_utf16(&buf.text, range) });
+        }
         if !self.mode.is_editing() {
             // Outside an edit the buffer is empty and a selection anchor may be stale
             // (some exits skip `reset_edit_state`), so do not consult it. An empty
@@ -339,11 +350,16 @@ impl EntityInputHandler for Spreadsheet {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
+        if let Some(editor) = &self.comment_editor {
+            let buf = editor.buffer();
+            return buf.marked.clone().map(|r| byte_range_to_utf16(&buf.text, r));
+        }
         let marked = self.ime_marked_range()?;
         Some(byte_range_to_utf16(&self.edit_value, marked))
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.comment_editor { editor.buffer_mut().marked = None; }
         self.edit_marked_range = None;
         cx.notify();
     }
@@ -355,6 +371,15 @@ impl EntityInputHandler for Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(editor) = &mut self.comment_editor {
+            let author = editor.author_focused;
+            let buf = editor.buffer_mut();
+            let range = range_utf16.map(|r| utf16_range_to_byte(&buf.text, r));
+            let text = if author { text.replace(['\r', '\n'], " ") } else { text.replace("\r\n", "\n") };
+            buf.replace(range, &text);
+            cx.notify();
+            return;
+        }
         if !self.cell_owns_text_input(window) {
             return;
         }
@@ -402,6 +427,13 @@ impl EntityInputHandler for Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(editor) = &mut self.comment_editor {
+            let buf = editor.buffer_mut();
+            let range = range_utf16.map(|r| utf16_range_to_byte(&buf.text, r));
+            buf.replace_and_mark(range, new_text, new_selected_range_utf16);
+            cx.notify();
+            return;
+        }
         if !self.cell_owns_text_input(window) {
             return;
         }
@@ -436,6 +468,13 @@ impl EntityInputHandler for Spreadsheet {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if let Some(editor) = &self.comment_editor {
+            if let Some(layout) = editor.layout.borrow().as_ref() {
+                if let Some(pos) = layout.position_for_index(editor.buffer().cursor) {
+                    return Some(Bounds::new(pos, gpui::size(gpui::px(1.), layout.line_height())));
+                }
+            }
+        }
         // Positions the input method's candidate window. `element_bounds` is useless here
         // because the handler is registered on a zero-size canvas, so the rectangle comes
         // from whichever surface is being edited. The grid case is the cell, not the

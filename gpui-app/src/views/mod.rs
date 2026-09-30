@@ -32,7 +32,7 @@ pub mod minimap;
 mod paste_special_dialog;
 mod convert_picker;
 mod cloud_open_dialog;
-mod preferences_panel;
+pub(crate) mod preferences_panel;
 pub mod refactor_log;
 pub(crate) mod review_card;
 pub(crate) mod review_overview_rail;
@@ -144,7 +144,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             style: Default::default(),
         })
         .relative()
-        .key_context("Spreadsheet")
+        .key_context(if app.comment_editor.is_some() { "CommentEditor" } else if app.mode == Mode::Preferences { "Preferences" } else if app.comments_sidebar_visible && app.comment_search.read(cx).focus.is_focused(window) { "CommentSearch" } else { "Spreadsheet" })
         .track_focus(&app.focus_handle);
     let el = actions_nav::bind(el, cx);
     let el = actions_edit::bind(el, cx);
@@ -154,6 +154,17 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         // Character input (handles editing, goto, find, and command modes)
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             key_handler::handle_key_down(this, event, window, cx);
+        }))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
+            if this.comments_sidebar_visible && this.comment_search.read(cx).focus.is_focused(window) {
+                let (x, y) = this.grid_layout.grid_body_origin;
+                let (w, h) = this.grid_layout.viewport_size;
+                let p = event.position;
+                if p.x >= px(x) && p.x < px(x + w) && p.y >= px(y) && p.y < px(y + h) {
+                    window.focus(&this.focus_handle, cx);
+                    cx.notify();
+                }
+            }
         }))
         // Key release handling:
         // - F1 hold-to-peek: hide help when F1 is released
@@ -580,6 +591,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     .flex_1()
                     .min_h(px(0.0))  // Allow grid to shrink below content size for console panel
                     .child(grid_element)
+                    .when(app.comments_sidebar_visible && !show_review_panel, |d| {
+                        d.child(crate::comment_sidebar::render(app, cx))
+                    })
                     .when(show_review_rail, |d| {
                         d.child(review_overview_rail::render_review_overview_rail(app, cx))
                     })
@@ -757,6 +771,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                     .child(profiler_panel::render_profiler_panel(app, cx))
             )
         })
+        .when(crate::comments::reader_visible(app, cx), |div| div.child(crate::comments::render_reader(app, window, cx)))
+        .when(app.comment_editor.is_some(), |div| div.child(crate::comments::render(app, window, cx)))
         .when(show_goto, |div| {
             div.child(goto_dialog::render_goto_dialog(app))
         })

@@ -456,6 +456,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quoted_other_sheet_reference_does_not_highlight_local_a1() {
+        let formula = "='Other sheet'!A1+B3";
+        let refs = Spreadsheet::parse_formula_refs(formula);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].key, RefKey::Cell { row: 2, col: 1 });
+        assert_eq!(&formula[refs[0].text_byte_range.clone()], "B3");
+    }
+
+    #[test]
     fn duplicate_token_stability() {
         // =A1 + A1 → two entries, same key, same color
         let refs = Spreadsheet::parse_formula_refs("=A1 + A1");

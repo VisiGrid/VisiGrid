@@ -658,6 +658,9 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
         }
     }
 
+    let comments: Vec<_> = sheet.comments().map(|((r,c),v)| (r,c,v)).collect();
+    let json = serde_json::to_string(&comments).map_err(|e| e.to_string())?;
+    conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('sheet_comments_0', ?1)", params![json]).map_err(|e| e.to_string())?;
     save_cond_formats_sheet(&conn, 0, &sheet.cond_formats)?;
     save_print_setup(&conn, 0, &sheet.print_setup)?;
     save_sheet_merges(&conn, 0, sheet)?;
@@ -820,7 +823,9 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             _ => String::new(),
         };
 
-        if !value.is_empty() {
+        if value_type == TYPE_TEXT {
+            sheet.set_text(row, col, &value);
+        } else if !value.is_empty() {
             sheet.set_value(row, col, &value);
         }
 
@@ -868,6 +873,12 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         };
         if !format.is_default() || value_type == TYPE_EMPTY {
             sheet.set_format(row, col, format);
+        }
+    }
+
+    if let Ok(raw) = conn.query_row("SELECT value FROM meta WHERE key = 'sheet_comments_0'", [], |row| row.get::<_, String>(0)) {
+        if let Ok(comments) = serde_json::from_str::<Vec<(usize,usize,visigrid_engine::cell::CellComment)>>(&raw) {
+            for (r,c,v) in comments { sheet.set_comment(r,c,Some(v)); }
         }
     }
 
@@ -1362,7 +1373,9 @@ fn load_workbook_v2(
                 _ => String::new(),
             };
 
-            if !value_str.is_empty() {
+            if value_type == TYPE_TEXT {
+                sheet.set_text(row, col, &value_str);
+            } else if !value_str.is_empty() {
                 sheet.set_value_deferred(row, col, &value_str);
             }
 
@@ -1580,6 +1593,11 @@ fn save_sheet_defaults(conn: &Connection, workbook: &Workbook) -> Result<(), Str
     for (i, sheet) in workbook.sheets().iter().enumerate() {
         save_print_setup(conn, i, &sheet.print_setup)?;
         save_sheet_merges(conn, i, sheet)?;
+        let mut comments: Vec<_> = sheet.comments().map(|((r, c), comment)| (r, c, comment)).collect();
+        comments.sort_by_key(|(r, c, _)| (*r, *c));
+        let json = serde_json::to_string(&comments).map_err(|e| e.to_string())?;
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![format!("sheet_comments_{i}"), json]).map_err(|e| e.to_string())?;
         let json = serde_json::to_string(&(&sheet.row_formats, &sheet.col_formats, sheet.frozen_panes))
             .map_err(|e| e.to_string())?;
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -1590,6 +1608,15 @@ fn save_sheet_defaults(conn: &Connection, workbook: &Workbook) -> Result<(), Str
 
 fn load_sheet_defaults(conn: &Connection, workbook: &mut Workbook) {
     for i in 0..workbook.sheet_count() {
+        let comments: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = ?1",
+            params![format!("sheet_comments_{i}")], |row| row.get(0)).ok();
+        if let Some(raw) = comments {
+            if let Ok(comments) = serde_json::from_str::<Vec<(usize, usize, visigrid_engine::cell::CellComment)>>(&raw) {
+                if let Some(sheet) = workbook.sheet_mut(i) {
+                    for (r, c, comment) in comments { sheet.set_comment(r, c, Some(comment)); }
+                }
+            }
+        }
         let raw: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = ?1",
             params![format!("sheet_defaults_{i}")], |row| row.get(0)).ok();
         if let Some(raw) = raw {

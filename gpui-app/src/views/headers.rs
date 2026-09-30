@@ -56,7 +56,7 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let selection_bg = app.token(TokenKey::SelectionBg);
-    let divider_color = app.token(TokenKey::PanelBorder);
+    let divider_color = app.token(TokenKey::FreezeDivider);
     let metrics = &app.metrics;
 
     // Calculate scrollable region columns
@@ -100,6 +100,7 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                 div()
                     .w(px(1.0))
                     .h_full()
+                    .flex_shrink_0()
                     .bg(divider_color)
             )
         })

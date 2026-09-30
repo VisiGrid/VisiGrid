@@ -33,6 +33,8 @@ actions!(navigation, [
 // Editing actions
 actions!(editing, [
     StartEdit,
+    AddEditComment,
+    ToggleCommentsSidebar,
     ConfirmEdit,
     ConfirmEditInPlace,  // Ctrl+Enter - confirms without moving
     ConfirmEditUp,       // Shift+Enter - confirms and moves up

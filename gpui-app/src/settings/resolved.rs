@@ -299,6 +299,7 @@ mod tests {
                 default_font_size: Setting::Inherit,
                 show_gridlines: Setting::Inherit,
                 show_format_bar: Setting::Inherit,
+                show_comment_previews: Setting::Inherit,
             },
             editing: crate::settings::user::EditingSettings {
                 enter_behavior: Setting::Inherit,

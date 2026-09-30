@@ -31,6 +31,7 @@ pub enum TokenKey {
     GridBg,
     GridLines,
     GridLinesBold,
+    FreezeDivider,
 
     // Headers
     HeaderBg,
@@ -152,6 +153,7 @@ impl TokenKey {
         TokenKey::GridBg,
         TokenKey::GridLines,
         TokenKey::GridLinesBold,
+        TokenKey::FreezeDivider,
         // Headers
         TokenKey::HeaderBg,
         TokenKey::HeaderText,
@@ -364,6 +366,7 @@ pub fn ledger_dark_theme() -> Theme {
     tokens.insert(TokenKey::GridBg, bg_dark);
     tokens.insert(TokenKey::GridLines, rgba(0x1c233040));  // Very subtle (25% opacity)
     tokens.insert(TokenKey::GridLinesBold, grid_bold);
+    tokens.insert(TokenKey::FreezeDivider, rgb(0x94a3b8));
 
     // Headers - slightly lifted from cells, guides the eye
     let header_bg = rgb(0x1a1f2a);  // Lifted from 0x171c26
@@ -512,6 +515,7 @@ pub fn slate_dark_theme() -> Theme {
     tokens.insert(TokenKey::GridBg, grid_900);
     tokens.insert(TokenKey::GridLines, rgba(0x33415540));
     tokens.insert(TokenKey::GridLinesBold, grid_700);
+    tokens.insert(TokenKey::FreezeDivider, rgb(0x94a3b8));
 
     // Headers
     tokens.insert(TokenKey::HeaderBg, grid_800);
@@ -671,6 +675,7 @@ pub fn ledger_light_theme() -> Theme {
     tokens.insert(TokenKey::GridBg, white);
     tokens.insert(TokenKey::GridLines, rgba(0xd1d5dc60));  // More visible (38% opacity)
     tokens.insert(TokenKey::GridLinesBold, border);
+    tokens.insert(TokenKey::FreezeDivider, rgb(0x4b5563));
 
     // Headers
     tokens.insert(TokenKey::HeaderBg, bg_header);
@@ -814,6 +819,7 @@ pub fn visicalc_theme() -> Theme {
     tokens.insert(TokenKey::GridBg, bg);
     tokens.insert(TokenKey::GridLines, rgb(0x1d4d1d));  // solid dim green — alpha over bright green read as graph paper
     tokens.insert(TokenKey::GridLinesBold, rgb(0x275f27));
+    tokens.insert(TokenKey::FreezeDivider, rgb(0x5cb85c));
 
     // Headers
     tokens.insert(TokenKey::HeaderBg, green_bg); // distinct surface — headers were melting into the grid
@@ -974,6 +980,7 @@ pub fn catppuccin_theme() -> Theme {
     tokens.insert(TokenKey::GridBg, rgb(0xffffff));  // Pure white cells
     tokens.insert(TokenKey::GridLines, rgba(0xccd0da40));  // Subtle gridlines
     tokens.insert(TokenKey::GridLinesBold, surface0);
+    tokens.insert(TokenKey::FreezeDivider, rgb(0x6c6f85));
 
     // Headers
     tokens.insert(TokenKey::HeaderBg, mantle);

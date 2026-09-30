@@ -76,6 +76,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // Editing
         KeyBinding::new("f2", StartEdit, Some("Spreadsheet")),
+        KeyBinding::new("shift-f2", AddEditComment, Some("Spreadsheet")),
         KeyBinding::new("enter", ConfirmEdit, Some("Spreadsheet")),
         KeyBinding::new("shift-enter", ConfirmEditUp, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "enter"), ConfirmEditInPlace, Some("Spreadsheet")),
@@ -183,6 +184,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
         // View
         KeyBinding::new(&kb_shift(m, "p"), ToggleCommandPalette, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "p"), ToggleCommandPalette, Some("CommentSearch")),
         KeyBinding::new(&kb(m, "k"), QuickOpen, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "i"), ToggleInspector, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, "y"), ShowHistoryPanel, Some("Spreadsheet")),

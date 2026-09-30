@@ -111,6 +111,8 @@ pub struct ImportResult {
     pub merges_imported: usize,
     /// Conditional-formatting rules translated into engine rules
     pub cond_formats_imported: usize,
+    /// Plain cell comments (Excel Notes), including comments on blank cells.
+    pub comments_imported: usize,
     /// Merged regions dropped due to overlap with existing merges
     pub merges_dropped_overlap: usize,
     /// Merged regions dropped due to invalid cell references
@@ -207,6 +209,9 @@ impl ImportResult {
         ];
         if self.formulas_imported > 0 {
             parts.push(format!("{} formulas", self.formulas_imported));
+        }
+        if self.comments_imported > 0 {
+            parts.push(format!("{} comments", self.comments_imported));
         }
         if self.styles_imported > 0 {
             parts.push(format!("Formatting: {} cells ({} styles)",
@@ -389,6 +394,7 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 /// Import an Excel file with options (xlsx, xls, xlsb, ods)
 pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Workbook, ImportResult), String> {
     let start_time = Instant::now();
+    let comments = crate::xlsx_comments::read(path)?;
 
     let mut workbook: Sheets<_> = open_workbook_auto(path)
         .map_err(|e| format!("Failed to open Excel file: {}", e))?;
@@ -742,6 +748,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 
     // Import formatting from styles.xml and per-cell style IDs
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
+    result.comments_imported = crate::xlsx_comments::apply(comments, &mut workbook)?;
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)
@@ -1172,6 +1179,7 @@ pub struct ExportResult {
     pub autofilter_exported: bool,
     /// Number of hidden rows exported
     pub hidden_rows_exported: usize,
+    pub comments_exported: usize,
 }
 
 impl ExportResult {
@@ -1183,6 +1191,9 @@ impl ExportResult {
         ];
         if self.formulas_exported > 0 {
             parts.push(format!("{} formulas", self.formulas_exported));
+        }
+        if self.comments_exported > 0 {
+            parts.push(format!("{} comments", self.comments_exported));
         }
         parts.join(", ")
     }
@@ -1401,9 +1412,13 @@ pub fn export(
 ) -> Result<ExportResult, String> {
     let start_time = Instant::now();
     let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
-    xlsx_workbook
-        .save(path)
-        .map_err(|e| format!("Failed to save XLSX file: {}", e))?;
+    if result.comments_exported == 0 {
+        xlsx_workbook.save(path).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
+    } else {
+        let bytes = xlsx_workbook.save_to_buffer().map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
+        let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
+        std::fs::write(path, bytes).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
+    }
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok(result)
 }
@@ -1418,6 +1433,7 @@ pub fn export_to_buffer(
     let bytes = xlsx_workbook
         .save_to_buffer()
         .map_err(|e| format!("Failed to serialize XLSX: {}", e))?;
+    let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
 }
@@ -1483,6 +1499,7 @@ fn build_export(
         result.formulas_as_values += as_values;
         result.converted_formulas.extend(converted);
         result.precision_warnings.extend(precision);
+        result.comments_exported += crate::xlsx_comments::write(sheet, worksheet)?;
 
         // Apply layout (column widths, row heights, frozen panes)
         if let Some(layout) = layout {
