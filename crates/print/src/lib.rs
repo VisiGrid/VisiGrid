@@ -8,6 +8,11 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
+#[cfg(feature = "pdf")]
+pub mod pdf;
+#[cfg(feature = "pdf")]
+pub mod snapshot;
+
 pub const GRID_UNIT_PT: f64 = 72.0 / 96.0;
 pub const MAX_PAGES: usize = 1_000;
 pub const MAX_CELL_POSITIONS: usize = 1_000_000;

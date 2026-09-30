@@ -1438,7 +1438,7 @@ impl History {
             return Err(PreviewBuildError::TooManyActions(i));
         }
 
-        // Large workbooks keep no load-time snapshot to replay from.
+        // No snapshot has been captured to replay from.
         let base = base.ok_or(PreviewBuildError::NoBaseSnapshot)?;
 
         // REPLAY GATE: Scan [0..i) for unsupported actions BEFORE starting replay.
@@ -1958,7 +1958,7 @@ pub enum PreviewBuildError {
     /// Replay detected an invariant violation (data integrity failure)
     /// Preview must abort - no partial previews allowed
     InvariantViolation(String),
-    /// The workbook was too large to keep a load-time copy to replay from
+    /// No load-time snapshot was captured to replay from
     NoBaseSnapshot,
 }
 

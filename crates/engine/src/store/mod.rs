@@ -220,7 +220,10 @@ mod differential {
                 }
             }
             11 => {
-                let (at, n) = (rng.below(ROWS), rng.below(40) + 1);
+                // Half the time right at a chunk boundary (1,024 rows), where
+                // the chunks kept whole meet the ones rebuilt.
+                let at = if rng.below(2) == 0 { (rng.below(3) + 1) * 1024 + rng.below(5) - 2 } else { rng.below(ROWS) };
+                let n = rng.below(40) + 1;
                 if rng.below(2) == 0 {
                     a.insert_rows(at, n, ROW_LIMIT);
                     b.insert_rows(at, n, ROW_LIMIT);
@@ -262,6 +265,65 @@ mod differential {
         for seed in 1..=24u64 {
             run(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 400);
         }
+    }
+
+    /// Phase 3: clones share chunks and pool pages until written. Fork a
+    /// store mid-run, then edit both copies with different operations: each
+    /// must still match its own hash-store oracle, so a write that leaked
+    /// through a shared chunk or page fails on one side or the other.
+    fn run_forked(seed: u64, steps: usize) {
+        let mut rng = Rng(seed);
+        let (mut hash, mut columns) = (HashStore::default(), ColumnStore::default());
+        for _ in 0..steps / 2 {
+            step(&mut rng, &mut hash, &mut columns);
+        }
+        let (mut hash2, mut columns2) = (hash.clone(), columns.clone());
+        let mut rng2 = Rng(seed ^ 0xD1B5_4A32_D192_ED03);
+        for i in 0..steps {
+            step(&mut rng, &mut hash, &mut columns);
+            step(&mut rng2, &mut hash2, &mut columns2);
+            if i % 25 == 0 || i + 1 == steps {
+                assert_eq!(hash.len(), columns.len(), "original len after step {i} (seed {seed})");
+                assert_eq!(hash2.len(), columns2.len(), "clone len after step {i} (seed {seed})");
+                assert_eq!(snapshot(&hash), snapshot(&columns), "original after step {i} (seed {seed})");
+                assert_eq!(snapshot(&hash2), snapshot(&columns2), "clone after step {i} (seed {seed})");
+            }
+        }
+        // Once the other copy is gone, the survivor owns everything again.
+        drop((hash2, columns2));
+        for _ in 0..50 {
+            step(&mut rng, &mut hash, &mut columns);
+        }
+        assert_eq!(snapshot(&hash), snapshot(&columns), "survivor (seed {seed})");
+    }
+
+    #[test]
+    fn clones_are_independent() {
+        for seed in 1..=16u64 {
+            run_forked(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 300);
+        }
+    }
+
+    /// A clone that is never written shares everything, including computed
+    /// results: results written to the original after the clone stay there.
+    #[test]
+    fn computed_results_do_not_leak_between_clones() {
+        use crate::formula::eval::Value;
+        let mut store = ColumnStore::default();
+        for r in 0..3000 {
+            let mut c = Cell::default();
+            c.set(&format!("=A{}+1", r + 1));
+            store.upsert(r, 1, Cell::default, move |cell| *cell = c);
+            store.set_computed(r, 1, Value::Number(r as f64));
+        }
+        let snap = store.clone();
+        store.set_computed(5, 1, Value::Number(-1.0));
+        store.clear_all_computed();
+        store.set_computed(2999, 1, Value::Text("new".into()));
+        assert_eq!(snap.with_computed(5, 1, |v| v.cloned()), Some(Value::Number(5.0)));
+        assert_eq!(snap.with_computed(2999, 1, |v| v.cloned()), Some(Value::Number(2999.0)));
+        assert_eq!(snap.computed_count(), 3000);
+        assert_eq!(store.computed_count(), 1);
     }
 
     /// Longer run for local soak testing: `cargo test -- --ignored`.

@@ -120,7 +120,7 @@ impl Spreadsheet {
                 format!("Preview aborted — data integrity error: {}", msg)
             }
             crate::history::PreviewBuildError::NoBaseSnapshot => {
-                "Preview unavailable for workbooks this large".to_string()
+                "Preview unavailable — no starting snapshot to replay from".to_string()
             }
         })?;
 
