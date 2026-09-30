@@ -223,17 +223,12 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         // Editing actions
-        // F2: Toggle Navigation ↔ Edit, or toggle Caret/Point in Formula mode
+        // F2: enter text editing, or toggle Caret/Point in Formula mode
         .on_action(cx.listener(|this, _: &StartEdit, window, cx| {
             if this.guard_terminal_focus(window, cx, "StartEdit") { return; }
             if this.mode.is_formula() {
                 // In Formula mode: F2 toggles between Caret and Point submode
                 this.toggle_formula_nav_mode(cx);
-                return;
-            }
-            if this.mode.is_editing() {
-                // Edit → Navigation: cancel without committing (same as Escape)
-                this.cancel_edit(cx);
                 return;
             }
             this.start_edit(cx);

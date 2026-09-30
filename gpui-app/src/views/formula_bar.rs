@@ -252,6 +252,8 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                         this.start_edit(cx);
                     }
 
+                    this.text_edit_caret_mode = true;
+
                     // Rebuild cache if needed for hit-testing
                     this.maybe_rebuild_formula_bar_cache(window);
 

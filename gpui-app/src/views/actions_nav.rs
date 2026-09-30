@@ -190,8 +190,11 @@ pub(crate) fn bind(
                     // Point mode: ref-picking
                     this.formula_move_ref(0, -1, cx);
                 }
+            } else if this.mode == Mode::Edit && this.text_edit_caret_mode {
+                this.move_edit_cursor_left(cx);
+                this.update_edit_scroll(window, cx);
             } else if this.mode.is_editing() {
-                // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                // Direct entry: commit-on-arrow for fast data entry.
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_left(cx);
@@ -250,8 +253,11 @@ pub(crate) fn bind(
                     // Point mode: ref-picking
                     this.formula_move_ref(0, 1, cx);
                 }
+            } else if this.mode == Mode::Edit && this.text_edit_caret_mode {
+                this.move_edit_cursor_right(cx);
+                this.update_edit_scroll(window, cx);
             } else if this.mode.is_editing() {
-                // Edit mode: commit-on-arrow (fast data entry, Excel-like)
+                // Direct entry: commit-on-arrow for fast data entry.
                 this.nav_perf.mark_key_action();
                 this.tab_chain_origin_col = None;  // Arrow breaks tab chain
                 this.confirm_edit_and_move_right(cx);
