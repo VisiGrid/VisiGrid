@@ -175,7 +175,14 @@ Preview files in a read-only terminal grid with `vgrid peek data.parquet`.
 CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
 Use `--shape` for dimensions, `--json` for structured output, or `--plain` for
 a text table. Previews default to 5,000 rows; `--max-rows` changes the limit.
-See [terminal viewer parity and next steps](docs/tui-parity.md).
+In the viewer, `/` searches, `[` `]` sort, `F` shows a column's frequencies and
+`P` builds a pivot. See [terminal viewer parity and next steps](docs/tui-parity.md).
+
+Summarize a file without opening it: `vgrid pivot sales.csv --rows Region
+--column Month --values sum:Amount` prints the pivot (`--csv` or `--json` for
+machines). With `--session` the pivot is created on a new sheet of the running
+workbook instead, and `vgrid pivot --session --refresh` recomputes it; agents get
+the same through the `create_pivot` and `refresh_pivot` MCP tools.
 
 For users who treat spreadsheets as part of a larger system, VisiGrid includes a full CLI and headless execution mode built on the same engine.
 

@@ -184,6 +184,8 @@ impl McpServer {
             "delete_columns" => self.tool_structure(args, "delete_cols"),
             "add_sheet" => self.tool_structure(args, "add_sheet"),
             "rename_sheet" => self.tool_structure(args, "rename_sheet"),
+            "create_pivot" => self.tool_structure(args, "create_pivot"),
+            "refresh_pivot" => self.tool_structure(args, "refresh_pivot"),
             "undo" => self.tool_history(args, false),
             "redo" => self.tool_history(args, true),
             "plan_script" => self.tool_plan_script(args),
@@ -525,6 +527,34 @@ impl McpServer {
                 sheet,
                 name: require_str(args, "name")?.to_string(),
             },
+            "create_pivot" => {
+                let names = |key: &str| -> Result<Vec<String>, String> {
+                    match args.get(key) {
+                        None | Some(Value::Null) => Ok(Vec::new()),
+                        Some(Value::String(s)) => Ok(vec![s.clone()]),
+                        Some(Value::Array(a)) => a
+                            .iter()
+                            .map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("`{}` must be header names", key)))
+                            .collect(),
+                        Some(_) => Err(format!("`{}` must be a list of header names", key)),
+                    }
+                };
+                let values = match args.get("values") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value::<Vec<visigrid_protocol::PivotValueSpec>>(v.clone())
+                        .map_err(|e| format!("`values` must be [{{\"field\": \"Amount\", \"aggregation\": \"sum\"}}]: {}", e))?,
+                };
+                StructureOp::CreatePivot {
+                    sheet,
+                    source: args.get("source").and_then(|v| v.as_str()).map(str::to_string),
+                    rows: names("rows")?,
+                    column: args.get("column").and_then(|v| v.as_str()).map(str::to_string),
+                    values,
+                }
+            }
+            "refresh_pivot" => StructureOp::RefreshPivot {
+                pivot: args.get("pivot").and_then(|v| v.as_str()).map(str::to_string),
+            },
             other => return Err(format!("unknown structure op: {}", other)),
         };
 
@@ -537,8 +567,16 @@ impl McpServer {
                 .map_err(|e| e.to_string());
         }
 
+        let is_pivot = matches!(op, StructureOp::CreatePivot { .. } | StructureOp::RefreshPivot { .. });
         let mut client = self.connect(args)?;
-        let r = client.structure(op).map_err(session_error_text)?;
+        let r = client.structure(op).map_err(|e| {
+            let text = session_error_text(e);
+            if is_pivot && text.contains("malformed_message") {
+                format!("{text}. This VisiGrid is older than pivot support; ask the user to update it.")
+            } else {
+                text
+            }
+        })?;
         serde_json::to_string_pretty(&json!({
             "applied": r.description,
             "revision": r.revision,
@@ -1144,6 +1182,52 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "create_pivot",
+            "title": "Create a pivot table",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
+            "description": "Summarize a table into a pivot on a new sheet (named Pivot, Pivot (2), …). The source's first row must be headers; name fields by header text (case-insensitive). The pivot stays linked to its source: call refresh_pivot after the source changes. One undo step in the GUI.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "A1 range including the header row, e.g. A1:F500. Omit to use the sheet's whole data area from A1." },
+                    "rows": { "type": "array", "items": { "type": "string" }, "description": "Row fields, outermost first" },
+                    "column": { "type": "string", "description": "Optional column field (one)" },
+                    "values": {
+                        "type": "array",
+                        "description": "Value fields",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": { "type": "string" },
+                                "aggregation": { "type": "string", "enum": ["sum", "count", "distinct_count", "average", "min", "max"], "description": "Omit for the default: sum for a numeric column, count otherwise" }
+                            },
+                            "required": ["field"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "sheet": { "type": "integer", "description": "0-based index of the source sheet; omit for the active sheet" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "refresh_pivot",
+            "title": "Refresh pivot tables",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            "description": "Recompute a pivot table from its source, or every pivot when `pivot` is omitted. Fails without changing anything if a source header was renamed or moved.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pivot": { "type": "string", "description": "Pivot name (e.g. PivotTable1) or id; omit to refresh all" },
+                    "dry_run": { "type": "boolean", "description": "Preview without applying" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "plan_script",
             "title": "Propose workbook changes",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
@@ -1357,6 +1441,8 @@ mod tests {
                 "delete_columns",
                 "add_sheet",
                 "rename_sheet",
+                "create_pivot",
+                "refresh_pivot",
                 "plan_script",
                 "get_plan",
                 "list_plan_changes",

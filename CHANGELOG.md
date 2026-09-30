@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Terminal
+
+- **`vgrid pivot`** summarizes a CSV, TSV, Excel, ODS, Parquet or `.sheet` file from the command line: `vgrid pivot sales.csv --rows Region --column Month --values sum:Amount,count:Order`. Fields are named by header text; aggregations are sum, count, distinct, avg, min and max. It prints a table, or `--csv` / `--json`. Nothing is written to the file. It uses the desktop's pivot engine, so totals, blanks and errors come out the same, and it refuses a Parquet file too large to load whole rather than summarizing part of it.
+- **Pivots in a running workbook.** `vgrid pivot --session …` creates the pivot on a new sheet of the open workbook (the desktop app or `vgrid serve`), and `vgrid pivot --session --refresh [name]` recomputes one or all. In the desktop app each is one undo step, attributed to the client. Agents get the same as the `create_pivot` and `refresh_pivot` MCP tools, and the session protocol gains `create_pivot` / `refresh_pivot` structure ops.
+- **`vgrid peek` can search and summarize.** `/` searches every cell and `n`/`N` step through the highlighted matches; `[` and `]` sort by the cursor column (numbers by value, blanks last) and `R` restores file order; `F` opens a column's frequency table and `P` a pivot (`rows=Region values=sum:Amount`) as new tabs, and `q` on those tabs goes back. These work on the rows peek loaded, and the tab names say so when the preview is truncated.
+
 ## 0.40.0
 
 ### Export to PDF

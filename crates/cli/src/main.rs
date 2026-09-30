@@ -14,6 +14,7 @@ mod serve;
 mod share;
 mod mcp;
 mod parse;
+mod pivot;
 mod recon;
 mod replay;
 mod scripts;
@@ -546,6 +547,72 @@ Examples:
         /// Column width for display (default: 12)
         #[arg(long, default_value = "12")]
         width: usize,
+    },
+
+    /// Summarize a table as a pivot (file → stdout, or into a running session)
+    #[command(after_help = "\
+Examples:
+  vgrid pivot sales.csv --rows Region --values sum:Amount
+  vgrid pivot sales.csv --rows Region,Rep --column Month --values sum:Amount,count:Order
+  vgrid pivot report.xlsx --sheet Data --range A1:F900 --rows Vendor --values avg:Days
+  vgrid pivot orders.parquet --rows Status --values distinct:Customer --json
+  vgrid pivot sales.csv --rows Region --values Amount --csv > by_region.csv
+
+  vgrid pivot --session --rows Region --values sum:Amount   # new sheet in the open workbook
+  vgrid pivot --session --refresh                           # refresh every pivot
+  vgrid pivot --session --refresh PivotTable1
+
+Fields are named by header text (case-insensitive); the first row of the
+source is the header row. Aggregations: sum, count, distinct, avg, min, max.
+A bare value field (--values Amount) sums a numeric column and counts any
+other, as the desktop's field list does.
+
+With a file, nothing is written: the pivot is computed and printed.
+With --session, the pivot is created on a new sheet of the running workbook
+(one undo step in the GUI) and stays linked to its source.")]
+    Pivot {
+        /// File to summarize (omit with --session)
+        file: Option<PathBuf>,
+
+        /// Row fields, outermost first (comma-separated or repeated)
+        #[arg(long, short = 'r')]
+        rows: Vec<String>,
+
+        /// Column field (one)
+        #[arg(long, short = 'c')]
+        column: Option<String>,
+
+        /// Value fields as agg:Field (comma-separated or repeated)
+        #[arg(long, short = 'v')]
+        values: Vec<String>,
+
+        /// Source sheet: name or 0-based index (with --session: index)
+        #[arg(long)]
+        sheet: Option<String>,
+
+        /// Source range including the header row (default: the sheet's data from A1)
+        #[arg(long)]
+        range: Option<String>,
+
+        /// Delimiter for text files: single char, or tab, comma, pipe, semicolon
+        #[arg(long)]
+        delimiter: Option<String>,
+
+        /// Output JSON (headers + typed rows)
+        #[arg(long, conflicts_with = "csv")]
+        json: bool,
+
+        /// Output CSV (unformatted numbers)
+        #[arg(long)]
+        csv: bool,
+
+        /// Send to a running session instead of reading a file (optional session ID)
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        session: Option<String>,
+
+        /// With --session: refresh a pivot by name, or all pivots when no name is given
+        #[arg(long, num_args = 0..=1, default_missing_value = "", requires = "session")]
+        refresh: Option<String>,
     },
 
     /// View a file in the terminal — delimited text, Parquet, Excel, ODS, .sheet/.vgrid
@@ -1855,6 +1922,23 @@ fn main() -> ExitCode {
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),
         Some(Commands::View { session, range, sheet, follow, width }) => {
             cmd_view(session, range, sheet, follow, width)
+        }
+        Some(Commands::Pivot { file, rows, column, values, sheet, range, delimiter, json, csv, session, refresh }) => {
+            let args = pivot::PivotArgs { rows, column, values, sheet, range };
+            match (file, session) {
+                (Some(_), Some(_)) => Err(CliError::args("give a file or --session, not both")),
+                (None, None) => Err(CliError::args("give a file to summarize, or --session for the running workbook")
+                    .with_hint("vgrid pivot sales.csv --rows Region --values sum:Amount")),
+                (None, Some(id)) => {
+                    let id = Some(id).filter(|s| !s.is_empty());
+                    let refresh = refresh.map(|r| Some(r).filter(|s| !s.is_empty()));
+                    pivot::cmd_pivot_session(id.as_deref(), &args, refresh)
+                }
+                (Some(file), None) => {
+                    let format = if json { pivot::PivotFormat::Json } else if csv { pivot::PivotFormat::Csv } else { pivot::PivotFormat::Table };
+                    pivot::cmd_pivot_file(&file, &args, delimiter.as_deref(), format)
+                }
+            }
         }
         Some(Commands::Peek {
             file, headers, no_headers, sheet, max_rows,
