@@ -2390,6 +2390,7 @@ impl Spreadsheet {
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
             CommandId::ExportPdf => self.show_pdf_export(cx),
+            CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
 

@@ -80,8 +80,8 @@ destination, and saving the PDF. The successful-export action reads **Export aga
   error instead of an incomplete image; the generated PDF can still be exported.
 
 This is an incremental export milestone, not the full print specification.
-Margins are fixed at 0.5 inches; there is no native Print command, workbook-wide
-output, custom margin controls, page-range control, printed headings, editable
+Margins are fixed at 0.5 inches; there is no workbook-wide
+output, custom margin controls, PDF export page-range control, printed headings, editable
 page breaks, or repeated-column controls in the dialog.
 Center-across-selection fidelity and shared grid/PDF text metrics still need work.
 External edits after capture do not change the export. **Refresh preview** captures
@@ -264,18 +264,94 @@ currency symbols, and both page numbers. Both rendered pages were visually
 inspected for clipping, spacing, and header/footer placement. This does not
 qualify macOS, Windows, native printers, or arbitrary workbook rendering.
 
+## Linux system printing
+
+**File → Print…** or **Ctrl+P** opens the existing preview. Its primary Print
+button (or Enter) opens the system print dialog. **File → Export PDF…** keeps
+Enter bound to exporting; Ctrl+P and the Print button work from either preview.
+The command palette also exposes Print.
+
+The optional `native-print` adapter uses the
+[XDG desktop Print portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Print.html)
+through ashpd. `PreparePrint` collects the printer, copies, page ranges and other
+printer options. VisiGrid seeds the paper, orientation, margins and 100% scale
+from the preview. A subsequent `Print` call sends the exact cached PDF and the
+returned token, without showing a second dialog or rerendering the workbook.
+The adapter encodes PreparePrint options directly and reads the token plus output
+format from its response: ashpd 0.13.13 uses incompatible option names/format
+casing in its typed PreparePrint API. A regression test covers the portal's
+underscore-separated option keys and GTK's lowercase `pdf` response.
+Changing paper, scale or number-up in the system dialog can change the physical
+output; change layout in the preview first when checking pagination.
+
+While the system dialog is active, the preview's layout controls and Close button
+are disabled. Cancel in the system dialog to return to the same preview. A
+cancelled request is not an error. A successful request says **Print request
+submitted. Check your printer’s queue.** This acknowledges submission, not
+physical completion. Subsequent job management belongs to the system queue.
+Failures are reported in the preview; technical details go to the application
+log. Some backends report dismissing the dialog with Escape as an unsuccessful
+request instead of cancellation; this produces the neutral **Print request
+wasn’t completed** message. There are no automatic retries that could duplicate a job.
+
+The PDF is staged in an anonymous, mode-0600 temporary file and passed as a file
+descriptor, kept open through the portal response. No named spool file remains.
+Printer choices are not saved in the workbook and printing does not edit cells
+or commit unapplied print setup.
+
+Linux requires a running `xdg-desktop-portal` and a backend implementing its Print
+interface. If unavailable, Export PDF remains usable. This initial adapter has
+no exported Wayland parent handle, so the compositor manages the system dialog
+as a separate window. macOS and Windows native printing remain unimplemented;
+the preview keeps Export PDF as its primary action and disables the Print button
+there, with a hint to print the exported document using a PDF viewer.
+
+The transport tests cover cancellation before submission, exact PDF bytes,
+temporary-file permissions, paper/orientation conversion, and unsuccessful
+submission. The `system_print` example exercises the real portal independently
+of the GUI:
+
+```sh
+cargo run -p visigrid-print --features native-print --example system_print -- report.pdf letter
+```
+
+For manual QA, cancel once, then choose **Print to File** with a fresh PDF output
+path. A file-printer check does not qualify physical printers, duplex, copy
+counts, or printer-specific page-range processing.
+
+Linux desktop QA (2026-09-30, GTK backend, portal v4): File → Print, Ctrl+P and
+the command palette open preview; Ctrl+P/Enter open the native dialog from the Print entry.
+Cancel returns to the same preview, and a subsequent request succeeds. Export
+PDF retains its own primary action and Enter-to-save behavior. Ctrl+Shift+P
+still opens the command palette. The footer remains usable at 1000×800, including
+the Open PDF button and submission message. Print to File produced four A4 pages
+byte-for-byte identical to an export from the same cached preview (38,906 bytes;
+SHA-256 `0766e13fc9fd020d39cc6359e5ab0e0964f3374237282c0f49f0113b76d5ab1d`).
+No physical printer job was submitted during these checks.
+The final rebuilt app also verified the neutral unsuccessful-request message
+after dismissing GTK's dialog with Escape, with preview controls reenabled.
+
+Automated verification: all 33 tests passed with `cargo test -p visigrid-print
+--all-features`, and the Linux desktop build passed. The manual helper also
+returned a clear unavailable-service error against a nonexistent session bus,
+without opening a dialog or submitting a job.
+
+Strict lint verification: `cargo clippy -p visigrid-print --all-features
+--all-targets --no-deps -- -D warnings` passed. Existing warnings in dependency
+crates are outside this targeted lint check.
+
 ## Remaining print roadmap
 
 1. Arbitrary repeated-row ranges and repeated columns, custom margins/scale,
-   printed headings, and page-range controls. Preview and PDF share the exact
+   printed headings, and PDF export page-range controls. Preview and PDF share the exact
    encoded document.
 2. Editable page layout and manual page breaks, with matching pagination semantics.
 3. Exact shared formatting semantics for all grid cases (including center across
    selection and extent growth from text spill), richer clipping locations and
    blank-page diagnostics.
-4. XLSX print-setup import/export and platform-specific print integration.
+4. XLSX print-setup import/export and macOS/Windows print integration.
 5. Platform QA for font resolution, bidi/CJK output, save dialogs, cancellation,
    and replacement on macOS and Windows. Linux test results do not qualify them.
 
-Native printing requires separate Linux/macOS/Windows adapter spikes and real
-printer QA. The current feature saves PDFs; it does not submit print jobs.
+Physical printer QA remains required on Linux; macOS and Windows require their
+own system-print adapters and platform verification.

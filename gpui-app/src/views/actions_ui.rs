@@ -35,6 +35,10 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ExportJson, _, cx| {
             this.export_json(cx);
         }))
+        .on_action(cx.listener(|this, _: &PrintPreview, window, cx| {
+            if this.guard_terminal_focus(window, cx, "PrintPreview") { return; }
+            this.print_action(cx);
+        }))
         .on_action(cx.listener(|this, _: &ExportPdf, _, cx| {
             this.show_pdf_export(cx);
         }))

@@ -8053,9 +8053,12 @@ dependencies = [
 name = "visigrid-print"
 version = "0.40.0"
 dependencies = [
+ "ashpd",
  "cosmic-text",
+ "futures-lite",
  "hayro",
  "krilla",
+ "smol",
  "tempfile",
  "visigrid-engine",
  "visigrid-io",
