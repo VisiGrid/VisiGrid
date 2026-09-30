@@ -546,7 +546,7 @@ impl EvalResult {
     }
 
     /// Convert result to a number (for arithmetic operations)
-    /// Arrays coerce to their top-left value
+    /// A single-cell array coerces to its value; a larger one is an error
     /// Also parses ISO date strings (2023-11-07) to Excel serial numbers
     pub fn to_number(&self) -> Result<f64, String> {
         match self {
@@ -568,6 +568,7 @@ impl EvalResult {
                 Err(format!("Cannot convert '{}' to number", s))
             }
             EvalResult::Error(e) => Err(e.clone()),
+            EvalResult::Array(arr) if arr.rows() * arr.cols() > 1 => Err(MULTI_CELL.to_string()),
             EvalResult::Array(arr) => arr.top_left().to_number(),
             EvalResult::Empty => Ok(0.0),
         }
@@ -607,6 +608,7 @@ impl EvalResult {
                 else { Err(format!("Cannot convert '{}' to boolean", s)) }
             }
             EvalResult::Error(e) => Err(e.clone()),
+            EvalResult::Array(arr) if arr.rows() * arr.cols() > 1 => Err(MULTI_CELL.to_string()),
             EvalResult::Array(arr) => arr.top_left().to_bool(),
             EvalResult::Empty => Ok(false),
         }
@@ -653,6 +655,12 @@ impl EvalResult {
         }
     }
 }
+
+/// Reading a multi-cell array as one value. This used to take the top-left cell
+/// silently, which was harmless while operators could not produce arrays; now that
+/// =ABS(A1:A3*2) builds one, answering with ABS(A1*2) would be a quiet wrong answer.
+/// Functions that understand arrays read them element by element instead.
+const MULTI_CELL: &str = "#VALUE! Expected a single value, got an array";
 
 pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
@@ -716,151 +724,251 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         }
         Expr::Function { name, args } => evaluate_function(name, args, lookup),
         Expr::BinaryOp { op, left, right } => {
-            let left_result = evaluate(left, lookup);
-            let right_result = evaluate(right, lookup);
-
-            // Check for errors first
-            if let EvalResult::Error(e) = &left_result {
-                return EvalResult::Error(e.clone());
+            // A range operand becomes an array of its cells, and the operator then
+            // applies to each element: =B2:B4>15 is {FALSE;TRUE;TRUE}, and
+            // --(B2:B4>15) is {0;1;1}. This used to be "#VALUE! Array arithmetic
+            // not supported", which ruled out FILTER conditions and the whole
+            // SUMPRODUCT(--(condition)) family.
+            let left_result = operand(left, lookup);
+            let right_result = operand(right, lookup);
+            if matches!(left_result, EvalResult::Array(_)) || matches!(right_result, EvalResult::Array(_)) {
+                return broadcast(*op, &left_result, &right_result);
             }
-            if let EvalResult::Error(e) = &right_result {
-                return EvalResult::Error(e.clone());
+            scalar_binary(*op, left_result, right_result)
+        }
+    }
+}
+
+/// Evaluate an operator's operand. A reference to more than one cell becomes an
+/// array of its typed values; anything else evaluates as usual.
+fn operand<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
+    match expr {
+        Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+            if matches!(sheet, SheetRef::RefError { .. }) {
+                return EvalResult::Error("#REF!".to_string());
             }
+            range_array(lookup, sheet, *start_row, *start_col, *end_row, *end_col)
+        }
+        Expr::WholeRange { .. } => {
+            let bounded = super::whole_range::bound_for_evaluation(expr, lookup);
+            if matches!(bounded, Expr::WholeRange { .. }) {
+                return EvalResult::Error("#VALUE! Array arithmetic not supported".to_string());
+            }
+            operand(&bounded, lookup)
+        }
+        Expr::NamedRange(name) => match lookup.resolve_named_range(name) {
+            Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                range_array(lookup, &SheetRef::Current, start_row, start_col, end_row, end_col)
+            }
+            _ => evaluate(expr, lookup),
+        },
+        _ => evaluate(expr, lookup),
+    }
+}
 
-            match op {
-                // Arithmetic operators - require numbers
-                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => {
-                    let left_val = match left_result.to_number() {
-                        Ok(n) => n,
-                        Err(e) => return EvalResult::Error(e),
-                    };
-                    let right_val = match right_result.to_number() {
-                        Ok(n) => n,
-                        Err(e) => return EvalResult::Error(e),
-                    };
+/// A rectangle of cells as an array of typed values. A single cell stays a scalar.
+fn range_array<L: CellLookup>(
+    lookup: &L,
+    sheet: &SheetRef,
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+) -> EvalResult {
+    let (r0, r1) = (start_row.min(end_row), start_row.max(end_row));
+    let (c0, c1) = (start_col.min(end_col), start_col.max(end_col));
+    if r0 == r1 && c0 == c1 {
+        return EvalResult::from_value(&super::eval_helpers::read_cell_value(lookup, sheet, r0, c0));
+    }
+    let data = (r0..=r1)
+        .map(|r| (c0..=c1).map(|c| super::eval_helpers::read_cell_value(lookup, sheet, r, c)).collect())
+        .collect();
+    EvalResult::Array(Array2D::from_vec(data))
+}
 
-                    let result = match op {
-                        Op::Add => left_val + right_val,
-                        Op::Sub => left_val - right_val,
-                        Op::Mul => left_val * right_val,
-                        Op::Div => {
-                            if right_val == 0.0 {
-                                return EvalResult::Error("#DIV/0!".to_string());
-                            }
-                            left_val / right_val
-                        }
-                        Op::Pow => return super::eval_math::power(left_val, right_val),
+/// Apply an operator element by element over arrays, Excel-style.
+///
+/// A scalar pairs with every element. A single row or column stretches along the
+/// other axis, so a column compared with a row fills a grid. Where two arrays of
+/// different sizes don't overlap, the element is #N/A, as in Excel. An error in one
+/// element stays in that element instead of failing the whole result.
+fn broadcast(op: Op, left: &EvalResult, right: &EvalResult) -> EvalResult {
+    fn dims(v: &EvalResult) -> (usize, usize) {
+        match v {
+            EvalResult::Array(a) => (a.rows(), a.cols()),
+            _ => (1, 1),
+        }
+    }
+    fn size(a: usize, b: usize) -> usize {
+        if a == 1 { b } else if b == 1 { a } else { a.max(b) }
+    }
+    fn pick(v: &EvalResult, (rows, cols): (usize, usize), r: usize, c: usize) -> Option<EvalResult> {
+        match v {
+            EvalResult::Array(a) => {
+                let r = if rows == 1 { 0 } else { r };
+                let c = if cols == 1 { 0 } else { c };
+                a.get(r, c).map(EvalResult::from_value)
+            }
+            other => Some(other.clone()),
+        }
+    }
+    let (ld, rd) = (dims(left), dims(right));
+    let (rows, cols) = (size(ld.0, rd.0), size(ld.1, rd.1));
+    let mut out = Array2D::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let value = match (pick(left, ld, r, c), pick(right, rd, r, c)) {
+                (Some(a), Some(b)) => scalar_binary(op, a, b).to_value(),
+                _ => Value::Error("#N/A".to_string()),
+            };
+            out.set(r, c, value);
+        }
+    }
+    EvalResult::Array(out)
+}
+
+/// One operator applied to two scalar values.
+fn scalar_binary(op: Op, left_result: EvalResult, right_result: EvalResult) -> EvalResult {
+    // Check for errors first
+    if let EvalResult::Error(e) = &left_result {
+        return EvalResult::Error(e.clone());
+    }
+    if let EvalResult::Error(e) = &right_result {
+        return EvalResult::Error(e.clone());
+    }
+
+    match op {
+        // Arithmetic operators - require numbers
+        Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => {
+            let left_val = match left_result.to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let right_val = match right_result.to_number() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+
+            let result = match op {
+                Op::Add => left_val + right_val,
+                Op::Sub => left_val - right_val,
+                Op::Mul => left_val * right_val,
+                Op::Div => {
+                    if right_val == 0.0 {
+                        return EvalResult::Error("#DIV/0!".to_string());
+                    }
+                    left_val / right_val
+                }
+                Op::Pow => return super::eval_math::power(left_val, right_val),
+                _ => unreachable!(),
+            };
+            // Overflow (1E308*10) has no spreadsheet value; Excel says #NUM!.
+            if result.is_finite() {
+                EvalResult::Number(result)
+            } else {
+                EvalResult::Error("#NUM!".to_string())
+            }
+        }
+
+        // Comparison operators
+        Op::Lt | Op::Gt | Op::Eq | Op::LtEq | Op::GtEq | Op::NotEq => {
+            // Empty coercion: blank cells coerce based on the other operand's type.
+            // This matches Excel: blank=0 → TRUE, blank="" → TRUE, blank=FALSE → TRUE.
+            let (left_result, right_result) = match (&left_result, &right_result) {
+                (EvalResult::Empty, EvalResult::Empty) => {
+                    (EvalResult::Number(0.0), EvalResult::Number(0.0))
+                }
+                (EvalResult::Empty, EvalResult::Number(_)) => {
+                    (EvalResult::Number(0.0), right_result)
+                }
+                (EvalResult::Number(_), EvalResult::Empty) => {
+                    (left_result, EvalResult::Number(0.0))
+                }
+                (EvalResult::Empty, EvalResult::Text(_)) => {
+                    (EvalResult::Text(String::new()), right_result)
+                }
+                (EvalResult::Text(_), EvalResult::Empty) => {
+                    (left_result, EvalResult::Text(String::new()))
+                }
+                (EvalResult::Empty, EvalResult::Boolean(_)) => {
+                    (EvalResult::Boolean(false), right_result)
+                }
+                (EvalResult::Boolean(_), EvalResult::Empty) => {
+                    (left_result, EvalResult::Boolean(false))
+                }
+                _ => (left_result, right_result),
+            };
+
+            // Compare based on types - numbers compare numerically, text alphabetically
+            let result = match (&left_result, &right_result) {
+                (EvalResult::Number(a), EvalResult::Number(b)) => {
+                    match op {
+                        Op::Lt => a < b,
+                        Op::Gt => a > b,
+                        Op::Eq => super::eval_helpers::approx_eq(*a, *b),
+                        Op::LtEq => a <= b,
+                        Op::GtEq => a >= b,
+                        Op::NotEq => !super::eval_helpers::approx_eq(*a, *b),
                         _ => unreachable!(),
-                    };
-                    // Overflow (1E308*10) has no spreadsheet value; Excel says #NUM!.
-                    if result.is_finite() {
-                        EvalResult::Number(result)
-                    } else {
-                        EvalResult::Error("#NUM!".to_string())
                     }
                 }
-
-                // Comparison operators
-                Op::Lt | Op::Gt | Op::Eq | Op::LtEq | Op::GtEq | Op::NotEq => {
-                    // Empty coercion: blank cells coerce based on the other operand's type.
-                    // This matches Excel: blank=0 → TRUE, blank="" → TRUE, blank=FALSE → TRUE.
-                    let (left_result, right_result) = match (&left_result, &right_result) {
-                        (EvalResult::Empty, EvalResult::Empty) => {
-                            (EvalResult::Number(0.0), EvalResult::Number(0.0))
-                        }
-                        (EvalResult::Empty, EvalResult::Number(_)) => {
-                            (EvalResult::Number(0.0), right_result)
-                        }
-                        (EvalResult::Number(_), EvalResult::Empty) => {
-                            (left_result, EvalResult::Number(0.0))
-                        }
-                        (EvalResult::Empty, EvalResult::Text(_)) => {
-                            (EvalResult::Text(String::new()), right_result)
-                        }
-                        (EvalResult::Text(_), EvalResult::Empty) => {
-                            (left_result, EvalResult::Text(String::new()))
-                        }
-                        (EvalResult::Empty, EvalResult::Boolean(_)) => {
-                            (EvalResult::Boolean(false), right_result)
-                        }
-                        (EvalResult::Boolean(_), EvalResult::Empty) => {
-                            (left_result, EvalResult::Boolean(false))
-                        }
-                        _ => (left_result, right_result),
-                    };
-
-                    // Compare based on types - numbers compare numerically, text alphabetically
-                    let result = match (&left_result, &right_result) {
-                        (EvalResult::Number(a), EvalResult::Number(b)) => {
-                            match op {
-                                Op::Lt => a < b,
-                                Op::Gt => a > b,
-                                Op::Eq => super::eval_helpers::approx_eq(*a, *b),
-                                Op::LtEq => a <= b,
-                                Op::GtEq => a >= b,
-                                Op::NotEq => !super::eval_helpers::approx_eq(*a, *b),
-                                _ => unreachable!(),
-                            }
-                        }
-                        (EvalResult::Text(a), EvalResult::Text(b)) => {
-                            let a_lower = a.to_lowercase();
-                            let b_lower = b.to_lowercase();
-                            match op {
-                                Op::Lt => a_lower < b_lower,
-                                Op::Gt => a_lower > b_lower,
-                                Op::Eq => a_lower == b_lower,
-                                Op::LtEq => a_lower <= b_lower,
-                                Op::GtEq => a_lower >= b_lower,
-                                Op::NotEq => a_lower != b_lower,
-                                _ => unreachable!(),
-                            }
-                        }
-                        (EvalResult::Boolean(a), EvalResult::Boolean(b)) => {
-                            match op {
-                                Op::Eq => a == b,
-                                Op::NotEq => a != b,
-                                _ => return EvalResult::Error("Cannot compare booleans with < > <= >=".to_string()),
-                            }
-                        }
-                        // Mixed type comparisons - convert to common type
-                        _ => {
-                            // Try numeric comparison first
-                            if let (Ok(a), Ok(b)) = (left_result.to_number(), right_result.to_number()) {
-                                match op {
-                                    Op::Lt => a < b,
-                                    Op::Gt => a > b,
-                                    Op::Eq => super::eval_helpers::approx_eq(a, b),
-                                    Op::LtEq => a <= b,
-                                    Op::GtEq => a >= b,
-                                    Op::NotEq => !super::eval_helpers::approx_eq(a, b),
-                                    _ => unreachable!(),
-                                }
-                            } else {
-                                // Fall back to text comparison
-                                let a = left_result.to_text().to_lowercase();
-                                let b = right_result.to_text().to_lowercase();
-                                match op {
-                                    Op::Lt => a < b,
-                                    Op::Gt => a > b,
-                                    Op::Eq => a == b,
-                                    Op::LtEq => a <= b,
-                                    Op::GtEq => a >= b,
-                                    Op::NotEq => a != b,
-                                    _ => unreachable!(),
-                                }
-                            }
-                        }
-                    };
-                    EvalResult::Boolean(result)
+                (EvalResult::Text(a), EvalResult::Text(b)) => {
+                    let a_lower = a.to_lowercase();
+                    let b_lower = b.to_lowercase();
+                    match op {
+                        Op::Lt => a_lower < b_lower,
+                        Op::Gt => a_lower > b_lower,
+                        Op::Eq => a_lower == b_lower,
+                        Op::LtEq => a_lower <= b_lower,
+                        Op::GtEq => a_lower >= b_lower,
+                        Op::NotEq => a_lower != b_lower,
+                        _ => unreachable!(),
+                    }
                 }
-
-                // String concatenation
-                Op::Concat => {
-                    let left_str = left_result.to_text();
-                    let right_str = right_result.to_text();
-                    EvalResult::Text(format!("{}{}", left_str, right_str))
+                (EvalResult::Boolean(a), EvalResult::Boolean(b)) => {
+                    match op {
+                        Op::Eq => a == b,
+                        Op::NotEq => a != b,
+                        _ => return EvalResult::Error("Cannot compare booleans with < > <= >=".to_string()),
+                    }
                 }
-            }
+                // Mixed type comparisons - convert to common type
+                _ => {
+                    // Try numeric comparison first
+                    if let (Ok(a), Ok(b)) = (left_result.to_number(), right_result.to_number()) {
+                        match op {
+                            Op::Lt => a < b,
+                            Op::Gt => a > b,
+                            Op::Eq => super::eval_helpers::approx_eq(a, b),
+                            Op::LtEq => a <= b,
+                            Op::GtEq => a >= b,
+                            Op::NotEq => !super::eval_helpers::approx_eq(a, b),
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        // Fall back to text comparison
+                        let a = left_result.to_text().to_lowercase();
+                        let b = right_result.to_text().to_lowercase();
+                        match op {
+                            Op::Lt => a < b,
+                            Op::Gt => a > b,
+                            Op::Eq => a == b,
+                            Op::LtEq => a <= b,
+                            Op::GtEq => a >= b,
+                            Op::NotEq => a != b,
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            };
+            EvalResult::Boolean(result)
+        }
+
+        // String concatenation
+        Op::Concat => {
+            let left_str = left_result.to_text();
+            let right_str = right_result.to_text();
+            EvalResult::Text(format!("{}{}", left_str, right_str))
         }
     }
 }

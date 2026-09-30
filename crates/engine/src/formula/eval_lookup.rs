@@ -592,7 +592,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let (range, idx_sheet) = match &args[0] {
                 Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => ((*start_row, *start_col, *end_row, *end_col), sheet.clone()),
                 Expr::CellRef { sheet, col, row, .. } => ((*row, *col, *row, *col), sheet.clone()),
-                _ => return Some(EvalResult::Error("INDEX requires a range as first argument".to_string())),
+                // A computed array: INDEX(FILTER(...),1) is the first match.
+                _ => return Some(index_array(args, lookup)),
             };
             let row_num = match evaluate(&args[1], lookup).to_number() {
                 Ok(n) => n as usize,
@@ -806,7 +807,12 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     EvalResult::Number((end_row.max(start_row) - end_row.min(start_row) + 1) as f64)
                 }
                 Expr::CellRef { .. } => EvalResult::Number(1.0),
-                _ => EvalResult::Error("#VALUE!".to_string()),
+                // A computed array: ROWS(FILTER(...)) counts what FILTER returned.
+                _ => match evaluate(&args[0], lookup) {
+                    EvalResult::Array(a) => EvalResult::Number(a.rows() as f64),
+                    EvalResult::Error(e) => EvalResult::Error(e),
+                    _ => EvalResult::Number(1.0),
+                },
             }
         }
         "COLUMNS" => {
@@ -818,7 +824,12 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     EvalResult::Number((end_col.max(start_col) - end_col.min(start_col) + 1) as f64)
                 }
                 Expr::CellRef { .. } => EvalResult::Number(1.0),
-                _ => EvalResult::Error("#VALUE!".to_string()),
+                // A computed array: ROWS(FILTER(...)) counts what FILTER returned.
+                _ => match evaluate(&args[0], lookup) {
+                    EvalResult::Array(a) => EvalResult::Number(a.cols() as f64),
+                    EvalResult::Error(e) => EvalResult::Error(e),
+                    _ => EvalResult::Number(1.0),
+                },
             }
         }
         "OFFSET" => {
@@ -1086,5 +1097,43 @@ mod strict_type_tests {
             eval("=VLOOKUP(7,A1:B2,2,TRUE)"),
             EvalResult::Text("seven-row".into())
         );
+    }
+}
+
+/// INDEX over a computed array rather than a range.
+fn index_array<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> EvalResult {
+    let array = match evaluate(&args[0], lookup) {
+        EvalResult::Array(a) => a,
+        EvalResult::Error(e) => return EvalResult::Error(e),
+        // A single value is a 1x1 array.
+        other => {
+            let mut a = Array2D::new(1, 1);
+            a.set(0, 0, other.to_value());
+            a
+        }
+    };
+    let index = |i: usize| match evaluate(&args[i], lookup).to_number() {
+        Ok(n) if n >= 1.0 => Ok(n as usize),
+        Ok(_) => Err("#VALUE!".to_string()),
+        Err(e) => Err(e),
+    };
+    let first = match index(1) {
+        Ok(n) => n,
+        Err(e) => return EvalResult::Error(e),
+    };
+    let (row, col) = if args.len() == 3 {
+        match index(2) {
+            Ok(c) => (first, c),
+            Err(e) => return EvalResult::Error(e),
+        }
+    } else if array.rows() == 1 {
+        // With one index, a single-row array is indexed along its columns.
+        (1, first)
+    } else {
+        (first, 1)
+    };
+    match array.get(row - 1, col - 1) {
+        Some(v) if row <= array.rows() && col <= array.cols() => EvalResult::from_value(v),
+        _ => EvalResult::Error("#REF!".to_string()),
     }
 }
