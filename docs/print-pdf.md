@@ -1,6 +1,7 @@
 # Print and PDF implementation
 
-Status: PDF export includes a visual print preview and optional printed gridlines.
+Status: PDF export includes a visual print preview, optional printed gridlines,
+repeated top rows, and per-sheet saved print setup.
 Native printer submission remains separate work.
 
 ## Export a PDF
@@ -15,6 +16,27 @@ Page count, scale, smallest text size, clipping, and font notices appear before
 export. Export saves the same cached PDF bytes shown in preview. Use a filename
 ending in `.pdf`. The receipt and an explicit **Open PDF** button remain visible
 after saving.
+
+**Repeat top rows** adds/removes leading visible rows from the captured print
+area. The displayed source row range repeats on every page. Hidden/filtered
+rows stay omitted; a header boundary cannot split a merge or consume all body
+rows. This first UI supports leading header bands, not arbitrary interior rows.
+
+**Use selection** sets a print area from the current selection (including
+intersecting merges). **Clear print area** returns to automatic bounds. A saved
+area is a source rectangle, so sorting does not pull unrelated cells into it.
+A sorted selection that does not form one source rectangle is rejected.
+Scope can temporarily override a saved area with Active sheet or Selected range.
+Headers must remain a leading band of that scope; incompatible scopes/sorts show
+an error rather than silently repeating other rows.
+
+Page controls edit a temporary preview. **Save setup to sheet** applies paper,
+orientation, scaling, gridlines, page numbers, print area, and repeated rows to
+that sheet as one undoable action. Save the workbook normally to persist it on
+disk. Closing without Save setup discards preview changes; exporting a PDF alone
+does not modify the workbook. Reopening preview uses the sheet's saved area and
+setup. Settings belong to the sheet, follow sheet copies/reordering, and do not
+change formula results or semantic fingerprints.
 
 The dialog identifies the captured sheet, aligns layout controls, and stacks
 settings above the preview in narrower windows. Settings and the preview canvas
@@ -59,9 +81,8 @@ destination, and saving the PDF. The successful-export action reads **Export aga
 
 This is an incremental export milestone, not the full print specification.
 Margins are fixed at 0.5 inches; there is no native Print command, workbook-wide
-output, saved print area, persistent settings, page-range control, printed
-headings, editable page breaks, or repeated-title controls in the dialog.
-The core already supports repeated titles, but that UI remains to be built.
+output, custom margin controls, page-range control, printed headings, editable
+page breaks, or repeated-column controls in the dialog.
 Center-across-selection fidelity and shared grid/PDF text metrics still need work.
 External edits after capture do not change the export. **Refresh preview** captures
 the sheet again; a workbook revision change shows a refresh notice. View-only
@@ -159,6 +180,43 @@ after filtering/sorting. The optional `snapshot` module implements the first wor
 layout API itself does not resolve these inputs.
 Only nonempty displayed text origins belong in `LayoutInput::text`.
 
+## Saved setup storage and structural edits
+
+The engine owns `Sheet::print_setup`. Native schema v10 adds a versioned
+`sheet_print_setup` table; pre-v10 files default to automatic bounds, A4 portrait,
+Fit columns, no gridlines/page numbers/headers. Single-sheet, workbook, metadata,
+and full GUI/CLI native save paths all preserve setup. Unsupported setup versions
+or malformed settings fail to load rather than being silently discarded. Full
+JSON interchange includes the additive `print_setup` field. XLSX/ODS print-setup
+interchange is not implemented in this pass.
+
+Source-coordinate areas and header ranges shift when rows/columns are inserted
+before them, expand for insertions inside, shrink for partial deletions, and
+clear when fully deleted. Insertion at the first row/column shifts the range;
+insertion just after its end does not expand it. Grid bounds clamp shifted ends.
+Desktop structural undo restores the exact prior setup, including a wholly
+deleted range; redo applies the structural edit again. Saving setup uses a small
+before/after settings action rather than cloning the workbook.
+
+Linux setup verification (2026-09-30): 28 print tests, 3 native/JSON setup
+integration tests, 2 engine range tests, and the history identity/replay test
+pass. The native-file regression suite passes 40 tests with one existing ignored
+test. Print-package Clippy passes with `--no-deps --all-features --all-targets
+-- -D warnings`; dependency linting still reports pre-existing engine warnings.
+The desktop build and smoke test cover repeated rows 1:4, gridlines, setup
+undo/redo, A1:F60 print area, saving/reopening a native workbook, and keyboard
+scrolling at 1000×800. A four-page headless PDF contains all 120 transactions
+once with headers on each page; the two-page GUI export contains only the 56
+transactions inside the saved area, also once, with repeated headers. Rendered
+second pages were inspected; the fixture's existing narrow-column clipping is
+reported by preflight.
+
+Existing native-format issue found during reopen QA: `merged_regions` stores
+only the active sheet's merges, and loading applies those merges to sheet 0.
+In a multi-sheet workbook this can clip or misplace merged titles after reopen,
+even though print settings persist correctly. Fixing per-sheet merge storage is
+separate follow-up work; this milestone does not claim to resolve that issue.
+
 ## PDF backend spike
 
 The optional `pdf-spike` feature enables Krilla 0.8.2 (MIT/Apache-2.0) for the
@@ -197,14 +255,14 @@ qualify macOS, Windows, native printers, or arbitrary workbook rendering.
 
 ## Remaining print roadmap
 
-1. Range/title editing, custom margins/scale, printed headings, and page-range
-   controls. Preview and PDF currently share the exact encoded document.
+1. Arbitrary repeated-row ranges and repeated columns, custom margins/scale,
+   printed headings, and page-range controls. Preview and PDF share the exact
+   encoded document.
 2. Editable page layout and manual page breaks, with matching pagination semantics.
 3. Exact shared formatting semantics for all grid cases (including center across
    selection and extent growth from text spill), richer clipping locations and
-   blank-page diagnostics, and repeat-title controls.
-4. Persist settings with native-format migration and structural range tracking;
-   preserve them through CLI/headless saves and exclude them from semantic hashes.
+   blank-page diagnostics.
+4. XLSX print-setup import/export and platform-specific print integration.
 5. Platform QA for font resolution, bidi/CJK output, save dialogs, cancellation,
    and replacement on macOS and Windows. Linux test results do not qualify them.
 

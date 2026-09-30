@@ -480,7 +480,7 @@ pub(crate) fn bind(
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabNext") { return; }
             if this.mode == Mode::ExportPdf {
-                if let Some(state) = this.pdf_export.as_mut() { state.focus = (state.focus + 1) % 6; }
+                if let Some(state) = this.pdf_export.as_mut() { state.focus_option((state.focus + 1) % 12); }
                 cx.notify();
                 return;
             }
@@ -527,7 +527,7 @@ pub(crate) fn bind(
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabPrev") { return; }
             if this.mode == Mode::ExportPdf {
-                if let Some(state) = this.pdf_export.as_mut() { state.focus = (state.focus + 5) % 6; }
+                if let Some(state) = this.pdf_export.as_mut() { state.focus_option((state.focus + 11) % 12); }
                 cx.notify();
                 return;
             }

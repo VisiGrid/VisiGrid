@@ -93,6 +93,7 @@ impl Spreadsheet {
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::InsertRows(count));
         let sheet_index = self.sheet_index(cx);
+        let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Perform the insert through the engine's structural entry point so
         // formulas, validations, and named ranges follow the moved cells.
@@ -134,6 +135,7 @@ impl Spreadsheet {
             sheet_index,
             at_row,
             count,
+            print_setup_before,
             formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
@@ -147,6 +149,7 @@ impl Spreadsheet {
     pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::DeleteRows(count));
         let sheet_index = self.sheet_index(cx);
+        let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Capture cells to be deleted for undo
         // Only cells that exist can be deleted, so ask the sparse store rather
@@ -199,6 +202,7 @@ impl Spreadsheet {
             count,
             deleted_cells,
             deleted_row_heights,
+            print_setup_before,
             formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
@@ -219,6 +223,7 @@ impl Spreadsheet {
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::InsertCols(count));
         let sheet_index = self.sheet_index(cx);
+        let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Perform the insert
         let rewrites = match self.workbook.update(cx, |wb, _| {
@@ -254,6 +259,7 @@ impl Spreadsheet {
             sheet_index,
             at_col,
             count,
+            print_setup_before,
             formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 
@@ -267,6 +273,7 @@ impl Spreadsheet {
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::DeleteCols(count));
         let sheet_index = self.sheet_index(cx);
+        let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Capture cells to be deleted for undo
         // See delete_rows: sparse lookup, not a full-column walk.
@@ -313,6 +320,7 @@ impl Spreadsheet {
             count,
             deleted_cells,
             deleted_col_widths,
+            print_setup_before,
             formula_rewrites: rewrites.iter().map(|(si, r, c, old, _)| (*si, *r, *c, old.clone())).collect(),
         });
 

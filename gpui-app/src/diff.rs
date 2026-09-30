@@ -494,7 +494,8 @@ fn process_action(
         }
 
         // Skip column/row sizing and visibility changes (visual only)
-        UndoAction::ColumnWidthSet { .. }
+        UndoAction::PrintSetupChanged { .. }
+        | UndoAction::ColumnWidthSet { .. }
         | UndoAction::RowHeightSet { .. }
         | UndoAction::RowVisibilityChanged { .. }
         | UndoAction::ColVisibilityChanged { .. }

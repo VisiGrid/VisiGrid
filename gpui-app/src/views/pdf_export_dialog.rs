@@ -2,7 +2,7 @@ use crate::ui::{dialog_header_with_subtitle, modal_overlay, Button, DialogFrame}
 use crate::{app::Spreadsheet, theme::TokenKey};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use visigrid_print::{Paper, Scale};
+use visigrid_engine::print_setup::{PrintPaper as Paper, PrintScale as Scale};
 
 pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
     let Some(state) = &app.pdf_export else {
@@ -28,7 +28,9 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
     let labels = [
         (
             "Scope",
-            if state.selection_only {
+            if state.use_print_area {
+                "Print area"
+            } else if state.selection_only {
                 "Selected range"
             } else {
                 "Active sheet"
@@ -36,7 +38,7 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         ),
         (
             "Paper",
-            match state.settings.paper {
+            match state.setup.paper {
                 Paper::A4 => "A4",
                 Paper::Letter => "Letter",
                 Paper::Legal => "Legal",
@@ -44,7 +46,7 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         ),
         (
             "Orientation",
-            if state.settings.landscape {
+            if state.setup.landscape {
                 "Landscape"
             } else {
                 "Portrait"
@@ -52,7 +54,7 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         ),
         (
             "Scaling",
-            match state.settings.scale {
+            match state.setup.scale {
                 Scale::FitColumns => "Fit columns",
                 Scale::FitSheet => "Fit sheet",
                 _ => "Actual size (100%)",
@@ -60,20 +62,20 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         ),
         (
             "Page numbers",
-            if state.settings.footer { "On" } else { "Off" },
-        ),
-        (
-            "Print gridlines",
-            if state.settings.gridlines {
+            if state.setup.page_numbers {
                 "On"
             } else {
                 "Off"
             },
         ),
+        (
+            "Print gridlines",
+            if state.setup.gridlines { "On" } else { "Off" },
+        ),
     ];
     let stale = state.captured_revision != app.workbook.read(cx).revision();
     let settings = div().id("pdf-settings-body").flex().flex_col().gap_3()
-        .min_h_0().overflow_y_scroll().flex_shrink_0()
+        .min_h_0().overflow_y_scroll().track_scroll(&state.settings_scroll).flex_shrink_0()
         .when(!compact, |d| d.w(px(284.0)).h_full())
         .when(compact, |d| d.w_full().h(px(180.0)))
         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(text).child("Page setup"))
@@ -87,6 +89,30 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
                         this.pdf_cycle_option(index, cx); cx.stop_propagation();
                     })))
         }))
+        .child(div().mt_2().flex().flex_col().gap_2()
+            .child(div().text_sm().text_color(text).child("Repeat top rows"))
+            .child(div().text_xs().text_color(muted).child(state.setup.repeat_rows.map_or("None".into(), |r| format!("Rows {}:{}", r.start + 1, r.end + 1))))
+            .child(div().flex().gap_2().children([(6, "+"), (7, "−"), (8, "Clear")].into_iter().map(|(index,label)| {
+                Button::new(ElementId::Name(format!("pdf-setup-{index}").into()), label)
+                    .disabled(state.busy).secondary(if state.focus == index { accent } else { border }, text)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.pdf_cycle_option(index, cx); cx.stop_propagation(); }))
+            })))
+            .child(div().text_xs().text_color(muted).child("+ adds the next visible row. A header cannot split a merged cell.")))
+        .child(div().flex().flex_col().gap_2()
+            .child(div().text_sm().text_color(text).child("Print area"))
+            .child(div().text_xs().text_color(muted).child(state.setup.area.map_or("Automatic bounds".into(), |a| format!("{}{}:{}{}", Spreadsheet::col_to_letter(a.start_col), a.start_row + 1, Spreadsheet::col_to_letter(a.end_col), a.end_row + 1))))
+            .children([(9, "Use selection"), (10, "Clear print area")].into_iter().map(|(index,label)| {
+                Button::new(ElementId::Name(format!("pdf-setup-{index}").into()), label)
+                    .disabled(state.busy).secondary(if state.focus == index { accent } else { border }, text)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.pdf_cycle_option(index, cx); cx.stop_propagation(); }))
+            })))
+        .child(Button::new("pdf-save-setup", "Save setup to sheet")
+            .disabled(state.busy || state.summary.is_err() || state.setup == state.saved_setup)
+            .secondary(if state.focus == 11 { accent } else { border }, text)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.pdf_cycle_option(11, cx); cx.stop_propagation(); })))
+        .child(div().text_xs().text_color(muted).child(if state.setup == state.saved_setup {
+            "Setup matches this sheet. Save the workbook to keep it on disk."
+        } else { "Preview changes are temporary until you save setup to the sheet." }))
         .child(div().mt_2().p_3().border_1().border_color(border).rounded_md().flex().flex_col().gap_2()
             .children(state.summary.clone().unwrap_or_else(|e| e).lines().enumerate().map(|(i, line)| {
                 div().text_sm().text_color(if state.summary.is_err() || i > 0 { warn } else { text }).child(line.to_string())
@@ -237,8 +263,8 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
             .text_color(text)
             .child(if let Some(error) = &state.preview_error {
                 error.clone()
-            } else if state.summary.is_err() {
-                "Adjust the page settings to create a preview.".into()
+            } else if let Err(error) = &state.summary {
+                error.clone()
             } else if state.preparing {
                 "Preparing document…".into()
             } else {

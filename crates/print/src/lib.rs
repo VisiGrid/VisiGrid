@@ -14,6 +14,8 @@ pub mod pdf;
 pub mod snapshot;
 #[cfg(feature = "preview")]
 pub mod preview;
+#[cfg(feature = "pdf")]
+pub mod setup;
 
 pub const GRID_UNIT_PT: f64 = 72.0 / 96.0;
 pub const MAX_PAGES: usize = 1_000;

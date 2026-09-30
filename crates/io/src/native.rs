@@ -198,6 +198,13 @@ CREATE TABLE IF NOT EXISTS cell_metadata (
     PRIMARY KEY (target, key)
 );
 
+-- Versioned presentation settings per sheet (not part of semantic verification).
+CREATE TABLE IF NOT EXISTS sheet_print_setup (
+    sheet_idx INTEGER PRIMARY KEY,
+    version INTEGER NOT NULL,
+    settings TEXT NOT NULL
+);
+
 -- Lua scripts attached to this workbook
 CREATE TABLE IF NOT EXISTS scripts (
     name TEXT PRIMARY KEY,
@@ -321,7 +328,7 @@ fn border_from_db(style: i32, color: Option<i64>) -> CellBorder {
 }
 
 /// Current schema version. Increment for each migration.
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 /// Run schema migrations for existing databases.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -449,6 +456,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE cells ADD COLUMN formula_source TEXT;
              PRAGMA user_version = 9;"
         )?;
+    }
+
+    if version < 10 {
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS sheet_print_setup (
+            sheet_idx INTEGER PRIMARY KEY, version INTEGER NOT NULL, settings TEXT NOT NULL
+        ); PRAGMA user_version = 10;")?;
     }
 
     Ok(())
@@ -620,6 +633,7 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
     }
 
     save_cond_formats_sheet(&conn, 0, &sheet.cond_formats)?;
+    save_print_setup(&conn, 0, &sheet.print_setup)?;
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -842,6 +856,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         }
     }
 
+    sheet.print_setup = load_print_setup(&conn, 0)?;
     Ok(sheet)
 }
 
@@ -1467,6 +1482,9 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     load_cond_formats(&conn, &mut workbook);
     load_tab_colors(&conn, &mut workbook);
     load_sheet_defaults(&conn, &mut workbook);
+    for i in 0..workbook.sheet_count() {
+        workbook.sheet_mut(i).unwrap().print_setup = load_print_setup(&conn, i)?;
+    }
     // After cells: a pivot's ownership must not block loading its own output.
     load_pivots(&conn, &mut workbook);
 
@@ -1500,10 +1518,32 @@ fn save_cond_formats_sheet(
     Ok(())
 }
 
+fn save_print_setup(conn: &Connection, index: usize, setup: &visigrid_engine::print_setup::PrintSetup) -> Result<(), String> {
+    setup.validate()?;
+    let raw = serde_json::to_string(setup).map_err(|e| e.to_string())?;
+    conn.execute("INSERT OR REPLACE INTO sheet_print_setup (sheet_idx, version, settings) VALUES (?1, 1, ?2)",
+        params![index as i64, raw]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn load_print_setup(conn: &Connection, index: usize) -> Result<visigrid_engine::print_setup::PrintSetup, String> {
+    use rusqlite::OptionalExtension;
+    // A read-only pre-v10 file cannot migrate. Missing table means the old default.
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_print_setup')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if !exists { return Ok(Default::default()); }
+    let row: Option<(i32, String)> = conn.query_row("SELECT version, settings FROM sheet_print_setup WHERE sheet_idx = ?1", [index as i64], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e| e.to_string())?;
+    let Some((version, raw)) = row else { return Ok(Default::default()); };
+    if version != 1 { return Err(format!("Unsupported print setup version {version} on sheet {}.", index + 1)); }
+    let setup: visigrid_engine::print_setup::PrintSetup = serde_json::from_str(&raw).map_err(|e| format!("Invalid print setup on sheet {}: {e}", index + 1))?;
+    setup.validate()?;
+    Ok(setup)
+}
+
 /// Sparse sheet formatting and initial pane configuration. Old files omit
 /// this metadata key and retain the default empty maps and unfrozen view.
 fn save_sheet_defaults(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     for (i, sheet) in workbook.sheets().iter().enumerate() {
+        save_print_setup(conn, i, &sheet.print_setup)?;
         let json = serde_json::to_string(&(&sheet.row_formats, &sheet.col_formats, sheet.frozen_panes))
             .map_err(|e| e.to_string())?;
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
