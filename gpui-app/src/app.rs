@@ -378,7 +378,7 @@ pub struct Spreadsheet {
     pub workbook: Entity<Workbook>,
     pub history: History,
     /// Base workbook state for replay (captured on load/new, never mutated).
-    /// None above REWIND_SNAPSHOT_MAX_CELLS: see `capture_base_workbook`.
+    /// Shares storage with the live workbook: see `capture_base_workbook`.
     pub base_workbook: Option<Workbook>,
     /// Soft-rewind preview state (Phase 8A)
     pub rewind_preview: RewindPreviewState,
@@ -661,7 +661,8 @@ pub struct Spreadsheet {
     pub selected_history_id: Option<u64>,  // Selected entry in History tab (Phase 4.3)
     pub history_filter_query: String,  // Filter query for History tab (Phase 4.3)
     pub history_filter_mode: HistoryFilterMode,  // Filter mode (Phase 7B)
-    pub history_view_start: usize,  // Virtual scroll start index (Phase 7C)
+    pub history_view_start: usize,  // Start of the bounded history page
+    pub history_scroll_handle: ScrollHandle,
     /// Highlighted range for history entry preview (sheet_index, start_row, start_col, end_row, end_col)
     pub history_highlight_range: Option<(usize, usize, usize, usize, usize)>,
     /// Current diff report (Explain Differences feature)
@@ -751,6 +752,8 @@ pub struct Spreadsheet {
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
+    pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
+    pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
     /// Per-cell conditional format override cache, keyed by (cells_rev, cf_rules_rev).
     /// Heavy predicates (COUNTIF over large ranges) are evaluated once per
@@ -783,6 +786,11 @@ pub struct Spreadsheet {
     // OS appearance observer — kept alive so System theme tracks OS dark/light
     #[allow(dead_code)]
     appearance_subscription: Option<gpui::Subscription>,
+
+    // Routes keys to the pivot field list before key bindings run (see
+    // Spreadsheet::intercept_pivot_keys). Kept alive for the window's life.
+    #[allow(dead_code)]
+    pivot_key_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -1014,23 +1022,14 @@ impl Default for NamedRangeUsageCache {
     }
 }
 
-/// Above this many stored cells, the desktop keeps no load-time copy of the
-/// workbook, so rewind preview is unavailable. The copy duplicates every cell:
-/// ~470 MB extra for a 1M-row x 5-column file (#18).
-pub(crate) const REWIND_SNAPSHOT_MAX_CELLS: usize = 1_000_000;
-
 impl Spreadsheet {
-    /// Record the current workbook as the state rewind preview replays from,
-    /// unless it is too large to keep a second copy of.
+    /// Record the current workbook as the state rewind preview replays from.
+    /// A clone shares its cells, pools and dependency graph with the live
+    /// workbook until one of them is edited (#18 phase 3), so it costs about
+    /// nothing at any size and afterwards only the chunks edits touch.
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
-        // Drop the old snapshot first so the two never coexist.
-        self.base_workbook = None;
-        let snapshot = {
-            let wb = self.wb(cx);
-            let cells: usize = wb.sheets().iter().map(|s| s.populated_cell_count()).sum();
-            (cells <= REWIND_SNAPSHOT_MAX_CELLS).then(|| wb.clone())
-        };
-        self.base_workbook = snapshot;
+        let snapshot = self.wb(cx).clone();
+        self.base_workbook = Some(snapshot);
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1100,6 +1099,8 @@ impl Spreadsheet {
                 }
             }
         });
+
+        let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
 
         // Session server channel: requests from TCP server → GUI thread
         let (session_tx, session_rx) = std::sync::mpsc::channel();
@@ -1274,6 +1275,7 @@ impl Spreadsheet {
             history_filter_query: String::new(),
             history_filter_mode: HistoryFilterMode::default(),
             history_view_start: 0,
+            history_scroll_handle: ScrollHandle::new(),
             history_highlight_range: None,
             diff_report: None,
             diff_ai_only_filter: false,
@@ -1301,6 +1303,8 @@ impl Spreadsheet {
             cf_preview_id: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
+            pivot_panel: None,
+            pivot_errors: std::collections::HashMap::new(),
             cf_edit_backup: None,
             cf_rules_rev: 1,
             cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -1320,6 +1324,7 @@ impl Spreadsheet {
             show_f2_tip: false,
             settings_subscription,
             appearance_subscription: Some(appearance_subscription),
+            pivot_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -2488,6 +2493,11 @@ impl Spreadsheet {
             CommandId::NextSheet => self.next_sheet(cx),
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
+            CommandId::InsertPivotTable => self.insert_pivot_table(cx),
+            CommandId::RefreshPivot => self.refresh_pivot(cx),
+            CommandId::RefreshAllPivots => self.refresh_all_pivots(cx),
+            CommandId::EditPivotFields => self.edit_pivot_fields(cx),
+            CommandId::DeletePivot => self.delete_pivot(cx),
 
             // Data (sort/filter)
             CommandId::SortAscending => {
@@ -3398,7 +3408,7 @@ impl Spreadsheet {
     /// (the import-time path has no window) it falls back to an estimate over
     /// CHARACTERS — the old code multiplied `str::len()`, which is bytes, so
     /// "café" measured as 5 and CJK as 3× its true width.
-    fn measure_columns(
+    pub(crate) fn measure_columns(
         &self,
         cols: &[usize],
         window: Option<&Window>,

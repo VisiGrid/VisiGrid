@@ -1,4 +1,9 @@
+use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
+
+#[path = "workbook_pivot.rs"]
+mod pivot_ops;
+pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
 use crate::cell_id::CellId;
@@ -7,7 +12,6 @@ use crate::sheet::{Sheet, SheetId, SheetRef, normalize_sheet_name, is_valid_shee
 use crate::named_range::{NamedRange, NamedRangeStore};
 use crate::formula::eval::{CellLookup, EvalArg, EvalResult, NamedRangeResolution, Value};
 use crate::formula::parser::bind_expr;
-use crate::formula::refs::extract_cell_ids;
 
 /// Impact analysis for a cell change (Phase 3.5a).
 ///
@@ -71,8 +75,10 @@ pub struct Workbook {
 
     /// Dependency graph for formula cells.
     /// Rebuilt on load, updated incrementally on cell changes.
+    /// Shared with clones until a formula edit changes it: rewind preview
+    /// keeps a clone of the workbook, and most edits change only values.
     #[serde(skip)]
-    dep_graph: DepGraph,
+    dep_graph: Arc<DepGraph>,
     /// Settlement failures from incremental recalcs, which have no report to
     /// carry them. Taken by whoever surfaces recalc problems (the status
     /// line, a session log); never persisted.
@@ -150,7 +156,7 @@ impl Workbook {
             next_sheet_id: 2, // Next ID will be 2
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
-            dep_graph: DepGraph::new(),
+            dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -322,6 +328,40 @@ impl Workbook {
         true
     }
 
+    /// Remove a sheet and hand it back whole, for an undo that must restore it
+    /// exactly (same id, same contents). Refuses to remove the last sheet.
+    pub fn take_sheet(&mut self, index: usize) -> Option<Sheet> {
+        if self.sheets.len() <= 1 || index >= self.sheets.len() {
+            return None;
+        }
+        let sheet = self.sheets.remove(index);
+        if self.active_sheet >= self.sheets.len() {
+            self.active_sheet = self.sheets.len() - 1;
+        } else if self.active_sheet > index {
+            self.active_sheet -= 1;
+        }
+        self.rebuild_dep_graph();
+        Some(sheet)
+    }
+
+    /// Put back a sheet removed by [`take_sheet`](Self::take_sheet), at the
+    /// same position and with the same id. Refuses if a sheet with that id or
+    /// name already exists.
+    pub fn restore_sheet(&mut self, index: usize, sheet: Sheet) -> bool {
+        if self.sheets.iter().any(|s| s.id == sheet.id || s.name_key == sheet.name_key) {
+            return false;
+        }
+        let index = index.min(self.sheets.len());
+        self.next_sheet_id = self.next_sheet_id.max(sheet.id.0 + 1);
+        self.sheets.insert(index, sheet);
+        if self.active_sheet >= index && self.sheets.len() > 1 && index <= self.active_sheet {
+            // Keep the same sheet active.
+            self.active_sheet += 1;
+        }
+        self.rebuild_dep_graph();
+        true
+    }
+
     /// Rename a sheet by index
     /// Returns false if:
     /// - Index is invalid
@@ -440,7 +480,7 @@ impl Workbook {
             next_sheet_id: max_id + 1,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
-            dep_graph: DepGraph::new(),
+            dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -465,7 +505,7 @@ impl Workbook {
             next_sheet_id,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
-            dep_graph: DepGraph::new(),
+            dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -954,22 +994,20 @@ impl Workbook {
         &self.dep_graph
     }
 
-    /// Extract finite references plus occupied cells in open ranges. Empty
-    /// coordinates are represented by subscriptions rather than grid-sized
-    /// edge sets. Spill receivers participate just like stored cells.
+    /// A formula's single-cell references and its ranges, whole rows and
+    /// columns included. Ranges stay ranges (#29): the graph indexes them
+    /// instead of holding an edge per cell, which made a running total
+    /// quadratic, and it no longer walks the sheet for each whole-column
+    /// reference.
     fn formula_dependencies(&self, bound: &crate::formula::parser::BoundExpr, sheet_id: SheetId)
-        -> (FxHashSet<CellId>, Vec<crate::formula::whole_range::WholeRangeRef>)
+        -> (FxHashSet<CellId>, Vec<crate::dep_graph::RangeRef>)
     {
-        let mut refs: FxHashSet<_> = extract_cell_ids(bound, sheet_id, &self.named_ranges, |idx| self.sheet_id_at_idx(idx)).into_iter().collect();
-        let ranges = crate::formula::whole_range::extract_whole_ranges(bound, sheet_id);
-        for range in &ranges {
-            if let Some(sheet) = self.sheet_by_id(range.sheet) {
-                for (row, col) in sheet.cells_iter().map(|(pos, _)| pos).chain(sheet.spill_receiver_coords()) {
-                    let cell = CellId::new(range.sheet, row, col);
-                    if range.contains(cell) { refs.insert(cell); }
-                }
-            }
-        }
+        let (refs, mut ranges) = crate::formula::refs::extract_refs(bound, sheet_id, &self.named_ranges, |idx| self.sheet_id_at_idx(idx));
+        ranges.extend(
+            crate::formula::whole_range::extract_whole_ranges(bound, sheet_id)
+                .iter()
+                .map(crate::dep_graph::RangeRef::from_whole),
+        );
         (refs, ranges)
     }
 
@@ -978,7 +1016,7 @@ impl Workbook {
     /// Call this after loading a workbook to populate the graph.
     /// Iterates all formula cells and extracts their references.
     pub fn rebuild_dep_graph(&mut self) {
-        self.dep_graph = DepGraph::new();
+        self.dep_graph = Arc::default();
 
         // Iterate all sheets and cells
         for sheet in &self.sheets {
@@ -994,13 +1032,16 @@ impl Workbook {
 
                     let formula_cell = CellId::new(sheet_id, row, col);
                     if !refs.is_empty() {
-                        self.dep_graph.replace_edges(formula_cell, refs);
+                        Arc::make_mut(&mut self.dep_graph).replace_edges(formula_cell, refs);
                     } else {
                         // Leaf formula (no cell refs, e.g. =1/0, =PI())
                         // Must still be tracked so recompute evaluates it.
-                        self.dep_graph.register_leaf_formula(formula_cell);
+                        Arc::make_mut(&mut self.dep_graph).register_leaf_formula(formula_cell);
                     }
-                    self.dep_graph.set_whole_ranges(formula_cell, ranges);
+                    // Links the formulas already inside these ranges...
+                    Arc::make_mut(&mut self.dep_graph).set_ranges(formula_cell, ranges);
+                    // ...and this formula to ranges registered before it.
+                    Arc::make_mut(&mut self.dep_graph).track_range_cell(formula_cell);
                 }
             }
         }
@@ -1023,30 +1064,68 @@ impl Workbook {
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
             let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
 
-            self.dep_graph.replace_edges(cell_id, refs);
-            self.dep_graph.set_whole_ranges(cell_id, ranges);
+            Arc::make_mut(&mut self.dep_graph).replace_edges(cell_id, refs);
+            Arc::make_mut(&mut self.dep_graph).set_ranges(cell_id, ranges);
             // replace_edges skips registering a cell that has no precedents, so a formula
             // with no static cell references (=1+1, =TODAY(), =INDIRECT("A1")) would be left
             // out of the dep graph and never evaluated by recompute. Register it as a leaf
             // formula so it is always recomputed.
-            self.dep_graph.register_leaf_formula(cell_id);
-        } else {
-            // Not a formula, clear any existing edges
-            self.dep_graph.clear_cell(cell_id);
+            Arc::make_mut(&mut self.dep_graph).register_leaf_formula(cell_id);
+        } else if self.dep_graph.has_own_deps(cell_id) {
+            // No longer a formula: clear its edges. A value that never was a
+            // formula leaves the graph alone, so a clone keeps sharing it.
+            Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
         }
-        self.dep_graph.track_whole_range_cell(cell_id);
+        // Only a formula is linked to the ranges it sits in.
+        if self.dep_graph.is_formula_cell(cell_id) {
+            Arc::make_mut(&mut self.dep_graph).track_range_cell(cell_id);
+        }
     }
 
     /// Clear dependencies for a cell (e.g., when the cell is deleted or cleared).
     pub fn clear_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
         let cell_id = CellId::new(sheet_id, row, col);
-        self.dep_graph.clear_cell(cell_id);
+        if self.dep_graph.has_own_deps(cell_id) {
+            Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
+        }
     }
 
-    /// Get the precedents (cells this formula depends on) for a cell.
+    /// Get the precedents (cells this formula depends on) for a cell: its
+    /// single references, plus every occupied cell (or spill receiver)
+    /// inside its ranges. For the UI; ordering uses the graph's edges.
     pub fn get_precedents(&self, sheet_id: SheetId, row: usize, col: usize) -> Vec<CellId> {
         let cell_id = CellId::new(sheet_id, row, col);
-        self.dep_graph.precedents(cell_id).collect()
+        self.expanded_precedents(cell_id).into_iter().collect()
+    }
+
+    /// A formula's precedents with its ranges expanded as they always were
+    /// for the UI: a bounded range to every cell in it, a whole row or
+    /// column to the cells that exist (and spill receivers) in it.
+    fn expanded_precedents(&self, cell_id: CellId) -> FxHashSet<CellId> {
+        let mut out: FxHashSet<CellId> = self.dep_graph.precedents(cell_id).collect();
+        for range in self.dep_graph.precedent_ranges(cell_id) {
+            let whole = (range.start_row == 0 && range.end_row == crate::sheet::NUM_ROWS - 1)
+                || (range.start_col == 0 && range.end_col == crate::sheet::NUM_COLS - 1);
+            if !whole {
+                for r in range.start_row..=range.end_row {
+                    for c in range.start_col..=range.end_col {
+                        out.insert(CellId::new(range.sheet, r, c));
+                    }
+                }
+                continue;
+            }
+            let Some(sheet) = self.sheet_by_id(range.sheet) else { continue };
+            for (r, c) in sheet.cells_in_range(range.start_row, range.end_row, range.start_col, range.end_col) {
+                out.insert(CellId::new(range.sheet, r, c));
+            }
+            for (r, c) in sheet.spill_receiver_coords() {
+                let cell = CellId::new(range.sheet, r, c);
+                if range.contains(cell) {
+                    out.insert(cell);
+                }
+            }
+        }
+        out
     }
 
     /// Get the dependents (cells that depend on this cell) for a cell.
@@ -1231,7 +1310,9 @@ impl Workbook {
             let neighbors: Vec<CellId> = if forward {
                 self.dep_graph.dependents(current).collect()
             } else {
-                self.dep_graph.precedents(current).collect()
+                // Ranges expanded to their occupied cells: a path may end at
+                // a value inside a range, which is not a graph edge (#29).
+                self.expanded_precedents(current).into_iter().collect()
             };
 
             // Sort for determinism: (sheet, row, col)
@@ -1867,7 +1948,7 @@ impl Workbook {
                 break;
             }
             for cell in &touched {
-                self.dep_graph.track_whole_range_cell(*cell);
+                Arc::make_mut(&mut self.dep_graph).track_range_cell(*cell);
                 if affected_set.insert(*cell) {
                     affected.push(*cell);
                 }
@@ -2175,6 +2256,14 @@ impl Workbook {
             }
         }
 
+        // Pivot outputs move as a whole or not at all: an edit that would cut
+        // through one is refused before anything changes.
+        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
+            return Err(format!(
+                "this would cut through {name}; move or delete the pivot table first"
+            ));
+        }
+
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
             let sheet = &mut self.sheets[sheet_index];
@@ -2191,6 +2280,9 @@ impl Workbook {
         // 3. Named ranges (workbook-level, so missed by any sheet-local pass).
         self.named_ranges
             .shift_for_structural(sheet_index, at, count, delete, is_row);
+
+        // 3b. Pivot outputs on this sheet, and pivot sources that live on it.
+        self.shift_pivots_for_structural(sheet_index, is_row, at, count, delete);
 
         // 4. Formulas on EVERY sheet: unqualified refs move only on the edited
         //    sheet, qualified refs move from anywhere.
@@ -2750,6 +2842,27 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
         self.current_sheet()
             .map(|sheet| sheet.get_value(row, col))
             .unwrap_or(0.0)
+    }
+
+    fn numbers_in_range(
+        &self,
+        sheet: &SheetRef,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        let target = match sheet {
+            SheetRef::Current => self.current_sheet(),
+            SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
+            SheetRef::RefError { .. } => return Err("#REF!".to_string()),
+        };
+        // A missing sheet's cells read "#REF!", which contributes nothing.
+        if let Some(target) = target {
+            target.numbers_in(start_row, start_col, end_row, end_col, out);
+        }
+        Ok(())
     }
 
     fn get_text(&self, row: usize, col: usize) -> String {

@@ -222,6 +222,13 @@ pub enum CommandId {
     PrevSheet,
     AddSheet,
 
+    // Pivot tables
+    InsertPivotTable,
+    RefreshPivot,
+    RefreshAllPivots,
+    EditPivotFields,
+    DeletePivot,
+
     // Data (sort/filter)
     SortAscending,
     SortDescending,
@@ -418,6 +425,11 @@ impl CommandId {
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
+            Self::InsertPivotTable => "Insert PivotTable",
+            Self::RefreshPivot => "Refresh PivotTable",
+            Self::RefreshAllPivots => "Refresh All PivotTables",
+            Self::EditPivotFields => "PivotTable Fields",
+            Self::DeletePivot => "Delete PivotTable",
             Self::SortAscending => "Sort Ascending (A→Z)",
             Self::SortDescending => "Sort Descending (Z→A)",
             Self::ToggleAutoFilter => "Toggle AutoFilter",
@@ -520,6 +532,9 @@ impl CommandId {
             Self::ZoomOut => Some("Ctrl+Alt+-"),
             Self::ZoomReset => Some("Ctrl+Alt+0"),
             Self::ToggleAutoFilter => Some("Ctrl+Shift+L"),
+            Self::RefreshPivot => Some("Alt+F5"),
+            Self::RefreshAllPivots => Some("Ctrl+Alt+F5"),
+            Self::InsertPivotTable | Self::EditPivotFields | Self::DeletePivot => None,
             #[cfg(target_os = "macos")]
             Self::SwitchWindow => Some("Cmd+`"),
             #[cfg(not(target_os = "macos"))]
@@ -669,6 +684,11 @@ impl CommandId {
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
+            Self::InsertPivotTable => "pivot table summarize group aggregate crosstab report sum count distinct",
+            Self::RefreshPivot => "pivot table refresh update recalculate",
+            Self::RefreshAllPivots => "pivot tables refresh all update",
+            Self::EditPivotFields => "pivot table fields rows columns values field list",
+            Self::DeletePivot => "pivot table delete remove clear",
             Self::SortAscending => "sort order ascending asc a-z smallest lowest",
             Self::SortDescending => "sort order descending desc z-a largest highest",
             Self::ToggleAutoFilter => "filter dropdown autofilter data",
@@ -861,6 +881,11 @@ impl CommandId {
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,
+            Self::InsertPivotTable,
+            Self::RefreshPivot,
+            Self::RefreshAllPivots,
+            Self::EditPivotFields,
+            Self::DeletePivot,
             Self::SortAscending,
             Self::SortDescending,
             Self::ToggleAutoFilter,
@@ -1053,6 +1078,11 @@ impl CommandId {
             | Self::TransformTitleCase
             | Self::TransformSentenceCase
             | Self::AutoSum
+            | Self::InsertPivotTable
+            | Self::RefreshPivot
+            | Self::RefreshAllPivots
+            | Self::EditPivotFields
+            | Self::DeletePivot
             | Self::SortAscending
             | Self::SortDescending
             | Self::ToggleAutoFilter

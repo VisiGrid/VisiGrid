@@ -81,18 +81,16 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if !args.is_empty() {
                 return Some(EvalResult::Error("RAND takes no arguments".to_string()));
             }
-                        // Simple LCG random - good enough for spreadsheet use
-            let seed = crate::timing::now_since_epoch().as_nanos() as u64;
-            let random = ((seed.wrapping_mul(6364136223846793005).wrapping_add(1)) as f64)
-                / (u64::MAX as f64);
-            EvalResult::Number(random)
+            EvalResult::Number(super::eval_helpers::next_random_f64())
         }
         "RANDBETWEEN" => {
             if args.len() != 2 {
                 return Some(EvalResult::Error("RANDBETWEEN requires exactly 2 arguments".to_string()));
             }
+            // Excel rounds the bounds inwards: bottom up, top down. Flooring both
+            // let RANDBETWEEN(1.5,2.5) return 1, below its own bottom.
             let bottom = match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => n.floor() as i64,
+                Ok(n) => n.ceil() as i64,
                 Err(e) => return Some(EvalResult::Error(e)),
             };
             let top = match evaluate(&args[1], lookup).to_number() {
@@ -102,10 +100,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if bottom > top {
                 return Some(EvalResult::Error("#NUM!".to_string()));
             }
-                        let seed = crate::timing::now_since_epoch().as_nanos() as u64;
-            let range = (top - bottom + 1) as u64;
-            let random = (seed.wrapping_mul(6364136223846793005).wrapping_add(1)) % range;
-            EvalResult::Number((bottom + random as i64) as f64)
+            let range = (top as i128 - bottom as i128 + 1) as u128;
+            // Multiply-shift maps 64 random bits onto the range without modulo bias.
+            let offset = (super::eval_helpers::next_random_u64() as u128 * range) >> 64;
+            EvalResult::Number((bottom as i128 + offset as i128) as f64)
         }
         "NORMSDIST" => {
             // Standard normal cumulative distribution function

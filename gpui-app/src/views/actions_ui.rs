@@ -626,4 +626,19 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &AddSheet, _, cx| {
             this.add_sheet(cx);
         }))
+        .on_action(cx.listener(|this, _: &InsertPivotTable, _, cx| {
+            this.insert_pivot_table(cx);
+        }))
+        .on_action(cx.listener(|this, _: &RefreshPivot, _, cx| {
+            this.refresh_pivot(cx);
+        }))
+        .on_action(cx.listener(|this, _: &RefreshAllPivots, _, cx| {
+            this.refresh_all_pivots(cx);
+        }))
+        .on_action(cx.listener(|this, _: &EditPivotFields, _, cx| {
+            this.edit_pivot_fields(cx);
+        }))
+        .on_action(cx.listener(|this, _: &DeletePivot, _, cx| {
+            this.delete_pivot(cx);
+        }))
 }

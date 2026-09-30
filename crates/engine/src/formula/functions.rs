@@ -10,24 +10,24 @@ const FUNCTION_NAMES: &[&str] = &[
     "CEILING", "CHOOSE", "COLUMN", "COLUMNS", "CONCAT", "CONCATENATE",
     "COS", "COUNT", "COUNTA", "COUNTBLANK", "COUNTIF", "COUNTIFS",
     "CUMIPMT", "CUMPRINC",
-    "DATE", "DATEDIF", "DATEVALUE", "DAY", "DEGREES",
-    "EDATE", "EOMONTH", "EXP",
+    "DATE", "DATEDIF", "DATEVALUE", "DAY", "DAYS", "DEGREES",
+    "EDATE", "EOMONTH", "EXACT", "EXP",
     "FILTER", "FIND", "FLOOR", "FV",
     "HLOOKUP", "HOUR",
     "IF", "IFERROR", "IFNA", "IFS", "INDEX", "INDIRECT", "INT", "IPMT", "IRR",
     "ISBLANK", "ISERROR", "ISNA", "ISNUMBER", "ISTEXT",
     "LEFT", "LEN", "LN", "LOG", "LOG10", "LOWER",
     "MATCH", "MAX", "MEDIAN", "MID", "MIN", "MINUTE", "MOD", "MONTH",
-    "NORM.S.DIST", "NORMSDIST", "NOT", "NOW", "NPV",
+    "NETWORKDAYS", "NORM.S.DIST", "NORMSDIST", "NOT", "NOW", "NPV",
     "OFFSET", "OR",
-    "PI", "PMT", "POWER", "PPMT", "PRODUCT", "PV",
-    "RADIANS", "RAND", "RANDBETWEEN", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP", "ROW", "ROWS",
-    "SECOND", "SEQUENCE", "SIN", "SORT", "SPARKLINE", "SQRT", "STDEV", "STDEV.P", "STDEV.S", "STDEVP", "SUBSTITUTE", "SUM", "SUMIF", "SUMIFS", "SUMPRODUCT", "SWITCH",
-    "TAN", "TEXT", "TEXTJOIN", "TODAY", "TRANSPOSE", "TRIM", "TRUNC",
+    "PI", "PMT", "POWER", "PPMT", "PRODUCT", "PROPER", "PV",
+    "RADIANS", "RAND", "RANDBETWEEN", "REPLACE", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP", "ROW", "ROWS",
+    "SEARCH", "SECOND", "SEQUENCE", "SIN", "SORT", "SPARKLINE", "SQRT", "STDEV", "STDEV.P", "STDEV.S", "STDEVP", "SUBSTITUTE", "SUM", "SUMIF", "SUMIFS", "SUMPRODUCT", "SWITCH",
+    "TAN", "TEXT", "TEXTAFTER", "TEXTBEFORE", "TEXTJOIN", "TIME", "TODAY", "TRANSPOSE", "TRIM", "TRUNC",
     "UNIQUE", "UPPER",
     "VALUE", "VAR", "VAR.P", "VAR.S", "VARP", "VLOOKUP",
-    "WEEKDAY",
-    "XLOOKUP",
+    "WEEKDAY", "WORKDAY",
+    "XLOOKUP", "XMATCH",
     "YEAR",
 ];
 
@@ -128,6 +128,43 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    /// Every function the evaluator dispatches must be in FUNCTION_NAMES.
+    ///
+    /// The list is maintained by hand beside a dispatch spread over ten files, and it has
+    /// drifted twice: seven names in one release, then eleven more (DAYS, EXACT, XMATCH
+    /// and the rest of 0.24.0's additions) that worked in cells while autocomplete,
+    /// validation and `vgrid list-functions` said they did not exist. Read the dispatch
+    /// arms from source rather than trusting another hand-kept list. Top-level arms sit at
+    /// exactly eight spaces; nested matches (DATEDIF's "YM" units) are deeper.
+    #[test]
+    fn every_dispatched_function_is_registered() {
+        let sources = [
+            include_str!("eval_math.rs"),
+            include_str!("eval_logical.rs"),
+            include_str!("eval_text.rs"),
+            include_str!("eval_conditional.rs"),
+            include_str!("eval_lookup.rs"),
+            include_str!("eval_financial.rs"),
+            include_str!("eval_datetime.rs"),
+            include_str!("eval_trig.rs"),
+            include_str!("eval_statistical.rs"),
+            include_str!("eval_array.rs"),
+        ];
+        let mut dispatched = Vec::new();
+        for src in sources {
+            for line in src.lines() {
+                let Some(arm) = line.strip_prefix("        \"") else { continue };
+                let Some((names, _)) = arm.split_once("=>") else { continue };
+                for name in format!("\"{names}").split('|') {
+                    dispatched.push(name.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        assert!(dispatched.len() > 100, "scan found only {} arms; has the dispatch layout changed?", dispatched.len());
+        let missing: Vec<_> = dispatched.iter().filter(|n| !is_known_function(n)).collect();
+        assert!(missing.is_empty(), "dispatched but not in FUNCTION_NAMES: {missing:?}");
     }
 
     #[test]

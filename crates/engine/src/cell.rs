@@ -1121,6 +1121,16 @@ pub fn try_parse_number(s: &str) -> Option<f64> {
     Some(n)
 }
 
+/// Parse text as a spreadsheet number: what `f64::from_str` accepts, minus the words.
+///
+/// Rust's parser reads "NaN", "inf" and "infinity" as numbers. A spreadsheet does not —
+/// in Excel they are text — and letting them through stored a NaN in the cell, which
+/// then panicked MEDIAN's sort (#34). Every place that turns cell text into a number
+/// goes through this so typed input, range reads and coercion agree.
+pub fn parse_finite(s: &str) -> Option<f64> {
+    s.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
 impl CellValue {
     pub fn from_input(input: &str) -> Self {
         let trimmed = input.trim();
@@ -1142,7 +1152,7 @@ impl CellValue {
             let pct_clean: String = pct.chars()
                 .filter(|c| !c.is_whitespace() && *c != ',')
                 .collect();
-            if let Ok(n) = pct_clean.parse::<f64>() {
+            if let Some(n) = parse_finite(&pct_clean) {
                 return CellValue::Number(n / 100.0);
             }
         }
@@ -1152,7 +1162,7 @@ impl CellValue {
             return CellValue::Number(n);
         }
 
-        if let Ok(num) = trimmed.parse::<f64>() {
+        if let Some(num) = parse_finite(trimmed) {
             return CellValue::Number(num);
         }
 
@@ -1307,7 +1317,7 @@ impl<'a> ValueRef<'a> {
     pub fn as_number(&self) -> f64 {
         match *self {
             ValueRef::Number(n) => n,
-            ValueRef::Text(s) => s.parse().unwrap_or(0.0),
+            ValueRef::Text(s) => parse_finite(s).unwrap_or(0.0),
             _ => 0.0,
         }
     }
@@ -1374,7 +1384,7 @@ pub struct CellExtras {
 }
 
 impl CellExtras {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.style_id.is_none()
             && self.spill_parent.is_none()
             && self.spill_info.is_none()
@@ -1418,20 +1428,32 @@ pub fn default_format() -> Arc<CellFormat> {
 /// [`Sheet::get_cell`]: crate::sheet::Sheet::get_cell
 #[derive(Debug, Clone, Copy)]
 pub struct CellRef<'a> {
-    cell: &'a Cell,
+    value: ValueRef<'a>,
+    format: &'a Arc<CellFormat>,
+    extras: Option<&'a CellExtras>,
 }
 
 impl<'a> CellRef<'a> {
     pub(crate) fn new(cell: &'a Cell) -> Self {
-        CellRef { cell }
+        CellRef { value: cell.value.as_ref(), format: &cell.format, extras: cell.extras.as_deref() }
+    }
+
+    /// Assemble a view from stored parts, for storage that does not keep
+    /// `Cell` structs (#18).
+    pub(crate) fn from_parts(
+        value: ValueRef<'a>,
+        format: &'a Arc<CellFormat>,
+        extras: Option<&'a CellExtras>,
+    ) -> Self {
+        CellRef { value, format, extras }
     }
 
     pub fn value(&self) -> ValueRef<'a> {
-        self.cell.value.as_ref()
+        self.value
     }
 
     pub fn format(&self) -> &'a CellFormat {
-        &self.cell.format
+        self.format
     }
 
     pub fn raw_display(&self) -> String {
@@ -1443,40 +1465,44 @@ impl<'a> CellRef<'a> {
     }
 
     pub fn style_id(&self) -> Option<u32> {
-        self.cell.style_id()
+        self.extras.and_then(|e| e.style_id)
     }
 
     pub fn spill_parent(&self) -> Option<(usize, usize)> {
-        self.cell.spill_parent()
+        self.extras.and_then(|e| e.spill_parent)
     }
 
     pub fn spill_info(&self) -> Option<&'a SpillInfo> {
-        self.cell.spill_info()
+        self.extras.and_then(|e| e.spill_info.as_ref())
     }
 
     pub fn spill_error(&self) -> Option<&'a SpillError> {
-        self.cell.spill_error()
+        self.extras.and_then(|e| e.spill_error.as_ref())
     }
 
     pub fn frozen_formula(&self) -> Option<&'a str> {
-        self.cell.frozen_formula()
+        self.extras.and_then(|e| e.frozen_formula.as_deref())
     }
 
     pub fn is_spill_receiver(&self) -> bool {
-        self.cell.is_spill_receiver()
+        self.spill_parent().is_some()
     }
 
     pub fn is_spill_parent(&self) -> bool {
-        self.cell.is_spill_parent()
+        self.spill_info().is_some()
     }
 
     pub fn has_spill_error(&self) -> bool {
-        self.cell.has_spill_error()
+        self.spill_error().is_some()
     }
 
     /// An owned copy of the cell.
     pub fn to_cell(&self) -> Cell {
-        self.cell.clone()
+        Cell {
+            value: self.value.to_owned_value(),
+            format: Arc::clone(self.format),
+            extras: self.extras.map(|e| Box::new(e.clone())),
+        }
     }
 }
 
@@ -1493,6 +1519,17 @@ impl Cell {
 
     pub fn as_ref(&self) -> CellRef<'_> {
         CellRef::new(self)
+    }
+
+    /// Take a cell apart for storage that keeps its pieces separately (#18).
+    pub(crate) fn into_parts(self) -> (CellValue, Arc<CellFormat>, Option<CellExtras>) {
+        (self.value, self.format, self.extras.map(|e| *e))
+    }
+
+    /// Reassemble a cell from stored pieces. Empty extras are dropped, as
+    /// every setter does.
+    pub(crate) fn from_parts(value: CellValue, format: Arc<CellFormat>, extras: Option<CellExtras>) -> Cell {
+        Cell { value, format, extras: extras.filter(|e| !e.is_empty()).map(Box::new) }
     }
 }
 

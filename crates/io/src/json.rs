@@ -416,6 +416,10 @@ struct SheetBody {
     filter: Option<FilterSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     charts: Option<serde_json::Value>,
+    /// Pivot tables shown on this sheet (engine SavedPivot list). Workbook
+    /// form only: a pivot's source is identified by sheet index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pivots: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -590,7 +594,14 @@ pub fn export_workbook(
         .sheets()
         .iter()
         .enumerate()
-        .map(|(i, s)| sheet_body(s, layouts.get(i).unwrap_or(&default_layout)))
+        .map(|(i, s)| {
+            let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout));
+            let saved = wb.saved_pivots(i);
+            if !saved.is_empty() {
+                body.pivots = serde_json::to_value(&saved).ok();
+            }
+            body
+        })
         .collect();
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
@@ -764,6 +775,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
             .collect(),
         filter: layout.filter.clone(),
         charts: layout.charts.clone(),
+        pivots: None,
     }
 }
 
@@ -869,6 +881,16 @@ pub fn import_any(
     let active = doc.active_sheet.unwrap_or(0).min(sheets.len() - 1);
     // Recompute formulas (stored values are only a fallback for engine-less consumers)
     let mut wb = Workbook::from_sheets(sheets, active);
+    // Pivots after cells, so ownership never blocks loading their output.
+    for (i, body) in bodies.iter().enumerate() {
+        if let Some(p) = &body.pivots {
+            let saved: Vec<visigrid_engine::workbook::SavedPivot> = serde_json::from_value(p.clone())
+                .map_err(|e| format!("sheet {:?}: invalid pivots: {}", body.name, e))?;
+            for w in wb.restore_pivots(i, saved) {
+                eprintln!("Warning: pivot on sheet {}: {}", i, w);
+            }
+        }
+    }
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
     let cached = cached_formula_values(&doc, &wb);
@@ -1664,6 +1686,55 @@ mod full_json_tests {
         // Filter + charts side-car round-tripped exactly
         assert_eq!(layouts[0].filter, layout.filter);
         assert_eq!(layouts[0].charts, layout.charts);
+    }
+
+    #[test]
+    fn pivots_round_trip_in_workbook_form() {
+        use visigrid_engine::pivot::{aggregate, Aggregation, PivotDefinition, PivotField, PivotSource, PivotTable, PivotValueField};
+        use visigrid_engine::workbook::Workbook;
+
+        let mut wb = Workbook::new();
+        {
+            let s = wb.sheet_mut(0).unwrap();
+            s.set_value(0, 0, "K");
+            s.set_value(0, 1, "V");
+            s.set_value(1, 0, "a");
+            s.set_value(1, 1, "3");
+        }
+        let out_idx = wb.add_sheet();
+        let out_id = wb.sheet(out_idx).unwrap().id;
+        let t = PivotTable {
+            id: 7,
+            name: "PivotTable1".into(),
+            source: PivotSource { sheet_id: wb.sheet(0).unwrap().id, start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
+            definition: PivotDefinition {
+                rows: vec![PivotField { offset: 0, header: "K".into() }],
+                column: None,
+                values: vec![PivotValueField {
+                    field: PivotField { offset: 1, header: "V".into() },
+                    aggregation: Aggregation::DistinctCount,
+                    number_format: None,
+                }],
+            },
+            anchor_row: 0,
+            anchor_col: 0,
+            extent: None,
+            last_refresh: None,
+            stale: false,
+            source_generation: None,
+        };
+        let (snap, gen) = wb.pivot_snapshot(&t).unwrap();
+        let output = aggregate(&t.definition, &snap).unwrap();
+        let commit = wb.prepare_pivot_commit(out_id, t, &output, gen, 0).unwrap();
+        wb.apply_pivot_state(&commit.after).unwrap();
+
+        let json = export_workbook(&wb, &[], 0).unwrap();
+        assert!(json.contains("\"pivots\"") && json.contains("distinct_count"));
+        let (back, _, _) = import_any(&json).unwrap();
+        let (idx, p) = back.find_pivot(7).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(p.source.sheet_id, back.sheet(0).unwrap().id);
+        assert_eq!(back.sheet(1).unwrap().get_display(1, 0), "a");
     }
 
     #[test]

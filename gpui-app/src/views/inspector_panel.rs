@@ -4,12 +4,12 @@ use crate::app::{Spreadsheet, SelectionFormatState, TriState};
 use crate::formatting::BorderApplyMode;
 use crate::mode::InspectorTab;
 use crate::theme::TokenKey;
-use crate::ui::popup;
+use crate::ui::{popup, Button};
 use visigrid_engine::formula::parser::{parse, extract_cell_refs};
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, TextOverflow, NumberFormat, DateStyle, NegativeStyle, CellValue};
 use visigrid_engine::cell_id::CellId;
 
-pub const PANEL_WIDTH: f32 = 280.0;
+pub const PANEL_WIDTH: f32 = 380.0;
 
 /// Render the inspector panel (right-side drawer)
 pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -66,16 +66,40 @@ fn render_header(
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let cell_ref_owned: SharedString = cell_ref.to_string().into();
-
     div()
-        .px_3()
-        .py_2()
+        .px_4()
+        .py_3()
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_between()
-        .border_b_1()
-        .border_color(panel_border)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_primary)
+                        .child("Inspector"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child(SharedString::from(format!(
+                            "{} · {}",
+                            cell_ref,
+                            if is_pinned {
+                                "Pinned cell"
+                            } else {
+                                "Following selection"
+                            }
+                        ))),
+                ),
+        )
         .child(
             div()
                 .flex()
@@ -83,62 +107,46 @@ fn render_header(
                 .gap_2()
                 .child(
                     div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(text_primary)
-                        .child(SharedString::from(format!("Inspector: {}", cell_ref_owned)))
-                )
-                .when(is_pinned, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(text_muted)
-                            .child("(pinned)")
-                    )
-                })
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                // Pin/Unpin button
-                .child(
-                    div()
                         .id("inspector-pin-btn")
                         .px_2()
                         .py_1()
-                        .rounded_sm()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(panel_border)
                         .cursor_pointer()
                         .text_size(px(11.0))
-                        .text_color(if is_pinned { text_primary } else { text_muted })
-                        .hover(|s| s.bg(panel_border))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.toggle_inspector_pin(cx);
-                        }))
-                        .child(if is_pinned { "Unpin" } else { "Pin" })
+                        .text_color(text_muted)
+                        .hover(|s| s.bg(panel_border.opacity(0.4)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_inspector_pin(cx);
+                            }),
+                        )
+                        .child(if is_pinned { "Unpin" } else { "Pin cell" }),
                 )
-                // Close button
                 .child(
                     div()
                         .id("inspector-close-btn")
                         .px_2()
                         .py_1()
-                        .rounded_sm()
+                        .rounded_md()
                         .cursor_pointer()
-                        .text_size(px(11.0))
+                        .text_size(px(16.0))
                         .text_color(text_muted)
-                        .hover(|s| s.bg(panel_border))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            // Exit preview when closing inspector
-                            if this.is_previewing() {
-                                this.exit_preview(cx);
-                            }
-                            this.inspector_visible = false;
-                            cx.notify();
-                        }))
-                        .child("X")
-                )
+                        .hover(|s| s.bg(panel_border.opacity(0.4)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                if this.is_previewing() {
+                                    this.exit_preview(cx);
+                                }
+                                this.inspector_visible = false;
+                                cx.notify();
+                            }),
+                        )
+                        .child("×"),
+                ),
         )
 }
 
@@ -151,88 +159,59 @@ fn render_tab_bar(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     div()
-        .flex()
+        .px_3()
+        .pb_3()
+        .flex_shrink_0()
         .border_b_1()
         .border_color(panel_border)
         .child(
             div()
-                .id("inspector-tab-inspector")
-                .flex_1()
-                .px_3()
-                .py_2()
-                .text_size(px(12.0))
-                .text_color(if current_tab == InspectorTab::Inspector { text_primary } else { text_muted })
-                .font_weight(if current_tab == InspectorTab::Inspector { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                .bg(if current_tab == InspectorTab::Inspector { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
-                .border_b_2()
-                .border_color(if current_tab == InspectorTab::Inspector { text_primary } else { gpui::transparent_black() })
-                .cursor_pointer()
-                .hover(|s| s.bg(panel_border.opacity(0.5)))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.inspector_tab = InspectorTab::Inspector;
-                    cx.notify();
-                }))
-                .child("Inspector")
-        )
-        .child(
-            div()
-                .id("inspector-tab-format")
-                .flex_1()
-                .px_3()
-                .py_2()
-                .text_size(px(12.0))
-                .text_color(if current_tab == InspectorTab::Format { text_primary } else { text_muted })
-                .font_weight(if current_tab == InspectorTab::Format { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                .bg(if current_tab == InspectorTab::Format { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
-                .border_b_2()
-                .border_color(if current_tab == InspectorTab::Format { text_primary } else { gpui::transparent_black() })
-                .cursor_pointer()
-                .hover(|s| s.bg(panel_border.opacity(0.5)))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.inspector_tab = InspectorTab::Format;
-                    cx.notify();
-                }))
-                .child("Format")
-        )
-        .child(
-            div()
-                .id("inspector-tab-names")
-                .flex_1()
-                .px_3()
-                .py_2()
-                .text_size(px(12.0))
-                .text_color(if current_tab == InspectorTab::Names { text_primary } else { text_muted })
-                .font_weight(if current_tab == InspectorTab::Names { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                .bg(if current_tab == InspectorTab::Names { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
-                .border_b_2()
-                .border_color(if current_tab == InspectorTab::Names { text_primary } else { gpui::transparent_black() })
-                .cursor_pointer()
-                .hover(|s| s.bg(panel_border.opacity(0.5)))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.inspector_tab = InspectorTab::Names;
-                    cx.notify();
-                }))
-                .child("Names")
-        )
-        .child(
-            div()
-                .id("inspector-tab-history")
-                .flex_1()
-                .px_3()
-                .py_2()
-                .text_size(px(12.0))
-                .text_color(if current_tab == InspectorTab::History { text_primary } else { text_muted })
-                .font_weight(if current_tab == InspectorTab::History { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                .bg(if current_tab == InspectorTab::History { selection_bg.opacity(0.3) } else { gpui::transparent_black() })
-                .border_b_2()
-                .border_color(if current_tab == InspectorTab::History { text_primary } else { gpui::transparent_black() })
-                .cursor_pointer()
-                .hover(|s| s.bg(panel_border.opacity(0.5)))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.inspector_tab = InspectorTab::History;
-                    cx.notify();
-                }))
-                .child("History")
+                .flex()
+                .p_1()
+                .gap_1()
+                .rounded_md()
+                .bg(panel_border.opacity(0.2))
+                .children(
+                    [
+                        (InspectorTab::Inspector, "inspector-tab-inspector", "Cell"),
+                        (InspectorTab::Format, "inspector-tab-format", "Format"),
+                        (InspectorTab::Names, "inspector-tab-names", "Names"),
+                        (InspectorTab::History, "inspector-tab-history", "History"),
+                    ]
+                    .into_iter()
+                    .map(|(tab, id, label)| {
+                        let selected = current_tab == tab;
+                        div()
+                            .id(id)
+                            .flex_1()
+                            .flex()
+                            .justify_center()
+                            .py_2()
+                            .rounded_sm()
+                            .text_size(px(12.0))
+                            .text_color(if selected { text_primary } else { text_muted })
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .bg(if selected {
+                                selection_bg.opacity(0.35)
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(panel_border.opacity(0.4)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.inspector_tab = tab;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(label)
+                    }),
+                ),
         )
 }
 
@@ -249,23 +228,63 @@ fn render_content(
 ) -> impl IntoElement {
     // Pre-build tabs that need &mut access
     let names_content = if current_tab == InspectorTab::Names {
-        Some(render_names_tab(app, text_primary, text_muted, accent, panel_border, cx))
+        Some(render_names_tab(
+            app,
+            text_primary,
+            text_muted,
+            accent,
+            panel_border,
+            cx,
+        ))
     } else {
         None
     };
 
     let history_content = if current_tab == InspectorTab::History {
-        Some(render_history_tab(app, text_primary, text_muted, accent, panel_border, cx))
+        Some(render_history_tab(
+            app,
+            text_primary,
+            text_muted,
+            accent,
+            panel_border,
+            cx,
+        ))
     } else {
         None
     };
 
     div()
+        .id("inspector-content")
         .flex_1()
-        .overflow_hidden()
+        .min_h_0()
+        .when(current_tab == InspectorTab::History, |d| {
+            d.overflow_hidden()
+        })
+        .when(current_tab != InspectorTab::History, |d| {
+            d.overflow_y_scroll()
+        })
         .child(match current_tab {
-            InspectorTab::Inspector => render_inspector_tab(app, row, col, text_primary, text_muted, accent, panel_border, cx),
-            InspectorTab::Format => render_format_tab(app, row, col, text_primary, text_muted, panel_border, accent, cx).into_any_element(),
+            InspectorTab::Inspector => render_inspector_tab(
+                app,
+                row,
+                col,
+                text_primary,
+                text_muted,
+                accent,
+                panel_border,
+                cx,
+            ),
+            InspectorTab::Format => render_format_tab(
+                app,
+                row,
+                col,
+                text_primary,
+                text_muted,
+                panel_border,
+                accent,
+                cx,
+            )
+            .into_any_element(),
             InspectorTab::Names => names_content.unwrap().into_any_element(),
             InspectorTab::History => history_content.unwrap().into_any_element(),
         })
@@ -3307,17 +3326,22 @@ fn wrap_toggle_btn(
 }
 
 // Helper: Section container
-fn section(title: &'static str, _border_color: Hsla, text_color: Hsla) -> Div {
+fn section(title: &'static str, border_color: Hsla, text_color: Hsla) -> Div {
     div()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(border_color)
+        .bg(border_color.opacity(0.08))
         .flex()
         .flex_col()
-        .gap_1()
+        .gap_2()
         .child(
             div()
                 .text_size(px(11.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(text_color)
-                .child(title)
+                .child(title),
         )
 }
 
@@ -3574,7 +3598,7 @@ fn format_relative_time(time: std::time::SystemTime) -> String {
 // History Tab
 // ============================================================================
 
-/// Number of history entries visible in virtual scroll window
+/// Keep each scrollable page bounded, including for very long histories.
 const HISTORY_VIEW_LEN: usize = 30;
 
 fn render_history_tab(
@@ -3595,7 +3619,8 @@ fn render_history_tab(
     let active_sheet_idx = app.sheet_index(cx);
     let selected_id = app.selected_history_id;
     let view_start = app.history_view_start;
-    let text_inverse = app.token(TokenKey::TextInverse);
+    let surface = app.token(TokenKey::EditorBg);
+    let scroll_handle = app.history_scroll_handle.clone();
 
     // Filter entries by mode first
     let mode_filtered: Vec<HistoryDisplayEntry> = all_entries
@@ -3606,7 +3631,8 @@ fn render_history_tab(
                 e.sheet_index.map_or(true, |si| si == active_sheet_idx)
             }
             HistoryFilterMode::ValidationOnly => {
-                e.label.to_lowercase().contains("validation") || e.label.to_lowercase().contains("exclusion")
+                e.label.to_lowercase().contains("validation")
+                    || e.label.to_lowercase().contains("exclusion")
             }
             HistoryFilterMode::DataEditsOnly => {
                 e.label.starts_with("Edit")
@@ -3615,9 +3641,7 @@ fn render_history_tab(
                     || e.label.starts_with("Clear")
                     || e.label.starts_with("Sort")
             }
-            HistoryFilterMode::TransformsOnly => {
-                e.label.starts_with("Transform:")
-            }
+            HistoryFilterMode::TransformsOnly => e.label.starts_with("Transform:"),
         })
         .collect();
 
@@ -3628,16 +3652,14 @@ fn render_history_tab(
         let q = filter_query.to_lowercase();
         mode_filtered
             .into_iter()
-            .filter(|e| {
-                e.label.to_lowercase().contains(&q) || e.scope.to_lowercase().contains(&q)
-            })
+            .filter(|e| e.label.to_lowercase().contains(&q) || e.scope.to_lowercase().contains(&q))
             .collect()
     };
 
     let filtered_count = entries.len();
     let is_filtered = filter_mode != HistoryFilterMode::All || !filter_query.is_empty();
 
-    // Virtual scroll: only render visible entries
+    // Render one bounded page; the viewport scrolls within it.
     let view_start_clamped = view_start.min(entries.len().saturating_sub(1));
     let view_end = (view_start_clamped + HISTORY_VIEW_LEN).min(entries.len());
     let visible_entries: Vec<HistoryDisplayEntry> = entries[view_start_clamped..view_end].to_vec();
@@ -3645,15 +3667,26 @@ fn render_history_tab(
     let can_scroll_down = view_end < entries.len();
 
     // Find selected entry for detail view
-    let selected_entry: Option<HistoryDisplayEntry> = selected_id
-        .and_then(|id| entries.iter().find(|e| e.id == id).cloned());
+    let selected_entry: Option<HistoryDisplayEntry> =
+        selected_id.and_then(|id| entries.iter().find(|e| e.id == id).cloned());
 
     // Collect entry IDs for keyboard navigation (full list, not just visible)
     let entry_ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
-    let entry_ids_for_scroll = entry_ids.clone();
     // Collect highlight ranges keyed by entry ID for Enter-to-jump
-    let entry_highlights: std::collections::HashMap<u64, Option<(usize, usize, usize, usize, usize)>> = entries.iter()
-        .map(|e| (e.id, e.sheet_index.and_then(|si| e.affected_range.map(|(sr, sc, er, ec)| (si, sr, sc, er, ec)))))
+    let entry_highlights: std::collections::HashMap<
+        u64,
+        Option<(usize, usize, usize, usize, usize)>,
+    > = entries
+        .iter()
+        .map(|e| {
+            (
+                e.id,
+                e.sheet_index.and_then(|si| {
+                    e.affected_range
+                        .map(|(sr, sc, er, ec)| (si, sr, sc, er, ec))
+                }),
+            )
+        })
         .collect();
 
     // Filter mode label for banner
@@ -3678,29 +3711,33 @@ fn render_history_tab(
                     if entry_ids.is_empty() {
                         return;
                     }
-                    let current_idx = this.selected_history_id
+                    let current_idx = this
+                        .selected_history_id
                         .and_then(|id| entry_ids.iter().position(|&eid| eid == id));
 
                     let new_idx = match (key, current_idx) {
                         ("up", Some(idx)) if idx > 0 => Some(idx - 1),
                         ("up", Some(_)) => Some(0), // Already at top
-                        ("up", None) => Some(0), // Select first
+                        ("up", None) => Some(0),    // Select first
                         ("down", Some(idx)) if idx < entry_ids.len() - 1 => Some(idx + 1),
                         ("down", Some(idx)) => Some(idx), // Already at bottom
-                        ("down", None) => Some(0), // Select first
+                        ("down", None) => Some(0),        // Select first
                         _ => None,
                     };
 
                     if let Some(idx) = new_idx {
                         let new_id = entry_ids[idx];
                         this.selected_history_id = Some(new_id);
-                        this.history_highlight_range = entry_highlights.get(&new_id).copied().flatten();
+                        this.history_highlight_range =
+                            entry_highlights.get(&new_id).copied().flatten();
                         // Auto-scroll to keep selection visible
                         if idx < this.history_view_start {
                             this.history_view_start = idx;
                         } else if idx >= this.history_view_start + HISTORY_VIEW_LEN {
                             this.history_view_start = idx.saturating_sub(HISTORY_VIEW_LEN - 1);
                         }
+                        this.history_scroll_handle
+                            .scroll_to_item(idx - this.history_view_start);
                         cx.notify();
                     }
                 }
@@ -3729,70 +3766,117 @@ fn render_history_tab(
                 _ => {}
             }
         }))
+        .child(
+            div()
+                .px_4()
+                .pt_3()
+                .pb_2()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_primary)
+                                .child("Workbook history"),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(accent.opacity(0.09))
+                                .text_size(px(10.0))
+                                .text_color(text_muted)
+                                .child(SharedString::from(format!("{} change{}", total_count, if total_count == 1 { "" } else { "s" }))),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(text_muted)
+                        .child("Select a change to inspect its details."),
+                ),
+        )
         // Filter input
         .child(
             div()
-                .px_3()
-                .py_2()
+                .px_4()
+                .pb_3()
+                .flex_shrink_0()
                 .border_b_1()
                 .border_color(panel_border)
                 .child(
                     div()
                         .id("history-filter-input")
-                        .px_2()
-                        .py_1()
+                        .px_3()
+                        .py_2()
                         .w_full()
-                        .bg(panel_border.opacity(0.3))
-                        .rounded_sm()
+                        .bg(surface)
+                        .border_1()
+                        .border_color(panel_border)
+                        .rounded_md()
                         .text_size(px(12.0))
                         .text_color(text_primary)
                         .child(if filter_query.is_empty() {
-                            div().text_color(text_muted).child("Filter...")
+                            div().text_color(text_muted).child("Filter history…")
                         } else {
                             div().child(filter_query.clone())
                         })
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            // Simple: click to clear filter (full text input would require more work)
-                            this.history_filter_query.clear();
-                            cx.notify();
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                // Simple: click to clear filter (full text input would require more work)
+                                this.history_filter_query.clear();
+                                cx.notify();
+                            }),
+                        )
                         .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                             if let Some(ch) = &event.keystroke.key_char {
                                 this.history_filter_query.push_str(ch);
                                 cx.notify();
-                            } else if event.keystroke.key == "backspace" && !this.history_filter_query.is_empty() {
+                            } else if event.keystroke.key == "backspace"
+                                && !this.history_filter_query.is_empty()
+                            {
                                 this.history_filter_query.pop();
                                 cx.notify();
                             } else if event.keystroke.key == "escape" {
                                 this.history_filter_query.clear();
                                 cx.notify();
                             }
-                        }))
+                        })),
                 )
                 // Filter mode chips
                 .child(
-                    div()
-                        .mt_2()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1()
-                        .children([
+                    div().mt_2().flex().flex_wrap().gap_1().children(
+                        [
                             (HistoryFilterMode::All, "All"),
                             (HistoryFilterMode::CurrentSheet, "This Sheet"),
                             (HistoryFilterMode::ValidationOnly, "Validation"),
                             (HistoryFilterMode::DataEditsOnly, "Data"),
                             (HistoryFilterMode::TransformsOnly, "Transforms"),
-                        ].into_iter().map(|(mode, label)| {
+                        ]
+                        .into_iter()
+                        .map(|(mode, label)| {
                             let is_active = filter_mode == mode;
                             div()
                                 .id(SharedString::from(format!("history-filter-{:?}", mode)))
                                 .px_2()
-                                .py(px(2.0))
-                                .rounded_sm()
-                                .text_size(px(10.0))
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(gpui::transparent_black())
+                                .text_size(px(11.0))
                                 .cursor_pointer()
                                 .when(is_active, |el| {
-                                    el.bg(accent.opacity(0.3))
+                                    el.bg(accent.opacity(0.12))
                                         .text_color(accent)
                                         .border_1()
                                         .border_color(accent.opacity(0.5))
@@ -3803,12 +3887,18 @@ fn render_history_tab(
                                         .hover(|s| s.bg(panel_border.opacity(0.4)))
                                 })
                                 .child(label)
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                    this.history_filter_mode = mode;
-                                    cx.notify();
-                                }))
-                        }))
-                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.history_filter_mode = mode;
+                                        this.history_view_start = 0;
+                                        this.history_scroll_handle.scroll_to_top_of_item(0);
+                                        cx.notify();
+                                    }),
+                                )
+                        }),
+                    ),
+                ),
         )
         // Filter banner (when filtered)
         .when(is_filtered, |el| {
@@ -3829,7 +3919,10 @@ fn render_history_tab(
                             .gap_2()
                             .text_size(px(10.0))
                             .text_color(text_muted)
-                            .child(SharedString::from(format!("Showing {} of {}", filtered_count, total_count)))
+                            .child(SharedString::from(format!(
+                                "Showing {} of {}",
+                                filtered_count, total_count
+                            )))
                             .when(filter_label.is_some(), |el| {
                                 el.child(
                                     div()
@@ -3837,9 +3930,9 @@ fn render_history_tab(
                                         .rounded_sm()
                                         .bg(accent.opacity(0.2))
                                         .text_color(accent)
-                                        .child(filter_label.unwrap_or(""))
+                                        .child(filter_label.unwrap_or("")),
                                 )
-                            })
+                            }),
                     )
                     .child(
                         div()
@@ -3849,63 +3942,82 @@ fn render_history_tab(
                             .cursor_pointer()
                             .hover(|s| s.text_color(text_primary))
                             .child("Clear")
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                this.history_filter_mode = crate::app::HistoryFilterMode::All;
-                                this.history_filter_query.clear();
-                                this.history_view_start = 0;
-                                cx.notify();
-                            }))
-                    )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.history_filter_mode = crate::app::HistoryFilterMode::All;
+                                    this.history_filter_query.clear();
+                                    this.history_view_start = 0;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
             )
         })
         .child(
-            // Entry list with virtual scroll
+            // Scroll within a bounded page; all thirty entries remain reachable
+            // even when the selected detail card takes part of the drawer.
             div()
                 .id("history-entry-list")
                 .flex_1()
-                .overflow_hidden()
-                .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _, cx| {
-                    let delta = event.delta.pixel_delta(px(24.0));
-                    let dy: f32 = delta.y.into();
-                    let scroll_lines = (-dy / 24.0).round() as i32;
-
-                    if scroll_lines > 0 {
-                        // Scroll down
-                        let max_start = entry_ids_for_scroll.len().saturating_sub(HISTORY_VIEW_LEN);
-                        this.history_view_start = (this.history_view_start + scroll_lines as usize).min(max_start);
-                    } else if scroll_lines < 0 {
-                        // Scroll up
-                        this.history_view_start = this.history_view_start.saturating_sub((-scroll_lines) as usize);
-                    }
-                    cx.notify();
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&scroll_handle)
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(visible_entries.iter().map(|entry| {
+                    render_history_entry(
+                        entry,
+                        selected_id,
+                        text_primary,
+                        text_muted,
+                        panel_border,
+                        surface,
+                        accent,
+                        cx,
+                    )
                 }))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .children(visible_entries.iter().map(|entry| {
-                            render_history_entry(entry, selected_id, text_primary, text_muted, panel_border, cx)
-                        }))
-                        .when(filtered_count == 0, |el| {
-                            el.child(
+                .when(filtered_count == 0, |el| {
+                    el.child(
+                        div()
+                            .p_4()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(panel_border)
+                            .bg(surface)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
                                 div()
-                                    .p_4()
                                     .text_size(px(12.0))
-                                    .text_color(text_muted)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(text_primary)
                                     .child(if total_count == 0 {
-                                        "No history yet"
+                                        "No changes yet"
                                     } else {
-                                        "No matches"
-                                    })
+                                        "No matching changes"
+                                    }),
                             )
-                        })
-                )
+                            .child(div().text_size(px(11.0)).text_color(text_muted).child(
+                                if total_count == 0 {
+                                    "Edits you make in this workbook will appear here."
+                                } else {
+                                    "Try another filter or clear the current filters."
+                                },
+                            )),
+                    )
+                }),
         )
         // Scroll indicator (when list is scrollable)
         .when(filtered_count > HISTORY_VIEW_LEN, |el| {
             el.child(
                 div()
-                    .h(px(20.0))
+                    .h(px(32.0))
+                    .flex_shrink_0()
                     .px_3()
                     .flex()
                     .items_center()
@@ -3913,17 +4025,14 @@ fn render_history_tab(
                     .border_t_1()
                     .border_color(panel_border)
                     .bg(panel_border.opacity(0.1))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(text_muted)
-                            .child(SharedString::from(format!(
-                                "{}-{} of {}",
-                                view_start_clamped + 1,
-                                view_end,
-                                filtered_count
-                            )))
-                    )
+                    .child(div().text_size(px(10.0)).text_color(text_muted).child(
+                        SharedString::from(format!(
+                            "{}-{} of {}",
+                            view_start_clamped + 1,
+                            view_end,
+                            filtered_count
+                        )),
+                    ))
                     .child(
                         div()
                             .flex()
@@ -3933,37 +4042,66 @@ fn render_history_tab(
                                     .id("history-scroll-up")
                                     .text_size(px(10.0))
                                     .cursor_pointer()
-                                    .text_color(if can_scroll_up { text_primary } else { text_muted.opacity(0.3) })
+                                    .text_color(if can_scroll_up {
+                                        text_primary
+                                    } else {
+                                        text_muted.opacity(0.3)
+                                    })
                                     .child("▲")
                                     .when(can_scroll_up, |el| {
-                                        el.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                            this.history_view_start = this.history_view_start.saturating_sub(HISTORY_VIEW_LEN);
-                                            cx.notify();
-                                        }))
-                                    })
+                                        el.on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.history_view_start = this
+                                                    .history_view_start
+                                                    .saturating_sub(HISTORY_VIEW_LEN);
+                                                this.history_scroll_handle.scroll_to_top_of_item(0);
+                                                cx.notify();
+                                            }),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
                                     .id("history-scroll-down")
                                     .text_size(px(10.0))
                                     .cursor_pointer()
-                                    .text_color(if can_scroll_down { text_primary } else { text_muted.opacity(0.3) })
+                                    .text_color(if can_scroll_down {
+                                        text_primary
+                                    } else {
+                                        text_muted.opacity(0.3)
+                                    })
                                     .child("▼")
                                     .when(can_scroll_down, |el| {
-                                        el.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                            let max_start = filtered_count.saturating_sub(HISTORY_VIEW_LEN);
-                                            this.history_view_start = (this.history_view_start + HISTORY_VIEW_LEN).min(max_start);
-                                            cx.notify();
-                                        }))
-                                    })
-                            )
-                    )
+                                        el.on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                let max_start =
+                                                    filtered_count.saturating_sub(HISTORY_VIEW_LEN);
+                                                this.history_view_start = (this.history_view_start
+                                                    + HISTORY_VIEW_LEN)
+                                                    .min(max_start);
+                                                this.history_scroll_handle.scroll_to_top_of_item(0);
+                                                cx.notify();
+                                            }),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
         })
         // Detail panel for selected entry
         .when(selected_entry.is_some(), |el| {
             let entry = selected_entry.unwrap();
-            el.child(render_history_detail(&entry, text_primary, text_muted, accent, text_inverse, panel_border, cx))
+            el.child(render_history_detail(
+                &entry,
+                text_primary,
+                text_muted,
+                accent,
+                surface,
+                panel_border,
+                cx,
+            ))
         })
 }
 
@@ -3973,6 +4111,8 @@ fn render_history_entry(
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
+    surface: Hsla,
+    accent: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let is_selected = selected_id == Some(entry.id);
@@ -3984,7 +4124,9 @@ fn render_history_entry(
 
     // Capture highlight info for click handler
     let highlight_range = entry.sheet_index.and_then(|si| {
-        entry.affected_range.map(|(sr, sc, er, ec)| (si, sr, sc, er, ec))
+        entry
+            .affected_range
+            .map(|(sr, sc, er, ec)| (si, sr, sc, er, ec))
     });
 
     // Format relative time
@@ -3996,32 +4138,48 @@ fn render_history_entry(
     div()
         .id(SharedString::from(format!("history-entry-{}", entry.id)))
         .px_3()
-        .py_2()
+        .py_3()
+        .flex_shrink_0()
+        .rounded_md()
         .flex()
         .flex_col()
-        .gap_0p5()
+        .gap_2()
         .cursor_pointer()
-        .bg(if is_selected { panel_border.opacity(0.5) } else { gpui::transparent_black() })
-        .border_b_1()
-        .border_color(panel_border.opacity(0.3))
-        .hover(|s| s.bg(panel_border.opacity(0.3)))
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            // Hide context menu on left click
-            this.history_context_menu_entry_id = None;
-            // Toggle selection and highlight
-            if this.selected_history_id == Some(entry_id) {
-                this.selected_history_id = None;
-                this.history_highlight_range = None;
-            } else {
-                this.selected_history_id = Some(entry_id);
-                this.history_highlight_range = highlight_range;
-            }
-            cx.notify();
-        }))
-        .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
-            // Show context menu for this entry
-            this.show_history_context_menu(entry_id, cx);
-        }))
+        .bg(if is_selected {
+            accent.opacity(0.10)
+        } else {
+            surface
+        })
+        .border_1()
+        .border_color(if is_selected {
+            accent.opacity(0.55)
+        } else {
+            panel_border.opacity(0.6)
+        })
+        .hover(|s| s.border_color(accent.opacity(0.45)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                // Hide context menu on left click
+                this.history_context_menu_entry_id = None;
+                // Toggle selection and highlight
+                if this.selected_history_id == Some(entry_id) {
+                    this.selected_history_id = None;
+                    this.history_highlight_range = None;
+                } else {
+                    this.selected_history_id = Some(entry_id);
+                    this.history_highlight_range = highlight_range;
+                }
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _, _, cx| {
+                // Show context menu for this entry
+                this.show_history_context_menu(entry_id, cx);
+            }),
+        )
         // Top row: label + time
         .child(
             div()
@@ -4036,16 +4194,20 @@ fn render_history_entry(
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(if is_undoable { text_primary } else { text_muted })
-                                .child(SharedString::from(entry.label.clone()))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(if is_undoable {
+                                    text_primary
+                                } else {
+                                    text_muted
+                                })
+                                .child(SharedString::from(entry.label.clone())),
                         )
                         .when(!is_undoable, |el| {
                             el.child(
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(text_muted)
-                                    .child("(undone)")
+                                    .child("(undone)"),
                             )
                         })
                         .when(ai_source.is_some(), |el| {
@@ -4056,16 +4218,17 @@ fn render_history_entry(
                                     .bg(ai_badge_color.opacity(0.2))
                                     .text_size(px(9.0))
                                     .text_color(ai_badge_color)
-                                    .child(SharedString::from(ai_source.clone().unwrap()))
+                                    .child(SharedString::from(ai_source.clone().unwrap())),
                             )
-                        })
+                        }),
                 )
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_size(px(10.0))
                         .text_color(text_muted)
-                        .child(SharedString::from(time_str))
-                )
+                        .child(SharedString::from(time_str)),
+                ),
         )
         // Bottom row: scope or location
         .when(!entry.scope.is_empty() || location.is_some(), |el| {
@@ -4081,7 +4244,7 @@ fn render_history_entry(
                             .text_color(text_muted)
                             .when(!entry.scope.is_empty(), |el| {
                                 el.child(SharedString::from(entry.scope.clone()))
-                            })
+                            }),
                     )
                     // Location chip (clickable to jump without selecting)
                     .when(location.is_some(), |el| {
@@ -4090,38 +4253,48 @@ fn render_history_entry(
                         el.child(
                             div()
                                 .id(SharedString::from(format!("history-loc-{}", entry_id)))
-                                .px_1()
+                                .px_2()
+                                .py(px(2.0))
+                                .max_w_full()
+                                .truncate()
                                 .rounded_sm()
-                                .bg(panel_border.opacity(0.3))
-                                .text_size(px(9.0))
+                                .bg(panel_border.opacity(0.18))
+                                .text_size(px(11.0))
                                 .text_color(text_muted)
                                 .cursor_pointer()
                                 .hover(|s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
                                 .child(SharedString::from(format!(
                                     "{}{}",
-                                    if sheet_idx.is_some() { format!("S{}!", sheet_idx.unwrap() + 1) } else { String::new() },
+                                    if sheet_idx.is_some() {
+                                        format!("S{}!", sheet_idx.unwrap() + 1)
+                                    } else {
+                                        String::new()
+                                    },
                                     loc
                                 )))
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                    // Jump to location (entry selection happens via parent handler)
-                                    if let Some((si, sr, sc, er, ec)) = jump_range {
-                                        if si != this.sheet_index(cx) {
-                                            if !this.activate_sheet(si, cx) {
-                                                return;
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                        // Jump to location (entry selection happens via parent handler)
+                                        if let Some((si, sr, sc, er, ec)) = jump_range {
+                                            if si != this.sheet_index(cx) {
+                                                if !this.activate_sheet(si, cx) {
+                                                    return;
+                                                }
                                             }
+                                            this.view_state.selected = (sr, sc);
+                                            if sr != er || sc != ec {
+                                                this.view_state.selection_end = Some((er, ec));
+                                            } else {
+                                                this.view_state.selection_end = None;
+                                            }
+                                            this.ensure_cell_visible(sr, sc);
+                                            cx.notify();
                                         }
-                                        this.view_state.selected = (sr, sc);
-                                        if sr != er || sc != ec {
-                                            this.view_state.selection_end = Some((er, ec));
-                                        } else {
-                                            this.view_state.selection_end = None;
-                                        }
-                                        this.ensure_cell_visible(sr, sc);
-                                        cx.notify();
-                                    }
-                                }))
+                                    }),
+                                ),
                         )
-                    })
+                    }),
             )
         })
 }
@@ -4131,276 +4304,236 @@ fn render_history_detail(
     text_primary: Hsla,
     text_muted: Hsla,
     accent: Hsla,
-    text_inverse: Hsla,
+    surface: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let lua_code = entry.lua.clone();
-    let generated_lua = entry.generated_lua.clone();
-    let summary = entry.summary.clone();
-    let ai_source = entry.ai_source.clone();
-    let has_changes = !entry.affected_cells.is_empty();
-    let entry_is_undoable = entry.is_undoable;
-
-    // AI badge color
-    let ai_badge_color = hsla(0.8, 0.6, 0.55, 1.0);
-
-    // Determine which Lua to use (explicit provenance takes priority)
-    let copyable_lua = lua_code.clone().or_else(|| generated_lua.clone());
+    let copyable_lua = entry.lua.clone().or_else(|| entry.generated_lua.clone());
     let has_lua = copyable_lua.is_some();
-
-    // Format cell address from row/col (e.g., "A1", "B2")
-    fn cell_addr(row: usize, col: usize) -> String {
-        let col_letter = if col < 26 {
-            ((b'A' + col as u8) as char).to_string()
-        } else {
-            let first = (b'A' + (col / 26 - 1) as u8) as char;
-            let second = (b'A' + (col % 26) as u8) as char;
-            format!("{}{}", first, second)
-        };
-        format!("{}{}", col_letter, row + 1)
-    }
-
-    // Show up to 5 changes - clone data to own it
-    let changes_to_show: Vec<(usize, usize, String, String)> = entry
-        .affected_cells
-        .iter()
-        .take(5)
-        .map(|(r, c, o, n)| (*r, *c, o.clone(), n.clone()))
-        .collect();
     let more_count = entry.affected_cells.len().saturating_sub(5);
 
     div()
-        .border_t_1()
-        .border_color(panel_border)
         .flex()
         .flex_col()
-        .max_h(px(250.0))
-        .overflow_hidden()
-        // AI source (when this is an AI-generated mutation)
-        .when(ai_source.is_some(), |el: Div| {
-            let source_label = ai_source.clone().unwrap();
-            el.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(panel_border)
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(text_muted)
-                            .child("Source")
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(ai_badge_color.opacity(0.15))
-                            .text_size(px(11.0))
-                            .text_color(ai_badge_color)
-                            .child(SharedString::from(source_label))
-                    )
-            )
-        })
-        // Action summary (when available)
-        .when(summary.is_some(), |el: Div| {
-            let summary_text = summary.clone().unwrap();
-            el.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(panel_border)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(text_muted)
-                            .child("Details")
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(text_primary)
-                            .child(SharedString::from(summary_text))
-                    )
-            )
-        })
-        // Changes section (when there are affected cells)
-        .when(has_changes, |el: Div| {
-            el.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(text_muted)
-                            .child("Changes")
-                    )
-                    .children(changes_to_show.into_iter().map(|(row, col, old, new)| {
-                        let addr = cell_addr(row, col);
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(11.0))
-                            .child(
-                                div()
-                                    .text_color(text_muted)
-                                    .min_w(px(40.0))
-                                    .child(SharedString::from(addr))
-                            )
-                            .child(
-                                div()
-                                    .text_color(text_muted)
-                                    .max_w(px(80.0))
-                                    .overflow_hidden()
-                                    .child(SharedString::from(if old.is_empty() { "(empty)".to_string() } else { old }))
-                            )
-                            .child(
-                                div()
-                                    .text_color(text_muted)
-                                    .child("→")
-                            )
-                            .child(
-                                div()
-                                    .text_color(text_primary)
-                                    .max_w(px(80.0))
-                                    .overflow_hidden()
-                                    .child(SharedString::from(if new.is_empty() { "(empty)".to_string() } else { new }))
-                            )
-                    }))
-                    .when(more_count > 0, |el| {
-                        el.child(
+        .flex_shrink_0()
+        .max_h(relative(0.5))
+        .border_t_1()
+        .border_color(panel_border)
+        .bg(surface)
+        .child(
+            div()
+                .id("history-detail-scroll")
+                .min_h_0()
+                .overflow_y_scroll()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(text_muted)
-                                .child(SharedString::from(format!("...and {} more", more_count)))
+                                .child("SELECTED CHANGE"),
                         )
-                    })
-            )
-        })
-        // Provenance section (when there's Lua code and user is Pro)
-        .when(lua_code.is_some(), |el: Div| {
-            let code = lua_code.clone().unwrap();
-            el.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_primary)
+                                .child(SharedString::from(entry.label.clone())),
+                        )
+                        .when_some(entry.summary.clone(), |d, summary| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(text_muted)
+                                    .child(SharedString::from(summary)),
+                            )
+                        }),
+                )
+                .when_some(entry.ai_source.clone(), |d, source| {
+                    d.child(
                         div()
                             .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(text_muted)
-                            .child("Provenance")
+                            .text_color(accent)
+                            .child(SharedString::from(format!("Source: {}", source))),
                     )
-                    .child(
+                })
+                .when(!entry.affected_cells.is_empty(), |d| {
+                    d.child(
                         div()
-                            .p_2()
                             .rounded_md()
-                            .bg(rgb(0x1a1a1a))
                             .border_1()
                             .border_color(panel_border)
                             .overflow_hidden()
                             .child(
                                 div()
+                                    .flex()
+                                    .gap_2()
+                                    .px_2()
+                                    .py_2()
+                                    .bg(panel_border.opacity(0.15))
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(text_muted)
+                                    .child(div().w(px(72.0)).flex_shrink_0().child("CELL"))
+                                    .child(div().flex_1().child("BEFORE"))
+                                    .child(div().flex_1().child("AFTER")),
+                            )
+                            .children(entry.affected_cells.iter().take(5).map(
+                                |(row, col, old, new)| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_2()
+                                        .py_2()
+                                        .border_t_1()
+                                        .border_color(panel_border.opacity(0.5))
+                                        .text_size(px(11.0))
+                                        .child(
+                                            div()
+                                                .w(px(72.0))
+                                                .flex_shrink_0()
+                                                .text_color(text_muted)
+                                                .child(SharedString::from(format!(
+                                                    "{}{}",
+                                                    Spreadsheet::col_letter(*col),
+                                                    row + 1
+                                                ))),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(text_muted)
+                                                .child(SharedString::from(if old.is_empty() {
+                                                    "Empty".into()
+                                                } else {
+                                                    old.clone()
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(text_primary)
+                                                .child(SharedString::from(if new.is_empty() {
+                                                    "Empty".into()
+                                                } else {
+                                                    new.clone()
+                                                })),
+                                        )
+                                },
+                            ))
+                            .when(more_count > 0, |d| {
+                                d.child(
+                                    div()
+                                        .px_2()
+                                        .py_2()
+                                        .text_size(px(10.0))
+                                        .text_color(text_muted)
+                                        .child(SharedString::from(format!(
+                                            "{} more changes",
+                                            more_count
+                                        ))),
+                                )
+                            }),
+                    )
+                })
+                .when_some(entry.lua.clone(), |d, code| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(text_muted)
+                                    .child("Lua provenance"),
+                            )
+                            .child(
+                                div()
+                                    .id("history-lua-code")
+                                    .p_3()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(panel_border)
+                                    .bg(panel_border.opacity(0.12))
+                                    .overflow_x_scroll()
                                     .text_size(px(11.0))
                                     .font_family("monospace")
                                     .text_color(text_primary)
-                                    .child(SharedString::from(code))
-                            )
+                                    .child(SharedString::from(code)),
+                            ),
                     )
-            )
-        })
-        // Empty state
-        .when(!has_changes && lua_code.is_none(), |el: Div| {
-            el.child(
+                })
+                .when(
+                    entry.affected_cells.is_empty()
+                        && entry.lua.is_none()
+                        && entry.summary.is_none(),
+                    |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(text_muted)
+                                .child("No cell-level details for this change."),
+                        )
+                    },
+                ),
+        )
+        .when(entry.is_undoable || has_lua, |d| {
+            d.child(
                 div()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(11.0))
-                    .text_color(text_muted)
-                    .child("No details available")
-            )
-        })
-        // Action buttons (Copy Lua + Rewind to here)
-        .when(entry_is_undoable || has_lua, |el: Div| {
-            el.child({
-                let lua_for_copy = copyable_lua.clone();
-                div()
-                    .px_3()
-                    .py_2()
+                    .px_4()
+                    .py_3()
+                    .flex_shrink_0()
                     .border_t_1()
                     .border_color(panel_border)
                     .flex()
+                    .items_center()
                     .gap_2()
-                    // Copy Lua button (when Lua is available)
-                    .when(has_lua, |el: Div| {
-                        el.child(
-                            div()
-                                .id("copy-lua-btn")
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(accent.opacity(0.15))
-                                .border_1()
-                                .border_color(accent.opacity(0.3))
-                                .text_size(px(11.0))
-                                .text_color(accent)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(accent.opacity(0.25)))
-                                .child("Copy Lua")
-                                .on_mouse_down(MouseButton::Left, {
-                                    let lua = lua_for_copy.clone();
+                    .when(has_lua, |d| {
+                        d.child(
+                            Button::new("copy-lua-btn", "Copy Lua")
+                                .secondary(panel_border, text_primary)
+                                .on_mouse_down(
+                                    MouseButton::Left,
                                     cx.listener(move |this, _, _, cx| {
-                                        if let Some(ref code) = lua {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
-                                            this.status_message = Some("Lua copied to clipboard".to_string());
+                                        if let Some(ref code) = copyable_lua {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                code.clone(),
+                                            ));
+                                            this.status_message =
+                                                Some("Lua copied to clipboard".into());
                                             cx.notify();
                                         }
-                                    })
-                                })
+                                    }),
+                                ),
                         )
                     })
-                    // Rewind to here button (when entry is undoable)
-                    .when(entry_is_undoable, |el: Div| {
-                        el.child(
-                            div()
-                                .id("rewind-to-here-btn")
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(hsla(0.0, 0.8, 0.3, 0.2))
-                                .border_1()
-                                .border_color(hsla(0.0, 0.8, 0.4, 0.5))
-                                .text_size(px(11.0))
-                                .text_color(hsla(0.0, 0.8, 0.7, 1.0))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(hsla(0.0, 0.8, 0.3, 0.4)))
-                                .child("Rewind to here...")
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.show_rewind_confirm(cx);
-                                }))
+                    .when(entry.is_undoable, |d| {
+                        d.child(
+                            Button::new("rewind-to-here-btn", "Rewind to here…")
+                                .secondary(accent.opacity(0.5), accent)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.show_rewind_confirm(cx);
+                                    }),
+                                ),
                         )
-                    })
-            })
+                    }),
+            )
         })
 }
 

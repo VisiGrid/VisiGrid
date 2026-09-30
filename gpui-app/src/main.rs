@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod actions;
+mod pivot_ui;
 mod ai;
 mod ai_cli;
 mod ai_dialog_state;

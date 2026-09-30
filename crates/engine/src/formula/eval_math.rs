@@ -1,8 +1,10 @@
 // Math functions: SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, ABS, ROUND, INT, MOD,
 // POWER, SQRT, CEILING, FLOOR, PRODUCT, MEDIAN, SUMPRODUCT
 
-use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution};
-use super::eval_helpers::{collect_numbers, collect_all_values};
+use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution, Value};
+use super::eval_helpers::{
+    collect_all_values, collect_numbers, excel_mod, round_to_15_sig, round_to_digits, RoundMode,
+};
 use super::parser::{BoundExpr, Expr};
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -93,8 +95,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            EvalResult::Number((value * factor).round() / factor)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::Nearest))
         }
         "ROUNDUP" => {
             if args.is_empty() || args.len() > 2 {
@@ -112,13 +113,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            let result = if value >= 0.0 {
-                (value * factor).ceil() / factor
-            } else {
-                (value * factor).floor() / factor
-            };
-            EvalResult::Number(result)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::AwayFromZero))
         }
         "ROUNDDOWN" => {
             if args.is_empty() || args.len() > 2 {
@@ -136,13 +131,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            let result = if value >= 0.0 {
-                (value * factor).floor() / factor
-            } else {
-                (value * factor).ceil() / factor
-            };
-            EvalResult::Number(result)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::TowardZero))
         }
         "TRUNC" => {
             if args.is_empty() || args.len() > 2 {
@@ -160,13 +149,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 0
             };
-            let factor = 10_f64.powi(decimals);
-            let result = if value >= 0.0 {
-                (value * factor).floor() / factor
-            } else {
-                (value * factor).ceil() / factor
-            };
-            EvalResult::Number(result)
+            EvalResult::Number(round_to_digits(value, decimals, RoundMode::TowardZero))
         }
         "INT" => {
             if args.len() != 1 {
@@ -192,7 +175,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if divisor == 0.0 {
                 return Some(EvalResult::Error("#DIV/0!".to_string()));
             }
-            EvalResult::Number(number % divisor)
+            EvalResult::Number(excel_mod(number, divisor))
         }
         "POWER" => {
             if args.len() != 2 {
@@ -206,7 +189,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Ok(n) => n,
                 Err(e) => return Some(EvalResult::Error(e)),
             };
-            EvalResult::Number(base.powf(exp))
+            power(base, exp)
         }
         "SQRT" => {
             if args.len() != 1 {
@@ -218,23 +201,26 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Err(e) => EvalResult::Error(e),
             }
         }
-        "CEILING" => {
-            if args.len() != 1 {
-                return Some(EvalResult::Error("CEILING requires exactly one argument".to_string()));
+        "CEILING" | "FLOOR" => {
+            // CEILING(number, [significance]) / FLOOR(number, [significance]).
+            // Excel requires the significance; it is optional here so sheets written
+            // against the old one-argument form (whole-number ceil/floor) still work.
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error(format!("{} requires 1 or 2 arguments", name)));
             }
-            match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => EvalResult::Number(n.ceil()),
-                Err(e) => EvalResult::Error(e),
-            }
-        }
-        "FLOOR" => {
-            if args.len() != 1 {
-                return Some(EvalResult::Error("FLOOR requires exactly one argument".to_string()));
-            }
-            match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => EvalResult::Number(n.floor()),
-                Err(e) => EvalResult::Error(e),
-            }
+            let number = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let significance = if args.len() == 2 {
+                match evaluate(&args[1], lookup).to_number() {
+                    Ok(n) => n,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            } else {
+                1.0
+            };
+            round_to_multiple(number, significance, name == "CEILING")
         }
         "PRODUCT" => {
             let values = collect_numbers(args, lookup);
@@ -256,7 +242,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.is_empty() {
                         EvalResult::Error("MEDIAN requires at least one value".to_string())
                     } else {
-                        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        vals.sort_by(f64::total_cmp);
                         let mid = vals.len() / 2;
                         if vals.len() % 2 == 0 {
                             EvalResult::Number((vals[mid - 1] + vals[mid]) / 2.0)
@@ -269,98 +255,41 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
         }
         "SUMPRODUCT" => {
-            // SUMPRODUCT(range1, range2, ..., rangeN) -> Number
+            // SUMPRODUCT(array1, array2, ..., arrayN) -> Number
             //
             // Contract:
-            // - Each arg must be a range, cell ref, or named range
+            // - Each arg is a range, cell ref, named range, or an expression that
+            //   produces an array (B2:B9*C2:C9, --(A2:A9="x"))
             // - All args must have the same shape (rows × cols)
             // - Iterates row-major, multiplies corresponding cells, sums products
-            // - Empty/text/bool cells → 0, errors propagate
+            // - In a range, numeric text counts; empty/other text/bool cells → 0.
+            //   In a computed array, only numbers count, which is why booleans
+            //   need -- to become 1s and 0s, as in Excel. Errors propagate.
             if args.is_empty() {
                 return Some(EvalResult::Error("SUMPRODUCT requires at least one argument".to_string()));
             }
-
-            // Extract rectangular coordinates for each arg
-            let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(args.len());
-            for (i, arg) in args.iter().enumerate() {
-                match arg {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                        ranges.push((*start_row, *start_col, *end_row, *end_col));
-                    }
-                    Expr::CellRef { col, row, .. } => {
-                        ranges.push((*row, *col, *row, *col));
-                    }
-                    Expr::NamedRange(name) => {
-                        match lookup.resolve_named_range(name) {
-                            Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
-                                ranges.push((start_row, start_col, end_row, end_col));
-                            }
-                            Some(NamedRangeResolution::Cell { row, col }) => {
-                                ranges.push((row, col, row, col));
-                            }
-                            None => return Some(EvalResult::Error(format!("#NAME? '{}'", name))),
-                        }
-                    }
-                    _ => {
-                        // Single scalar arg: evaluate and return (SUMPRODUCT(5) = 5)
-                        if args.len() == 1 {
-                            return Some(match evaluate(arg, lookup).to_number() {
-                                Ok(n) => EvalResult::Number(n),
-                                Err(e) => EvalResult::Error(e),
-                            });
-                        }
-                        return Some(EvalResult::Error(format!(
-                            "SUMPRODUCT argument {} must be a range, cell reference, or named range",
-                            i + 1
-                        )));
-                    }
-                }
+            let mut grids: Vec<Vec<Vec<f64>>> = Vec::with_capacity(args.len());
+            for arg in args {
+                let grid = match sumproduct_grid(arg, lookup) {
+                    Ok(g) => g,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                grids.push(grid);
             }
-
-            // Normalize coordinates (min/max) and compute shape
-            let norm: Vec<(usize, usize, usize, usize)> = ranges.iter().map(|&(r1, c1, r2, c2)| {
-                (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2))
-            }).collect();
-
-            let num_rows = norm[0].2 - norm[0].0 + 1;
-            let num_cols = norm[0].3 - norm[0].1 + 1;
-
-            // Validate all shapes match
-            for (i, r) in norm.iter().enumerate().skip(1) {
-                let rows = r.2 - r.0 + 1;
-                let cols = r.3 - r.1 + 1;
-                if rows != num_rows || cols != num_cols {
+            let (rows, cols) = (grids[0].len(), grids[0].first().map_or(0, |r| r.len()));
+            for (i, g) in grids.iter().enumerate().skip(1) {
+                let (r, c) = (g.len(), g.first().map_or(0, |r| r.len()));
+                if r != rows || c != cols {
                     return Some(EvalResult::Error(format!(
                         "SUMPRODUCT ranges must have the same shape. Argument 1 is {}x{}, argument {} is {}x{}.",
-                        num_rows, num_cols, i + 1, rows, cols
+                        rows, cols, i + 1, r, c
                     )));
                 }
             }
-
-            // Iterate row-major, multiply corresponding cells, accumulate sum
             let mut sum = 0.0;
-            for row_offset in 0..num_rows {
-                for col_offset in 0..num_cols {
-                    let mut product = 1.0;
-                    for r in &norm {
-                        let cell_r = r.0 + row_offset;
-                        let cell_c = r.1 + col_offset;
-                        let text = lookup.get_text(cell_r, cell_c);
-                        if text.is_empty() {
-                            product = 0.0;
-                            break; // 0 * anything = 0, skip remaining
-                        } else if text.starts_with('#') {
-                            // Error cell — propagate
-                            return Some(EvalResult::Error(text));
-                        } else if let Ok(n) = text.parse::<f64>() {
-                            product *= n;
-                        } else {
-                            // Text/bool → 0
-                            product = 0.0;
-                            break;
-                        }
-                    }
-                    sum += product;
+            for r in 0..rows {
+                for c in 0..cols {
+                    sum += grids.iter().map(|g| g[r][c]).product::<f64>();
                 }
             }
             EvalResult::Number(sum)
@@ -368,4 +297,99 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         _ => return None,
     };
     Some(result)
+}
+
+/// POWER and the ^ operator. Excel never shows NaN or infinity: 0 to a negative power is
+/// a division by zero, and anything else without a finite real result is #NUM!.
+pub(crate) fn power(base: f64, exp: f64) -> EvalResult {
+    if base == 0.0 && exp < 0.0 {
+        return EvalResult::Error("#DIV/0!".to_string());
+    }
+    let result = base.powf(exp);
+    if result.is_finite() {
+        EvalResult::Number(result)
+    } else {
+        EvalResult::Error("#NUM!".to_string())
+    }
+}
+
+/// CEILING and FLOOR with Excel's significance rules.
+///
+/// The quotient is rounded towards +inf (CEILING) or -inf (FLOOR) and multiplied back,
+/// which gives each sign combination Excel's answer: CEILING(-4.2,1) = -4 and
+/// CEILING(-4.2,-1) = -5. A positive number with a negative significance is #NUM!.
+/// A zero significance gives 0 for CEILING and #DIV/0! for FLOOR, as in Excel.
+fn round_to_multiple(number: f64, significance: f64, up: bool) -> EvalResult {
+    if number == 0.0 {
+        return EvalResult::Number(0.0);
+    }
+    if significance == 0.0 {
+        return if up {
+            EvalResult::Number(0.0)
+        } else {
+            EvalResult::Error("#DIV/0!".to_string())
+        };
+    }
+    if number > 0.0 && significance < 0.0 {
+        return EvalResult::Error("#NUM!".to_string());
+    }
+    // 0.3/0.1 is 2.9999999999999996 in binary; snap before choosing a side.
+    let q = round_to_15_sig(number / significance);
+    let q = if up { q.ceil() } else { q.floor() };
+    // ...and again after, so CEILING(0.25,0.1) is 0.3 rather than 0.30000000000000004.
+    EvalResult::Number(round_to_15_sig(q * significance))
+}
+
+/// One SUMPRODUCT argument as a grid of numbers.
+fn sumproduct_grid<L: CellLookup>(arg: &BoundExpr, lookup: &L) -> Result<Vec<Vec<f64>>, String> {
+    // Ranges keep their long-standing reading: numeric text counts, other text,
+    // booleans and blanks are 0.
+    let rect = match arg {
+        Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+            if matches!(sheet, crate::sheet::SheetRef::RefError { .. }) {
+                return Err("#REF!".to_string());
+            }
+            Some((*start_row, *start_col, *end_row, *end_col))
+        }
+        Expr::CellRef { col, row, .. } => Some((*row, *col, *row, *col)),
+        Expr::NamedRange(name) => match lookup.resolve_named_range(name) {
+            Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                Some((start_row, start_col, end_row, end_col))
+            }
+            Some(NamedRangeResolution::Cell { row, col }) => Some((row, col, row, col)),
+            None => return Err(format!("#NAME? '{}'", name)),
+        },
+        _ => None,
+    };
+    if let Some((r1, c1, r2, c2)) = rect {
+        let (r0, r1) = (r1.min(r2), r1.max(r2));
+        let (c0, c1) = (c1.min(c2), c1.max(c2));
+        return (r0..=r1)
+            .map(|r| {
+                (c0..=c1)
+                    .map(|c| {
+                        let text = lookup.get_text(r, c);
+                        if text.starts_with('#') {
+                            Err(text)
+                        } else {
+                            Ok(crate::cell::parse_finite(&text).unwrap_or(0.0))
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+    let element = |v: &Value| match v {
+        Value::Number(n) => Ok(*n),
+        Value::Error(e) => Err(e.clone()),
+        _ => Ok(0.0),
+    };
+    match evaluate(arg, lookup) {
+        EvalResult::Array(a) => (0..a.rows())
+            .map(|r| (0..a.cols()).map(|c| a.get(r, c).map_or(Ok(0.0), element)).collect())
+            .collect(),
+        EvalResult::Error(e) => Err(e),
+        // A lone scalar is a 1x1 array: SUMPRODUCT(5) is 5.
+        other => Ok(vec![vec![other.to_number()?]]),
+    }
 }
