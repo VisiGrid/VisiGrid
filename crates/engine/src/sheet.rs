@@ -3034,6 +3034,66 @@ mod tests {
     }
 
     #[test]
+    fn sort_order_minus_one_is_descending() {
+        // Excel's sort_order is 1 or -1. It was read as a boolean, and -1 is
+        // truthy, so this sorted ascending.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "10");
+        sheet.set_value(1, 0, "30");
+        sheet.set_value(2, 0, "20");
+        sheet.set_value(0, 2, "=SORT(A1:A3,1,-1)");
+        assert_eq!(sheet.get_display(0, 2), "30");
+        assert_eq!(sheet.get_display(1, 2), "20");
+        assert_eq!(sheet.get_display(2, 2), "10");
+        sheet.set_value(0, 3, "=SORT(A1:A3,1,1)");
+        assert_eq!(sheet.get_display(0, 3), "10");
+        sheet.set_value(0, 4, "=SORT(A1:A3,1,2)");
+        assert!(sheet.get_display(0, 4).starts_with("#"), "sort_order 2 is an error");
+    }
+
+    #[test]
+    fn sort_descending_keeps_ties_in_order() {
+        // Reversing an ascending sort also reversed rows with equal keys.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        for (r, (name, score)) in [("Ana", "2"), ("Bo", "1"), ("Cy", "2"), ("Di", "1")].iter().enumerate() {
+            sheet.set_value(r, 0, name);
+            sheet.set_value(r, 1, score);
+        }
+        sheet.set_value(0, 3, "=SORT(A1:B4,2,-1)");
+        let names: Vec<String> = (0..4).map(|r| sheet.get_display(r, 3)).collect();
+        assert_eq!(names, ["Ana", "Cy", "Bo", "Di"]);
+    }
+
+    #[test]
+    fn transpose_keeps_text() {
+        // Every cell used to be read as a number, so text became 0.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        sheet.set_value(0, 0, "Ana");
+        sheet.set_value(0, 1, "10");
+        sheet.set_value(1, 0, "Bo");
+        sheet.set_value(0, 3, "=TRANSPOSE(A1:B2)");
+        assert_eq!(sheet.get_display(0, 3), "Ana");
+        assert_eq!(sheet.get_display(0, 4), "Bo");
+        assert_eq!(sheet.get_display(1, 3), "10");
+        // A blank cell transposes to 0, as in Excel.
+        assert_eq!(sheet.get_display(1, 4), "0");
+    }
+
+    #[test]
+    fn filter_include_column_of_typed_booleans() {
+        // A typed TRUE is stored as text, and the include column was read as
+        // numbers, so this selected nothing.
+        let mut sheet = Sheet::new(SheetId(1), 10, 10);
+        for (r, (name, keep)) in [("Ana", "TRUE"), ("Bo", "FALSE"), ("Cy", "true")].iter().enumerate() {
+            sheet.set_value(r, 0, name);
+            sheet.set_value(r, 1, keep);
+        }
+        sheet.set_value(0, 3, "=FILTER(A1:A3,B1:B3)");
+        assert_eq!(sheet.get_display(0, 3), "Ana");
+        assert_eq!(sheet.get_display(1, 3), "Cy");
+    }
+
+    #[test]
     fn test_unique_single_column() {
         let mut sheet = Sheet::new(SheetId(1), 10, 10);
 

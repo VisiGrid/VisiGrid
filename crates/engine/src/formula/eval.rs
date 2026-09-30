@@ -3269,4 +3269,28 @@ mod tests {
         assert_eq!(eval("=COUNT(A1:A4)"), EvalResult::Number(2.0));
         assert_eq!(eval("=ISTEXT(A1)"), EvalResult::Boolean(true));
     }
+
+    #[test]
+    fn text_renders_excel_format_codes() {
+        // TEXT was a stub: only "0.00"-style decimals and a crude "%".
+        let text = |f: &str| match eval_str(f) {
+            EvalResult::Text(t) => t,
+            other => panic!("{f}: {other:?}"),
+        };
+        assert_eq!(text("=TEXT(1234.5,\"#,##0.00\")"), "1,234.50");
+        assert_eq!(text("=TEXT(0.256,\"0.0%\")"), "25.6%");
+        assert_eq!(text("=TEXT(45929,\"yyyy-mm-dd\")"), "2025-09-29");
+        assert_eq!(text("=TEXT(45929,\"dddd\")"), "Monday");
+        assert_eq!(text("=TEXT(45929,\"mmm d, yyyy\")"), "Sep 29, 2025");
+        assert_eq!(text("=TEXT(7,\"000\")"), "007");
+        assert_eq!(text("=TEXT(1234.5,\"$#,##0\")"), "$1,235");
+        assert_eq!(text("=TEXT(-5,\"0;(0)\")"), "(5)");
+        assert_eq!(text("=TEXT(0.75,\"h:mm AM/PM\")"), "6:00 PM");
+        assert_eq!(text("=TEXT(1234.567,\"0.0\")"), "1234.6");
+        // Numeric text is formatted; other text and booleans pass through.
+        assert_eq!(text("=TEXT(\"12.5\",\"0.00\")"), "12.50");
+        assert_eq!(text("=TEXT(\"abc\",\"0.00\")"), "abc");
+        assert_eq!(text("=TEXT(TRUE,\"0\")"), "TRUE");
+        assert_eq!(text("=TEXT(5,\"\")"), "");
+    }
 }

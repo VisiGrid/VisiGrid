@@ -184,24 +184,42 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             EvalResult::Text(trimmed)
         }
         "TEXT" => {
+            // TEXT(value, format_text): a number rendered with an Excel format code.
+            //
+            // This used to be a stub that understood only "0.00"-style decimals and a
+            // crude "%", so TEXT(date,"yyyy-mm-dd") returned the serial number and
+            // "#,##0" dropped the separator. Cells already render custom formats with
+            // ssfmt; TEXT now uses the same renderer, so a format code means the same
+            // thing in a cell and in a formula.
             if args.len() != 2 {
                 return Some(EvalResult::Error("TEXT requires exactly 2 arguments".to_string()));
             }
-            let value = match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => n,
-                Err(e) => return Some(EvalResult::Error(e)),
+            let format = match evaluate(&args[1], lookup) {
+                EvalResult::Error(e) => return Some(EvalResult::Error(e)),
+                other => other.to_text(),
             };
-            let format = evaluate(&args[1], lookup).to_text();
-            // Simple format support
-            let result = if format.contains("0.") {
-                let decimals = format.matches('0').count().saturating_sub(1);
-                format!("{:.1$}", value, decimals)
-            } else if format.contains('%') {
-                format!("{}%", (value * 100.0) as i64)
-            } else {
-                format!("{}", value)
+            let value = match evaluate(&args[0], lookup) {
+                EvalResult::Error(e) => return Some(EvalResult::Error(e)),
+                EvalResult::Number(n) => n,
+                EvalResult::Empty => 0.0,
+                // Excel passes booleans and non-numeric text through unformatted.
+                EvalResult::Boolean(b) => return Some(EvalResult::Text(if b { "TRUE" } else { "FALSE" }.to_string())),
+                EvalResult::Text(t) => match crate::cell::parse_finite(t.trim()) {
+                    Some(n) => n,
+                    None => return Some(EvalResult::Text(t)),
+                },
+                other => match other.to_number() {
+                    Ok(n) => n,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                },
             };
-            EvalResult::Text(result)
+            if format.is_empty() {
+                return Some(EvalResult::Text(String::new()));
+            }
+            match ssfmt::format_default(value, &format) {
+                Ok(text) => EvalResult::Text(text),
+                Err(_) => EvalResult::Error("#VALUE!".to_string()),
+            }
         }
         "VALUE" => {
             if args.len() != 1 {

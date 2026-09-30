@@ -4,6 +4,15 @@ use crate::sheet::SheetRef;
 use super::eval::{evaluate, CellLookup, EvalResult, Value, NamedRangeResolution};
 use super::parser::{BoundExpr, Expr};
 
+/// Read a single cell's typed value, honoring the sheet the reference points at.
+pub(crate) fn read_cell_value<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Value {
+    match sheet {
+        SheetRef::Current => lookup.get_cell_value(row, col),
+        SheetRef::Id(id) => lookup.get_value_sheet(*id, row, col),
+        SheetRef::RefError { .. } => Value::Empty,
+    }
+}
+
 /// Compare two Values for sorting
 /// Order: Numbers < Text < Empty < Errors (ascending)
 pub(crate) fn value_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
