@@ -1294,17 +1294,17 @@ impl Sheet {
                     found.push((r, c, n));
                 }
             };
-            self.cells.for_each_in(start_row, end_row, start_col, end_col, |(r, c), cell| {
-                if skip(r, c) || self.spill_values.contains_key(&(r, c)) {
+            let no_spills = self.spill_values.is_empty();
+            self.cells.for_each_scalar_in(start_row, end_row, start_col, end_col, |(r, c), cell| {
+                if skip(r, c) || (!no_spills && self.spill_values.contains_key(&(r, c))) {
                     return;
                 }
-                let n = match cell.value() {
-                    ValueRef::Number(n) => Some(unsigned_zero(n)),
-                    ValueRef::Text(s) => crate::cell::parse_finite(s),
-                    ValueRef::Formula { ast: Some(_), .. } => {
-                        self.get_cached_value(r, c).as_ref().and_then(number)
-                    }
-                    ValueRef::Formula { ast: None, .. } | ValueRef::Empty => None,
+                use crate::store::Scalar;
+                let n = match cell {
+                    Scalar::Number(n) => Some(unsigned_zero(n)),
+                    Scalar::Text(s) => crate::cell::parse_finite(s),
+                    Scalar::Computed(value) => value.and_then(number),
+                    Scalar::Empty => None,
                 };
                 if let Some(n) = n {
                     take(r, c, n);

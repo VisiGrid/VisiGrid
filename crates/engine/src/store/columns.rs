@@ -587,6 +587,17 @@ impl FormatTable {
     }
 }
 
+/// A stored cell as range aggregation sees it.
+pub(crate) enum Scalar<'a> {
+    Number(f64),
+    Text(&'a str),
+    /// A formula with a parsed AST: its computed result, `None` if not
+    /// computed yet.
+    Computed(Option<&'a Value>),
+    /// Empty, or a formula that failed to parse.
+    Empty,
+}
+
 /// Add a cell after every cell already in `chunks` (rows must arrive in
 /// ascending order), opening a new chunk when the row crosses into one.
 fn append(chunks: &mut Vec<(u32, Arc<Chunk>)>, row: usize, slot: Slot, format: FormatId) {
@@ -694,6 +705,53 @@ impl ColumnStore {
                     if (min_row..=max_row).contains(&row) {
                         f((row, col), self.view(row, col, chunk, off, slot));
                     }
+                }
+            }
+        }
+    }
+
+    /// Visit the stored cells inside a rectangle as scalars, in the same
+    /// order as [`Self::for_each_in`], for range aggregation: a formula
+    /// yields its computed result, read by id under one borrow instead of
+    /// being looked up again by position and cloned. Summing a column of
+    /// formulas was dominated by that lookup (#29).
+    pub fn for_each_scalar_in(
+        &self,
+        min_row: usize,
+        max_row: usize,
+        min_col: usize,
+        max_col: usize,
+        mut f: impl FnMut((usize, usize), Scalar<'_>),
+    ) {
+        if self.columns.is_empty() || min_row > max_row || min_col > max_col {
+            return;
+        }
+        let values = self.formulas.values.borrow();
+        let last_col = max_col.min(self.columns.len() - 1);
+        let (lo, _) = split(min_row);
+        let (hi, _) = split(max_row);
+        for col in min_col..=last_col {
+            let chunks = &self.columns[col].chunks;
+            let start = chunks.partition_point(|c| c.0 < lo);
+            for (idx, chunk) in &chunks[start..] {
+                if *idx > hi {
+                    break;
+                }
+                for (off, slot) in chunk.cells.slots() {
+                    let row = join(*idx, off);
+                    if !(min_row..=max_row).contains(&row) {
+                        continue;
+                    }
+                    let scalar = match slot {
+                        Slot::Empty => Scalar::Empty,
+                        Slot::Number(n) => Scalar::Number(n),
+                        Slot::Text(id) => Scalar::Text(self.strings.get(id)),
+                        Slot::Formula(id) if self.formulas.get(id).ast.is_some() => {
+                            Scalar::Computed(values.get(id as usize).and_then(Option::as_ref))
+                        }
+                        Slot::Formula(_) => Scalar::Empty,
+                    };
+                    f((row, col), scalar);
                 }
             }
         }

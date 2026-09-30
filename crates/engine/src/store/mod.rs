@@ -13,6 +13,7 @@ mod columns;
 mod hash;
 
 pub(crate) use columns::ColumnStore as CellStore;
+pub(crate) use columns::Scalar;
 
 #[cfg(test)]
 mod differential {

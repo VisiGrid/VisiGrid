@@ -42,7 +42,7 @@ fn content(rng: &mut Rng, row: usize, col: usize) -> String {
     }
     let src = col_letter(rng.below(col));
     let r = row + 1;
-    match rng.below(9) {
+    match rng.below(10) {
         // running total: every row reads all rows above it
         0 => format!("=SUM(${src}$1:{src}{r})"),
         // a rectangle over several columns to the left
@@ -68,6 +68,9 @@ fn content(rng: &mut Rng, row: usize, col: usize) -> String {
             let (a, b) = (a.min(b), a.max(b));
             format!("=SUM(({src}{a}:{src}{b}>20)*{src}{a}:{src}{b})")
         }
+        // a wide range: one row, every column to the left (stored in a
+        // row tree, not a column tree)
+        8 => format!("=SUM(A{0}:{1}{0})", rng.below(ROWS) + 1, col_letter(col - 1)),
         _ => format!("=MAX({src}{}:{src}{})", r.min(ROWS), ROWS),
     }
 }
