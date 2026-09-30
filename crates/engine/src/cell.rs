@@ -1229,6 +1229,11 @@ impl CellValue {
                 format!("{} {}", date_part, time_part)
             }
             NumberFormat::Custom(ref code) => {
+                // Four empty Excel format sections intentionally hide the value.
+                // ssfmt currently treats this valid code as General instead.
+                if code.trim() == ";;;" {
+                    return String::new();
+                }
                 // Use ssfmt for full ECMA-376 format code rendering (accounting,
                 // multi-section, date/time tokens, etc.). Falls back to our
                 // simpler formatter if ssfmt can't parse the code.
@@ -1616,6 +1621,12 @@ impl Cell {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_excel_format_sections_hide_numeric_values() {
+        for value in [-42.5, 0.0, 42.5] {
+            assert_eq!(super::CellValue::format_number(value, &super::NumberFormat::Custom(";;;".into())), "");
+        }
+    }
     use super::*;
 
     /// #18 phase 0: every reader now goes through ValueRef, and CellValue
