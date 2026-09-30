@@ -1038,10 +1038,9 @@ impl Workbook {
                         // Must still be tracked so recompute evaluates it.
                         Arc::make_mut(&mut self.dep_graph).register_leaf_formula(formula_cell);
                     }
-                    // Links the formulas already inside these ranges...
+                    // Formulas inside these ranges are ordered first through
+                    // the range index, whenever they are registered.
                     Arc::make_mut(&mut self.dep_graph).set_ranges(formula_cell, ranges);
-                    // ...and this formula to ranges registered before it.
-                    Arc::make_mut(&mut self.dep_graph).track_range_cell(formula_cell);
                 }
             }
         }
@@ -1075,10 +1074,6 @@ impl Workbook {
             // No longer a formula: clear its edges. A value that never was a
             // formula leaves the graph alone, so a clone keeps sharing it.
             Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
-        }
-        // Only a formula is linked to the ranges it sits in.
-        if self.dep_graph.is_formula_cell(cell_id) {
-            Arc::make_mut(&mut self.dep_graph).track_range_cell(cell_id);
         }
     }
 
@@ -1213,35 +1208,14 @@ impl Workbook {
     /// Returns true if this cell's value cannot be trusted because it depends
     /// on a circular reference somewhere in its precedent chain.
     pub fn has_cycle_in_upstream(&self, sheet_id: SheetId, row: usize, col: usize) -> bool {
-        let cell_id = CellId::new(sheet_id, row, col);
-        let mut visited = FxHashSet::default();
-        let mut queue = vec![cell_id];
-
-        // BFS through precedents
-        while let Some(current) = queue.pop() {
-            if visited.contains(&current) {
-                continue;
-            }
-            visited.insert(current);
-
-            // Check if this cell has a cycle error
-            if let Some(sheet) = self.sheet_by_id(current.sheet) {
-                if let Some(cell) = sheet.get_cell_opt(current.row, current.col) {
-                    if cell.value().is_cycle_error() {
-                        return true;
-                    }
-                }
-            }
-
-            // Add precedents to queue
-            for prec in self.dep_graph.precedents(current) {
-                if !visited.contains(&prec) {
-                    queue.push(prec);
-                }
-            }
-        }
-
-        false
+        // The inspector asks this on every render, so walk ranges through
+        // the index (each node once) rather than expanding every cell's
+        // ranges from scratch, which is quadratic up a running total.
+        self.dep_graph.any_upstream(CellId::new(sheet_id, row, col), |current| {
+            self.sheet_by_id(current.sheet)
+                .and_then(|sheet| sheet.get_cell_opt(current.row, current.col))
+                .is_some_and(|cell| cell.value().is_cycle_error())
+        })
     }
 
     // =========================================================================
@@ -1413,8 +1387,12 @@ impl Workbook {
         // --- Phase 2: Topo Sort ---
         let phase_start = Instant::now();
         // Get topo order (or detect cycles)
-        let (order, cycle_cells) = match self.dep_graph.topo_order_all_formulas() {
-            Ok(order) => (order, Vec::new()),
+        let mut levels: FxHashMap<CellId, usize> = FxHashMap::default();
+        let (order, cycle_cells) = match self.dep_graph.topo_levels_all_formulas() {
+            Ok((order, lv)) => {
+                levels = lv;
+                (order, Vec::new())
+            }
             Err(cycle) => {
                 report.had_cycles = true;
                 let cycle_cells = cycle.cells.clone();
@@ -1475,8 +1453,9 @@ impl Workbook {
             let mut upstream_known = Vec::new();
             for cell_id in known_deps_order {
                 // Check transitive dependency on cycle cells
-                let depends_on_cycle = self.dep_graph.precedents(cell_id)
-                    .any(|p| cycle_set.contains(&p));
+                let depends_on_cycle = self.dep_graph.ordering_precedents(cell_id)
+                    .iter()
+                    .any(|p| cycle_set.contains(p));
                 if depends_on_cycle {
                     downstream_known.push(cell_id);
                 } else {
@@ -1487,7 +1466,7 @@ impl Workbook {
             // Evaluate upstream non-cycle cells
             for cell_id in &upstream_known {
                 let mut max_pred_depth = 0;
-                for pred in self.dep_graph.precedents(*cell_id) {
+                for pred in self.dep_graph.ordering_precedents(*cell_id) {
                     max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
                 }
                 let cell_depth = max_pred_depth + 1;
@@ -1618,14 +1597,16 @@ impl Workbook {
                 progress = false;
                 let mut still_remaining = Vec::new();
                 for cell_id in remaining {
-                    let all_deps_ready = self.dep_graph.precedents(cell_id)
-                        .all(|p| !downstream_set.contains(&p) || evaluated.contains(&p));
+                    let preds = self.dep_graph.ordering_precedents(cell_id);
+                    let all_deps_ready = preds
+                        .iter()
+                        .all(|p| !downstream_set.contains(p) || evaluated.contains(p));
                     if all_deps_ready {
                         evaluated.insert(cell_id);
                         progress = true;
 
                         let mut max_pred_depth = 0;
-                        for pred in self.dep_graph.precedents(cell_id) {
+                        for pred in preds {
                             max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
                         }
                         let cell_depth = max_pred_depth + 1;
@@ -1649,7 +1630,7 @@ impl Workbook {
             // Any remaining cells have unresolvable deps — evaluate anyway
             for cell_id in &remaining {
                 let mut max_pred_depth = 0;
-                for pred in self.dep_graph.precedents(*cell_id) {
+                for pred in self.dep_graph.ordering_precedents(*cell_id) {
                     max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
                 }
                 let cell_depth = max_pred_depth + 1;
@@ -1722,11 +1703,18 @@ impl Workbook {
             let mut eval_order: usize = 0;
 
             for cell_id in &known_deps_order {
-                let mut max_pred_depth = 0;
-                for pred in self.dep_graph.precedents(*cell_id) {
-                    max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
-                }
-                let cell_depth = max_pred_depth + 1;
+                // The ordering's level counts formulas inside ranges; with a
+                // cycle there is no full order, so fall back to single refs.
+                let cell_depth = match levels.get(cell_id) {
+                    Some(&level) => level,
+                    None => {
+                        let mut max_pred_depth = 0;
+                        for pred in self.dep_graph.precedents(*cell_id) {
+                            max_pred_depth = max_pred_depth.max(depths.get(&pred).copied().unwrap_or(0));
+                        }
+                        max_pred_depth + 1
+                    }
+                };
                 depths.insert(*cell_id, cell_depth);
                 report.max_depth = report.max_depth.max(cell_depth);
 
@@ -1948,7 +1936,6 @@ impl Workbook {
                 break;
             }
             for cell in &touched {
-                Arc::make_mut(&mut self.dep_graph).track_range_cell(*cell);
                 if affected_set.insert(*cell) {
                     affected.push(*cell);
                 }

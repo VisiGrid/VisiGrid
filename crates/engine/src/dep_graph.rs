@@ -194,6 +194,84 @@ impl RangeIndex {
         self.by_col.retain(|(s, _), _| *s != sheet);
         self.by_row.retain(|(s, _), _| *s != sheet);
     }
+
+    fn tree(&self, tall: bool, key: (SheetId, u32)) -> Option<&Tree> {
+        if tall { self.by_col.get(&key) } else { self.by_row.get(&key) }
+    }
+
+    /// The stored nodes whose interval contains `cell`: the virtual nodes a
+    /// formula at `cell` belongs to.
+    fn nodes_at(&self, cell: CellId, mut f: impl FnMut(VNode)) {
+        for (tall, line, pos) in [(true, cell.col, cell.row), (false, cell.row, cell.col)] {
+            let key = (cell.sheet, line as u32);
+            if let Some(tree) = self.tree(tall, key) {
+                for node in path(pos) {
+                    if tree.contains_key(&node) {
+                        f(VNode { tall, sheet: cell.sheet, line: line as u32, node });
+                    }
+                }
+            }
+        }
+    }
+
+    /// The stored nodes a range was inserted as.
+    fn nodes_of(range: &RangeRef, mut f: impl FnMut(VNode)) {
+        let mut nodes = Vec::new();
+        if Self::tall(range) {
+            cover(range.start_row, range.end_row, &mut nodes);
+            for col in range.start_col..=range.end_col {
+                nodes.iter().for_each(|&node| f(VNode { tall: true, sheet: range.sheet, line: col as u32, node }));
+            }
+        } else {
+            cover(range.start_col, range.end_col, &mut nodes);
+            for row in range.start_row..=range.end_row {
+                nodes.iter().for_each(|&node| f(VNode { tall: false, sheet: range.sheet, line: row as u32, node }));
+            }
+        }
+    }
+
+    fn readers_of(&self, v: VNode) -> impl Iterator<Item = CellId> + '_ {
+        self.tree(v.tall, (v.sheet, v.line)).and_then(|t| t.get(&v.node)).into_iter().flat_map(|s| s.iter().copied())
+    }
+}
+
+/// One stored segment-tree node, standing for "every formula inside my
+/// interval" (#29). Ordering and cycle detection route range dependencies
+/// through these instead of an edge per formula per range: a running total
+/// over n formulas is ~21n node memberships rather than n²/2 edges.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct VNode {
+    /// true: a column's tree over rows; false: a row's tree over columns.
+    tall: bool,
+    sheet: SheetId,
+    /// The column (tall) or row (wide) the tree belongs to.
+    line: u32,
+    node: u32,
+}
+
+impl VNode {
+    /// The interval of positions (rows if tall, columns if wide) it covers.
+    fn span(&self) -> (usize, usize) {
+        let depth = 31 - self.node.leading_zeros();
+        let size = 1usize << (TREE_BITS - depth);
+        let lo = (self.node as usize - (1usize << depth)) * size;
+        (lo, lo + size - 1)
+    }
+
+    fn sort_key(&self) -> (u64, bool, u32, u32) {
+        (self.sheet.raw(), self.tall, self.line, self.node)
+    }
+}
+
+/// A node of the ordering graph: a formula cell, or a range node.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Node {
+    Real(CellId),
+    Virt(VNode),
+}
+
+fn cell_key(c: &CellId) -> (u64, usize, usize) {
+    (c.sheet.raw(), c.row, c.col)
 }
 
 /// Persistent dependency graph for formula cells.
@@ -208,9 +286,11 @@ impl RangeIndex {
 /// 2. **No dangling entries:** Empty sets are removed, not stored.
 /// 3. **No duplicate edges:** Set semantics enforced by FxHashSet.
 /// 4. **Atomic updates:** edge replacement and range materialization update both maps.
-/// 5. **Formulas inside ranges are edges:** if formula X lies in a range of
-///    formula F, then X ∈ preds[F]. Values inside ranges are not edges; they
-///    are found through `ranges`.
+/// 5. **Ranges are not edges:** `preds`/`succs` hold single references only.
+///    A formula F reading a range that contains formula X is ordered after X
+///    through the range index (see [`VNode`]), and X's readers are found by
+///    `dependents` through the same index. Materializing those edges made a
+///    running total over a column of formulas n²/2 edges (#29).
 #[derive(Default, Debug, Clone)]
 pub struct DepGraph {
     /// Precedents: for each formula cell B, the cells A it depends on.
@@ -238,9 +318,9 @@ impl DepGraph {
         Self::default()
     }
 
-    /// Returns the cells this formula cell depends on for ordering: single
-    /// references, and the formulas inside its ranges. Values inside ranges
-    /// are not included; see [`DepGraph::precedent_ranges`].
+    /// The cells this formula references directly (single references).
+    /// Formulas inside its ranges are not included; see
+    /// [`DepGraph::ordering_precedents`] and [`DepGraph::precedent_ranges`].
     ///
     /// These are the incoming edges to the cell.
     pub fn precedents(&self, cell: CellId) -> impl Iterator<Item = CellId> + '_ {
@@ -366,11 +446,6 @@ impl DepGraph {
         out
     }
 
-    fn add_edge(&mut self, pred: CellId, formula: CellId) {
-        self.preds.entry(formula).or_default().insert(pred);
-        self.succs.entry(pred).or_default().insert(formula);
-    }
-
     /// Replace all edges for a formula cell atomically.
     ///
     /// This is the primary mutation API. It:
@@ -419,10 +494,9 @@ impl DepGraph {
         self.index_formula(formula_cell);
     }
 
-    /// Register a formula's range references, after `replace_edges`: index
-    /// them, and add an ordering edge from every formula already inside
-    /// them. Formulas that arrive inside the range later are linked by
-    /// [`DepGraph::track_range_cell`].
+    /// Register a formula's range references, after `replace_edges`. Only
+    /// the index changes: the formulas inside a range are ordered before its
+    /// reader when an order is computed, however late they arrive.
     pub fn set_ranges(&mut self, formula: CellId, ranges: Vec<RangeRef>) {
         if ranges.is_empty() {
             return;
@@ -437,25 +511,50 @@ impl DepGraph {
         self.index_formula(formula);
         for range in &ranges {
             self.ranges.insert(formula, range);
-            for inner in self.formulas_in(range) {
-                self.add_edge(inner, formula);
-            }
         }
         self.range_refs.entry(formula).or_default().extend(ranges);
     }
 
-    /// Link a formula cell to every formula whose ranges contain it, so the
-    /// readers are ordered after it. Call when a cell becomes a formula (and
-    /// for new spill receivers, which is harmless: only formulas get edges).
-    pub fn track_range_cell(&mut self, cell: CellId) {
-        if !self.is_formula_cell(cell) {
-            return;
+    /// Visit `cell` and everything it reads, transitively — single
+    /// references and formulas inside ranges — each once, stopping when `f`
+    /// returns true. Ranges are walked through their index nodes, and a node
+    /// is expanded once however many readers share it, so the walk is linear
+    /// in what it reaches, even up a running total.
+    pub fn any_upstream(&self, cell: CellId, mut f: impl FnMut(CellId) -> bool) -> bool {
+        let mut seen: FxHashSet<CellId> = FxHashSet::default();
+        let mut seen_nodes: FxHashSet<VNode> = FxHashSet::default();
+        let mut stack = vec![cell];
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if f(current) {
+                return true;
+            }
+            stack.extend(self.precedents(current));
+            for range in self.precedent_ranges(current) {
+                RangeIndex::nodes_of(range, |v| {
+                    if seen_nodes.insert(v) {
+                        self.formulas_under(v, |x| stack.push(x));
+                    }
+                });
+            }
         }
-        let mut readers = Vec::new();
-        self.ranges.readers(cell, |f| readers.push(f));
-        for reader in readers {
-            self.add_edge(cell, reader);
+        false
+    }
+
+    /// Everything a formula must be ordered after: its single references
+    /// and the formulas inside its ranges. Costs the formulas in its ranges,
+    /// so it is for one-off questions (the inspector, a cycle's
+    /// neighbourhood), not for ordering a whole workbook.
+    pub fn ordering_precedents(&self, cell: CellId) -> Vec<CellId> {
+        let mut out: FxHashSet<CellId> = self.precedents(cell).collect();
+        for range in self.precedent_ranges(cell) {
+            out.extend(self.formulas_in(range));
         }
+        let mut out: Vec<CellId> = out.into_iter().collect();
+        out.sort_by_key(cell_key);
+        out
     }
 
     /// Clear all edges for a cell (formula removed or cell deleted).
@@ -537,13 +636,8 @@ impl DepGraph {
                 continue; // Formula cell was deleted
             };
             let ranges = old_ranges.get(formula_cell);
-            // Map all precedents, keeping only those that survive. Formulas
-            // inside ranges come back through set_ranges below.
-            let mapped_preds: FxHashSet<CellId> = preds
-                .iter()
-                .filter(|p| !ranges.is_some_and(|rs| rs.iter().any(|r| r.contains(**p))))
-                .filter_map(|p| map(*p))
-                .collect();
+            // Map all precedents (single references), keeping those that survive.
+            let mapped_preds: FxHashSet<CellId> = preds.iter().filter_map(|p| map(*p)).collect();
 
             if mapped_preds.is_empty() && ranges.is_none() {
                 continue; // All precedents were deleted
@@ -560,302 +654,145 @@ impl DepGraph {
             let mapped: Vec<RangeRef> = ranges.iter().filter_map(|r| map_range(r, &map)).collect();
             self.set_ranges(formula, mapped);
         }
-        let formulas: Vec<CellId> = self.preds.keys().copied().collect();
-        for formula in formulas {
-            self.track_range_cell(formula);
-        }
     }
 
     // =========================================================================
-    // Cycle Membership (Tarjan's SCC)
+    // Ordering and cycles, with ranges through virtual nodes (#29)
     // =========================================================================
 
-    /// Find all cells that are members of true cycles (SCC size > 1 or self-loop).
-    ///
-    /// Uses Tarjan's algorithm. Only considers edges between formula cells.
-    /// Iterates nodes in sorted order (by CellId) for deterministic output.
-    ///
-    /// Edge direction: walks `preds` (depends-on edges) — from cell X, follow
-    /// `preds[X]` to find cells X references. This is the natural cycle direction.
-    pub fn find_cycle_members(&self) -> FxHashSet<CellId> {
-        let formula_cells: FxHashSet<CellId> = self.preds.keys().copied().collect();
-        if formula_cells.is_empty() {
-            return FxHashSet::default();
-        }
-
-        // Sorted iteration order for determinism
-        let mut sorted_cells: Vec<CellId> = formula_cells.iter().copied().collect();
-        sorted_cells.sort_by(|a, b| {
-            a.sheet.raw().cmp(&b.sheet.raw())
-                .then(a.row.cmp(&b.row))
-                .then(a.col.cmp(&b.col))
-        });
-
-        // Tarjan's state
-        let mut index_counter: u32 = 0;
-        let mut stack: Vec<CellId> = Vec::new();
-        let mut on_stack: FxHashSet<CellId> = FxHashSet::default();
-        let mut indices: FxHashMap<CellId, u32> = FxHashMap::default();
-        let mut lowlinks: FxHashMap<CellId, u32> = FxHashMap::default();
-        let mut result: FxHashSet<CellId> = FxHashSet::default();
-
-        // Helper: collect sorted neighbours (preds that are formula cells)
-        let sorted_neighbours = |cell: CellId| -> Vec<CellId> {
-            let mut neighbours: Vec<CellId> = self.preds
-                .get(&cell)
-                .into_iter()
-                .flat_map(|s| s.iter().copied())
-                .filter(|c| formula_cells.contains(c))
-                .collect();
-            neighbours.sort_by(|a, b| {
-                a.sheet.raw().cmp(&b.sheet.raw())
-                    .then(a.row.cmp(&b.row))
-                    .then(a.col.cmp(&b.col))
-            });
-            neighbours
-        };
-
-        // Iterative Tarjan's to avoid stack overflow on deep graphs.
-        struct DfsFrame {
-            cell: CellId,
-            neighbours: Vec<CellId>,
-            next_idx: usize,
-        }
-
-        for &root in &sorted_cells {
-            if indices.contains_key(&root) {
-                continue;
+    /// Formula cells inside a virtual node's interval.
+    fn formulas_under(&self, v: VNode, mut f: impl FnMut(CellId)) {
+        let (lo, hi) = v.span();
+        let Some(cols) = self.formula_rows.get(&v.sheet) else { return };
+        if v.tall {
+            if let Some(rows) = cols.get(&v.line) {
+                let hi = hi.min(u32::MAX as usize) as u32;
+                for &row in rows.range(lo as u32..=hi) {
+                    f(CellId::new(v.sheet, row as usize, v.line as usize));
+                }
             }
+        } else {
+            for (&col, rows) in cols {
+                if (lo..=hi).contains(&(col as usize)) && rows.contains(&v.line) {
+                    f(CellId::new(v.sheet, v.line as usize, col as usize));
+                }
+            }
+        }
+    }
 
-            let mut dfs_stack: Vec<DfsFrame> = Vec::new();
+    /// Per virtual node, how many of `members` lie inside it. Only nodes
+    /// some range was stored as are counted, so this is ~21 lookups a cell.
+    fn vnode_counts(&self, members: impl Iterator<Item = CellId>) -> FxHashMap<VNode, usize> {
+        let mut counts = FxHashMap::default();
+        for cell in members {
+            self.ranges.nodes_at(cell, |v| *counts.entry(v).or_insert(0) += 1);
+        }
+        counts
+    }
 
-            // Start visiting root
-            let idx = index_counter;
-            index_counter += 1;
-            indices.insert(root, idx);
-            lowlinks.insert(root, idx);
-            stack.push(root);
-            on_stack.insert(root);
-
-            dfs_stack.push(DfsFrame {
-                cell: root,
-                neighbours: sorted_neighbours(root),
-                next_idx: 0,
+    /// The distinct virtual nodes `formula`'s ranges were stored as, among `live`.
+    fn range_nodes(&self, formula: CellId, live: &FxHashMap<VNode, usize>) -> Vec<VNode> {
+        let mut out = Vec::new();
+        let mut seen = FxHashSet::default();
+        for range in self.precedent_ranges(formula) {
+            RangeIndex::nodes_of(range, |v| {
+                if live.contains_key(&v) && seen.insert(v) {
+                    out.push(v);
+                }
             });
+        }
+        out
+    }
 
-            while let Some(frame) = dfs_stack.last_mut() {
-                if frame.next_idx < frame.neighbours.len() {
-                    let w = frame.neighbours[frame.next_idx];
-                    frame.next_idx += 1;
+    /// Kahn's algorithm over `members`, with each range standing for the
+    /// formulas inside it. A formula becomes ready once its single
+    /// references among `members` are placed and every virtual node of its
+    /// ranges has had all its member formulas placed. Returns the order and
+    /// each placed cell's level: 1 + the highest level among what it had to
+    /// follow (1 for a formula that follows nothing).
+    ///
+    /// Ties break by (sheet, row, col), as before. Members that are never
+    /// placed are on or behind a cycle.
+    fn kahn(&self, members: &FxHashSet<CellId>) -> (Vec<CellId>, FxHashMap<CellId, usize>) {
+        let mut left = self.vnode_counts(members.iter().copied());
+        let mut in_degree: FxHashMap<CellId, usize> = FxHashMap::default();
+        for &cell in members {
+            let singles = self.preds.get(&cell).map_or(0, |p| p.iter().filter(|c| members.contains(c)).count());
+            in_degree.insert(cell, singles + self.range_nodes(cell, &left).len());
+        }
+        // The highest level among what each cell or node follows, so far.
+        let mut floor: FxHashMap<CellId, usize> = FxHashMap::default();
+        let mut node_floor: FxHashMap<VNode, usize> = FxHashMap::default();
 
-                    if let std::collections::hash_map::Entry::Vacant(e) = indices.entry(w) {
-                        // Recurse into w
-                        let w_idx = index_counter;
-                        index_counter += 1;
-                        e.insert(w_idx);
-                        lowlinks.insert(w, w_idx);
-                        stack.push(w);
-                        on_stack.insert(w);
-
-                        dfs_stack.push(DfsFrame {
-                            cell: w,
-                            neighbours: sorted_neighbours(w),
-                            next_idx: 0,
-                        });
-                    } else if on_stack.contains(&w) {
-                        let w_idx = indices[&w];
-                        let v_low = lowlinks.get_mut(&frame.cell).unwrap();
-                        if w_idx < *v_low {
-                            *v_low = w_idx;
-                        }
-                    }
-                } else {
-                    // All neighbours explored — pop and propagate lowlink
-                    let finished = dfs_stack.pop().unwrap();
-                    let v = finished.cell;
-                    let v_low = lowlinks[&v];
-                    let v_idx = indices[&v];
-
-                    // Propagate lowlink to parent
-                    if let Some(parent) = dfs_stack.last() {
-                        let parent_low = lowlinks.get_mut(&parent.cell).unwrap();
-                        if v_low < *parent_low {
-                            *parent_low = v_low;
-                        }
-                    }
-
-                    // SCC root check
-                    if v_low == v_idx {
-                        // Pop SCC from stack
-                        let mut scc = Vec::new();
-                        loop {
-                            let w = stack.pop().unwrap();
-                            on_stack.remove(&w);
-                            scc.push(w);
-                            if w == v {
-                                break;
-                            }
-                        }
-
-                        // Include SCC if size > 1, or size == 1 with self-loop
-                        if scc.len() > 1 {
-                            result.extend(scc);
-                        } else if scc.len() == 1 {
-                            let cell = scc[0];
-                            if self.preds.get(&cell).is_some_and(|p| p.contains(&cell)) {
-                                result.insert(cell);
-                            }
-                        }
-                    }
+        fn release(
+            dep: CellId,
+            level: usize,
+            in_degree: &mut FxHashMap<CellId, usize>,
+            floor: &mut FxHashMap<CellId, usize>,
+            ready: &mut Vec<CellId>,
+        ) {
+            if let Some(d) = in_degree.get_mut(&dep) {
+                let f = floor.entry(dep).or_insert(0);
+                *f = (*f).max(level);
+                *d = d.saturating_sub(1);
+                if *d == 0 {
+                    ready.push(dep);
                 }
             }
         }
 
-        result
-    }
+        let mut queue: Vec<CellId> = in_degree.iter().filter(|(_, d)| **d == 0).map(|(c, _)| *c).collect();
+        // Descending, so the smallest is at the end and pops first.
+        queue.sort_by_key(|c| std::cmp::Reverse(cell_key(c)));
+        let mut order = Vec::with_capacity(members.len());
+        let mut levels = FxHashMap::default();
+        let mut nodes = Vec::new();
+        while let Some(cell) = queue.pop() {
+            let level = floor.get(&cell).copied().unwrap_or(0) + 1;
+            levels.insert(cell, level);
+            order.push(cell);
 
-    /// Find all non-trivial SCCs (cycle groups), returned as separate groups.
-    ///
-    /// Each inner Vec is one SCC (size > 1, or size == 1 with self-loop).
-    /// Uses the same iterative Tarjan's algorithm as `find_cycle_members`.
-    /// SCCs within each group are sorted by (sheet, row, col) for determinism.
-    pub fn find_cycle_sccs(&self) -> Vec<Vec<CellId>> {
-        let formula_cells: FxHashSet<CellId> = self.preds.keys().copied().collect();
-        if formula_cells.is_empty() {
-            return Vec::new();
-        }
-
-        let mut sorted_cells: Vec<CellId> = formula_cells.iter().copied().collect();
-        sorted_cells.sort_by(|a, b| {
-            a.sheet.raw().cmp(&b.sheet.raw())
-                .then(a.row.cmp(&b.row))
-                .then(a.col.cmp(&b.col))
-        });
-
-        let mut index_counter: u32 = 0;
-        let mut stack: Vec<CellId> = Vec::new();
-        let mut on_stack: FxHashSet<CellId> = FxHashSet::default();
-        let mut indices: FxHashMap<CellId, u32> = FxHashMap::default();
-        let mut lowlinks: FxHashMap<CellId, u32> = FxHashMap::default();
-        let mut sccs: Vec<Vec<CellId>> = Vec::new();
-
-        let sorted_neighbours = |cell: CellId| -> Vec<CellId> {
-            let mut neighbours: Vec<CellId> = self.preds
-                .get(&cell)
-                .into_iter()
-                .flat_map(|s| s.iter().copied())
-                .filter(|c| formula_cells.contains(c))
-                .collect();
-            neighbours.sort_by(|a, b| {
-                a.sheet.raw().cmp(&b.sheet.raw())
-                    .then(a.row.cmp(&b.row))
-                    .then(a.col.cmp(&b.col))
-            });
-            neighbours
-        };
-
-        struct DfsFrame {
-            cell: CellId,
-            neighbours: Vec<CellId>,
-            next_idx: usize,
-        }
-
-        for &root in &sorted_cells {
-            if indices.contains_key(&root) {
-                continue;
+            let mut ready = Vec::new();
+            if let Some(deps) = self.succs.get(&cell) {
+                for &dep in deps {
+                    if members.contains(&dep) {
+                        release(dep, level, &mut in_degree, &mut floor, &mut ready);
+                    }
+                }
             }
-
-            let mut dfs_stack: Vec<DfsFrame> = Vec::new();
-
-            let idx = index_counter;
-            index_counter += 1;
-            indices.insert(root, idx);
-            lowlinks.insert(root, idx);
-            stack.push(root);
-            on_stack.insert(root);
-
-            dfs_stack.push(DfsFrame {
-                cell: root,
-                neighbours: sorted_neighbours(root),
-                next_idx: 0,
-            });
-
-            while let Some(frame) = dfs_stack.last_mut() {
-                if frame.next_idx < frame.neighbours.len() {
-                    let w = frame.neighbours[frame.next_idx];
-                    frame.next_idx += 1;
-
-                    if let std::collections::hash_map::Entry::Vacant(e) = indices.entry(w) {
-                        let w_idx = index_counter;
-                        index_counter += 1;
-                        e.insert(w_idx);
-                        lowlinks.insert(w, w_idx);
-                        stack.push(w);
-                        on_stack.insert(w);
-
-                        dfs_stack.push(DfsFrame {
-                            cell: w,
-                            neighbours: sorted_neighbours(w),
-                            next_idx: 0,
-                        });
-                    } else if on_stack.contains(&w) {
-                        let w_idx = indices[&w];
-                        let v_low = lowlinks.get_mut(&frame.cell).unwrap();
-                        if w_idx < *v_low {
-                            *v_low = w_idx;
-                        }
-                    }
-                } else {
-                    let finished = dfs_stack.pop().unwrap();
-                    let v = finished.cell;
-                    let v_low = lowlinks[&v];
-                    let v_idx = indices[&v];
-
-                    if let Some(parent) = dfs_stack.last() {
-                        let parent_low = lowlinks.get_mut(&parent.cell).unwrap();
-                        if v_low < *parent_low {
-                            *parent_low = v_low;
-                        }
-                    }
-
-                    if v_low == v_idx {
-                        let mut scc = Vec::new();
-                        loop {
-                            let w = stack.pop().unwrap();
-                            on_stack.remove(&w);
-                            scc.push(w);
-                            if w == v {
-                                break;
-                            }
-                        }
-
-                        let is_cycle = if scc.len() > 1 {
-                            true
-                        } else {
-                            // size == 1: only a cycle if self-loop
-                            let cell = scc[0];
-                            self.preds.get(&cell).is_some_and(|p| p.contains(&cell))
-                        };
-
-                        if is_cycle {
-                            scc.sort_by(|a, b| {
-                                a.sheet.raw().cmp(&b.sheet.raw())
-                                    .then(a.row.cmp(&b.row))
-                                    .then(a.col.cmp(&b.col))
-                            });
-                            sccs.push(scc);
+            nodes.clear();
+            self.ranges.nodes_at(cell, |v| nodes.push(v));
+            for &v in &nodes {
+                let Some(count) = left.get_mut(&v) else { continue };
+                let top = node_floor.entry(v).or_insert(0);
+                *top = (*top).max(level);
+                *count -= 1;
+                if *count == 0 {
+                    let top = *top;
+                    for reader in self.ranges.readers_of(v) {
+                        if members.contains(&reader) {
+                            release(reader, top, &mut in_degree, &mut floor, &mut ready);
                         }
                     }
                 }
             }
+            ready.sort_by_key(cell_key);
+            queue.extend(ready.into_iter().rev());
         }
-
-        sccs
+        (order, levels)
     }
 
-    // =========================================================================
-    // Topological Ordering + Cycle Detection (Phase 1.2)
-    // =========================================================================
+    fn ordered(&self, members: FxHashSet<CellId>) -> Result<(Vec<CellId>, FxHashMap<CellId, usize>), CycleReport> {
+        if members.is_empty() {
+            return Ok((Vec::new(), FxHashMap::default()));
+        }
+        let (order, levels) = self.kahn(&members);
+        if order.len() < members.len() {
+            let cycle_cells: Vec<CellId> = members.into_iter().filter(|c| !levels.contains_key(c)).collect();
+            return Err(CycleReport::cycle(cycle_cells));
+        }
+        Ok((order, levels))
+    }
 
     /// Returns all formula cells in the graph.
     ///
@@ -864,206 +801,167 @@ impl DepGraph {
         self.preds.keys().copied()
     }
 
-    /// Compute topological order of all formula cells.
-    ///
-    /// Returns cells in dependency order: precedents before dependents.
-    /// Uses Kahn's algorithm with stable ordering for determinism.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(order)` - Valid topological order
-    /// - `Err(CycleReport)` - Graph contains cycles
-    ///
-    /// # Algorithm
-    ///
-    /// Only considers edges between formula cells. Value-only cells (cells with
-    /// no formula) are not included in the ordering since they don't need
-    /// recomputation.
+    /// Topological order of all formula cells: everything a formula reads,
+    /// directly or through a range, comes first. `Err` holds the cells on or
+    /// behind a cycle (Kahn's remainder; [`Self::find_cycle_sccs`] has the
+    /// cycles themselves).
     pub fn topo_order_all_formulas(&self) -> Result<Vec<CellId>, CycleReport> {
-        // Collect all formula cells
-        let formula_cells: FxHashSet<CellId> = self.preds.keys().copied().collect();
+        self.topo_levels_all_formulas().map(|(order, _)| order)
+    }
 
-        if formula_cells.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Compute in-degree for each formula cell
-        // Only count edges from precedents that are ALSO formula cells
-        let mut in_degree: FxHashMap<CellId, usize> = FxHashMap::default();
-
-        for &cell in &formula_cells {
-            let count = self
-                .preds
-                .get(&cell)
-                .map(|preds| preds.iter().filter(|p| formula_cells.contains(p)).count())
-                .unwrap_or(0);
-            in_degree.insert(cell, count);
-        }
-
-        // Initialize queue with zero in-degree cells
-        // Sort for deterministic order
-        let mut queue: Vec<CellId> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(&cell, _)| cell)
-            .collect();
-        // Sort in DESCENDING order so smallest is at end (popped first)
-        queue.sort_by(|a, b| {
-            b.sheet
-                .raw()
-                .cmp(&a.sheet.raw())
-                .then(b.row.cmp(&a.row))
-                .then(b.col.cmp(&a.col))
-        });
-
-        let mut result = Vec::with_capacity(formula_cells.len());
-
-        while let Some(cell) = queue.pop() {
-            result.push(cell);
-
-            // For each dependent that is a formula cell
-            if let Some(deps) = self.succs.get(&cell) {
-                let mut new_zero_degree = Vec::new();
-
-                for &dep in deps {
-                    if formula_cells.contains(&dep) {
-                        if let Some(deg) = in_degree.get_mut(&dep) {
-                            *deg = deg.saturating_sub(1);
-                            if *deg == 0 {
-                                new_zero_degree.push(dep);
-                            }
-                        }
-                    }
-                }
-
-                // Sort new zero-degree cells for deterministic order
-                new_zero_degree.sort_by(|a, b| {
-                    a.sheet
-                        .raw()
-                        .cmp(&b.sheet.raw())
-                        .then(a.row.cmp(&b.row))
-                        .then(a.col.cmp(&b.col))
-                });
-                // Add in reverse order so smallest is popped first
-                for cell in new_zero_degree.into_iter().rev() {
-                    queue.push(cell);
-                }
-            }
-        }
-
-        // If not all cells are in result, we have a cycle
-        if result.len() < formula_cells.len() {
-            // Find cells involved in cycle
-            let cycle_cells: Vec<CellId> = formula_cells
-                .iter()
-                .filter(|c| !result.contains(c))
-                .copied()
-                .collect();
-            return Err(CycleReport::cycle(cycle_cells));
-        }
-
-        Ok(result)
+    /// [`Self::topo_order_all_formulas`] with each cell's level, which the
+    /// recalc report uses as its depth. Levels count formulas inside ranges;
+    /// computing them from `precedents` would miss those.
+    pub fn topo_levels_all_formulas(&self) -> Result<(Vec<CellId>, FxHashMap<CellId, usize>), CycleReport> {
+        self.ordered(self.preds.keys().copied().collect())
     }
 
     /// Topologically order a subset of the formula cells.
     ///
-    /// Same algorithm and the same deterministic tie-breaking as
-    /// [`Self::topo_order_all_formulas`], but the work is proportional to
-    /// `cells` and the edges incident to it rather than to the whole workbook.
+    /// Same algorithm and tie-breaking as [`Self::topo_order_all_formulas`],
+    /// with the work proportional to `cells`, their edges and the range
+    /// nodes they sit in, rather than to the whole workbook.
     ///
     /// This exists for incremental recalculation. The caller's dirty set is a
     /// forward closure — every transitive dependent of the cells that changed —
     /// so it is closed under `dependents`, and a cell inside it can only be
     /// ordered after the cells inside it that it reads. Precedents *outside*
-    /// the set are clean: their cached values are still correct, so they carry
-    /// no edge here and contribute nothing to the ordering.
+    /// the set are clean: their cached values are still correct, so they impose
+    /// no ordering here.
     ///
-    /// Ordering the whole workbook to place one changed cell is what made a
-    /// single-cell edit cost 78 ms on 200,000 formulas — linear in the
-    /// workbook, with a dirty set of one.
-    ///
-    /// Cells in `cells` that are not formula cells are ignored, matching
-    /// `topo_order_all_formulas`, whose domain is `preds.keys()`.
-    ///
-    /// Returns `Err` only when the cycle is *within* `cells`. A cycle
-    /// elsewhere in the workbook cannot affect this ordering and is not this
-    /// function's business.
-    pub fn topo_order_subset(
-        &self,
-        cells: &FxHashSet<CellId>,
-    ) -> Result<Vec<CellId>, CycleReport> {
-        let members: FxHashSet<CellId> =
-            cells.iter().copied().filter(|c| self.preds.contains_key(c)).collect();
+    /// Cells in `cells` that are not formula cells are ignored. Returns `Err`
+    /// only when the cycle is *within* `cells`.
+    pub fn topo_order_subset(&self, cells: &FxHashSet<CellId>) -> Result<Vec<CellId>, CycleReport> {
+        let members: FxHashSet<CellId> = cells.iter().copied().filter(|c| self.preds.contains_key(c)).collect();
+        self.ordered(members).map(|(order, _)| order)
+    }
 
-        if members.is_empty() {
-            return Ok(Vec::new());
+    /// Cycles among the formula cells: strongly connected components of
+    /// the ordering graph (single references, plus ranges through their
+    /// virtual nodes) with more than one node or a self-reference. Each is
+    /// returned as its formula cells, sorted; a formula whose range contains
+    /// itself is a cycle of one. Iterative Tarjan, roots and neighbours in
+    /// (sheet, row, col) order for deterministic output.
+    fn cycle_components(&self) -> Vec<Vec<CellId>> {
+        if self.preds.is_empty() {
+            return Vec::new();
         }
+        let live = self.vnode_counts(self.preds.keys().copied());
+        let neighbours = |node: Node| -> Vec<Node> {
+            match node {
+                Node::Real(cell) => {
+                    let mut reals: Vec<CellId> = self
+                        .preds
+                        .get(&cell)
+                        .into_iter()
+                        .flat_map(|s| s.iter().copied())
+                        .filter(|c| self.preds.contains_key(c))
+                        .collect();
+                    reals.sort_by_key(cell_key);
+                    let mut virts = self.range_nodes(cell, &live);
+                    virts.sort_by_key(VNode::sort_key);
+                    reals.into_iter().map(Node::Real).chain(virts.into_iter().map(Node::Virt)).collect()
+                }
+                Node::Virt(v) => {
+                    let mut reals = Vec::new();
+                    self.formulas_under(v, |c| {
+                        if self.preds.contains_key(&c) {
+                            reals.push(c);
+                        }
+                    });
+                    reals.sort_by_key(cell_key);
+                    reals.into_iter().map(Node::Real).collect()
+                }
+            }
+        };
 
-        // In-degree counts only precedents that are themselves in the subset.
-        let mut in_degree: FxHashMap<CellId, usize> = FxHashMap::default();
-        for &cell in &members {
-            let count = self
-                .preds
-                .get(&cell)
-                .map(|preds| preds.iter().filter(|p| members.contains(p)).count())
-                .unwrap_or(0);
-            in_degree.insert(cell, count);
+        let mut roots: Vec<CellId> = self.preds.keys().copied().collect();
+        roots.sort_by_key(cell_key);
+
+        struct Frame {
+            node: Node,
+            neighbours: Vec<Node>,
+            next: usize,
         }
+        let mut counter: u32 = 0;
+        let mut index: FxHashMap<Node, u32> = FxHashMap::default();
+        let mut low: FxHashMap<Node, u32> = FxHashMap::default();
+        let mut stack: Vec<Node> = Vec::new();
+        let mut on_stack: FxHashSet<Node> = FxHashSet::default();
+        let mut out = Vec::new();
 
-        let mut queue: Vec<CellId> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(&cell, _)| cell)
-            .collect();
-        // Descending, so the smallest is at the end and pops first.
-        queue.sort_by(|a, b| {
-            b.sheet
-                .raw()
-                .cmp(&a.sheet.raw())
-                .then(b.row.cmp(&a.row))
-                .then(b.col.cmp(&a.col))
-        });
+        for root in roots {
+            let root = Node::Real(root);
+            if index.contains_key(&root) {
+                continue;
+            }
+            index.insert(root, counter);
+            low.insert(root, counter);
+            counter += 1;
+            stack.push(root);
+            on_stack.insert(root);
+            let mut dfs = vec![Frame { node: root, neighbours: neighbours(root), next: 0 }];
 
-        let mut result = Vec::with_capacity(members.len());
-
-        while let Some(cell) = queue.pop() {
-            result.push(cell);
-
-            if let Some(deps) = self.succs.get(&cell) {
-                let mut new_zero_degree = Vec::new();
-
-                for &dep in deps {
-                    if members.contains(&dep) {
-                        if let Some(deg) = in_degree.get_mut(&dep) {
-                            *deg = deg.saturating_sub(1);
-                            if *deg == 0 {
-                                new_zero_degree.push(dep);
+            while let Some(frame) = dfs.last_mut() {
+                if frame.next < frame.neighbours.len() {
+                    let w = frame.neighbours[frame.next];
+                    frame.next += 1;
+                    if let std::collections::hash_map::Entry::Vacant(e) = index.entry(w) {
+                        e.insert(counter);
+                        low.insert(w, counter);
+                        counter += 1;
+                        stack.push(w);
+                        on_stack.insert(w);
+                        dfs.push(Frame { node: w, neighbours: neighbours(w), next: 0 });
+                    } else if on_stack.contains(&w) {
+                        let w_index = index[&w];
+                        let v_low = low.get_mut(&frame.node).expect("visited");
+                        *v_low = (*v_low).min(w_index);
+                    }
+                } else {
+                    let v = dfs.pop().expect("frame").node;
+                    let v_low = low[&v];
+                    if let Some(parent) = dfs.last() {
+                        let p_low = low.get_mut(&parent.node).expect("visited");
+                        *p_low = (*p_low).min(v_low);
+                    }
+                    if v_low == index[&v] {
+                        let mut size = 0;
+                        let mut cells = Vec::new();
+                        loop {
+                            let w = stack.pop().expect("scc member");
+                            on_stack.remove(&w);
+                            size += 1;
+                            if let Node::Real(c) = w {
+                                cells.push(c);
                             }
+                            if w == v {
+                                break;
+                            }
+                        }
+                        let is_cycle = size > 1
+                            || cells.first().is_some_and(|c| self.preds.get(c).is_some_and(|p| p.contains(c)));
+                        if is_cycle && !cells.is_empty() {
+                            cells.sort_by_key(cell_key);
+                            out.push(cells);
                         }
                     }
                 }
-
-                new_zero_degree.sort_by(|a, b| {
-                    a.sheet
-                        .raw()
-                        .cmp(&b.sheet.raw())
-                        .then(a.row.cmp(&b.row))
-                        .then(a.col.cmp(&b.col))
-                });
-                for cell in new_zero_degree.into_iter().rev() {
-                    queue.push(cell);
-                }
             }
         }
+        out
+    }
 
-        if result.len() < members.len() {
-            let placed: FxHashSet<CellId> = result.iter().copied().collect();
-            let cycle_cells: Vec<CellId> =
-                members.iter().filter(|c| !placed.contains(c)).copied().collect();
-            return Err(CycleReport::cycle(cycle_cells));
-        }
+    /// Find all cells that are members of true cycles (SCC size > 1 or
+    /// self-loop), including cycles through ranges.
+    pub fn find_cycle_members(&self) -> FxHashSet<CellId> {
+        self.cycle_components().into_iter().flatten().collect()
+    }
 
-        Ok(result)
+    /// Find all non-trivial SCCs (cycle groups), returned as separate groups
+    /// of formula cells, each sorted by (sheet, row, col).
+    pub fn find_cycle_sccs(&self) -> Vec<Vec<CellId>> {
+        self.cycle_components()
     }
 
     /// Check if adding edges from `cell` to `new_preds` would create a cycle.
@@ -1189,7 +1087,6 @@ mod tests {
             let f = cell(1, r, 1);
             g.register_leaf_formula(f);
             g.set_ranges(f, vec![rect(0, 0, r, 0)]);
-            g.track_range_cell(f);
         }
         assert_eq!(g.referenced_cell_count(), 0, "no per-cell edges for values");
         // ...yet every reader of A1 is found, and only readers of A500 for A500.
@@ -1197,26 +1094,110 @@ mod tests {
         assert_eq!(g.dependents(cell(1, 499, 0)).count(), 501);
     }
 
-    #[test]
-    fn formulas_inside_a_range_are_ordering_edges_both_ways_round() {
-        // Reader registered first, formula inside added later.
-        let mut g = DepGraph::new();
-        let reader = cell(1, 10, 1);
-        g.register_leaf_formula(reader);
-        g.set_ranges(reader, vec![rect(0, 0, 9, 0)]);
-        let inner = cell(1, 4, 0);
-        g.register_leaf_formula(inner);
-        g.track_range_cell(inner);
-        assert!(to_set(g.precedents(reader)).contains(&inner));
-        assert_eq!(g.topo_order_all_formulas().unwrap().iter().position(|c| *c == inner).unwrap() <
-            g.topo_order_all_formulas().unwrap().iter().position(|c| *c == reader).unwrap(), true);
+    fn position(order: &[CellId], c: CellId) -> usize {
+        order.iter().position(|x| *x == c).expect("placed")
+    }
 
-        // Formula inside registered first, reader later.
+    #[test]
+    fn formulas_inside_a_range_are_ordered_first_both_ways_round() {
+        let reader = cell(1, 10, 1);
+        let inner = cell(1, 4, 0);
+        // Reader registered first, formula inside added later...
+        let mut g = DepGraph::new();
+        g.register_leaf_formula(reader);
+        g.set_ranges(reader, vec![rect(0, 0, 9, 0)]);
+        g.register_leaf_formula(inner);
+        let order = g.topo_order_all_formulas().unwrap();
+        assert!(position(&order, inner) < position(&order, reader));
+        assert_eq!(g.ordering_precedents(reader), vec![inner]);
+        // ...and the other way round.
         let mut g = DepGraph::new();
         g.register_leaf_formula(inner);
         g.register_leaf_formula(reader);
         g.set_ranges(reader, vec![rect(0, 0, 9, 0)]);
-        assert!(to_set(g.precedents(reader)).contains(&inner));
+        let order = g.topo_order_all_formulas().unwrap();
+        assert!(position(&order, inner) < position(&order, reader));
+        // Neither way is an edge: a range is not n edges.
+        assert_eq!(g.precedents(reader).count(), 0);
+        assert_eq!(g.referenced_cell_count(), 0);
+    }
+
+    /// #29: a running total over a column of formulas. B_n = SUM($A$1:A_n)
+    /// with every A a formula used to be n²/2 edges; now it is none, and
+    /// the order and levels still put every A_k before B_n.
+    #[test]
+    fn a_running_total_over_formulas_is_ordered_without_edges() {
+        let n = 2000;
+        let mut g = DepGraph::new();
+        for r in 0..n {
+            g.register_leaf_formula(cell(1, r, 0));
+            let b = cell(1, r, 1);
+            g.register_leaf_formula(b);
+            g.set_ranges(b, vec![rect(0, 0, r, 0)]);
+        }
+        assert_eq!(g.referenced_cell_count(), 0);
+        let (order, levels) = g.topo_levels_all_formulas().unwrap();
+        assert_eq!(order.len(), 2 * n);
+        let mut last_a = 0;
+        for r in 0..n {
+            let pa = position(&order, cell(1, r, 0));
+            last_a = last_a.max(pa);
+            assert!(pa < position(&order, cell(1, r, 1)), "A{} before B{}", r + 1, r + 1);
+        }
+        // Each B follows only the As: level 2. (A range over formulas at
+        // level 1.)
+        assert!((0..n).all(|r| levels[&cell(1, r, 0)] == 1 && levels[&cell(1, r, 1)] == 2));
+        let _ = last_a;
+    }
+
+    /// Levels count formulas reached through ranges: a chain through a
+    /// range is as deep as a chain through single references.
+    #[test]
+    fn levels_count_formulas_inside_ranges() {
+        let mut g = DepGraph::new();
+        let a = cell(1, 0, 0);
+        let b = cell(1, 0, 1); // =SUM(A1:A1) as a range
+        let c = cell(1, 0, 2); // =B1*2
+        g.register_leaf_formula(a);
+        g.register_leaf_formula(b);
+        g.set_ranges(b, vec![rect(0, 0, 0, 0)]);
+        g.replace_edges(c, [b].into_iter().collect());
+        let (_, levels) = g.topo_levels_all_formulas().unwrap();
+        assert_eq!((levels[&a], levels[&b], levels[&c]), (1, 2, 3));
+    }
+
+    /// Only the members of a subset order each other: a range whose other
+    /// formulas are outside the set does not hold its reader back.
+    #[test]
+    fn a_subset_ignores_range_formulas_outside_it() {
+        let mut g = DepGraph::new();
+        for r in 0..10 {
+            g.register_leaf_formula(cell(1, r, 0));
+        }
+        let reader = cell(1, 0, 1);
+        g.register_leaf_formula(reader);
+        g.set_ranges(reader, vec![rect(0, 0, 9, 0)]);
+        let dirty: FxHashSet<CellId> = [cell(1, 3, 0), reader].into_iter().collect();
+        assert_eq!(g.topo_order_subset(&dirty).unwrap(), vec![cell(1, 3, 0), reader]);
+        let only_reader: FxHashSet<CellId> = [reader].into_iter().collect();
+        assert_eq!(g.topo_order_subset(&only_reader).unwrap(), vec![reader]);
+    }
+
+    /// A cycle through ranges on both sides: A5 = SUM(B1:B10), B3 = SUM(A1:A10).
+    #[test]
+    fn a_cycle_through_two_ranges_is_found() {
+        let mut g = DepGraph::new();
+        let a = cell(1, 4, 0);
+        let b = cell(1, 2, 1);
+        let bystander = cell(1, 50, 2);
+        g.register_leaf_formula(a);
+        g.set_ranges(a, vec![rect(0, 1, 9, 1)]);
+        g.register_leaf_formula(b);
+        g.set_ranges(b, vec![rect(0, 0, 9, 0)]);
+        g.register_leaf_formula(bystander);
+        assert_eq!(g.find_cycle_sccs(), vec![vec![b, a]]);
+        let err = g.topo_order_all_formulas().unwrap_err();
+        assert_eq!(to_set(err.cells.into_iter()), to_set([a, b].into_iter()));
     }
 
     #[test]
