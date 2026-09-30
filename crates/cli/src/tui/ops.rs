@@ -134,12 +134,14 @@ pub fn frequency(data: &PeekData, col: usize) -> PeekData {
         *entry += 1;
     }
     let total = data.rows.len().max(1) as f64;
-    let mut items: Vec<(&str, usize)> = first_seen.into_iter().map(|v| (v, counts[v])).collect();
-    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| compare(&sort_key(a.0), &sort_key(b.0), false)));
+    // Keys computed once: a high-cardinality column has one item per row.
+    let mut items: Vec<(&str, usize, Option<Key>)> =
+        first_seen.into_iter().map(|v| (v, counts[v], sort_key(v))).collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| compare(&a.2, &b.2, false)));
     let name = data.col_names.get(col).cloned().unwrap_or_else(|| util::col_to_letter(col));
     let rows = items
         .into_iter()
-        .map(|(v, n)| {
+        .map(|(v, n, _)| {
             vec![
                 if v.trim().is_empty() { "(blank)".to_string() } else { v.to_string() },
                 n.to_string(),

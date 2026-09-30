@@ -42,6 +42,9 @@ struct TuiApp {
     order: Vec<Vec<usize>>,
     /// Per tab: the tab a derived tab (frequency, pivot) was made from.
     parent: Vec<Option<usize>>,
+    /// Per tab: (cursor_row, cursor_col, scroll_row, scroll_col), restored
+    /// when the tab is shown again.
+    positions: Vec<(usize, usize, usize, usize)>,
     /// Text entry on the status line (search or pivot spec).
     prompt: Option<Prompt>,
     /// Last search query, for n / N.
@@ -81,6 +84,7 @@ impl TuiApp {
             multi_sheet: false,
             order: Vec::new(),
             parent: vec![None],
+            positions: Vec::new(),
             prompt: None,
             search: None,
             message: None,
@@ -106,6 +110,7 @@ impl TuiApp {
             multi_sheet: multi,
             order: Vec::new(),
             parent: Vec::new(),
+            positions: Vec::new(),
             prompt: None,
             search: None,
             message: None,
@@ -116,6 +121,7 @@ impl TuiApp {
     fn with_identity_orders(mut self) -> Self {
         self.order = self.sheets.iter().map(|s| (0..s.data.num_rows).collect()).collect();
         self.parent = vec![None; self.sheets.len()];
+        self.positions = vec![(0, 0, 0, 0); self.sheets.len()];
         self
     }
 
@@ -141,6 +147,7 @@ impl TuiApp {
         self.order.push((0..data.num_rows).collect());
         self.sheets.push(SheetData { name, data });
         self.parent.push(Some(from));
+        self.positions.push((0, 0, 0, 0));
         self.multi_sheet = true;
         self.switch_sheet(self.sheets.len() - 1);
     }
@@ -152,6 +159,7 @@ impl TuiApp {
         self.sheets.remove(i);
         self.order.remove(i);
         self.parent.remove(i);
+        self.positions.remove(i);
         for p in self.parent.iter_mut().flatten() {
             if *p == i {
                 *p = back;
@@ -274,11 +282,12 @@ impl TuiApp {
         if idx >= self.sheets.len() || idx == self.active_sheet {
             return;
         }
+        if let Some(p) = self.positions.get_mut(self.active_sheet) {
+            *p = (self.cursor_row, self.cursor_col, self.scroll_row, self.scroll_col);
+        }
         self.active_sheet = idx;
-        self.cursor_row = 0;
-        self.cursor_col = 0;
-        self.scroll_row = 0;
-        self.scroll_col = 0;
+        (self.cursor_row, self.cursor_col, self.scroll_row, self.scroll_col) =
+            self.positions.get(idx).copied().unwrap_or((0, 0, 0, 0));
         self.row_num_width = Self::compute_row_num_width(self.data());
     }
 
@@ -1040,6 +1049,7 @@ mod tests {
         assert!(screen(&app).contains("freq Region"));
         press(&mut app, "q");
         assert_eq!((app.sheets.len(), app.active_sheet, app.should_quit), (1, 0, false));
+        assert_eq!((app.cursor_row, app.cursor_col), (1, 0), "returning keeps the source cursor");
 
         // Pivot prompt starts prefilled from the cursor column; edit and run.
         press(&mut app, "P");

@@ -115,6 +115,7 @@ pub fn cmd_pivot_file(path: &Path, args: &PivotArgs, delimiter: Option<&str>, fo
     let out = wb.sheet(out_idx).ok_or_else(|| CliError::io("pivot output sheet missing"))?;
     let (h, w) = (h as usize, w as usize);
 
+    let mut text = String::new();
     match format {
         PivotFormat::Json => {
             let header_rows = if matches!(op, StructureOp::CreatePivot { column: Some(_), .. }) { 2 } else { 1 };
@@ -130,15 +131,16 @@ pub fn cmd_pivot_file(path: &Path, args: &PivotArgs, delimiter: Option<&str>, fo
             let rows: Vec<Vec<serde_json::Value>> =
                 (header_rows.min(h)..h).map(|r| (0..w).map(|c| json_value(r, c)).collect()).collect();
             let doc = serde_json::json!({ "headers": headers, "rows": rows, "source_rows": source.data_rows() });
-            println!("{}", serde_json::to_string_pretty(&doc).map_err(|e| CliError::io(e.to_string()))?);
+            text = serde_json::to_string_pretty(&doc).map_err(|e| CliError::io(e.to_string()))? + "\n";
         }
         PivotFormat::Csv => {
-            let mut writer = csv::Writer::from_writer(std::io::stdout());
+            let mut writer = csv::Writer::from_writer(Vec::new());
             for r in 0..h {
                 let record: Vec<String> = (0..w).map(|c| raw_text(&out.get_computed_value(r, c), &out.get_display(r, c))).collect();
                 writer.write_record(&record).map_err(|e| CliError::io(e.to_string()))?;
             }
-            writer.flush().map_err(|e| CliError::io(e.to_string()))?;
+            let bytes = writer.into_inner().map_err(|e| CliError::io(e.to_string()))?;
+            text = String::from_utf8_lossy(&bytes).into_owned();
         }
         PivotFormat::Table => {
             let cells: Vec<Vec<String>> =
@@ -158,10 +160,19 @@ pub fn cmd_pivot_file(path: &Path, args: &PivotArgs, delimiter: Option<&str>, fo
                         }
                     })
                     .collect();
-                println!("{}", line.join("  ").trim_end());
+                text.push_str(line.join("  ").trim_end());
+                text.push('\n');
             }
-            eprintln!("{} source rows → {} × {}", source.data_rows(), h, w);
         }
+    }
+    // `vgrid pivot … | head` closes the pipe early; that is not an error.
+    use std::io::Write;
+    match std::io::stdout().lock().write_all(text.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(CliError::io(e.to_string())),
+        _ => {}
+    }
+    if format == PivotFormat::Table {
+        eprintln!("{} source rows → {} × {}", source.data_rows(), h, w);
     }
     Ok(())
 }
