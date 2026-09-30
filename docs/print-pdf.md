@@ -59,7 +59,7 @@ as 1 / 4 / 1 / 1 A4 pages. Poppler confirms embedded, subsetted, Unicode-mapped
 fonts; extracted output preserves all 120 unique transaction IDs and the invoice,
 report, and annual totals. Hidden markers and distant blank-formatted cells do
 not appear. Accented Latin, Greek, Japanese, Arabic, wrapping, merged regions,
-and page-one layouts were visually checked. Invoice has no clipping warnings;
+and all seven PDF pages were visually checked. Invoice has no clipping warnings;
 Edge cases correctly identifies intentional clipping at B16. The long report's
 narrow date/description columns produce clipping notices; the wide portrait
 table reports text below 8 pt at 53.3% scale. These notices do not resize cells.
@@ -68,6 +68,14 @@ The fixture also exposed existing import/display bugs fixed alongside export:
 namespace-prefixed XLSX formatting/layout and relationship attributes now parse,
 typed ISO dates import as numeric dates, and the Excel `;;;` number format hides
 numeric values. Focused regressions cover these cases.
+
+Desktop smoke test on Linux: File → Export PDF opens the settings dialog;
+Tab/Space changes paper size, Enter opens the native save prompt, and exporting
+Invoice produces a one-page Letter PDF with the correct date and $1,128.24 total.
+The success receipt stays open, and cancelling a second native save prompt
+returns to the settings without overwriting the file. The workbook remains an
+XLSX import. `cargo clippy --no-deps -p visigrid-print --all-features --all-targets
+-- -D warnings` passes; existing dependency warnings remain outside this crate.
 
 The product proposal and research live in the planning repository:
 
