@@ -87,74 +87,57 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         }
 
         "FILTER" => {
-            // FILTER(range, include)
-            // Returns rows from range where include is TRUE
-            if args.len() != 2 {
-                return Some(EvalResult::Error("FILTER requires exactly 2 arguments".to_string()));
+            // FILTER(array, include, [if_empty])
+            // Returns the rows (or columns) of array where include is TRUE.
+            // include may be a range or a computed condition such as B2:B9>15.
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error("FILTER requires 2 or 3 arguments".to_string()));
             }
 
-            // Get the data range dimensions and values
-            let (data_rows, data_cols, data) = match range_values(&args[0], lookup) {
-                Some(Ok(v)) => v,
-                Some(Err(e)) => return Some(EvalResult::Error(e)),
-                None => {
-                    return Some(EvalResult::Error("#VALUE! FILTER requires a range as first argument".to_string()));
+            let (data_rows, data_cols, data) = match grid_values(&args[0], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let (inc_rows, inc_cols, inc) = match grid_values(&args[1], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            // An error anywhere in the condition is the answer, as in Excel.
+            if let Some(Value::Error(e)) = inc.iter().flatten().find(|v| matches!(v, Value::Error(_))) {
+                return Some(EvalResult::Error(e.clone()));
+            }
+            let flags: Vec<bool> = inc.iter().flatten().map(include_flag).collect();
+
+            let kept: Vec<Vec<Value>> = if inc_cols == 1 && (inc_rows == data_rows || inc_rows == 1) {
+                // One flag per row (a single flag keeps or drops everything).
+                data.into_iter()
+                    .enumerate()
+                    .filter(|(r, _)| flags[if inc_rows == 1 { 0 } else { *r }])
+                    .map(|(_, row)| row)
+                    .collect()
+            } else if inc_rows == 1 && inc_cols == data_cols {
+                // One flag per column.
+                if !flags.iter().any(|&f| f) {
+                    Vec::new()
+                } else {
+                    data.into_iter()
+                        .map(|row| row.into_iter().zip(&flags).filter(|(_, &f)| f).map(|(v, _)| v).collect())
+                        .collect()
                 }
+            } else {
+                return Some(EvalResult::Error(format!(
+                    "#VALUE! Include is {}x{} but must match the {} rows or {} columns of the data",
+                    inc_rows, inc_cols, data_rows, data_cols
+                )));
             };
 
-            // Get the include criteria (must be a column matching data_rows)
-            let include: Vec<bool> = match &args[1] {
-                Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                    let inc_rows = end_row - start_row + 1;
-                    let inc_cols = end_col - start_col + 1;
-
-                    // Must be a single column with matching row count
-                    if inc_cols != 1 {
-                        return Some(EvalResult::Error("#VALUE! Include must be a single column".to_string()));
-                    }
-                    if inc_rows != data_rows {
-                        return Some(EvalResult::Error(format!("#VALUE! Include has {} rows but data has {} rows", inc_rows, data_rows)));
-                    }
-
-                    // Read the include column typed. It was read as numbers, so a
-                    // column of TRUE/FALSE — which a typed cell stores as text —
-                    // selected nothing at all.
-                    let Some(Ok((_, _, cells))) = range_values(&args[1], lookup) else {
-                        return Some(EvalResult::Error("#REF!".to_string()));
-                    };
-                    cells.into_iter().map(|row| include_flag(&row[0])).collect()
+            if kept.is_empty() {
+                if let Some(if_empty) = args.get(2) {
+                    return Some(evaluate(if_empty, lookup));
                 }
-                _ => {
-                    // Try evaluating as a single value (scalar comparison result)
-                    match evaluate(&args[1], lookup) {
-                        EvalResult::Boolean(b) => vec![b; data_rows],
-                        EvalResult::Number(n) => vec![n != 0.0; data_rows],
-                        _ => return Some(EvalResult::Error("#VALUE! Include must be a range or boolean".to_string())),
-                    }
-                }
-            };
-
-            // Filter rows where include is TRUE
-            let filtered_rows: Vec<Vec<Value>> = data.into_iter()
-                .zip(include.iter())
-                .filter(|(_, &inc)| inc)
-                .map(|(row, _)| row)
-                .collect();
-
-            if filtered_rows.is_empty() {
                 return Some(EvalResult::Error("#CALC! No matches".to_string()));
             }
-
-            // Build result array
-            let out_rows = filtered_rows.len();
-            let mut array = Array2D::new(out_rows, data_cols);
-            for (r, row) in filtered_rows.iter().enumerate() {
-                for (c, val) in row.iter().enumerate() {
-                    array.set(r, c, val.clone());
-                }
-            }
-
-            EvalResult::Array(array)
+            EvalResult::Array(Array2D::from_vec(kept))
         }
 
         "UNIQUE" => {
@@ -387,5 +370,26 @@ fn include_flag(v: &Value) -> bool {
         // A typed TRUE is stored as text.
         Value::Text(s) => s.eq_ignore_ascii_case("TRUE"),
         Value::Empty | Value::Error(_) => false,
+    }
+}
+
+/// A function argument as a grid of values: a range's cells, a computed array's
+/// elements, or a single value as a 1x1 grid.
+fn grid_values<L: CellLookup>(
+    arg: &BoundExpr,
+    lookup: &L,
+) -> Result<(usize, usize, Vec<Vec<Value>>), String> {
+    if let Some(range) = range_values(arg, lookup) {
+        return range;
+    }
+    match evaluate(arg, lookup) {
+        EvalResult::Array(a) => {
+            let data: Vec<Vec<Value>> = (0..a.rows())
+                .map(|r| (0..a.cols()).map(|c| a.get(r, c).cloned().unwrap_or(Value::Empty)).collect())
+                .collect();
+            Ok((a.rows(), a.cols(), data))
+        }
+        EvalResult::Error(e) => Err(e),
+        other => Ok((1, 1, vec![vec![other.to_value()]])),
     }
 }

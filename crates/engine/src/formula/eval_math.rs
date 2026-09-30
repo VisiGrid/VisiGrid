@@ -1,7 +1,7 @@
 // Math functions: SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, ABS, ROUND, INT, MOD,
 // POWER, SQRT, CEILING, FLOOR, PRODUCT, MEDIAN, SUMPRODUCT
 
-use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution};
+use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution, Value};
 use super::eval_helpers::{
     collect_all_values, collect_numbers, excel_mod, round_to_15_sig, round_to_digits, RoundMode,
 };
@@ -255,98 +255,41 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
         }
         "SUMPRODUCT" => {
-            // SUMPRODUCT(range1, range2, ..., rangeN) -> Number
+            // SUMPRODUCT(array1, array2, ..., arrayN) -> Number
             //
             // Contract:
-            // - Each arg must be a range, cell ref, or named range
+            // - Each arg is a range, cell ref, named range, or an expression that
+            //   produces an array (B2:B9*C2:C9, --(A2:A9="x"))
             // - All args must have the same shape (rows × cols)
             // - Iterates row-major, multiplies corresponding cells, sums products
-            // - Empty/text/bool cells → 0, errors propagate
+            // - In a range, numeric text counts; empty/other text/bool cells → 0.
+            //   In a computed array, only numbers count, which is why booleans
+            //   need -- to become 1s and 0s, as in Excel. Errors propagate.
             if args.is_empty() {
                 return Some(EvalResult::Error("SUMPRODUCT requires at least one argument".to_string()));
             }
-
-            // Extract rectangular coordinates for each arg
-            let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(args.len());
-            for (i, arg) in args.iter().enumerate() {
-                match arg {
-                    Expr::Range { start_col, start_row, end_col, end_row, .. } => {
-                        ranges.push((*start_row, *start_col, *end_row, *end_col));
-                    }
-                    Expr::CellRef { col, row, .. } => {
-                        ranges.push((*row, *col, *row, *col));
-                    }
-                    Expr::NamedRange(name) => {
-                        match lookup.resolve_named_range(name) {
-                            Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
-                                ranges.push((start_row, start_col, end_row, end_col));
-                            }
-                            Some(NamedRangeResolution::Cell { row, col }) => {
-                                ranges.push((row, col, row, col));
-                            }
-                            None => return Some(EvalResult::Error(format!("#NAME? '{}'", name))),
-                        }
-                    }
-                    _ => {
-                        // Single scalar arg: evaluate and return (SUMPRODUCT(5) = 5)
-                        if args.len() == 1 {
-                            return Some(match evaluate(arg, lookup).to_number() {
-                                Ok(n) => EvalResult::Number(n),
-                                Err(e) => EvalResult::Error(e),
-                            });
-                        }
-                        return Some(EvalResult::Error(format!(
-                            "SUMPRODUCT argument {} must be a range, cell reference, or named range",
-                            i + 1
-                        )));
-                    }
-                }
+            let mut grids: Vec<Vec<Vec<f64>>> = Vec::with_capacity(args.len());
+            for arg in args {
+                let grid = match sumproduct_grid(arg, lookup) {
+                    Ok(g) => g,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                grids.push(grid);
             }
-
-            // Normalize coordinates (min/max) and compute shape
-            let norm: Vec<(usize, usize, usize, usize)> = ranges.iter().map(|&(r1, c1, r2, c2)| {
-                (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2))
-            }).collect();
-
-            let num_rows = norm[0].2 - norm[0].0 + 1;
-            let num_cols = norm[0].3 - norm[0].1 + 1;
-
-            // Validate all shapes match
-            for (i, r) in norm.iter().enumerate().skip(1) {
-                let rows = r.2 - r.0 + 1;
-                let cols = r.3 - r.1 + 1;
-                if rows != num_rows || cols != num_cols {
+            let (rows, cols) = (grids[0].len(), grids[0].first().map_or(0, |r| r.len()));
+            for (i, g) in grids.iter().enumerate().skip(1) {
+                let (r, c) = (g.len(), g.first().map_or(0, |r| r.len()));
+                if r != rows || c != cols {
                     return Some(EvalResult::Error(format!(
                         "SUMPRODUCT ranges must have the same shape. Argument 1 is {}x{}, argument {} is {}x{}.",
-                        num_rows, num_cols, i + 1, rows, cols
+                        rows, cols, i + 1, r, c
                     )));
                 }
             }
-
-            // Iterate row-major, multiply corresponding cells, accumulate sum
             let mut sum = 0.0;
-            for row_offset in 0..num_rows {
-                for col_offset in 0..num_cols {
-                    let mut product = 1.0;
-                    for r in &norm {
-                        let cell_r = r.0 + row_offset;
-                        let cell_c = r.1 + col_offset;
-                        let text = lookup.get_text(cell_r, cell_c);
-                        if text.is_empty() {
-                            product = 0.0;
-                            break; // 0 * anything = 0, skip remaining
-                        } else if text.starts_with('#') {
-                            // Error cell — propagate
-                            return Some(EvalResult::Error(text));
-                        } else if let Ok(n) = text.parse::<f64>() {
-                            product *= n;
-                        } else {
-                            // Text/bool → 0
-                            product = 0.0;
-                            break;
-                        }
-                    }
-                    sum += product;
+            for r in 0..rows {
+                for c in 0..cols {
+                    sum += grids.iter().map(|g| g[r][c]).product::<f64>();
                 }
             }
             EvalResult::Number(sum)
@@ -395,4 +338,58 @@ fn round_to_multiple(number: f64, significance: f64, up: bool) -> EvalResult {
     let q = if up { q.ceil() } else { q.floor() };
     // ...and again after, so CEILING(0.25,0.1) is 0.3 rather than 0.30000000000000004.
     EvalResult::Number(round_to_15_sig(q * significance))
+}
+
+/// One SUMPRODUCT argument as a grid of numbers.
+fn sumproduct_grid<L: CellLookup>(arg: &BoundExpr, lookup: &L) -> Result<Vec<Vec<f64>>, String> {
+    // Ranges keep their long-standing reading: numeric text counts, other text,
+    // booleans and blanks are 0.
+    let rect = match arg {
+        Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
+            if matches!(sheet, crate::sheet::SheetRef::RefError { .. }) {
+                return Err("#REF!".to_string());
+            }
+            Some((*start_row, *start_col, *end_row, *end_col))
+        }
+        Expr::CellRef { col, row, .. } => Some((*row, *col, *row, *col)),
+        Expr::NamedRange(name) => match lookup.resolve_named_range(name) {
+            Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                Some((start_row, start_col, end_row, end_col))
+            }
+            Some(NamedRangeResolution::Cell { row, col }) => Some((row, col, row, col)),
+            None => return Err(format!("#NAME? '{}'", name)),
+        },
+        _ => None,
+    };
+    if let Some((r1, c1, r2, c2)) = rect {
+        let (r0, r1) = (r1.min(r2), r1.max(r2));
+        let (c0, c1) = (c1.min(c2), c1.max(c2));
+        return (r0..=r1)
+            .map(|r| {
+                (c0..=c1)
+                    .map(|c| {
+                        let text = lookup.get_text(r, c);
+                        if text.starts_with('#') {
+                            Err(text)
+                        } else {
+                            Ok(crate::cell::parse_finite(&text).unwrap_or(0.0))
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+    let element = |v: &Value| match v {
+        Value::Number(n) => Ok(*n),
+        Value::Error(e) => Err(e.clone()),
+        _ => Ok(0.0),
+    };
+    match evaluate(arg, lookup) {
+        EvalResult::Array(a) => (0..a.rows())
+            .map(|r| (0..a.cols()).map(|c| a.get(r, c).map_or(Ok(0.0), element)).collect())
+            .collect(),
+        EvalResult::Error(e) => Err(e),
+        // A lone scalar is a 1x1 array: SUMPRODUCT(5) is 5.
+        other => Ok(vec![vec![other.to_number()?]]),
+    }
 }
