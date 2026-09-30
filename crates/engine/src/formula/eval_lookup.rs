@@ -2,7 +2,7 @@
 // ROW, COLUMN, ROWS, COLUMNS
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
-use super::eval_helpers::{get_typed_for_sheet, get_text_for_sheet, wildcard_match};
+use super::eval_helpers::{read_cell_value, get_typed_for_sheet, get_text_for_sheet, wildcard_match};
 use super::parser::{BoundExpr, Expr};
 use crate::sheet::SheetRef;
 use std::cmp::Ordering;
@@ -894,14 +894,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
     Some(result)
 }
 
-/// Read a single cell's typed value, honoring the sheet the reference points at.
-fn read_cell_value<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Value {
-    match sheet {
-        SheetRef::Current => lookup.get_cell_value(row, col),
-        SheetRef::Id(id) => lookup.get_value_sheet(*id, row, col),
-        SheetRef::RefError { .. } => Value::Empty,
-    }
-}
 
 /// Materialize a rectangular region into an EvalResult: a scalar for 1x1, else an Array.
 fn range_to_result<L: CellLookup>(
