@@ -1,4 +1,4 @@
-use crate::ui::{dialog_header_with_subtitle, modal_overlay, Button, DialogFrame, DialogSize};
+use crate::ui::{dialog_header_with_subtitle, modal_overlay, Button, DialogFrame};
 use crate::{app::Spreadsheet, theme::TokenKey};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -13,7 +13,18 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
     let border = app.token(TokenKey::PanelBorder);
     let accent = app.token(TokenKey::Accent);
     let warn = app.token(TokenKey::Warn);
-    let available_height: f32 = app.window_size.height.into();
+    let panel = app.token(TokenKey::PanelBg);
+    let width = (f32::from(app.window_size.width) - 48.0).clamp(480.0, 1280.0);
+    let height = (f32::from(app.window_size.height) - 48.0).clamp(340.0, 960.0);
+    let body_height = height - 136.0;
+    let compact = width < 800.0;
+    let preview_width = if compact { width - 32.0 } else { width - 332.0 };
+    let preview_height = if compact {
+        (body_height - 196.0).max(100.0)
+    } else {
+        body_height
+    };
+    let canvas_height = (preview_height - 66.0).max(60.0);
     let labels = [
         (
             "Scope",
@@ -42,8 +53,8 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
         (
             "Scaling",
             match state.settings.scale {
-                Scale::FitColumns => "Fit columns on one page",
-                Scale::FitSheet => "Fit sheet on one page",
+                Scale::FitColumns => "Fit columns",
+                Scale::FitSheet => "Fit sheet",
                 _ => "Actual size (100%)",
             },
         ),
@@ -51,217 +62,311 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
             "Page numbers",
             if state.settings.footer { "On" } else { "Off" },
         ),
+        (
+            "Print gridlines",
+            if state.settings.gridlines {
+                "On"
+            } else {
+                "Off"
+            },
+        ),
     ];
-    let body =
-        div()
-            .id("pdf-settings-body")
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
-            .children(
-                labels
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (label, value))| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_4()
-                            .child(div().text_sm().text_color(text).child(label))
-                            .child(
-                                Button::new(
-                                    ElementId::Name(format!("pdf-option-{index}").into()),
-                                    format!("{value}  ›"),
-                                )
-                                .disabled(state.busy)
-                                .secondary(if state.focus == index { accent } else { border }, text)
-                                .w(px(232.0))
-                                .text_center()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.pdf_cycle_option(index, cx);
-                                        cx.stop_propagation();
-                                    }),
-                                ),
-                            )
-                    }),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .p_3()
-                    .border_1()
-                    .border_color(border)
-                    .rounded_md()
-                    .text_sm()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(if state.busy {
-                        vec![div()
-                            .text_color(text)
-                            .child(if state.choosing_path {
-                                "Choose a location in the save dialog."
-                            } else {
-                                "Creating PDF…"
-                            })
-                            .into_any_element()]
-                    } else {
-                        state
-                            .summary
-                            .clone()
-                            .unwrap_or_else(|e| e)
-                            .lines()
-                            .enumerate()
-                            .map(|(index, line)| {
-                                div()
-                                    .text_color(if state.summary.is_err() || index > 0 {
-                                        warn
-                                    } else {
-                                        text
-                                    })
-                                    .child(line.to_string())
-                                    .into_any_element()
-                            })
-                            .collect()
-                    }),
-            )
-            .when(state.error.is_some(), |element| {
-                element.child(
-                    div()
-                        .p_3()
-                        .border_1()
-                        .border_color(warn)
-                        .rounded_md()
-                        .text_sm()
-                        .text_color(warn)
-                        .child(state.error.clone().unwrap()),
-                )
-            })
-            .when(state.report.is_some(), |element| {
-                element.child(
-                    div()
-                        .p_3()
-                        .border_1()
-                        .border_color(border)
-                        .rounded_md()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children(
-                            state
-                                .report
-                                .iter()
-                                .flatten()
-                                .enumerate()
-                                .map(|(index, line)| {
-                                    div()
-                                        .text_sm()
-                                        .text_color(if index == 0 { text } else { warn })
-                                        .child(line.clone())
-                                }),
-                        )
-                        .when(state.saved_path.is_some(), |receipt| {
-                            receipt.child(
-                                div().text_xs().text_color(muted).child(
-                                    state.saved_path.as_ref().unwrap().display().to_string(),
-                                ),
-                            )
-                        }),
-                )
-            })
-            .child(
-                div().text_xs().text_color(muted).child(
-                    "Half-inch margins · Current calculated values · Visible rows and columns",
-                ),
-            )
-            .child(
-                div().text_xs().text_color(muted).child(
-                    "Blank outer formatting is excluded. Choose Selected range to include it.",
-                ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Tab: choose a setting · Space: change · Enter: export · Esc: cancel"),
-            );
-    let footer = div()
+    let stale = state.captured_revision != app.workbook.read(cx).revision();
+    let settings = div().id("pdf-settings-body").flex().flex_col().gap_3()
+        .min_h_0().overflow_y_scroll().flex_shrink_0()
+        .when(!compact, |d| d.w(px(284.0)).h_full())
+        .when(compact, |d| d.w_full().h(px(180.0)))
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(text).child("Page setup"))
+        .children(labels.into_iter().enumerate().map(|(index, (label, value))| {
+            div().flex().items_center().justify_between().gap_2()
+                .child(div().text_sm().text_color(text).child(label))
+                .child(Button::new(ElementId::Name(format!("pdf-option-{index}").into()), format!("{value} ›"))
+                    .disabled(state.busy).secondary(if state.focus == index { accent } else { border }, text)
+                    .w(px(154.0)).px_2().text_center()
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        this.pdf_cycle_option(index, cx); cx.stop_propagation();
+                    })))
+        }))
+        .child(div().mt_2().p_3().border_1().border_color(border).rounded_md().flex().flex_col().gap_2()
+            .children(state.summary.clone().unwrap_or_else(|e| e).lines().enumerate().map(|(i, line)| {
+                div().text_sm().text_color(if state.summary.is_err() || i > 0 { warn } else { text }).child(line.to_string())
+            })))
+        .children(state.notices.iter().map(|notice| div().text_sm().text_color(warn).child(notice.clone())))
+        .when(state.error.is_some(), |d| d.child(div().text_sm().text_color(warn).child(state.error.clone().unwrap())))
+        .when(state.report.is_some(), |d| d.child(div().p_3().border_1().border_color(border).rounded_md().flex().flex_col().gap_2()
+            .children(state.report.iter().flatten().map(|line| div().text_sm().text_color(text).child(line.clone())))
+            .when(state.saved_path.is_some(), |d| d.child(div().text_xs().text_color(muted).child(state.saved_path.as_ref().unwrap().display().to_string())))))
+        .child(div().text_xs().text_color(muted).child("Half-inch margins. Uses visible rows and columns. Select a range to include blank outer cells."))
+        .child(div().text_xs().text_color(if stale { warn } else { muted }).child(if stale {
+            "Sheet changed. Refresh to include edits; export keeps the shown snapshot."
+        } else { "Preview uses a snapshot of the sheet's current calculated values." }))
+        .child(Button::new("pdf-refresh", "Refresh preview").disabled(state.busy).secondary(border, text)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.refresh_pdf_preview(cx); cx.stop_propagation(); })))
+        .child(div().text_xs().text_color(muted).child("Tab: setting · Space: change · PgUp/PgDn: page · Enter: export · Esc: close"));
+
+    let (paper_width, paper_height) = (
+        state.page_size.0 as f32 * 4.0 / 3.0,
+        state.page_size.1 as f32 * 4.0 / 3.0,
+    );
+    let fit = ((preview_width - 40.0) / paper_width)
+        .min((canvas_height - 40.0) / paper_height)
+        .max(0.05);
+    let zoom = state.zoom.unwrap_or(fit);
+    let (page_width, page_height) = (paper_width * zoom, paper_height * zoom);
+    let has_pages = state.output.is_some();
+    let toolbar = div()
         .flex()
-        .justify_end()
+        .items_center()
+        .flex_wrap()
         .gap_2()
-        .when(state.saved_path.is_some() && !state.busy, |div| {
-            div.child(
-                Button::new("pdf-open", "Open PDF")
-                    .secondary(border, text)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            if let Some(path) =
-                                this.pdf_export.as_ref().and_then(|s| s.saved_path.as_ref())
-                            {
-                                if let Err(error) = open::that(path) {
-                                    if let Some(state) = this.pdf_export.as_mut() {
-                                        state.error = Some(format!("Could not open PDF: {error}"));
-                                    }
-                                    cx.notify();
-                                }
-                            }
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
-        })
+        .flex_shrink_0()
         .child(
-            Button::new(
-                "pdf-cancel",
-                if state.report.is_some() {
-                    "Close"
+            Button::new("pdf-prev-page", "Previous")
+                .disabled(!has_pages || state.page == 0)
+                .secondary(border, text)
+                .px_2()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.pdf_preview_page(-1, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(text)
+                .child(if state.page_count > 0 {
+                    format!("Page {} of {}", state.page + 1, state.page_count)
                 } else {
-                    "Cancel"
-                },
-            )
-            .secondary(border, muted)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close_pdf_export(cx);
-                    cx.stop_propagation();
+                    "No pages".into()
                 }),
+        )
+        .child(
+            Button::new("pdf-next-page", "Next")
+                .disabled(!has_pages || state.page + 1 >= state.page_count)
+                .secondary(border, text)
+                .px_2()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.pdf_preview_page(1, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("pdf-zoom-out", "-")
+                .disabled(zoom <= 0.5)
+                .secondary(border, text)
+                .px_2()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        if zoom > 0.5 {
+                            this.pdf_preview_zoom(zoom * 0.8, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+        .child(
+            div().text_xs().text_color(muted).child(
+                state
+                    .zoom
+                    .map_or("Fit".into(), |z| format!("{:.0}%", z * 100.0)),
             ),
         )
         .child(
-            Button::new(
-                "pdf-save",
-                if state.report.is_some() {
-                    "Export again…"
-                } else {
-                    "Export PDF…"
-                },
+            Button::new("pdf-zoom-in", "+")
+                .disabled(zoom >= 2.0)
+                .secondary(border, text)
+                .px_2()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        if zoom < 2.0 {
+                            this.pdf_preview_zoom(zoom * 1.25, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+        .child(
+            Button::new("pdf-fit-page", "Fit page")
+                .secondary(border, text)
+                .px_2()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.pdf_preview_zoom(0.0, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+        );
+    let page = if let Some(image) = &state.image {
+        div()
+            .w(px(page_width + 32.0))
+            .min_w_full()
+            .h(px(page_height + 32.0))
+            .min_h_full()
+            .p_4()
+            .flex()
+            .justify_center()
+            .items_start()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(page_width))
+                    .h(px(page_height))
+                    .bg(rgb(0xffffff))
+                    .shadow_md()
+                    .child(img(image.clone()).w_full().h_full()),
             )
-            .disabled(state.busy || state.summary.is_err())
-            .primary(accent, app.token(TokenKey::TextInverse))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.save_pdf(cx);
-                    cx.stop_propagation();
+            .into_any_element()
+    } else {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .text_sm()
+            .text_color(text)
+            .child(if let Some(error) = &state.preview_error {
+                error.clone()
+            } else if state.summary.is_err() {
+                "Adjust the page settings to create a preview.".into()
+            } else if state.preparing {
+                "Preparing document…".into()
+            } else {
+                "Rendering page…".into()
+            })
+            .into_any_element()
+    };
+    let preview = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .min_w_0()
+        .min_h_0()
+        .flex_1()
+        .child(toolbar)
+        .child(
+            div()
+                .id("pdf-preview-canvas")
+                .flex_1()
+                .min_h_0()
+                .overflow_scroll()
+                .border_1()
+                .border_color(border)
+                .rounded_md()
+                .bg(border.opacity(0.25))
+                .child(page),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("Preview zoom changes the view only. Export uses this PDF document."),
+        );
+    let body = div()
+        .flex()
+        .gap_4()
+        .h(px(body_height))
+        .min_h_0()
+        .when(compact, |d| d.flex_col())
+        .child(settings)
+        .child(preview);
+    let footer = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child(if state.choosing_path {
+                    "Choose a location in the save dialog."
+                } else if state.busy {
+                    "Saving PDF…"
+                } else {
+                    ""
                 }),
-            ),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .when(state.saved_path.is_some() && !state.busy, |d| {
+                    d.child(
+                        Button::new("pdf-open", "Open PDF")
+                            .secondary(border, text)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    if let Some(path) =
+                                        this.pdf_export.as_ref().and_then(|s| s.saved_path.as_ref())
+                                    {
+                                        if let Err(error) = open::that(path) {
+                                            if let Some(state) = this.pdf_export.as_mut() {
+                                                state.error =
+                                                    Some(format!("Could not open PDF: {error}"));
+                                            }
+                                            cx.notify();
+                                        }
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+                })
+                .child(
+                    Button::new("pdf-cancel", if state.busy { "Cancel" } else { "Close" })
+                        .secondary(border, muted)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.close_pdf_export(cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
+                )
+                .child(
+                    Button::new(
+                        "pdf-save",
+                        if state.report.is_some() {
+                            "Export again…"
+                        } else {
+                            "Export PDF…"
+                        },
+                    )
+                    .disabled(state.busy || state.preparing || state.output.is_none())
+                    .primary(accent, app.token(TokenKey::TextInverse))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.save_pdf(cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+                ),
         );
     modal_overlay(
         "pdf-export-dialog",
         |this, cx| this.close_pdf_export(cx),
-        DialogFrame::new(body, app.token(TokenKey::PanelBg), border)
-            .size(DialogSize::Lg)
-            .max_height(px((available_height - 48.0).max(240.0)))
+        DialogFrame::new(body, panel, border)
+            .width(px(width))
+            .max_height(px(height))
             .header(dialog_header_with_subtitle(
-                "Export PDF",
-                app.sheet(cx).name.clone(),
+                "Print Preview",
+                state
+                    .snapshot
+                    .as_ref()
+                    .map_or("Worksheet".to_string(), |s| s.name.clone()),
                 text,
                 muted,
             ))

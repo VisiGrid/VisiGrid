@@ -1,6 +1,6 @@
 //! Active-view capture and asynchronous PDF export. Export never changes save state.
 use crate::{app::Spreadsheet, mode::Mode};
-use gpui::{App, Context};
+use gpui::{App, Context, RenderImage};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -20,12 +20,28 @@ pub struct PdfExportState {
     pub error: Option<String>,
     pub report: Option<Vec<String>>,
     pub saved_path: Option<std::path::PathBuf>,
+    pub output: Option<Arc<visigrid_print::pdf::PdfOutput>>,
+    pub preview_cancel: Arc<AtomicBool>,
+    pub preparing: bool,
+    pub page_loading: bool,
+    pub preview_error: Option<String>,
+    pub image: Option<Arc<RenderImage>>,
+    pub page: usize,
+    pub page_count: usize,
+    pub page_size: (f64, f64),
+    /// None fits the page in the viewport. This never affects PDF scale.
+    pub zoom: Option<f32>,
+    pub notices: Vec<String>,
+    pub captured_revision: u64,
 }
 
 impl PdfExportState {
     pub fn update_summary(&mut self) {
+        self.page_count = 0;
         self.summary = self.snapshot.as_ref().map_err(Clone::clone).and_then(|s| {
             let plan = paginate(&s.layout, &self.settings).map_err(|e| e.to_string())?;
+            self.page_count = plan.pages().len();
+            self.page_size = plan.page_size();
             let mut summary = format!("{} • {} page{} • {:.0}% scale", s.name, plan.pages().len(), if plan.pages().len() == 1 { "" } else { "s" }, plan.scale()*100.0);
             if let Some(size) = plan.readability().smallest_text_pt {
                 summary.push_str(&format!(" • smallest text {:.1} pt", size));
@@ -52,6 +68,9 @@ impl Spreadsheet {
         if self.mode.is_editing() && !self.commit_current_edit(cx) {
             return;
         }
+        if let Some(old) = self.pdf_export.take() {
+            old.preview_cancel.store(true, Ordering::Relaxed);
+        }
         let snapshot = self.capture_pdf(false, cx).map(Arc::new);
         let mut state = PdfExportState {
             settings: PageSettings::default(),
@@ -65,11 +84,187 @@ impl Spreadsheet {
             error: None,
             report: None,
             saved_path: None,
+            output: None,
+            preview_cancel: Arc::new(AtomicBool::new(false)),
+            preparing: false,
+            page_loading: false,
+            preview_error: None,
+            image: None,
+            page: 0,
+            page_count: 0,
+            page_size: (595.0, 842.0),
+            zoom: None,
+            notices: Vec::new(),
+            captured_revision: self.workbook.read(cx).revision(),
         };
         state.update_summary();
         self.pdf_export = Some(state);
         self.mode = Mode::ExportPdf;
+        self.rebuild_pdf_preview(cx);
         cx.notify();
+    }
+
+    fn rebuild_pdf_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.pdf_export.as_mut() else {
+            return;
+        };
+        state.preview_cancel.store(true, Ordering::Relaxed);
+        state.preview_cancel = Arc::new(AtomicBool::new(false));
+        state.output = None;
+        state.image = None;
+        state.page = 0;
+        state.page_loading = false;
+        state.preparing = false;
+        state.preview_error = None;
+        state.notices.clear();
+        if state.summary.is_err() {
+            cx.notify();
+            return;
+        }
+        let Ok(snapshot) = state.snapshot.clone() else {
+            return;
+        };
+        let settings = state.settings.clone();
+        let cancel = state.preview_cancel.clone();
+        state.preparing = true;
+        cx.spawn(async move |this, cx| {
+            let worker_cancel = cancel.clone();
+            let result = smol::unblock(move || {
+                visigrid_print::pdf::render_cancellable(&snapshot, &settings, || {
+                    worker_cancel.load(Ordering::Relaxed)
+                })
+            })
+            .await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                let Some(state) = this.pdf_export.as_mut() else {
+                    return;
+                };
+                if !Arc::ptr_eq(&state.preview_cancel, &cancel) {
+                    return;
+                }
+                state.preparing = false;
+                match result {
+                    Ok(output) => {
+                        state.notices = pdf_notices(&output);
+                        state.output = Some(Arc::new(output));
+                    }
+                    Err(error) => state.preview_error = Some(error),
+                }
+                this.load_pdf_preview_page(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn load_pdf_preview_page(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.pdf_export.as_mut() else {
+            return;
+        };
+        // Coalesce page changes: at most one raster task for this document.
+        if state.page_loading {
+            return;
+        }
+        let Some(output) = state.output.clone() else {
+            return;
+        };
+        let page = state.page;
+        let cancel = state.preview_cancel.clone();
+        state.page_loading = true;
+        state.preview_error = None;
+        cx.spawn(async move |this, cx| {
+            let worker_cancel = cancel.clone();
+            let result = smol::unblock(move || {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return Err("Preview cancelled".to_string());
+                }
+                let mut page = visigrid_print::preview::rasterize(output, page, 2400)?;
+                // GPUI's RenderImage consumes BGRA, the rasterizer returns RGBA.
+                for pixel in page.rgba.as_chunks_mut::<4>().0 {
+                    pixel.swap(0, 2);
+                }
+                let buffer = image::RgbaImage::from_raw(page.width, page.height, page.rgba)
+                    .ok_or("Invalid preview bitmap")?;
+                Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+            })
+            .await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                let Some(state) = this.pdf_export.as_mut() else {
+                    return;
+                };
+                if !Arc::ptr_eq(&state.preview_cancel, &cancel) {
+                    return;
+                }
+                state.page_loading = false;
+                if state.page == page {
+                    match result {
+                        Ok(image) => state.image = Some(image),
+                        Err(error) => state.preview_error = Some(error),
+                    }
+                } else {
+                    this.load_pdf_preview_page(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn pdf_preview_page(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(state) = self.pdf_export.as_mut() else {
+            return;
+        };
+        if state.page_count == 0 || state.output.is_none() {
+            return;
+        }
+        let page = state
+            .page
+            .saturating_add_signed(delta)
+            .min(state.page_count - 1);
+        if state.page == page {
+            return;
+        }
+        state.page = page;
+        state.image = None;
+        state.preview_error = None;
+        self.load_pdf_preview_page(cx);
+        cx.notify();
+    }
+
+    pub fn pdf_preview_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        if let Some(state) = self.pdf_export.as_mut() {
+            state.zoom = if zoom == 0.0 {
+                None
+            } else {
+                Some(zoom.clamp(0.5, 2.0))
+            };
+            cx.notify();
+        }
+    }
+
+    pub fn refresh_pdf_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.pdf_export.as_ref() else {
+            return;
+        };
+        if state.busy {
+            return;
+        }
+        let snapshot = self.capture_pdf(state.selection_only, cx).map(Arc::new);
+        let state = self.pdf_export.as_mut().unwrap();
+        state.snapshot = snapshot;
+        state.captured_revision = self.workbook.read(cx).revision();
+        state.report = None;
+        state.saved_path = None;
+        state.error = None;
+        state.update_summary();
+        self.rebuild_pdf_preview(cx);
     }
 
     fn capture_pdf(&self, selection_only: bool, cx: &App) -> Result<Snapshot, String> {
@@ -172,6 +367,7 @@ impl Spreadsheet {
             let state = self.pdf_export.as_mut().unwrap();
             state.selection_only = selection_only;
             state.snapshot = snapshot;
+            state.captured_revision = self.workbook.read(cx).revision();
         } else {
             use visigrid_print::{Paper, Scale};
             let state = self.pdf_export.as_mut().unwrap();
@@ -192,6 +388,7 @@ impl Spreadsheet {
                     }
                 }
                 4 => state.settings.footer = !state.settings.footer,
+                5 => state.settings.gridlines = !state.settings.gridlines,
                 _ => {}
             }
         }
@@ -201,12 +398,14 @@ impl Spreadsheet {
         state.report = None;
         state.saved_path = None;
         state.update_summary();
+        self.rebuild_pdf_preview(cx);
         cx.notify();
     }
 
     pub fn close_pdf_export(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.pdf_export.take() {
             state.cancel.store(true, Ordering::Relaxed);
+            state.preview_cancel.store(true, Ordering::Relaxed);
         }
         self.mode = Mode::Navigation;
         cx.notify();
@@ -216,13 +415,15 @@ impl Spreadsheet {
         let Some(state) = self.pdf_export.as_mut() else {
             return;
         };
-        if state.busy || state.summary.is_err() {
+        if state.busy || state.preparing || state.summary.is_err() {
             return;
         }
         let Ok(snapshot) = state.snapshot.clone() else {
             return;
         };
-        let settings = state.settings.clone();
+        let Some(output) = state.output.clone() else {
+            return;
+        };
         let cancel = state.cancel.clone();
         state.busy = true;
         state.choosing_path = true;
@@ -285,37 +486,15 @@ impl Spreadsheet {
             let work_cancel = cancel.clone();
             let saved_path = path.clone();
             let result = smol::unblock(move || {
-                let output = visigrid_print::pdf::render_cancellable(&snapshot, &settings, || {
-                    work_cancel.load(Ordering::Relaxed)
-                })?;
                 if work_cancel.load(Ordering::Relaxed) {
                     return Err("Export cancelled".to_string());
                 }
                 visigrid_print::pdf::save_atomic(&path, &output.bytes)?;
-                let mut message = vec![format!(
+                let message = vec![format!(
                     "Saved {} page{} as PDF",
                     output.pages,
                     if output.pages == 1 { "" } else { "s" }
                 )];
-                if output.clipped_cells > 0 {
-                    message.push(format!(
-                        "Clipped text in {} cell(s): {}. Increase row heights or column widths.",
-                        output.clipped_cells,
-                        output.clipped_addresses.join(", ")
-                    ));
-                }
-                if output.small_text_cells > 0 {
-                    message.push(format!(
-                        "{} cell(s) have text below 8 pt. Try landscape or actual size.",
-                        output.small_text_cells
-                    ));
-                }
-                if !output.substituted_fonts.is_empty() {
-                    message.push(format!(
-                        "Fonts substituted: {}",
-                        output.substituted_fonts.join(", ")
-                    ));
-                }
                 Ok(message)
             })
             .await;
@@ -350,4 +529,27 @@ impl Spreadsheet {
 fn rgba(color: gpui::Hsla) -> [u8; 4] {
     let c: gpui::Rgba = color.into();
     [c.r, c.g, c.b, c.a].map(|v| (v * 255.0).round() as u8)
+}
+
+fn pdf_notices(output: &visigrid_print::pdf::PdfOutput) -> Vec<String> {
+    let mut notices = Vec::new();
+    if output.clipped_cells > 0 {
+        notices.push(format!(
+            "Clipped text in {} cell(s): {}{}. Increase row heights or column widths.",
+            output.clipped_cells,
+            output.clipped_addresses.join(", "),
+            if output.clipped_cells > output.clipped_addresses.len() {
+                " (first 10 shown)"
+            } else {
+                ""
+            }
+        ));
+    }
+    if !output.substituted_fonts.is_empty() {
+        notices.push(format!(
+            "Fonts substituted: {}",
+            output.substituted_fonts.join(", ")
+        ));
+    }
+    notices
 }

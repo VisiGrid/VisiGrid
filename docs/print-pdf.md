@@ -1,23 +1,27 @@
 # Print and PDF implementation
 
-Status: basic PDF export is wired into the desktop app on `feat/print-pdf`.
-Native printer submission and the visual page preview are still pending.
+Status: PDF export includes a visual print preview and optional printed gridlines.
+Native printer submission remains separate work.
 
 ## Export a PDF
 
 Choose **File → Export PDF…** (also available in the command palette).
 Select Active sheet or Selected range, A4/Letter/Legal, portrait/landscape,
-Fit columns/Actual size/Fit sheet, and optional page numbers. The dialog reports
-page count, scale, and smallest cell text size before opening the native save
-prompt. Use a filename ending in `.pdf`. A successful export keeps the receipt
-visible, including clipping, small-text, and missing-font notices, with an
-explicit **Open PDF** button.
+Fit columns/Actual size/Fit sheet, optional page numbers, and **Print gridlines**
+(default off). The right pane shows the actual generated PDF on white paper.
+Previous/Next (or PgUp/PgDn) navigate pages; zoom and Fit page change only the
+preview view. Page setup changes regenerate the document in the background.
+Page count, scale, smallest text size, clipping, and font notices appear before
+export. Export saves the same cached PDF bytes shown in preview. Use a filename
+ending in `.pdf`. The receipt and an explicit **Open PDF** button remain visible
+after saving.
 
-The dialog identifies the active sheet, aligns layout controls, and scrolls its
-body in smaller windows. Success, destination, and warnings are separate items;
+The dialog identifies the captured sheet, aligns layout controls, and stacks
+settings above the preview in narrower windows. Settings and the preview canvas
+scroll independently. Success, destination, and warnings are separate items;
 changing any setting clears the previous receipt. Clicking a setting also moves
-keyboard focus to it. Progress distinguishes choosing a destination from creating
-the PDF, and the successful-export action reads **Export again…**.
+keyboard focus to it. Progress distinguishes preparing the preview, choosing a
+destination, and saving the PDF. The successful-export action reads **Export again…**.
 
 - The adapter captures current calculated display values, dimensions, effective
   conditional formats, agent roles, merges, and the active sort/filter/hide view.
@@ -29,9 +33,10 @@ the PDF, and the successful-export action reads **Export again…**.
   intentional blank formatting. Intersecting merges expand the selected scope.
   Merges made discontinuous by sorting fail with a clear explanation.
 - Capture is synchronous; encoding, shaping, and disk writes run in the background.
-  Cancel discards the render and checks between pages/cells. Saving uses a synced
-  temporary sibling followed by atomic replacement. Rendering errors cannot
-  truncate an existing destination.
+  Closing or changing settings discards stale render results and checks cancellation
+  between pages/cells. Page changes coalesce while a bitmap is rendering. Saving
+  uses a synced temporary sibling followed by atomic replacement. Rendering errors
+  cannot truncate an existing destination.
 - The optional `pdf` feature connects the engine adapter to Krilla and cosmic-text.
   Advanced shaping handles bidi and font fallback; resolved fonts are embedded in
   searchable vector output. The app's bundled IBM Plex Sans faces are always
@@ -40,21 +45,34 @@ the PDF, and the successful-export action reads **Export again…**.
   reported. Text wraps within existing row heights; export never resizes the sheet.
 - Explicit fills, font styling, alignment, borders, wrapped text, merges, and
   left-aligned overflow are rendered. Semantic styles use a light paper palette;
-  desktop selection and theme backgrounds are omitted.
+  desktop selection and theme backgrounds are omitted. Printed gridlines are a
+  separate setting from the editing grid: light gray lines within the captured
+  print area, beneath fills and explicit borders, with no internal merged-cell
+  lines. They do not add cells to the print area or modify workbook formatting.
+- The optional `preview` feature includes `pdf` and [Hayro 0.7.1](https://github.com/LaurenzV/hayro)
+  (MIT/Apache-2.0). It rasterizes the generated PDF with embedded fonts, one page
+  at a time, at a maximum 2400-pixel long edge. Zoom is 50–200% or Fit page;
+  exported text remains vector/searchable regardless of preview resolution.
+  Rasterization runs in the background and cannot be interrupted mid-page; stale
+  results are discarded. Unsupported rendering elements produce a visible preview
+  error instead of an incomplete image; the generated PDF can still be exported.
 
 This is an incremental export milestone, not the full print specification.
-Margins are fixed at 0.5 inches; there is no visual page preview, native Print
-command, workbook-wide output, saved print area, persistent settings, page-range
-control, gridline/headings controls, or repeated-title controls in the dialog.
+Margins are fixed at 0.5 inches; there is no native Print command, workbook-wide
+output, saved print area, persistent settings, page-range control, printed
+headings, editable page breaks, or repeated-title controls in the dialog.
 The core already supports repeated titles, but that UI remains to be built.
 Center-across-selection fidelity and shared grid/PDF text metrics still need work.
-External edits after capture do not change the export; reopen the dialog to
-capture them. The sheet/range choice captures a fresh snapshot.
+External edits after capture do not change the export. **Refresh preview** captures
+the sheet again; a workbook revision change shows a refresh notice. View-only
+changes that do not increment the workbook revision may not show that notice.
+The sheet/range choice also captures a fresh snapshot.
 
 Headless QA uses the same adapter and renderer (not a shipped CLI command):
 
 ```sh
-cargo run -p visigrid-print --features pdf --example export_pdf -- INPUT.xlsx OUTPUT.pdf 'Invoice'
+cargo run -p visigrid-print --features pdf --example export_pdf -- INPUT.xlsx OUTPUT.pdf 'Invoice' --gridlines
+cargo run -p visigrid-print --features preview --example preview_pdf -- OUTPUT.pdf PAGE.ppm 1
 cargo test -p visigrid-print --all-features
 ```
 
@@ -82,6 +100,25 @@ The success receipt stays open, and cancelling a second native save prompt
 returns to the settings without overwriting the file. The workbook remains an
 XLSX import. `cargo clippy --no-deps -p visigrid-print --all-features --all-targets
 -- -D warnings` passes; existing dependency warnings remain outside this crate.
+
+Preview/gridline verification (2026-09-30): all 25 print tests pass, including
+pixel checks for gridlines on/off, merged interiors, explicit white fills,
+explicit borders, bounded print scope, shaped text, invalid preview requests,
+and unchanged PDF bytes across preview resolutions. Print Clippy passes with
+all features and targets. All seven fixture pages render through Hayro; side-by-side
+Poppler comparisons preserve geometry, styling, Japanese, Arabic, and clipping.
+Gridlines preserve the 1 / 4 / 1 / 1 page counts, all 120 transaction IDs, and
+the invoice/report/annual totals.
+
+Desktop preview smoke test on Linux: the invoice renders with gridlines off/on;
+zoom and Fit page leave the export scale unchanged. The dialog fits both
+1400×1100 and the app's minimum-width 1000×800 window. PgDn navigates the
+four-page report; rapid paper/orientation changes show the final selected layout,
+and closing during regeneration then reopening does not display stale results.
+Saving from preview produces a one-page A4 PDF with visible gridlines and the
+correct invoice total; cancelling a second native save prompt returns to preview.
+The final desktop build completed successfully. macOS and Windows UI QA remains
+outstanding.
 
 The product proposal and research live in the planning repository:
 
@@ -160,10 +197,9 @@ qualify macOS, Windows, native printers, or arbitrary workbook rendering.
 
 ## Remaining print roadmap
 
-1. A common shaped drawing representation for visual preview and PDF; current
-   output shares geometry with the page plan but is not a GPUI page preview.
-2. Preview navigation, range/title editing, custom margins/scale, printed headings
-   and gridlines, page-range controls, and source-revision refresh notices.
+1. Range/title editing, custom margins/scale, printed headings, and page-range
+   controls. Preview and PDF currently share the exact encoded document.
+2. Editable page layout and manual page breaks, with matching pagination semantics.
 3. Exact shared formatting semantics for all grid cases (including center across
    selection and extent growth from text spill), richer clipping locations and
    blank-page diagnostics, and repeat-title controls.

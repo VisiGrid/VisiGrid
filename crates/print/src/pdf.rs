@@ -25,6 +25,12 @@ pub struct PdfOutput {
     pub substituted_fonts: Vec<String>,
 }
 
+impl AsRef<[u8]> for PdfOutput {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// Render entirely before opening the destination. An error leaves it intact.
 pub fn render(snapshot: &Snapshot, settings: &PageSettings) -> Result<PdfOutput, String> {
     render_cancellable(snapshot, settings, || false)
@@ -90,6 +96,25 @@ pub fn render_cancellable(
                     }
                 }
             }
+        }
+        // Gridlines are page decoration, never worksheet borders. Draw them
+        // under fills and explicit borders; merged interiors have no gridlines.
+        if settings.gridlines {
+            surface.set_fill(None);
+            surface.set_stroke(Some(Stroke {
+                paint: rgb::Color::new(180, 180, 180).into(),
+                width: (0.4 * plan.scale() as f32).max(0.25),
+                ..Default::default()
+            }));
+            for (cell, rect) in &on_page {
+                if cancelled() {
+                    return Err("Export cancelled".into());
+                }
+                if cell.format.background_color.is_none() {
+                    surface.draw_path(&rectangle(*rect)?);
+                }
+            }
+            surface.set_stroke(None);
         }
         // Paint all fills before text. Text overflow can then cross blank cells.
         for (cell, rect) in &on_page {

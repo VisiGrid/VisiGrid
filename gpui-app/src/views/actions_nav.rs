@@ -362,6 +362,7 @@ pub(crate) fn bind(
             this.ensure_visible(cx);
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
+            if this.mode == Mode::ExportPdf { this.pdf_preview_page(-1, cx); return; }
             if this.guard_terminal_focus(window, cx, "PageUp") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {
@@ -376,6 +377,7 @@ pub(crate) fn bind(
             this.page_up(cx);
         }))
         .on_action(cx.listener(|this, _: &PageDown, window, cx| {
+            if this.mode == Mode::ExportPdf { this.pdf_preview_page(1, cx); return; }
             if this.guard_terminal_focus(window, cx, "PageDown") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {

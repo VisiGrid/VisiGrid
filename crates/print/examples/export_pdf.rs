@@ -5,8 +5,8 @@ use visigrid_print::{AxisItem, PageSettings, GRID_UNIT_PT};
 
 fn main() -> Result<(), String> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 4 {
-        return Err("Usage: export_pdf INPUT.xlsx OUTPUT.pdf SHEET_NAME".into());
+    if args.len() < 4 || args.len() > 5 || (args.len() == 5 && args[4] != "--gridlines") {
+        return Err("Usage: export_pdf INPUT.xlsx OUTPUT.pdf SHEET_NAME [--gridlines]".into());
     }
     let (workbook, imported) = visigrid_io::xlsx::import(Path::new(&args[1]))?;
     let index = workbook
@@ -35,6 +35,7 @@ fn main() -> Result<(), String> {
     let snapshot = capture(sheet, &view, None, "IBM Plex Sans", 11.0)?;
     let settings = PageSettings {
         footer: true,
+        gridlines: args.len() == 5,
         ..Default::default()
     };
     let output = visigrid_print::pdf::render(&snapshot, &settings)?;
