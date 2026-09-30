@@ -14,10 +14,11 @@ pub struct PdfExportState {
     pub snapshot: Result<Arc<Snapshot>, String>,
     pub summary: Result<String, String>,
     pub busy: bool,
+    pub choosing_path: bool,
     pub cancel: Arc<AtomicBool>,
     pub focus: usize,
     pub error: Option<String>,
-    pub report: Option<String>,
+    pub report: Option<Vec<String>>,
     pub saved_path: Option<std::path::PathBuf>,
 }
 
@@ -58,6 +59,7 @@ impl Spreadsheet {
             snapshot,
             summary: Ok(String::new()),
             busy: false,
+            choosing_path: false,
             cancel: Arc::new(AtomicBool::new(false)),
             focus: 0,
             error: None,
@@ -194,7 +196,10 @@ impl Spreadsheet {
             }
         }
         let state = self.pdf_export.as_mut().unwrap();
+        state.focus = option;
         state.error = None;
+        state.report = None;
+        state.saved_path = None;
         state.update_summary();
         cx.notify();
     }
@@ -220,8 +225,10 @@ impl Spreadsheet {
         let settings = state.settings.clone();
         let cancel = state.cancel.clone();
         state.busy = true;
+        state.choosing_path = true;
         state.error = None;
         state.report = None;
+        state.saved_path = None;
         let directory = self
             .current_file
             .as_ref()
@@ -240,6 +247,7 @@ impl Spreadsheet {
                         let _ = this.update(cx, |this, cx| {
                             if let Some(state) = this.pdf_export.as_mut() {
                                 state.busy = false;
+                                state.choosing_path = false;
                                 if !matches!(other, Ok(Ok(None))) {
                                     state.error = Some(
                                         "Could not open the save dialog. Please try again.".into(),
@@ -255,6 +263,12 @@ impl Spreadsheet {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
+            let _ = this.update(cx, |this, cx| {
+                if let Some(state) = this.pdf_export.as_mut() {
+                    state.choosing_path = false;
+                }
+                cx.notify();
+            });
             if !path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
@@ -278,24 +292,27 @@ impl Spreadsheet {
                     return Err("Export cancelled".to_string());
                 }
                 visigrid_print::pdf::save_atomic(&path, &output.bytes)?;
-                let mut message =
-                    format!("Exported {} page(s) to {}", output.pages, path.display());
+                let mut message = vec![format!(
+                    "Saved {} page{} as PDF",
+                    output.pages,
+                    if output.pages == 1 { "" } else { "s" }
+                )];
                 if output.clipped_cells > 0 {
-                    message.push_str(&format!(
-                        " • {} cell(s) clipped ({}); increase row heights or column widths",
+                    message.push(format!(
+                        "Clipped text in {} cell(s): {}. Increase row heights or column widths.",
                         output.clipped_cells,
                         output.clipped_addresses.join(", ")
                     ));
                 }
                 if output.small_text_cells > 0 {
-                    message.push_str(&format!(
-                        " • {} cell(s) below 8 pt",
+                    message.push(format!(
+                        "{} cell(s) have text below 8 pt. Try landscape or actual size.",
                         output.small_text_cells
                     ));
                 }
                 if !output.substituted_fonts.is_empty() {
-                    message.push_str(&format!(
-                        " • font fallback: {}",
+                    message.push(format!(
+                        "Fonts substituted: {}",
                         output.substituted_fonts.join(", ")
                     ));
                 }

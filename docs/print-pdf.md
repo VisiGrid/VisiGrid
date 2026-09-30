@@ -13,6 +13,12 @@ prompt. Use a filename ending in `.pdf`. A successful export keeps the receipt
 visible, including clipping, small-text, and missing-font notices, with an
 explicit **Open PDF** button.
 
+The dialog identifies the active sheet, aligns layout controls, and scrolls its
+body in smaller windows. Success, destination, and warnings are separate items;
+changing any setting clears the previous receipt. Clicking a setting also moves
+keyboard focus to it. Progress distinguishes choosing a destination from creating
+the PDF, and the successful-export action reads **Export again…**.
+
 - The adapter captures current calculated display values, dimensions, effective
   conditional formats, agent roles, merges, and the active sort/filter/hide view.
   Screen zoom is not an input. Export uses current cached calculations (including
