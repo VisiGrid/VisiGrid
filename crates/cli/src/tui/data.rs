@@ -5,21 +5,24 @@ use crate::util;
 pub struct PeekData {
     /// Row-major cell data (already display-ready strings)
     pub rows: Vec<Vec<String>>,
-    /// Raw cell content (formulas as "=...", values as-is). Only populated for .sheet files.
+    /// Typed JSON cells when the source carries types (Parquet). Built only
+    /// for --json so interactive previews don't keep a second copy of values.
+    pub json_rows: Option<Vec<Vec<serde_json::Value>>>,
+    /// Raw cell content (formulas as "=...", values as-is). Native workbooks only.
     pub raw: Option<Vec<Vec<String>>>,
     pub num_rows: usize,
     pub num_cols: usize,
     /// Pre-computed column widths (display columns, clamped to [3, 40])
     pub col_widths: Vec<usize>,
-    /// Column header names: first-row values (--headers) or generated A,B,C...
+    /// Column names: schema, first-row values (--headers), or generated A,B,C...
     pub col_names: Vec<String>,
-    /// Whether first data row was consumed as headers
+    /// Whether explicit headers are present (schema or a consumed header row)
     pub has_headers: bool,
     /// 1-based file row number of the first data row (2 if headers consumed, else 1)
     pub first_data_file_row: usize,
     /// Total data row count in file (if known, even when truncated by --max-rows)
     pub total_rows: Option<usize>,
-    /// Detected delimiter
+    /// Detected delimiter, or 0 for structured files
     pub delimiter: u8,
 }
 
@@ -137,6 +140,7 @@ pub fn load_csv(
 
     Ok(PeekData {
         rows,
+        json_rows: None,
         raw: None,
         num_rows,
         num_cols,
@@ -155,7 +159,83 @@ pub struct SheetData {
     pub data: PeekData,
 }
 
-/// Load a .sheet workbook file and return a PeekData for each sheet.
+/// Bounded Parquet preview. Schema names are always headers; record 1 is the
+/// first data row, because the file has no physical header record to skip.
+pub fn load_parquet(
+    path: &Path,
+    max_rows: usize,
+    force: bool,
+    width_scan_rows: usize,
+    json: bool,
+) -> Result<PeekData, String> {
+    let limit = if max_rows == 0 && !force {
+        crate::PEEK_FORCE_CAP + 1
+    } else if max_rows == 0 {
+        usize::MAX
+    } else {
+        max_rows
+    };
+    let imported = visigrid_io::parquet::import_with_limits(
+        path,
+        limit,
+        if force { None } else { Some(PEEK_CELL_CAP) },
+    )?;
+    if max_rows == 0 && !force && imported.total_rows > crate::PEEK_FORCE_CAP as u64 {
+        return Err("Parquet file has >200k rows; use --max-rows to preview fewer rows or --force to override".into());
+    }
+    if imported.cols_loaded < imported.total_cols {
+        return Err(format!(
+            "Parquet file has {} columns; peek supports at most {} (select fewer columns first)",
+            imported.total_cols, imported.cols_loaded,
+        ));
+    }
+    let total = usize::try_from(imported.total_rows)
+        .map_err(|_| "Parquet row count exceeds this platform's capacity")?;
+    let num_rows = imported.rows_loaded;
+    let num_cols = imported.cols_loaded;
+    let col_names: Vec<String> = (0..num_cols)
+        .map(|c| imported.sheet.get_display(0, c))
+        .collect();
+    let rows: Vec<Vec<String>> = (1..=num_rows)
+        .map(|r| (0..num_cols).map(|c| imported.sheet.get_interchange_display(r, c)).collect())
+        .collect();
+    let json_rows = if json {
+        Some((1..=num_rows).map(|r| {
+            (0..num_cols).map(|c| {
+                if imported.sheet.get_cell_opt(r, c).is_none_or(|cell| cell.value().is_empty()) {
+                    serde_json::Value::Null
+                } else {
+                    let value = crate::convert::cell_json_value(&imported.sheet, r, c);
+                    // Temporal values are numbers in the engine, but their
+                    // interchange representation is an ISO date/time string.
+                    if value.is_number() {
+                        crate::convert::string_to_json_value(&rows[r - 1][c])
+                    } else {
+                        value
+                    }
+                }
+            }).collect()
+        }).collect())
+    } else {
+        None
+    };
+    let col_widths = PeekData::compute_widths(&col_names, &rows, num_cols, width_scan_rows);
+    Ok(PeekData {
+        rows,
+        json_rows,
+        raw: None,
+        num_rows,
+        num_cols,
+        col_widths,
+        col_names,
+        has_headers: true,
+        first_data_file_row: 1,
+        total_rows: (num_rows < total).then_some(total),
+        delimiter: 0,
+    })
+}
+
+/// Load a native workbook file and return a PeekData for each sheet.
 ///
 /// Loads the workbook, rebuilds the dependency graph, recomputes all formulas,
 /// then extracts evaluated cell values as display strings.
@@ -164,6 +244,7 @@ pub fn load_sheet(
     path: &Path,
     max_rows: usize,
     width_scan_rows: usize,
+    force: bool,
 ) -> Result<Vec<SheetData>, String> {
     let mut workbook = visigrid_io::native::load_workbook(path)
         .map_err(|e| format!("failed to load {}: {}", path.display(), e))?;
@@ -205,6 +286,7 @@ pub fn load_sheet(
                 name,
                 data: PeekData {
                     rows: vec![],
+                    json_rows: None,
                     raw: Some(vec![]),
                     num_rows: 0,
                     num_cols: 0,
@@ -222,6 +304,8 @@ pub fn load_sheet(
         let total_rows_in_sheet = max_row + 1;
         let num_cols = max_col + 1;
         let effective_rows = total_rows_in_sheet.min(cap);
+
+        check_preview_size(&name, effective_rows, num_cols, force)?;
 
         // Extract evaluated values and raw formulas into row-major grids
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(effective_rows);
@@ -254,6 +338,7 @@ pub fn load_sheet(
             name,
             data: PeekData {
                 rows,
+                json_rows: None,
                 raw: Some(raw_rows),
                 num_rows,
                 num_cols,
@@ -274,7 +359,18 @@ pub fn load_sheet(
 /// Prevents catastrophic allocation from xlsx/ods "used range" formatting artifacts.
 const PEEK_CELL_CAP: usize = 10_000_000;
 
-/// Load an xlsx/ods workbook file and return a PeekData for each sheet.
+fn check_preview_size(name: &str, rows: usize, cols: usize, force: bool) -> Result<(), String> {
+    if !force && rows.saturating_mul(cols) > PEEK_CELL_CAP {
+        return Err(format!(
+            "sheet '{}' preview has {} rows x {} cols; exceeds {} cells\n\
+             hint: reduce --max-rows or use --force to override",
+            name, rows, cols, PEEK_CELL_CAP,
+        ));
+    }
+    Ok(())
+}
+
+/// Load an Excel/ODS workbook file and return a PeekData for each sheet.
 ///
 /// Uses `visigrid_io::xlsx::import()` (calamine) to read stored cell values.
 /// By default does NOT recompute formulas — shows calamine's cached values (fast).
@@ -333,6 +429,7 @@ pub fn load_workbook_peek(
                 name,
                 data: PeekData {
                     rows: vec![],
+                    json_rows: None,
                     raw: None,
                     num_rows: 0,
                     num_cols: 0,
@@ -350,17 +447,8 @@ pub fn load_workbook_peek(
         let total_rows_in_sheet = max_row + 1;
         let num_cols = max_col + 1;
 
-        // Cell-count guard: reject sheets where bbox area is dangerously large
-        let cell_count = total_rows_in_sheet.saturating_mul(num_cols);
-        if !force && cell_count > PEEK_CELL_CAP {
-            return Err(format!(
-                "sheet '{}' has {} rows x {} cols ({}M cells); too large for peek\n\
-                 hint: use --force to override, or set --max-rows to a specific limit",
-                name, total_rows_in_sheet, num_cols, cell_count / 1_000_000,
-            ));
-        }
-
         let effective_rows = total_rows_in_sheet.min(cap);
+        check_preview_size(&name, effective_rows, num_cols, force)?;
 
         // Extract display values into row-major grid
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(effective_rows);
@@ -386,6 +474,7 @@ pub fn load_workbook_peek(
             name,
             data: PeekData {
                 rows,
+                json_rows: None,
                 raw: None,
                 num_rows,
                 num_cols,
@@ -412,6 +501,13 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn preview_cell_budget_can_be_overridden() {
+        assert!(check_preview_size("wide", 1001, 10000, false).is_err());
+        assert!(check_preview_size("wide", 1, 10000, false).is_ok());
+        assert!(check_preview_size("wide", 1001, 10000, true).is_ok());
     }
 
     #[test]

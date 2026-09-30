@@ -296,16 +296,67 @@ fn peek_xlsx_non_tty_auto_fallback() {
 #[test]
 fn peek_unsupported_extension_error() {
     let dir = tempfile::tempdir().expect("create temp dir");
-    let path = dir.path().join("data.parquet");
+    let path = dir.path().join("data.unknown");
     std::fs::write(&path, b"dummy").expect("write dummy file");
 
     let output = vgrid()
         .args(["peek", path.to_str().unwrap()])
         .output()
-        .expect("vgrid peek data.parquet");
+        .expect("vgrid peek data.unknown");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("xlsx"), "error should mention xlsx as supported, got: {}", stderr);
     assert!(stderr.contains("ods"), "error should mention ods as supported, got: {}", stderr);
+}
+
+#[test]
+fn peek_selected_sheet_is_consistent_in_plain_and_json() {
+    let mut wb = visigrid_engine::workbook::Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(0, 0, "unselected");
+    let index = wb.add_sheet_named("Summary").unwrap();
+    wb.sheet_mut(index).unwrap().set_value(0, 0, "selected");
+    let dir = tempfile::tempdir().unwrap();
+    for extension in ["sheet", "vgrid", "xlsx", "xlsm"] {
+        let path = dir.path().join(format!("book.{extension}"));
+        if matches!(extension, "sheet" | "vgrid") {
+            visigrid_io::native::save_workbook(&wb, &path).unwrap();
+        } else {
+            visigrid_io::xlsx::export(&wb, &path, None).unwrap();
+        }
+        for mode in ["--plain", "--json"] {
+            let out = vgrid().args(["peek", path.to_str().unwrap(), "--sheet", "summary", mode]).output().unwrap();
+            assert!(out.status.success(), "{extension}: {}", String::from_utf8_lossy(&out.stderr));
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains("selected"));
+            assert!(!text.contains("unselected"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn peek_json_recompute_matches_plain() {
+    let mut wb = visigrid_engine::workbook::Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(0, 0, "=6*7");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("formula.xlsx");
+    visigrid_io::xlsx::export(&wb, &path, None).unwrap();
+    let out = vgrid().args(["peek", path.to_str().unwrap(), "--json", "--recompute"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(data["rows"][0][0], 42);
+}
+
+#[test]
+fn peek_cell_guard_allows_bounded_previews() {
+    let mut wb = visigrid_engine::workbook::Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(1000, 10000, "sparse");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide.sheet");
+    visigrid_io::native::save_workbook(&wb, &path).unwrap();
+    let refused = vgrid().args(["peek", path.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("exceeds"));
+    let bounded = vgrid().args(["peek", path.to_str().unwrap(), "--shape", "--max-rows", "1"]).output().unwrap();
+    assert!(bounded.status.success(), "{}", String::from_utf8_lossy(&bounded.stderr));
 }
