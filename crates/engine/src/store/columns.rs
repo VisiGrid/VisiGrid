@@ -20,6 +20,12 @@
 //!
 //! Lookups are O(log C) in the column's non-empty chunks, which is a
 //! handful of comparisons.
+//!
+//! Cloning is copy-on-write (#18 phase 3). Chunks are shared behind `Arc`,
+//! and the string pool and formula table are split into shared pages, so a
+//! clone copies pointers, and a later write copies only the chunk or page it
+//! lands in. Rewind preview keeps a clone of the whole workbook, and so do
+//! operation plans.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -41,6 +47,56 @@ const SPARSIFY_BELOW: usize = 32;
 type StrId = u32;
 type FormulaId = u32;
 type FormatId = u32;
+
+const PAGE_BITS: usize = 10;
+const PAGE: usize = 1 << PAGE_BITS;
+
+/// A vector in pages that clones share until one is written: a clone copies
+/// a pointer per page, and a write copies only the page it lands in.
+#[derive(Debug)]
+struct Paged<T> {
+    pages: Vec<Arc<Vec<T>>>,
+    len: usize,
+}
+
+impl<T> Clone for Paged<T> {
+    fn clone(&self) -> Self {
+        Paged { pages: self.pages.clone(), len: self.len }
+    }
+}
+
+impl<T> Default for Paged<T> {
+    fn default() -> Self {
+        Paged { pages: Vec::new(), len: 0 }
+    }
+}
+
+impl<T: Clone> Paged<T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, i: usize) -> Option<&T> {
+        self.pages.get(i >> PAGE_BITS)?.get(i & (PAGE - 1))
+    }
+
+    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        let page = self.pages.get_mut(i >> PAGE_BITS)?;
+        Arc::make_mut(page).get_mut(i & (PAGE - 1))
+    }
+
+    fn push(&mut self, value: T) {
+        if self.len.is_multiple_of(PAGE) {
+            self.pages.push(Arc::new(Vec::new()));
+        }
+        Arc::make_mut(self.pages.last_mut().expect("page just ensured")).push(value);
+        self.len += 1;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.pages.iter().flat_map(|p| p.iter())
+    }
+}
 
 #[inline]
 fn split(row: usize) -> (u32, usize) {
@@ -313,35 +369,37 @@ impl Chunk {
 
 #[derive(Debug, Clone, Default)]
 struct Column {
-    /// Non-empty chunks, sorted by chunk index.
-    chunks: Vec<(u32, Chunk)>,
+    /// Non-empty chunks, sorted by chunk index. Shared with clones until
+    /// written.
+    chunks: Vec<(u32, Arc<Chunk>)>,
 }
 
 impl Column {
     fn chunk(&self, idx: u32) -> Option<&Chunk> {
-        self.chunks.binary_search_by_key(&idx, |c| c.0).ok().map(|i| &self.chunks[i].1)
+        self.chunks.binary_search_by_key(&idx, |c| c.0).ok().map(|i| &*self.chunks[i].1)
     }
 
     fn chunk_mut_or_new(&mut self, idx: u32, format: FormatId) -> &mut Chunk {
         let i = match self.chunks.binary_search_by_key(&idx, |c| c.0) {
             Ok(i) => i,
             Err(i) => {
-                self.chunks.insert(i, (idx, Chunk::new(format)));
+                self.chunks.insert(i, (idx, Arc::new(Chunk::new(format))));
                 i
             }
         };
-        &mut self.chunks[i].1
+        Arc::make_mut(&mut self.chunks[i].1)
     }
 }
 
 /// Interned text with reference counts, so repeated values cost one copy
 /// and a cleared cell gives its string back. The index stores only ids and
-/// hashes through `entries`, so each distinct string is kept once.
+/// hashes through `entries`, so each distinct string is kept once. Clones
+/// share the index until a distinct string is added or dropped.
 #[derive(Debug, Clone, Default)]
 struct StringPool {
-    entries: Vec<Option<(Box<str>, u32)>>,
+    entries: Paged<Option<(Box<str>, u32)>>,
     free: Vec<StrId>,
-    index: hashbrown::HashTable<StrId>,
+    index: Arc<hashbrown::HashTable<StrId>>,
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -350,31 +408,30 @@ fn hash_str(s: &str) -> u64 {
 }
 
 impl StringPool {
-    fn text(entries: &[Option<(Box<str>, u32)>], id: StrId) -> &str {
-        &entries[id as usize].as_ref().expect("live string id").0
+    fn text(entries: &Paged<Option<(Box<str>, u32)>>, id: StrId) -> &str {
+        &entries.get(id as usize).and_then(Option::as_ref).expect("live string id").0
     }
 
     fn intern(&mut self, s: &str) -> StrId {
         let hash = hash_str(s);
-        let entries = &mut self.entries;
-        if let Some(&id) = self.index.find(hash, |&id| Self::text(entries, id) == s) {
-            if let Some((_, refs)) = &mut entries[id as usize] {
+        if let Some(&id) = self.index.find(hash, |&id| Self::text(&self.entries, id) == s) {
+            if let Some(Some((_, refs))) = self.entries.get_mut(id as usize) {
                 *refs += 1;
             }
             return id;
         }
         let id = match self.free.pop() {
             Some(id) => {
-                entries[id as usize] = Some((Box::from(s), 1));
+                *self.entries.get_mut(id as usize).expect("freed string id") = Some((Box::from(s), 1));
                 id
             }
             None => {
-                entries.push(Some((Box::from(s), 1)));
-                (entries.len() - 1) as StrId
+                self.entries.push(Some((Box::from(s), 1)));
+                (self.entries.len() - 1) as StrId
             }
         };
         let entries = &self.entries;
-        self.index.insert_unique(hash, id, |&i| hash_str(Self::text(entries, i)));
+        Arc::make_mut(&mut self.index).insert_unique(hash, id, |&i| hash_str(Self::text(entries, i)));
         id
     }
 
@@ -383,16 +440,19 @@ impl StringPool {
     }
 
     fn release(&mut self, id: StrId) {
-        let Some((text, refs)) = &mut self.entries[id as usize] else { return };
-        *refs -= 1;
-        if *refs == 0 {
-            let hash = hash_str(text);
-            if let Ok(entry) = self.index.find_entry(hash, |&i| i == id) {
-                entry.remove();
+        let hash = {
+            let Some(Some((text, refs))) = self.entries.get_mut(id as usize) else { return };
+            *refs -= 1;
+            if *refs > 0 {
+                return;
             }
-            self.entries[id as usize] = None;
-            self.free.push(id);
+            hash_str(text)
+        };
+        if let Ok(entry) = Arc::make_mut(&mut self.index).find_entry(hash, |&i| i == id) {
+            entry.remove();
         }
+        *self.entries.get_mut(id as usize).expect("live string id") = None;
+        self.free.push(id);
     }
 }
 
@@ -404,20 +464,20 @@ struct Formula {
 
 #[derive(Debug, Clone, Default)]
 struct FormulaTable {
-    entries: Vec<Option<Formula>>,
+    entries: Paged<Option<Formula>>,
     free: Vec<FormulaId>,
     /// Each formula's last computed result, by the same id (#18 phase 2).
     /// Written during recalculation through `&self`, as the position-keyed
     /// cache it replaces was. `None` means not computed yet; readers never
     /// evaluate on a miss.
-    values: RefCell<Vec<Option<Value>>>,
+    values: RefCell<Paged<Option<Value>>>,
 }
 
 impl FormulaTable {
     fn insert(&mut self, f: Formula) -> FormulaId {
         let id = match self.free.pop() {
             Some(id) => {
-                self.entries[id as usize] = Some(f);
+                *self.entries.get_mut(id as usize).expect("freed formula id") = Some(f);
                 id
             }
             None => {
@@ -427,21 +487,24 @@ impl FormulaTable {
         };
         // A reused id must not inherit the previous formula's result.
         let values = self.values.get_mut();
-        if values.len() <= id as usize {
-            values.resize(id as usize + 1, None);
+        while values.len() <= id as usize {
+            values.push(None);
         }
-        values[id as usize] = None;
+        if values.get(id as usize).is_some_and(Option::is_some) {
+            *values.get_mut(id as usize).expect("value slot") = None;
+        }
         id
     }
 
     fn get(&self, id: FormulaId) -> &Formula {
-        self.entries[id as usize].as_ref().expect("live formula id")
+        self.entries.get(id as usize).and_then(Option::as_ref).expect("live formula id")
     }
 
     fn remove(&mut self, id: FormulaId) -> Formula {
-        let f = self.entries[id as usize].take().expect("live formula id");
-        if let Some(v) = self.values.get_mut().get_mut(id as usize) {
-            *v = None;
+        let f = self.entries.get_mut(id as usize).and_then(Option::take).expect("live formula id");
+        let values = self.values.get_mut();
+        if values.get(id as usize).is_some_and(Option::is_some) {
+            *values.get_mut(id as usize).expect("value slot") = None;
         }
         self.free.push(id);
         f
@@ -452,14 +515,33 @@ impl FormulaTable {
         f(values.get(id as usize).and_then(Option::as_ref))
     }
 
+    /// Recalculation rewrites results that have not changed; skipping those
+    /// keeps a page shared with a snapshot from being copied for nothing.
     fn set_value(&self, id: FormulaId, value: Option<Value>) {
-        if let Some(slot) = self.values.borrow_mut().get_mut(id as usize) {
-            *slot = value;
+        let mut values = self.values.borrow_mut();
+        match values.get(id as usize) {
+            Some(current) if *current != value => {
+                *values.get_mut(id as usize).expect("value slot") = value;
+            }
+            _ => {}
         }
     }
 
     fn take_value(&self, id: FormulaId) -> Option<Value> {
-        self.values.borrow_mut().get_mut(id as usize).and_then(Option::take)
+        let mut values = self.values.borrow_mut();
+        if values.get(id as usize)?.is_none() {
+            return None;
+        }
+        values.get_mut(id as usize).and_then(Option::take)
+    }
+
+    fn clear_values(&self) {
+        let mut values = self.values.borrow_mut();
+        for id in 0..values.len() {
+            if values.get(id).is_some_and(Option::is_some) {
+                *values.get_mut(id).expect("value slot") = None;
+            }
+        }
     }
 }
 
@@ -487,13 +569,12 @@ impl Default for FormatTable {
 }
 
 impl FormatTable {
-    fn intern(&mut self, format: Arc<CellFormat>) -> FormatId {
-        if let Some(&id) = self.by_address.get(&(Arc::as_ptr(&format) as usize)) {
-            return id;
-        }
-        if let Some(&id) = self.index.get(&format) {
-            return id;
-        }
+    fn find(&self, format: &Arc<CellFormat>) -> Option<FormatId> {
+        self.by_address.get(&(Arc::as_ptr(format) as usize)).or_else(|| self.index.get(format)).copied()
+    }
+
+    /// Add a format `find` did not have.
+    fn add(&mut self, format: Arc<CellFormat>) -> FormatId {
         let id = self.formats.len() as FormatId;
         self.by_address.insert(Arc::as_ptr(&format) as usize, id);
         self.formats.push(Arc::clone(&format));
@@ -508,12 +589,12 @@ impl FormatTable {
 
 /// Add a cell after every cell already in `chunks` (rows must arrive in
 /// ascending order), opening a new chunk when the row crosses into one.
-fn append(chunks: &mut Vec<(u32, Chunk)>, row: usize, slot: Slot, format: FormatId) {
+fn append(chunks: &mut Vec<(u32, Arc<Chunk>)>, row: usize, slot: Slot, format: FormatId) {
     let (idx, off) = split(row);
     if chunks.last().map(|c| c.0) != Some(idx) {
-        chunks.push((idx, Chunk::new(format)));
+        chunks.push((idx, Arc::new(Chunk::new(format))));
     }
-    let chunk = &mut chunks.last_mut().expect("chunk just ensured").1;
+    let chunk = Arc::make_mut(&mut chunks.last_mut().expect("chunk just ensured").1);
     chunk.count += 1;
     chunk.cells.set(off, slot, chunk.count as usize);
     chunk.formats.set(off, format, chunk.count == 1);
@@ -533,8 +614,8 @@ pub(crate) struct ColumnStore {
     columns: Vec<Column>,
     strings: StringPool,
     formulas: FormulaTable,
-    formats: FormatTable,
-    extras: HashMap<(u32, u32), CellExtras>,
+    formats: Arc<FormatTable>,
+    extras: Arc<HashMap<(u32, u32), CellExtras>>,
     len: usize,
 }
 
@@ -677,9 +758,7 @@ impl ColumnStore {
 
     /// Forget every computed result (before a full recalculation).
     pub fn clear_all_computed(&self) {
-        for v in self.formulas.values.borrow_mut().iter_mut() {
-            *v = None;
-        }
+        self.formulas.clear_values();
     }
 
     /// Number of formulas with a computed result (diagnostics).
@@ -734,10 +813,10 @@ impl ColumnStore {
             self.insert(row, col, cell);
             return;
         }
-        let id = self.formats.intern(format);
+        let id = self.intern_format(format);
         let column = &mut self.columns[col];
         let i = column.chunks.binary_search_by_key(&idx, |c| c.0).expect("present chunk");
-        let chunk = &mut column.chunks[i].1;
+        let chunk = Arc::make_mut(&mut column.chunks[i].1);
         chunk.formats.set(off, id, chunk.count == 1);
     }
 
@@ -751,9 +830,18 @@ impl ColumnStore {
             CellValue::Text(s) => Slot::Text(self.strings.intern(&s)),
             CellValue::Formula { source, ast } => Slot::Formula(self.formulas.insert(Formula { source, ast })),
         };
-        let format = self.formats.intern(format);
+        let format = self.intern_format(format);
         let extras = extras.filter(|e| !e.is_empty());
         self.put(row, col, Raw { slot, format, extras });
+    }
+
+    /// The table is shared with clones, so it is copied only for a format it
+    /// does not have yet.
+    fn intern_format(&mut self, format: Arc<CellFormat>) -> FormatId {
+        match self.formats.find(&format) {
+            Some(id) => id,
+            None => Arc::make_mut(&mut self.formats).add(format),
+        }
     }
 
     /// Place stored pieces at a position that is currently empty.
@@ -770,7 +858,7 @@ impl ColumnStore {
         chunk.formats.set(off, raw.format, chunk.count == 1);
         if let Some(extras) = raw.extras {
             chunk.extras += 1;
-            self.extras.insert((row as u32, col as u32), extras);
+            Arc::make_mut(&mut self.extras).insert((row as u32, col as u32), extras);
         }
         self.len += 1;
     }
@@ -781,12 +869,12 @@ impl ColumnStore {
         let (idx, off) = split(row);
         let column = self.columns.get_mut(col)?;
         let i = column.chunks.binary_search_by_key(&idx, |c| c.0).ok()?;
-        let chunk = &mut column.chunks[i].1;
+        let chunk = Arc::make_mut(&mut column.chunks[i].1);
         let format = chunk.formats.get(off);
         let slot = chunk.cells.remove(off, chunk.count as usize - 1)?;
         chunk.count -= 1;
         let extras = if chunk.extras > 0 {
-            let e = self.extras.remove(&(row as u32, col as u32));
+            let e = Arc::make_mut(&mut self.extras).remove(&(row as u32, col as u32));
             if e.is_some() {
                 chunk.extras -= 1;
             }
@@ -823,13 +911,13 @@ impl ColumnStore {
     /// Move cells at or below `at` down by `count` rows, dropping any that
     /// would land at or past `limit`.
     pub fn insert_rows(&mut self, at: usize, count: usize, limit: usize) {
-        self.remap_rows(|r| if r >= at { (r + count < limit).then_some(r + count) } else { Some(r) });
+        self.remap_rows(at, |r| if r >= at { (r + count < limit).then_some(r + count) } else { Some(r) });
     }
 
     /// Delete `count` rows from `start`; cells below move up.
     pub fn delete_rows(&mut self, start: usize, count: usize) {
         let end = start + count;
-        self.remap_rows(|r| {
+        self.remap_rows(start, |r| {
             if r < start {
                 Some(r)
             } else if r < end {
@@ -874,10 +962,13 @@ impl ColumnStore {
     }
 
     /// Re-row every column through `to`, which must keep the order of the
-    /// rows it keeps (true of row inserts and deletes). Each column is rebuilt
+    /// rows it keeps (true of row inserts and deletes) and leave rows above
+    /// `first_moved` where they are. Chunks wholly above it are kept as they
+    /// are, still shared with any clone. The rest of each column is rebuilt
     /// alone, streaming its cells into new chunks while the old chunks are
     /// dropped, so the extra memory is bounded by one column, not the sheet.
-    fn remap_rows(&mut self, to: impl Fn(usize) -> Option<usize>) {
+    fn remap_rows(&mut self, first_moved: usize, to: impl Fn(usize) -> Option<usize>) {
+        let kept = |idx: u32| join(idx + 1, 0) <= first_moved;
         for col in 0..self.columns.len() {
             let old = std::mem::take(&mut self.columns[col].chunks);
             if old.is_empty() {
@@ -885,16 +976,20 @@ impl ColumnStore {
             }
             // This column's metadata, keyed by old row, to follow its cells.
             let mut extras: HashMap<usize, CellExtras> = HashMap::new();
-            for (idx, chunk) in old.iter().filter(|(_, c)| c.extras > 0) {
+            for (idx, chunk) in old.iter().filter(|(idx, c)| c.extras > 0 && !kept(*idx)) {
                 for (off, _) in chunk.cells.slots() {
                     let row = join(*idx, off);
-                    if let Some(e) = self.extras.remove(&(row as u32, col as u32)) {
+                    if let Some(e) = Arc::make_mut(&mut self.extras).remove(&(row as u32, col as u32)) {
                         extras.insert(row, e);
                     }
                 }
             }
-            let mut built: Vec<(u32, Chunk)> = Vec::new();
+            let mut built: Vec<(u32, Arc<Chunk>)> = Vec::new();
             for (idx, chunk) in old {
+                if kept(idx) {
+                    built.push((idx, chunk));
+                    continue;
+                }
                 for (off, slot) in chunk.cells.slots() {
                     let row = join(idx, off);
                     let extra = extras.remove(&row);
@@ -902,8 +997,8 @@ impl ColumnStore {
                         Some(new_row) => {
                             append(&mut built, new_row, slot, chunk.formats.get(off));
                             if let Some(e) = extra {
-                                built.last_mut().expect("just appended").1.extras += 1;
-                                self.extras.insert((new_row as u32, col as u32), e);
+                                Arc::make_mut(&mut built.last_mut().expect("just appended").1).extras += 1;
+                                Arc::make_mut(&mut self.extras).insert((new_row as u32, col as u32), e);
                             }
                         }
                         None => {
@@ -924,7 +1019,7 @@ impl ColumnStore {
                 self.release_slot(slot);
                 self.len -= 1;
                 if chunk.extras > 0 {
-                    self.extras.remove(&(join(idx, off) as u32, col as u32));
+                    Arc::make_mut(&mut self.extras).remove(&(join(idx, off) as u32, col as u32));
                 }
             }
         }
@@ -935,10 +1030,8 @@ impl ColumnStore {
         if self.extras.is_empty() {
             return;
         }
-        self.extras = std::mem::take(&mut self.extras)
-            .into_iter()
-            .map(|((r, c), e)| ((r, to(c as usize) as u32), e))
-            .collect();
+        let old = Arc::unwrap_or_clone(std::mem::take(&mut self.extras));
+        self.extras = Arc::new(old.into_iter().map(|((r, c), e)| ((r, to(c as usize) as u32), e)).collect());
     }
 
     fn release_slot(&mut self, slot: Slot) {
