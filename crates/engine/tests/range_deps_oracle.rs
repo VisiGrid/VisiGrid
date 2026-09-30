@@ -42,7 +42,7 @@ fn content(rng: &mut Rng, row: usize, col: usize) -> String {
     }
     let src = col_letter(rng.below(col));
     let r = row + 1;
-    match rng.below(7) {
+    match rng.below(9) {
         // running total: every row reads all rows above it
         0 => format!("=SUM(${src}$1:{src}{r})"),
         // a rectangle over several columns to the left
@@ -59,6 +59,14 @@ fn content(rng: &mut Rng, row: usize, col: usize) -> String {
         5 => {
             let (a, b) = (rng.below(ROWS) + 1, rng.below(ROWS) + 1);
             format!("=SUM({}{}:A{})", col_letter(col - 1), a.max(b), a.min(b))
+        }
+        // array arithmetic: the ranges sit inside operators, not directly in
+        // a function's argument list, so their dependencies must still register
+        6 => format!("=SUMPRODUCT(--({src}1:{src}{r}>50))"),
+        7 => {
+            let (a, b) = (rng.below(ROWS) + 1, rng.below(ROWS) + 1);
+            let (a, b) = (a.min(b), a.max(b));
+            format!("=SUM(({src}{a}:{src}{b}>20)*{src}{a}:{src}{b})")
         }
         _ => format!("=MAX({src}{}:{src}{})", r.min(ROWS), ROWS),
     }

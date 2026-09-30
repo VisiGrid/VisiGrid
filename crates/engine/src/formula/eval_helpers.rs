@@ -4,6 +4,15 @@ use crate::sheet::SheetRef;
 use super::eval::{evaluate, CellLookup, EvalResult, Value, NamedRangeResolution};
 use super::parser::{BoundExpr, Expr};
 
+/// Read a single cell's typed value, honoring the sheet the reference points at.
+pub(crate) fn read_cell_value<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Value {
+    match sheet {
+        SheetRef::Current => lookup.get_cell_value(row, col),
+        SheetRef::Id(id) => lookup.get_value_sheet(*id, row, col),
+        SheetRef::RefError { .. } => Value::Empty,
+    }
+}
+
 /// Compare two Values for sorting
 /// Order: Numbers < Text < Empty < Errors (ascending)
 pub(crate) fn value_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
@@ -450,10 +459,16 @@ pub(crate) fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> 
                     EvalResult::Array(arr) => {
                         for r in 0..arr.rows() {
                             for c in 0..arr.cols() {
-                                if let Some(v) = arr.get(r, c) {
-                                    if let Ok(n) = EvalResult::from_value(v).to_number() {
-                                        values.push(n);
+                                match arr.get(r, c) {
+                                    // An error inside the array is the result, as with
+                                    // an error cell inside a range.
+                                    Some(Value::Error(e)) => return Err(e.clone()),
+                                    Some(v) => {
+                                        if let Ok(n) = EvalResult::from_value(v).to_number() {
+                                            values.push(n);
+                                        }
                                     }
+                                    None => {}
                                 }
                             }
                         }
@@ -539,9 +554,20 @@ pub(crate) fn collect_all_values<L: CellLookup>(args: &[BoundExpr], lookup: &L) 
                     }
                 }
             }
-            _ => {
-                values.push(evaluate(arg, lookup));
-            }
+            _ => match evaluate(arg, lookup) {
+                // A computed array — FILTER(...), B2:B9*2 — contributes every element,
+                // not just its top-left cell.
+                EvalResult::Array(arr) => {
+                    for r in 0..arr.rows() {
+                        for c in 0..arr.cols() {
+                            if let Some(v) = arr.get(r, c) {
+                                values.push(EvalResult::from_value(v));
+                            }
+                        }
+                    }
+                }
+                other => values.push(other),
+            },
         }
     }
 
