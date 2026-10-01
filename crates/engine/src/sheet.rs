@@ -357,6 +357,13 @@ pub struct Sheet {
     /// plans, undo of unrelated edits). Only the pivot writer changes them.
     #[serde(default)]
     pub pivots: Vec<crate::pivot::PivotTable>,
+    /// Editable Tables. Mutation goes through workbook-level schema commits.
+    #[serde(default)]
+    pub(crate) data_tables: Vec<crate::table::DataTable>,
+    #[serde(default)]
+    pub(crate) table_id_high_water: u64,
+    #[serde(default)]
+    pub(crate) table_column_allocators: std::collections::BTreeMap<u64, u64>,
     /// Bumped on every accepted value write. Pivots compare it with the
     /// generation recorded at refresh to know their source may have changed.
     #[serde(skip)]
@@ -372,6 +379,27 @@ pub struct Sheet {
 }
 
 impl CellLookup for Sheet {
+    fn is_table_name(&self, name: &str) -> bool { self.tables().iter().any(|t| t.name.eq_ignore_ascii_case(name)) }
+    fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {
+        let target = match &reference.table {
+            Some(name) => self.tables().iter().find(|t| t.name.eq_ignore_ascii_case(name)),
+            None => cell.and_then(|(row,col)| self.table_at(row,col)),
+        };
+        match target {
+            Some(table) => {
+                use crate::formula::parser::Expr;
+                let mut resolved = crate::formula::structured::resolve_region(table, self.id, self.id, cell, reference);
+                // A standalone Sheet lookup has no cross-sheet ID registry.
+                match &mut resolved {
+                    Expr::CellRef { sheet, .. } | Expr::Range { sheet, .. } => *sheet = SheetRef::Current,
+                    _ => {}
+                }
+                resolved
+            }
+            None => crate::formula::parser::Expr::ReferenceError(if reference.table.is_some() { "#NAME? Unknown table" } else { "#VALUE! Structured reference requires a table context" }.into()),
+        }
+    }
+
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) {
         match sheet { SheetRef::Current => self.data_bounds(), _ => (0, 0) }
     }
@@ -532,6 +560,9 @@ impl Sheet {
             print_setup: Default::default(),
             merged_regions: Vec::new(),
             pivots: Vec::new(),
+            data_tables: Vec::new(),
+            table_id_high_water: 0,
+            table_column_allocators: Default::default(),
             edit_generation: 0,
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -562,6 +593,9 @@ impl Sheet {
             print_setup: Default::default(),
             merged_regions: Vec::new(),
             pivots: Vec::new(),
+            data_tables: Vec::new(),
+            table_id_high_water: 0,
+            table_column_allocators: Default::default(),
             edit_generation: 0,
             merge_index: HashMap::new(),
             has_any_borders: false,
@@ -624,11 +658,84 @@ impl Sheet {
     /// count the write otherwise.
     #[inline]
     fn accept_value_write(&mut self, row: usize, col: usize) -> bool {
-        if self.is_pivot_owned(row, col) {
+        if self.is_pivot_owned(row, col) || self.table_header_at(row, col).is_some() {
             return false;
         }
         self.edit_generation = self.edit_generation.wrapping_add(1);
         true
+    }
+
+    pub fn tables(&self) -> &[crate::table::DataTable] { &self.data_tables }
+
+    pub fn has_table_history(&self) -> bool { self.table_id_high_water > 0 || !self.data_tables.is_empty() }
+
+    pub fn table_at(&self, row: usize, col: usize) -> Option<&crate::table::DataTable> {
+        self.data_tables.iter().find(|t| t.range.contains(row, col))
+    }
+
+    pub fn table_header_at(&self, row: usize, col: usize) -> Option<&crate::table::DataTable> {
+        self.data_tables.iter().find(|t| t.range.start_row == row && t.range.contains(row, col))
+    }
+
+    /// Shared preflight for hosts. Low-level void setters additionally refuse
+    /// these writes; callers use this to reject an entire batch with a reason.
+    pub fn table_value_write_error(&self, row: usize, col: usize) -> Option<String> {
+        self.table_header_at(row, col).map(|t| format!(
+            "'{}' has a protected table header; use the table column rename operation.", t.name
+        ))
+    }
+
+    /// Derived from authoritative cell contents, so clear/paste/undo and load
+    /// cannot leave a second exception registry out of sync.
+    pub fn is_calculated_exception(&self, row: usize, col: usize) -> bool {
+        let Some(table) = self.table_at(row, col) else { return false; };
+        if row == table.range.start_row { return false; }
+        let Some(expected) = table.formula_at(row, col) else { return false; };
+        let actual = self.get_raw(row, col);
+        actual != expected && !(actual.starts_with('=')
+            && crate::formula::parser::parse(&actual).ok() == crate::formula::parser::parse(&expected).ok())
+    }
+
+    pub fn table_structural_error(&self, is_row: bool, at: usize, count: usize, delete: bool) -> Option<String> {
+        if count == 0 { return None; }
+        let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
+        for t in self.tables() {
+            let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
+                else { (t.range.start_col, t.range.end_col) };
+            if delete && at <= last && end > start && (if is_row { at <= start } else { at <= start && end > last }) {
+                return Some(format!("This would remove {}'s schema. Resize or remove the Table first.", t.name));
+            }
+            if !delete {
+                let limit = if is_row { self.rows } else { self.cols };
+                if at <= last && last.checked_add(count).is_none_or(|v| v >= limit) {
+                    return Some(format!("This would push {} past the sheet boundary.", t.name));
+                }
+            }
+        }
+        None
+    }
+
+    fn shift_tables(&mut self, is_row: bool, at: usize, count: usize, delete: bool) {
+        if count == 0 || self.data_tables.is_empty() { return; }
+        for t in &mut self.data_tables {
+            let (start, end) = if is_row { (t.range.start_row, t.range.end_row) }
+                else { (t.range.start_col, t.range.end_col) };
+            if let Some((start, end)) = crate::structural::shift_span(start, end, at, count, delete) {
+                if is_row { t.range.start_row = start; t.range.end_row = end; }
+                else { t.range.start_col = start; t.range.end_col = end; }
+            }
+        }
+        self.mark_table_changed();
+    }
+
+    pub(crate) fn mark_table_changed(&mut self) {
+        self.edit_generation = self.edit_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn write_table_header(&mut self, row: usize, col: usize, value: CellValue) {
+        self.clear_spill_from(row, col);
+        self.cells.clear_computed(row, col);
+        self.with_cell(row, col, |cell| { cell.value = value; cell.clear_spill_state(); });
     }
 
     /// Write one pivot output cell, bypassing the ownership guard. Numbers stay
@@ -776,6 +883,7 @@ impl Sheet {
     /// Replace a formula cell with a static cached value, preserving the
     /// original formula as audit metadata. Used during cycle freeze on import.
     pub fn freeze_cell(&mut self, row: usize, col: usize, cached: CellValue, formula_source: String) {
+        if self.table_header_at(row, col).is_some() { return; }
         self.with_cell(row, col, |cell| {
             cell.value = cached;
             cell.clear_spill_state(); // Runtime state only — must not touch frozen_formula
@@ -969,6 +1077,11 @@ impl Sheet {
         rows: usize,
         cols: usize,
     ) -> Result<(), (usize, usize)> {
+        // A formula in a Table may compute a scalar, but cannot own an array
+        // spill. Check the anchor too, including a one-cell array result.
+        if self.table_at(parent_row, parent_col).is_some() {
+            return Err((parent_row, parent_col));
+        }
         for dr in 0..rows {
             for dc in 0..cols {
                 if dr == 0 && dc == 0 {
@@ -978,7 +1091,7 @@ impl Sheet {
                 let c = parent_col + dc;
 
                 // A pivot's owned output blocks a spill, blank cells included.
-                if self.is_pivot_owned(r, c) {
+                if self.is_pivot_owned(r, c) || self.table_at(r, c).is_some() {
                     return Err((r, c));
                 }
 
@@ -1753,6 +1866,9 @@ impl Sheet {
     /// Replace all merged regions and rebuild the lookup index.
     /// Used by undo/redo to restore merge state.
     pub fn set_merges(&mut self, regions: Vec<MergedRegion>) {
+        if regions.iter().any(|m| self.tables().iter().any(|t| t.range.intersects(crate::table::TableRange {
+            start_row: m.start.0, start_col: m.start.1, end_row: m.end.0, end_col: m.end.1,
+        }))) { return; }
         self.merged_regions = regions;
         self.rebuild_merge_index();
     }
@@ -1804,6 +1920,10 @@ impl Sheet {
 
     /// Add a merged region. Returns Err if it overlaps an existing merge.
     pub fn add_merge(&mut self, region: MergedRegion) -> Result<(), String> {
+        let range = crate::table::TableRange { start_row: region.start.0, start_col: region.start.1, end_row: region.end.0, end_col: region.end.1 };
+        if self.tables().iter().any(|t| t.range.intersects(range)) {
+            return Err("Cannot merge cells inside a Table.".into());
+        }
         if region.is_degenerate() {
             return Ok(()); // silently ignore 1×1 merges
         }
@@ -1922,6 +2042,8 @@ impl Sheet {
 
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
+        if self.table_structural_error(true, at_row, count, false).is_some() { return; }
+        self.shift_tables(true, at_row, count, false);
         self.print_setup.adjust(true, at_row, count, false);
         self.cells.insert_rows(at_row, count, self.rows);
 
@@ -1944,6 +2066,8 @@ impl Sheet {
 
     /// Delete rows at the specified position, shifting remaining rows up
     pub fn delete_rows(&mut self, start_row: usize, count: usize) {
+        if self.table_structural_error(true, start_row, count, true).is_some() { return; }
+        self.shift_tables(true, start_row, count, true);
         self.print_setup.adjust(true, start_row, count, true);
         let end_row = start_row + count; // exclusive
 
@@ -1993,9 +2117,13 @@ impl Sheet {
 
     /// Insert columns at the specified position, shifting existing columns right
     pub fn insert_cols(&mut self, at_col: usize, count: usize) {
+        if self.table_structural_error(false, at_col, count, false).is_some() { return; }
+        let Ok(tables) = self.tables_after_column_edit(at_col, count, false) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(false, at_col, count, false);
         // Shift cells right of the insertion
         self.cells.insert_cols(at_col, count, self.cols);
+        self.sync_table_headers();
 
         // Adjust merged regions (grid-line semantics)
         for m in &mut self.merged_regions {
@@ -2014,6 +2142,9 @@ impl Sheet {
 
     /// Delete columns at the specified position, shifting remaining columns left
     pub fn delete_cols(&mut self, start_col: usize, count: usize) {
+        if self.table_structural_error(false, start_col, count, true).is_some() { return; }
+        let Ok(tables) = self.tables_after_column_edit(start_col, count, true) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(false, start_col, count, true);
         let end_col = start_col + count; // exclusive
 

@@ -127,7 +127,7 @@ impl UndoAction {
             UndoAction::Group { actions, description } => {
                 Some(group_to_lua(actions, description))
             }
-            UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } | UndoAction::PivotCommit { .. } => None,
+            UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } | UndoAction::TableCommit { .. } | UndoAction::PivotCommit { .. } => None,
             UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
                 Some(format!(
                     "grid.insert_rows{{ sheet={}, at={}, count={} }}",
@@ -455,6 +455,9 @@ impl UndoAction {
             }
             UndoAction::WorkbookSnapshot { commit, .. } => {
                 vec![format!("workbook_snapshot:{}", commit.description)]
+            }
+            UndoAction::TableCommit { commit, description, .. } => {
+                vec![format!("table:{}:{}", commit.table_id().0, description)]
             }
             UndoAction::PivotCommit { commit, description, .. } => {
                 vec![format!("pivot:{}:{}", commit.after.pivot_id, description)]
@@ -926,7 +929,7 @@ fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
         UndoAction::Group { actions, .. } => {
             actions.iter().any(|a| action_affects_sheet(a, sheet_index))
         }
-        UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } | UndoAction::PivotCommit { .. } => true,
+        UndoAction::PlanCommit { .. } | UndoAction::WorkbookSnapshot { .. } | UndoAction::TableCommit { .. } | UndoAction::PivotCommit { .. } => true,
         // View-only, include everywhere
         UndoAction::PrintSetupChanged { .. } | UndoAction::FreezePanesChanged { .. } => true,
         // Rewind is audit-only, always include
@@ -1000,6 +1003,7 @@ mod tests {
     #[test]
     fn test_rows_inserted_to_lua() {
         let action = UndoAction::RowsInserted {
+            table_rows: None,
             print_setup_before: Default::default(),
             sheet_index: 0,
             at_row: 4,

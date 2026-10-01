@@ -282,6 +282,8 @@ actions!(sheets, [
     AddSheet,
 ]);
 
+actions!(table, [CreateTable]);
+
 // Pivot tables
 actions!(pivot, [
     InsertPivotTable,   // Insert a pivot table from the selection / current region

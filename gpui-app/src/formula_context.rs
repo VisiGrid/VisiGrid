@@ -1231,7 +1231,31 @@ enum AnalyzerTokenKind {
     Whitespace,
     Bang,         // '!' for sheet references
     SheetPrefix,  // Quoted sheet name like 'Sheet Name'
+    StructuredRef, // Opaque Table selector; column completion is a later feature
     Unknown,
+}
+
+/// Keep selectors (including partial input) together so their column names,
+/// commas and parentheses cannot trigger function completion/signature help.
+fn structured_selector_end(chars: &[char], start: usize) -> usize {
+    let mut depth = 0;
+    let mut i = start;
+    while i < chars.len() {
+        if chars[i] == '\'' && chars.get(i + 1).is_some_and(|c| matches!(c, '[' | ']' | '#' | '@' | '\'')) {
+            i += 2;
+            continue;
+        }
+        match chars[i] {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 { return i + 1; }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }
 
 /// Tokenize formula for analysis (produces char-indexed spans)
@@ -1245,6 +1269,15 @@ fn tokenize_for_analysis(formula: &str) -> Vec<AnalyzerToken> {
         let c = chars[i];
 
         match c {
+            '[' => {
+                i = structured_selector_end(&chars, i);
+                tokens.push(AnalyzerToken {
+                    kind: AnalyzerTokenKind::StructuredRef,
+                    start,
+                    end: i,
+                    text: chars[start..i].iter().collect(),
+                });
+            }
             '=' if i == 0 => {
                 tokens.push(AnalyzerToken {
                     kind: AnalyzerTokenKind::Equals,
@@ -1439,10 +1472,14 @@ fn tokenize_for_analysis(formula: &str) -> Vec<AnalyzerToken> {
                 while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
                     i += 1;
                 }
+                let structured = chars.get(i) == Some(&'[');
+                if structured { i = structured_selector_end(&chars, i); }
                 let text: String = chars[start..i].iter().collect();
 
                 // Determine if it's a cell reference
-                let kind = if is_cell_ref(&text) {
+                let kind = if structured {
+                    AnalyzerTokenKind::StructuredRef
+                } else if is_cell_ref(&text) {
                     AnalyzerTokenKind::CellRef
                 } else {
                     AnalyzerTokenKind::Identifier
@@ -1555,6 +1592,7 @@ pub fn analyze(formula: &str, cursor: usize) -> FormulaContext {
                 }
             }
             AnalyzerTokenKind::CellRef => TokenType::CellRef,
+            AnalyzerTokenKind::StructuredRef => TokenType::NamedRange,
             AnalyzerTokenKind::Number => TokenType::Number,
             AnalyzerTokenKind::String => TokenType::String,
             AnalyzerTokenKind::SheetPrefix => TokenType::String, // Treat quoted sheet names like strings for highlighting
@@ -1600,6 +1638,7 @@ fn determine_mode(tokens: &[AnalyzerToken], cursor: usize, token_at_cursor: &Opt
             AnalyzerTokenKind::String => return FormulaEditMode::String,
             AnalyzerTokenKind::Number => return FormulaEditMode::Number,
             AnalyzerTokenKind::CellRef => return FormulaEditMode::Reference,
+            AnalyzerTokenKind::StructuredRef => return FormulaEditMode::Complete,
             AnalyzerTokenKind::Identifier => return FormulaEditMode::Identifier,
             AnalyzerTokenKind::Operator | AnalyzerTokenKind::Comparison => return FormulaEditMode::Operator,
             AnalyzerTokenKind::RParen => return FormulaEditMode::Complete,
@@ -1623,7 +1662,7 @@ fn determine_mode(tokens: &[AnalyzerToken], cursor: usize, token_at_cursor: &Opt
         Some(AnalyzerTokenKind::Equals) => FormulaEditMode::Start,
         Some(AnalyzerTokenKind::LParen) | Some(AnalyzerTokenKind::Comma) => FormulaEditMode::ArgList,
         Some(AnalyzerTokenKind::Operator) | Some(AnalyzerTokenKind::Comparison) => FormulaEditMode::Operator,
-        Some(AnalyzerTokenKind::RParen) => FormulaEditMode::Complete,
+        Some(AnalyzerTokenKind::RParen | AnalyzerTokenKind::StructuredRef) => FormulaEditMode::Complete,
         Some(AnalyzerTokenKind::Number) | Some(AnalyzerTokenKind::CellRef) => FormulaEditMode::Complete,
         Some(AnalyzerTokenKind::Identifier) => {
             // After identifier: could be complete or waiting for (
@@ -1841,6 +1880,7 @@ pub fn tokenize_for_highlight(formula: &str) -> Vec<(Range<usize>, TokenType)> {
                 AnalyzerTokenKind::String => TokenType::String,
                 AnalyzerTokenKind::SheetPrefix => TokenType::String, // Quoted sheet names
                 AnalyzerTokenKind::CellRef => TokenType::CellRef,
+                AnalyzerTokenKind::StructuredRef => TokenType::NamedRange,
                 AnalyzerTokenKind::Operator => TokenType::Operator,
                 AnalyzerTokenKind::Comparison => TokenType::Comparison,
                 AnalyzerTokenKind::LParen | AnalyzerTokenKind::RParen => TokenType::Paren,
@@ -1861,6 +1901,25 @@ pub fn tokenize_for_highlight(formula: &str) -> Vec<(Range<usize>, TokenType)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_references_do_not_offer_function_completion_or_false_errors() {
+        for formula in ["=[@Qty]*[@Price]", "=Sales[Amount]", "=Sales[[#Headers],[Amount]]", "=[@[Unit Price]]", "=[Cost']USD]", "=Sales[SUM(a,b)]"] {
+            let end = formula.chars().count();
+            let ctx = analyze(formula, end);
+            assert_eq!(ctx.mode, FormulaEditMode::Complete, "{formula}");
+            assert!(ctx.identifier_text.is_none());
+            assert!(check_errors(formula, end, &[]).is_none(), "{formula}");
+            assert!(!tokenize_for_highlight(formula).iter().any(|(_, kind)| *kind == TokenType::Error));
+        }
+        let partial = "=SUM(Sales[[#Headers],[Am";
+        let ctx = analyze(partial, partial.chars().count());
+        assert_eq!(ctx.mode, FormulaEditMode::Complete);
+        assert_eq!(ctx.current_arg_index, Some(0));
+        assert_eq!(check_errors(partial, partial.chars().count(), &[]).unwrap().kind, DiagnosticKind::Transient);
+        let unicode = "=[@[金額]]";
+        assert_eq!(analyze(unicode, unicode.chars().count()).primary_span, Some(1..unicode.chars().count()));
+    }
 
     #[test]
     fn test_analyze_start() {

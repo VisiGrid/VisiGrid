@@ -288,9 +288,9 @@ impl Spreadsheet {
         let numbers = &input[letter_end..];
 
         // Parse column (A=0, B=1, ..., Z=25, AA=26, etc.)
-        let col = letters.chars().fold(0usize, |acc, c| {
-            acc * 26 + (c as usize - 'A' as usize + 1)
-        }) - 1;
+        let col = letters.chars().try_fold(0usize, |acc, c| {
+            acc.checked_mul(26)?.checked_add(c as usize - 'A' as usize + 1)
+        })?.checked_sub(1)?;
 
         // Parse row (1-based to 0-based)
         let row = numbers.parse::<usize>().ok()?.checked_sub(1)?;

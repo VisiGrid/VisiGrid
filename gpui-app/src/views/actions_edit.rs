@@ -518,6 +518,7 @@ pub(crate) fn bind(
                 this.update_title_if_needed(window, cx);
                 return;
             }
+            if this.table_tab_append(cx) { this.update_title_if_needed(window, cx); return; }
             if this.mode.is_editing() {
                 this.confirm_edit_and_tab_right(cx);
                 this.update_title_if_needed(window, cx);

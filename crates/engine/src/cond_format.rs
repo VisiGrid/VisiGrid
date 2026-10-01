@@ -206,6 +206,9 @@ fn offset_expr(expr: &ParsedExpr, dr: i64, dc: i64) -> Option<ParsedExpr> {
         Expr::Empty => Expr::Empty,
         Expr::RefError => Expr::RefError,
         Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
+        Expr::StructuredRef(r) => Expr::StructuredRef(r.clone()),
+        Expr::EmptyRange { columns } => Expr::EmptyRange { columns: *columns },
+        Expr::ReferenceError(e) => Expr::ReferenceError(e.clone()),
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => Expr::CellRef {
             sheet: sheet.clone(),
             col: shift(*col, *col_abs, dc)?,

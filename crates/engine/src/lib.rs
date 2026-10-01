@@ -15,6 +15,7 @@ pub mod recalc;
 pub mod sheet;
 mod store;
 pub mod structural;
+pub mod table;
 pub mod validation;
 pub mod workbook;
 

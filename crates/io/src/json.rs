@@ -151,6 +151,8 @@ pub const FULL_JSON_FORMAT: &str = "visigrid-json";
 pub const FULL_JSON_VERSION: u32 = 1;
 /// Version written for workbook-form (multi-sheet) documents.
 pub const FULL_JSON_WORKBOOK_VERSION: u32 = 2;
+/// Table-bearing documents require v3; ordinary exports retain v1/v2.
+pub const FULL_JSON_TABLE_VERSION: u32 = 3;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
 /// the web mapper own it). BTreeMap for deterministic serialization.
@@ -363,6 +365,8 @@ fn keys_to_usize(m: &BTreeMap<String, f32>) -> BTreeMap<usize, f32> {
 
 #[derive(Serialize, Deserialize)]
 struct FullDoc {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table_catalog: Option<visigrid_engine::workbook::SavedTableCatalog>,
     format: String,
     version: u32,
     /// v1 single-sheet body, flattened at the top level for compatibility.
@@ -575,7 +579,9 @@ pub fn export_full(sheet: &Sheet) -> Result<String, String> {
 pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<String, String> {
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: FULL_JSON_VERSION,
+        version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
+        table_catalog: sheet.has_table_history().then(||
+            visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()),
         body: sheet_body(sheet, layout),
         sheets: Vec::new(),
         active_sheet: None,
@@ -607,7 +613,8 @@ pub fn export_workbook(
         .collect();
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: FULL_JSON_WORKBOOK_VERSION,
+        version: if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
+        table_catalog: wb.has_table_history().then(|| wb.saved_tables()),
         body: SheetBody::default(),
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
@@ -860,10 +867,10 @@ pub fn import_any(
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
-    if doc.version > FULL_JSON_WORKBOOK_VERSION {
+    if doc.version > FULL_JSON_TABLE_VERSION {
         return Err(format!(
             "visigrid-json version {} is newer than supported ({})",
-            doc.version, FULL_JSON_WORKBOOK_VERSION
+            doc.version, FULL_JSON_TABLE_VERSION
         ));
     }
 
@@ -893,6 +900,12 @@ pub fn import_any(
                 eprintln!("Warning: pivot on sheet {}: {}", i, w);
             }
         }
+    }
+    if let Some(catalog) = &doc.table_catalog {
+        if doc.version < FULL_JSON_TABLE_VERSION { return Err("Tables require visigrid-json v3.".into()); }
+        wb.restore_tables(catalog.clone()).map_err(|e| format!("invalid tables: {e}"))?;
+    } else if doc.version == FULL_JSON_TABLE_VERSION {
+        return Err("visigrid-json v3 is missing its table catalog.".into());
     }
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
