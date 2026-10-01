@@ -146,16 +146,21 @@ fn excel_rich_text_and_nonstandard_relationship_targets_import() {
 }
 
 #[test]
-fn unsupported_or_broken_comments_fail_instead_of_disappearing() {
+fn unsupported_or_broken_notes_never_stop_an_import() {
+    // A workbook must open whatever state its notes are in: unreadable
+    // notes are skipped and named in a warning, never the whole file.
+    // Threaded comments (Excel 365) keep the Note Excel saves beside them.
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.xlsx");
     let target = dir.path().join("broken.xlsx");
     let mut wb = Workbook::new();
     wb.active_sheet_mut()
         .set_comment(0, 0, Some(note("Keep me", "QA")));
+    wb.active_sheet_mut().set_value(0, 1, "data");
     xlsx::export(&wb, &source, None).unwrap();
     for replacement in [
         "threaded",
+        "threaded-rels",
         "author",
         "reference",
         "missing",
@@ -168,6 +173,10 @@ fn unsupported_or_broken_comments_fail_instead_of_disappearing() {
                 "document" if name == "xl/comments1.xml" => "<unrelated/>".into(),
                 "empty" if name == "xl/comments1.xml" => "<comments><authors><author>QA</author></authors><commentList><comment ref=\"A1\" authorId=\"0\"/></commentList></comments>".into(),
                 "threaded" if name == "[Content_Types].xml" => xml.replace("</Types>", "<Override PartName=\"/xl/custom.xml\" ContentType=\"application/vnd.ms-excel.threadedcomments+xml\"/></Types>"),
+                // As Excel 365 writes them: a threadedComment part beside the
+                // legacy comments part, and a person list on the workbook.
+                "threaded-rels" if name.ends_with("sheet1.xml.rels") => xml.replace("</Relationships>", "<Relationship Id=\"rIdT\" Type=\"http://schemas.microsoft.com/office/2017/10/relationships/threadedComment\" Target=\"../threadedComments/threadedComment1.xml\"/></Relationships>"),
+                "threaded-rels" if name == "xl/_rels/workbook.xml.rels" => xml.replace("</Relationships>", "<Relationship Id=\"rIdP\" Type=\"http://schemas.microsoft.com/office/2017/10/relationships/person\" Target=\"persons/person.xml\"/></Relationships>"),
                 "author" if name == "xl/comments1.xml" => xml.replace("authorId=\"0\"", "authorId=\"900\"").replace("authorId=\"1\"", "authorId=\"900\""),
                 "reference" if name == "xl/comments1.xml" => xml.replace("ref=\"A1\"", "ref=\"A0\""),
                 "missing" if name.ends_with("sheet1.xml.rels") => xml.replace("comments1.xml", "missing.xml"),
@@ -175,7 +184,18 @@ fn unsupported_or_broken_comments_fail_instead_of_disappearing() {
             };
             (name.into(), changed.into_bytes())
         });
-        assert!(xlsx::import(&target).is_err(), "{replacement}");
+        let (loaded, report) = xlsx::import(&target).unwrap_or_else(|e| panic!("{replacement}: {e}"));
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(0, 1), "data", "{replacement}: cells still import");
+        if replacement.starts_with("threaded") {
+            assert_eq!(loaded.sheet(0).unwrap().comment(0, 0).map(|c| c.text.as_str()), Some("Keep me"), "{replacement}");
+            if replacement == "threaded" {
+                assert!(report.warnings.iter().any(|w| w.contains("threaded")), "{:?}", report.warnings);
+            }
+        } else {
+            assert_eq!(report.comments_imported, 0, "{replacement}");
+            assert!(loaded.sheet(0).unwrap().comment(0, 0).is_none(), "{replacement}");
+            assert!(report.warnings.iter().any(|w| w.contains("Notes on 'Sheet1'")), "{replacement}: {:?}", report.warnings);
+        }
     }
     wb.active_sheet_mut()
         .set_comment(0, 0, Some(note(&"a".repeat(32768), "QA")));

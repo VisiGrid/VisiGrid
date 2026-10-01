@@ -394,7 +394,8 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
 /// Import an Excel file with options (xlsx, xls, xlsb, ods)
 pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Workbook, ImportResult), String> {
     let start_time = Instant::now();
-    let comments = crate::xlsx_comments::read(path)?;
+    // Notes never stop an import; what can't be read becomes a warning.
+    let notes = crate::xlsx_comments::read(path);
 
     let mut workbook: Sheets<_> = open_workbook_auto(path)
         .map_err(|e| format!("Failed to open Excel file: {}", e))?;
@@ -748,7 +749,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 
     // Import formatting from styles.xml and per-cell style IDs
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
-    result.comments_imported = crate::xlsx_comments::apply(comments, &mut workbook)?;
+    result.warnings.extend(notes.warnings);
+    result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)

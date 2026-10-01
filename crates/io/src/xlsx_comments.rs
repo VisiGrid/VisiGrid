@@ -15,7 +15,16 @@ use visigrid_engine::{cell::CellComment, sheet::Sheet, workbook::Workbook};
 
 type Comments = Vec<(String, Vec<((usize, usize), CellComment)>)>;
 const MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
-const THREADED_ERROR: &str = "This workbook contains threaded Excel comments. VisiGrid currently supports Excel Notes only. Import was stopped to avoid losing discussions. Open the original in Excel; use a separate copy with Notes to work in VisiGrid.";
+const THREADED_WARNING: &str = "This workbook has threaded Excel comments. VisiGrid supports Excel Notes only, so each thread was imported as the Note Excel saves alongside it for older versions. Replies and resolved status are not kept, and saving this workbook as .xlsx replaces the threads with those Notes. Keep the original if you need the discussions.";
+
+/// Notes read from a package, and what could not be read. Nothing about
+/// notes stops an import: a note that cannot be read is skipped with a
+/// warning, so a workbook never fails to open because of its notes.
+#[derive(Default)]
+pub(crate) struct ReadNotes {
+    pub comments: Comments,
+    pub warnings: Vec<String>,
+}
 
 fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, String> {
     for a in e.attributes() {
@@ -81,8 +90,10 @@ fn relationships(xml: &str, source: &str) -> Result<Vec<Relationship>, String> {
         match reader.read_event().map_err(|e| e.to_string())? {
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
                 let kind = attr(&e, b"Type")?.unwrap_or_default();
-                if kind.to_ascii_lowercase().contains("threadedcomment") {
-                    return Err(THREADED_ERROR.into());
+                // Threads (and their people list) are not read; their
+                // legacy Notes arrive through the ordinary comments part.
+                if kind.to_ascii_lowercase().contains("threadedcomment") || kind.ends_with("/person") {
+                    continue;
                 }
                 if attr(&e, b"TargetMode")?.as_deref() == Some("External") {
                     if kind.ends_with("/comments") {
@@ -103,18 +114,28 @@ fn relationships(xml: &str, source: &str) -> Result<Vec<Relationship>, String> {
     Ok(result)
 }
 
-pub(crate) fn read(path: &Path) -> Result<Comments, String> {
+/// Read every sheet's Notes. Never fails: anything unreadable becomes a
+/// warning, and the workbook imports without those notes.
+pub(crate) fn read(path: &Path) -> ReadNotes {
+    let mut notes = ReadNotes::default();
+    if let Err(e) = read_into(path, &mut notes) {
+        notes.warnings.push(format!("Excel Notes could not be read and were skipped: {e}"));
+    }
+    notes
+}
+
+fn read_into(path: &Path, notes: &mut ReadNotes) -> Result<(), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let Ok(mut zip) = zip::ZipArchive::new(file) else {
-        return Ok(Vec::new());
+        return Ok(());
     }; // Legacy XLS.
     if !zip.file_names().any(|n| n == "xl/workbook.xml") {
-        return Ok(Vec::new());
+        return Ok(());
     } // ODS/XLSB.
       // Includes nonstandard part names via content types, not just Excel's usual directory.
     let types = part(&mut zip, "[Content_Types].xml")?;
     if types.to_ascii_lowercase().contains("threadedcomment") {
-        return Err(THREADED_ERROR.into());
+        notes.warnings.push(THREADED_WARNING.into());
     }
     let workbook_xml = part(&mut zip, "xl/workbook.xml")?;
     let rel_xml = part(&mut zip, "xl/_rels/workbook.xml.rels")?;
@@ -122,7 +143,6 @@ pub(crate) fn read(path: &Path) -> Result<Comments, String> {
         .into_iter()
         .map(|r| (r.id.clone(), r))
         .collect();
-    let mut result = Vec::new();
     let mut reader = Reader::from_str(&workbook_xml);
     loop {
         match reader.read_event().map_err(|e| e.to_string())? {
@@ -141,23 +161,26 @@ pub(crate) fn read(path: &Path) -> Result<Comments, String> {
                 if !zip.file_names().any(|n| n == rel_path) {
                     continue;
                 }
-                let xml = part(&mut zip, &rel_path)?;
-                for rel in relationships(&xml, &rel.target)? {
-                    if rel.kind.ends_with("/comments") {
-                        let xml = part(&mut zip, &rel.target)?;
-                        result.push((
-                            name.clone(),
-                            parse(&xml)
-                                .map_err(|e| format!("Cannot import Notes on '{name}': {e}"))?,
-                        ));
-                    }
+                let sheet_notes = part(&mut zip, &rel_path)
+                    .and_then(|xml| relationships(&xml, &rel.target))
+                    .and_then(|rels| {
+                        let mut found = Vec::new();
+                        for rel in rels.iter().filter(|r| r.kind.ends_with("/comments")) {
+                            found.extend(parse(&part(&mut zip, &rel.target)?)?);
+                        }
+                        Ok(found)
+                    });
+                match sheet_notes {
+                    Ok(found) if found.is_empty() => {}
+                    Ok(found) => notes.comments.push((name.clone(), found)),
+                    Err(e) => notes.warnings.push(format!("Notes on '{name}' could not be read and were skipped: {e}")),
                 }
             }
             Event::Eof => break,
             _ => {}
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 // SpreadsheetML's escaped UTF-16 code units. Decode once so _x005F_x0041_
@@ -320,24 +343,31 @@ fn parse(xml: &str) -> Result<Vec<((usize, usize), CellComment)>, String> {
     Ok(comments)
 }
 
-pub(crate) fn apply(comments: Comments, workbook: &mut Workbook) -> Result<usize, String> {
+/// Attach read notes to their sheets. Returns how many were placed; notes
+/// for a sheet the import did not create, or a second note on one cell,
+/// are skipped with a warning.
+pub(crate) fn apply(comments: Comments, workbook: &mut Workbook, warnings: &mut Vec<String>) -> usize {
     let mut count = 0;
     for (name, comments) in comments {
-        let idx = workbook
-            .sheets()
-            .iter()
-            .position(|s| s.name == name)
-            .ok_or_else(|| format!("Notes belong to missing sheet '{name}'"))?;
-        let sheet = workbook.sheet_mut(idx).unwrap();
+        let Some(idx) = workbook.sheets().iter().position(|s| s.name == name) else {
+            warnings.push(format!("Notes on '{name}' were skipped: that sheet was not imported"));
+            continue;
+        };
+        let sheet = workbook.sheet_mut(idx).expect("index from position");
+        let mut duplicates = 0;
         for ((row, col), comment) in comments {
             if sheet.comment(row, col).is_some() {
-                return Err(format!("Duplicate Notes on '{name}'"));
+                duplicates += 1;
+                continue;
             }
             sheet.set_comment(row, col, Some(comment));
             count += 1;
         }
+        if duplicates > 0 {
+            warnings.push(format!("{duplicates} duplicate Note(s) on '{name}' were skipped; the first Note on each cell was kept"));
+        }
     }
-    Ok(count)
+    count
 }
 
 pub(crate) fn write(
