@@ -2119,6 +2119,17 @@ impl Workbook {
         self.note_cell_changed(cell_id)
     }
 
+    /// Write literal text with dependency tracking, without interpreting formulas
+    /// or numeric-looking identifiers. Used by typed clipboard imports.
+    pub fn set_cell_text_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
+        let Some(sheet) = self.sheets.get_mut(sheet_index) else { return Recalculated::Cells(Vec::new()); };
+        if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
+        let sheet_id = sheet.id;
+        sheet.set_text(row, col, text);
+        self.update_cell_deps(sheet_id, row, col);
+        self.note_cell_changed(CellId::new(sheet_id, row, col))
+    }
+
     /// Clear a cell on a specific sheet with dep tracking + recalc notification.
     /// Removes the value and spill state, unlike `set_value("")`, but keeps a comment.
     pub fn clear_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize) -> Recalculated {

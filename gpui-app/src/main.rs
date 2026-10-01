@@ -80,6 +80,7 @@ mod structured_results;
 mod sheet_ops;
 mod sort_filter;
 mod table_filter_ui;
+mod table_edit;
 mod split_view;
 mod theme;
 mod trace;

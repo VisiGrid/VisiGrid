@@ -102,6 +102,7 @@ pub struct CellFormatPatch {
 /// redo even though the stored snapshots retain their original revisions.
 #[derive(Clone, Debug)]
 pub struct WorkbookSnapshotCommit {
+    pub(crate) table_cells: bool,
     pub description: String,
     before: Workbook,
     after: Workbook,
@@ -111,9 +112,14 @@ impl WorkbookSnapshotCommit {
     pub fn new(description: impl Into<String>, before: Workbook, after: Workbook) -> Self {
         Self {
             description: description.into(),
+            table_cells: false,
             before,
             after,
         }
+    }
+
+    pub(crate) fn table_cells(description: &str, before: Workbook, after: Workbook) -> Self {
+        Self { description: description.into(), before, after, table_cells: true }
     }
 
     pub fn undo_into(&self, workbook: &mut Workbook) {
@@ -1617,6 +1623,7 @@ impl History {
                 after_row_view,
                 ..
             } => {
+                if commit.table_cells { return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::WorkbookSnapshot)); }
                 commit.replay_into(workbook);
                 view_state.per_sheet = vec![
                     crate::app::PreviewSheetView::default();
@@ -2004,6 +2011,7 @@ impl UndoAction {
     /// Check if this action (and any nested actions in Group) are replay-supported
     pub fn is_replay_supported(&self) -> bool {
         match self {
+            UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells => false,
             UndoAction::Group { actions, .. } => {
                 actions.iter().all(|a| a.is_replay_supported())
             }
@@ -2014,6 +2022,7 @@ impl UndoAction {
     /// Find the first unsupported action kind in this action (including nested)
     pub fn first_unsupported_kind(&self) -> Option<UndoActionKind> {
         match self {
+            UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells => Some(UndoActionKind::WorkbookSnapshot),
             UndoAction::Group { actions, .. } => {
                 for action in actions {
                     if let Some(kind) = action.first_unsupported_kind() {

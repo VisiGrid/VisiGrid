@@ -1,6 +1,6 @@
 # Tables: engine, structured references, desktop authoring, row growth, and calculated columns
 
-Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 has the Table view engine, persisted criteria and guarded engine history, 2026-10-01; desktop sort/filter integration remains pending. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
+Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 has persisted Table views, desktop header dropdowns, and atomic editing/pasting through visible Table records, 2026-10-01. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
 
 ## Model
 
@@ -150,11 +150,19 @@ Clear sort, Clear all Table filters and Clear view are independent commands. The
 
 Activation checks the engine's neighboring-content rules plus desktop body-row heights, manually hidden rows and freeze boundaries. Worksheet and Table view owners cannot silently replace one another. Undo/redo revalidates the target criteria and restores focus by canonical record, falling back to a visible row if needed. Rewind preview explicitly refuses Table view history until it can represent filtered visibility correctly.
 
-This UI slice supports browsing, sorting, filtering, copying and saving. **While any sheet has saved Table sort/filter criteria, workbook edits are gated**, including scripts, session batches, row/column changes and non-view undo/redo. Clear the criteria/views before editing; hiding buttons does not lift this gate. Buttons alone do not block edits. This temporary workbook-wide restriction also prevents cross-sheet edits from invalidating formula-dependent filter membership. Full mapped editing, paste/fill, batch preflight and recalculation-driven focus remain the next integration step.
+### Editing and pasting visible records
+
+Direct entry, F2, formula-bar/IME edits, Delete, and Paste (contents, all, values, formulas or formats) target canonical records in the active Table body. Each paste resolves every destination from the pre-edit projection, skipping hidden records, before applying any writes. A one-cell paste broadcasts across visible selected cells; multi-cell pastes start at the active cell. Exceeding the remaining visible records or Table columns rejects the entire operation. Merged source cells are refused. One batch is limited to 100,000 cells.
+
+The batch is preflighted and recalculated on a candidate workbook. It is published only when every saved Table view still passes layout validation, including any spills produced by recalculation. An edited sort key follows its record to the new position; a record that no longer matches the filter moves focus to the nearest remaining record at the old display position without a second Enter/Tab movement (or to the header if no records remain). Edit sessions retain the original record and revision; a stale edit is refused. Changes to calculated columns are individual overrides, never automatic fills into hidden records.
+
+The name box, Go To and formula point-picking use canonical cell addresses. A1 ranges still span their canonical endpoints, including hidden records. Copy captures each canonical source row. Relative A1 formula references use each source/destination record pair, even if criteria change between copying and pasting. Paste Values preserves literal text such as leading-zero IDs and formula-looking strings. Contents preserves destination formatting; All includes copied formatting and comments. Each operation has one atomic undo/redo step, including dependent values and filter membership. The desktop currently stores before/after workbook snapshots for these transactions; large workbooks therefore have a higher history-memory cost. Rewind through these actions is disabled until it can represent filtered visibility.
+
+**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, edits outside an active Table body, structural changes, cut, fill/Ctrl+Enter multi-edit, scripts, session batches and unrelated history actions remain gated. Clear the criteria before those operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths and cross-sheet edits from invalidating formula-dependent filters.
 
 ## Next Phase 2 slices
 
-1. Complete Table sort/filter desktop integration above.
+1. Extend mapped mutation support to fill, cut, other editing surfaces and scripts; replace full-workbook edit snapshots with guarded sparse history for large workbooks.
 2. Table-backed pivot sources with stable field IDs, explicit refresh, and stale-state feedback.
 3. XLSX Table interoperability subset and export-loss messaging.
 4. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
@@ -164,6 +172,8 @@ Totals rows and saved views come later. Web/cloud preservation is deferred.
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+Phase 2 visible-record editing, 2026-10-01: 606 desktop tests passed with zero failures and 3 existing ignores; the desktop build passed. Regression checks cover canonical paste coordinates, per-row formula rebasing, literal-text paste, paste-special scope, hidden/header/adjacent/overflow rejection, recalculation-induced spill rejection, calculated-column overrides, atomic snapshot undo/redo, point-picked references and filtered-out focus. Linux live QA verified typing into sorted/filtered records, three-row visible paste with hidden values unchanged, total recalculation, one-step undo/redo, whole-batch overflow refusal, canonical Go To and formula picks, filter-key edits with remaining-record focus, and Delete/undo across a filtered selection. Saved SQLite cells confirmed canonical destinations and unchanged hidden records.
 
 Phase 2 header dropdowns, 2026-10-01: the desktop suite passed 598 tests with zero failures and 3 existing ignores; the launchable build passed. New checks cover workbook-wide criteria gating (including hidden arrows and other sheets), desktop layout metadata, atomic Lua rejection, explicit session-batch errors and Table-view history. Linux live QA verified header clicks, Alt+Down, search/cancel, sort and value filtering, independent clear actions, button visibility, undo/redo, save/reopen and editing after Clear view. Saved SQLite inspection confirmed that canonical record order and the total formula stayed unchanged, criteria persisted, and clearing the last view returned to the older catalog version. Record counts show the Table body (3 of 6 in the fixture), not the full worksheet. macOS/Windows UI and full mapped editing remain untested/pending.
 

@@ -3,7 +3,8 @@
 ## Unreleased
 
 - **Table header dropdowns** sort records and filter by searchable values within the Table’s exact bounds. Clear sort and filters independently, or use **Clear view** to restore the original order. Click a header arrow or press Alt+Down on a header. Criteria survive native/full-JSON save and reopen, and support desktop undo/redo.
-- **First Table-view UI milestone:** active Table sort/filter criteria temporarily pause workbook editing, including scripts and session batches. Clear the criteria before editing. Rewind through Table-view actions and mapped editing/paste are still pending. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records.
+- **Edit and paste through Table filters.** Cell edits, Delete and Paste Special write only to visible records, then rebuild the sort/filter view. Pasting past the visible body or Table columns rejects the whole paste. Each batch has one undo/redo step; calculated-column edits affect only the selected record. Copied formulas retain their original record coordinates across sort/filter changes, and Paste Values preserves literal text and leading-zero IDs. The name box, Go To and formula point-picking use the records’ actual cell addresses.
+- **Table-view limits:** clear criteria before structural changes, cut/fill, edits outside the active Table body, scripts or session batches. Rewind through Table-view actions is still pending. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records.
 - Saved Table views use Tables catalog version 3. VisiGrid 0.42 opens these files through its future-format read-only recovery. Clearing the last view allows the older catalog version again.
 
 ## 0.42.0

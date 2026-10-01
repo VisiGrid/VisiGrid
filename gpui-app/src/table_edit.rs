@@ -1,0 +1,496 @@
+//! Atomic cell writes through a Table projection. Plan against the old view,
+//! recalculate a candidate, and publish only if every saved view is still safe.
+use crate::{
+    app::{Spreadsheet, NUM_ROWS},
+    history::{UndoAction, WorkbookSnapshotCommit},
+};
+use gpui::*;
+use visigrid_engine::{
+    cell::{CellComment, CellFormat},
+    workbook::Workbook,
+};
+
+/// Point-picked references address canonical cells. A range retains ordinary
+/// A1 semantics: it spans its canonical endpoints, including hidden records.
+pub(crate) fn table_formula_reference(
+    rows: &visigrid_engine::filter::RowView,
+    start: (usize, usize),
+    end: Option<(usize, usize)>,
+) -> String {
+    let start = (rows.view_to_data(start.0), start.1);
+    match end {
+        Some((row, col)) => Spreadsheet::make_range_ref(start, (rows.view_to_data(row), col)),
+        None => Spreadsheet::make_cell_ref(start.0, start.1),
+    }
+}
+
+/// Keep a filtered-out edit near its old on-screen position, within the
+/// remaining records. Fall back to the header only when no records remain.
+fn focus_after_edit(
+    rows: &visigrid_engine::filter::RowView,
+    range: visigrid_engine::table::TableRange,
+    old_slot: usize,
+    record: usize,
+) -> usize {
+    rows.data_to_view(record).unwrap_or_else(|| {
+        rows.visible_rows()
+            .iter()
+            .copied()
+            .filter(|r| *r > range.start_row && *r <= range.end_row)
+            .min_by_key(|r| (r.abs_diff(old_slot), *r < old_slot))
+            .unwrap_or(range.start_row)
+    })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TableCellWrite {
+    pub row: usize,
+    pub col: usize,
+    pub value: Option<String>,
+    pub literal_text: bool,
+    pub format: Option<CellFormat>,
+    pub comment: Option<Option<CellComment>>,
+}
+
+impl TableCellWrite {
+    pub(crate) fn value(row: usize, col: usize, value: String) -> Self {
+        Self {
+            row,
+            col,
+            value: Some(value),
+            literal_text: false,
+            format: None,
+            comment: None,
+        }
+    }
+}
+
+fn validate_table_writes(
+    wb: &Workbook,
+    sheet_index: usize,
+    writes: &[TableCellWrite],
+) -> Result<(), String> {
+    let sheet = wb.sheet(sheet_index).ok_or("The sheet no longer exists.")?;
+    let view = sheet
+        .build_saved_table_view(NUM_ROWS.min(sheet.rows))?
+        .ok_or("Select a filtered or sorted Table body cell, or clear the Table views first.")?;
+    let range = view.range();
+    for write in writes {
+        if write.row <= range.start_row
+            || write.row > range.end_row
+            || write.col < range.start_col
+            || write.col > range.end_col
+        {
+            return Err("Edits must stay inside the Table body. Clear the view to edit headers, adjacent cells or grow the Table.".into());
+        }
+        if view.focus_record(write.row)?.record_hidden {
+            return Err("Cannot write to a hidden Table record.".into());
+        }
+        if sheet.get_spill_parent(write.row, write.col).is_some() {
+            return Err("Cannot edit a spill receiver.".into());
+        }
+        if let Some(error) = sheet.table_value_write_error(write.row, write.col) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_table_writes(
+    wb: &Workbook,
+    sheet_index: usize,
+    writes: &[TableCellWrite],
+) -> Result<Workbook, String> {
+    validate_table_writes(wb, sheet_index, writes)?;
+    let mut candidate = wb.clone();
+    {
+        let mut batch = candidate.batch_guard();
+        for write in writes {
+            if let Some(value) = &write.value {
+                if write.literal_text {
+                    batch.set_cell_text_tracked(sheet_index, write.row, write.col, value);
+                } else {
+                    batch.set_cell_value_tracked(sheet_index, write.row, write.col, value);
+                }
+            }
+            let sheet = batch.sheet_mut(sheet_index).unwrap();
+            if let Some(format) = &write.format {
+                sheet.set_format(write.row, write.col, format.clone());
+            }
+            if let Some(comment) = &write.comment {
+                sheet.set_comment(write.row, write.col, comment.clone());
+            }
+        }
+    }
+    if let Some(error) = candidate.take_incremental_errors().first() {
+        return Err(format!("The edit could not be recalculated: {error:?}"));
+    }
+    // Recalculation can change a spill or a formula-backed key on another sheet.
+    for sheet in candidate.sheets() {
+        sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))?;
+    }
+    Ok(candidate)
+}
+
+impl Spreadsheet {
+    pub(crate) fn table_cell_edit_guard(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_edit_target = None;
+        if self.block_if_previewing_only(cx) {
+            return true;
+        }
+        if !crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            return false;
+        }
+        self.sync_table_view(cx);
+        if let Some(table) = self
+            .sheet(cx)
+            .table_view_spec()
+            .and_then(|v| self.sheet(cx).tables().iter().find(|t| t.id == v.table))
+        {
+            if let Err(error) = self.table_layout_check(table) {
+                self.status_message = Some(error);
+                cx.notify();
+                return true;
+            }
+        }
+        let (view_row, col) = self.view_state.selected;
+        let row = self.row_view.view_to_data(view_row);
+        let result = validate_table_writes(
+            self.wb(cx),
+            self.sheet_index(cx),
+            &[TableCellWrite::value(
+                row,
+                col,
+                self.sheet(cx).get_raw(row, col),
+            )],
+        );
+        match result {
+            Ok(_) => {
+                self.table_edit_target =
+                    Some((self.sheet_index(cx), row, col, self.wb(cx).revision()));
+                false
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                true
+            }
+        }
+    }
+
+    pub(crate) fn apply_table_cell_writes(
+        &mut self,
+        writes: Vec<TableCellWrite>,
+        description: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.block_if_previewing_only(cx) {
+            return false;
+        }
+        if writes.is_empty() {
+            return false;
+        }
+        if let Some(table) = self
+            .sheet(cx)
+            .table_view_spec()
+            .and_then(|v| self.sheet(cx).tables().iter().find(|t| t.id == v.table))
+        {
+            if let Err(error) = self.table_layout_check(table) {
+                self.status_message = Some(error);
+                cx.notify();
+                return false;
+            }
+        }
+        let before = self.wb(cx).clone();
+        let candidate = match prepare_table_writes(&before, self.sheet_index(cx), &writes) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                return false;
+            }
+        };
+        let before_row_view = self.row_view.clone();
+        let old_focus = self.view_state.selected;
+        let record = before_row_view.view_to_data(old_focus.0);
+        let range = before
+            .active_sheet()
+            .tables()
+            .iter()
+            .find(|t| Some(t.id) == before.active_sheet().table_view_spec().map(|s| s.table))
+            .unwrap()
+            .range;
+        self.workbook
+            .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+        self.sync_table_view(cx);
+        let focus = focus_after_edit(&self.row_view, range, old_focus.0, record);
+        self.view_state.select_cell(focus, old_focus.1);
+        self.ensure_visible(cx);
+        self.history.record_action_with_provenance(
+            UndoAction::WorkbookSnapshot {
+                commit: Box::new(WorkbookSnapshotCommit::table_cells(
+                    description,
+                    before,
+                    self.wb(cx).clone(),
+                )),
+                before_row_view,
+                after_row_view: self.row_view.clone(),
+            },
+            None,
+        );
+        self.bump_cells_rev();
+        self.is_modified = true;
+        self.clipboard_visual_range = None;
+        cx.notify();
+        true
+    }
+
+    /// Canonical targets for a single-cell broadcast or Delete. Skip hidden
+    /// slots and validate the complete selection before changing any record.
+    pub(crate) fn table_selection_targets(&self, cx: &App) -> Result<Vec<(usize, usize)>, String> {
+        let mut targets = std::collections::BTreeSet::new();
+        for ((r1, c1), (r2, c2)) in self.all_selection_ranges() {
+            for row in r1..=r2 {
+                if !self.row_view.is_view_row_visible(row) {
+                    continue;
+                }
+                for col in c1..=c2 {
+                    if targets.len() >= 100_000 {
+                        return Err("Select at most 100,000 cells for one Table edit.".into());
+                    }
+                    targets.insert((self.row_view.view_to_data(row), col));
+                }
+            }
+        }
+        let _ = cx;
+        Ok(targets.into_iter().collect())
+    }
+
+    pub(crate) fn delete_table_selection(&mut self, cx: &mut Context<Self>) {
+        match self.table_selection_targets(cx) {
+            Ok(targets) => {
+                self.apply_table_cell_writes(
+                    targets
+                        .into_iter()
+                        .map(|(r, c)| TableCellWrite::value(r, c, String::new()))
+                        .collect(),
+                    "Clear visible Table cells",
+                    cx,
+                );
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prepare_table_writes, TableCellWrite};
+    use crate::history::WorkbookSnapshotCommit;
+    use visigrid_engine::{
+        filter::{ColumnFilter, FilterKey, SortDirection},
+        formula::eval::Value,
+        sheet::{Sheet, SheetId},
+        table::TableRange,
+        table_view::{TableFilter, TableSort, TableViewSpec},
+        workbook::Workbook,
+    };
+
+    fn fixture(filtered: bool) -> Workbook {
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(7), 30, 8)], 0);
+        for (r, values) in [
+            ["Group", "Amount", "Result"],
+            ["West", "30", "=C4*2"],
+            ["East", "10", "=C5*2"],
+            ["West", "20", "=C6*2"],
+            ["West", "40", "=C7*2"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, v) in values.iter().enumerate() {
+                wb.set_cell_value_tracked(0, r + 2, c + 1, v);
+            }
+        }
+        wb.set_cell_value_tracked(0, 0, 1, "=SUM(C4:C7)");
+        let id = wb
+            .create_table(
+                SheetId(7),
+                TableRange {
+                    start_row: 2,
+                    end_row: 6,
+                    start_col: 1,
+                    end_col: 3,
+                },
+                "Sales",
+            )
+            .unwrap()
+            .table_id();
+        let table = wb.table(id).unwrap().1;
+        let mut spec = TableViewSpec::new(id);
+        spec.sort = Some(TableSort {
+            column: table.columns[1].id,
+            direction: SortDirection::Ascending,
+        });
+        if filtered {
+            spec.filters.push(TableFilter {
+                column: table.columns[0].id,
+                criteria: ColumnFilter {
+                    selected: Some([FilterKey::Text("West".into()).normalized()].into()),
+                    text_filter: None,
+                },
+            });
+        }
+        wb.set_table_view_spec(SheetId(7), Some(spec)).unwrap();
+        wb
+    }
+
+    #[test]
+    fn point_picking_uses_canonical_addresses_after_sort_and_filter() {
+        let wb = fixture(true);
+        let view = wb
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::table_formula_reference(view.rows(), (4, 2), None),
+            "C6"
+        );
+        assert_eq!(
+            super::table_formula_reference(view.rows(), (4, 2), Some((5, 3))),
+            "C4:D6"
+        );
+    }
+
+    #[test]
+    fn mapped_batch_skips_hidden_records_recalculates_and_undoes_atomically() {
+        let before = fixture(true);
+        let view = before
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        let rows = view.visible_body_rows(4, 3).unwrap();
+        assert_eq!(rows, vec![5, 3, 6]);
+        let writes: Vec<_> = rows
+            .iter()
+            .zip([60, 70, 80])
+            .map(|(&row, n)| TableCellWrite::value(row, 2, n.to_string()))
+            .collect();
+        let after = prepare_table_writes(&before, 0, &writes).unwrap();
+        assert_eq!(after.active_sheet().get_raw(4, 2), "10");
+        assert_eq!(
+            after.active_sheet().get_computed_value(0, 1),
+            Value::Number(220.0)
+        );
+        assert_eq!(
+            after.active_sheet().get_computed_value(5, 3),
+            Value::Number(120.0)
+        );
+        let commit = WorkbookSnapshotCommit::table_cells("Paste", before.clone(), after.clone());
+        let mut wb = after;
+        commit.undo_into(&mut wb);
+        assert_eq!(wb.active_sheet().get_raw(5, 2), "20");
+        assert_eq!(
+            wb.active_sheet().table_view_spec(),
+            before.active_sheet().table_view_spec()
+        );
+        commit.redo_into(&mut wb);
+        assert_eq!(wb.active_sheet().get_raw(5, 2), "60");
+    }
+
+    #[test]
+    fn invalid_batch_and_late_spill_leave_source_unchanged() {
+        let wb = fixture(true);
+        for invalid in [
+            TableCellWrite::value(4, 2, "99".into()),
+            TableCellWrite::value(2, 2, "Header".into()),
+            TableCellWrite::value(5, 4, "Adjacent".into()),
+            TableCellWrite::value(7, 2, "Growth".into()),
+        ] {
+            assert!(prepare_table_writes(
+                &wb,
+                0,
+                &[TableCellWrite::value(3, 2, "99".into()), invalid]
+            )
+            .is_err());
+            assert_eq!(wb.active_sheet().get_raw(3, 2), "30");
+        }
+        // A Table edit makes an array outside the Table grow into adjacent
+        // body rows. That must reject the whole candidate after recalc.
+        let mut wb = fixture(false);
+        wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(C4-29)");
+        assert!(prepare_table_writes(&wb, 0, &[TableCellWrite::value(3, 2, "35".into())]).is_err());
+        assert_eq!(wb.active_sheet().get_raw(3, 2), "30");
+        let view = wb
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        assert!(view.visible_body_rows(6, 2).is_err());
+    }
+
+    #[test]
+    fn edited_key_moves_or_disappears_without_changing_hidden_data() {
+        let wb = fixture(true);
+        let after =
+            prepare_table_writes(&wb, 0, &[TableCellWrite::value(5, 1, "East".into())]).unwrap();
+        let view = after
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        assert!(view.focus_record(5).unwrap().record_hidden);
+        assert_eq!(super::focus_after_edit(view.rows(), view.range(), 4, 5), 5);
+        // With no visible records, leave focus on the Table's header.
+        let empty = prepare_table_writes(
+            &wb,
+            0,
+            &[
+                TableCellWrite::value(3, 1, "East".into()),
+                TableCellWrite::value(5, 1, "East".into()),
+                TableCellWrite::value(6, 1, "East".into()),
+            ],
+        )
+        .unwrap();
+        let empty_view = empty
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::focus_after_edit(empty_view.rows(), empty_view.range(), 4, 5),
+            2
+        );
+        assert_eq!(after.active_sheet().get_raw(4, 1), "East");
+        let after =
+            prepare_table_writes(&wb, 0, &[TableCellWrite::value(5, 2, "90".into())]).unwrap();
+        let view = after
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.visible_body_rows(4, 3).unwrap(), vec![3, 6, 5]);
+    }
+
+    #[test]
+    fn calculated_column_edit_is_one_record_override_and_text_stays_literal() {
+        let mut wb = fixture(true);
+        let id = wb.active_sheet().tables()[0].id;
+        wb.set_calculated_column(id, 3, 3, "=C4*2", true).unwrap();
+        let mut write = TableCellWrite::value(5, 3, "=1+1".into());
+        write.literal_text = true;
+        let after = prepare_table_writes(&wb, 0, &[write]).unwrap();
+        assert_eq!(
+            after.active_sheet().get_computed_value(5, 3),
+            Value::Text("=1+1".into())
+        );
+        assert_eq!(after.active_sheet().get_raw(4, 3), "=C5*2");
+        assert!(after.active_sheet().is_calculated_exception(5, 3));
+        assert!(!after.active_sheet().is_calculated_exception(4, 3));
+    }
+}

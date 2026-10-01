@@ -36,7 +36,9 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
-            if !matches!(&entry.action, UndoAction::TableViewChanged { .. }) && self.block_table_view_edit(cx) {
+            if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
+                && !matches!(&entry.action, UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells)
+                && self.block_table_view_edit(cx) {
                 self.history.redo(); return;
             }
             if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
@@ -151,8 +153,13 @@ impl Spreadsheet {
                     before_row_view,
                     ..
                 } => {
+                    let record = self.row_view.view_to_data(self.view_state.selected.0);
                     self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
+                    if commit.table_cells {
+                        self.view_state.selected.0 = record;
+                        self.sync_table_view(cx);
+                    }
                     self.status_message = Some(format!("Undo: {}", commit.description));
                 }
                 UndoAction::TableViewChanged { commit, description, .. } => {
@@ -1239,7 +1246,9 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
-            if !matches!(&entry.action, UndoAction::TableViewChanged { .. }) && self.block_table_view_edit(cx) {
+            if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
+                && !matches!(&entry.action, UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells)
+                && self.block_table_view_edit(cx) {
                 self.history.undo(); return;
             }
             if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
@@ -1355,8 +1364,13 @@ impl Spreadsheet {
                     after_row_view,
                     ..
                 } => {
+                    let record = self.row_view.view_to_data(self.view_state.selected.0);
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
+                    if commit.table_cells {
+                        self.view_state.selected.0 = record;
+                        self.sync_table_view(cx);
+                    }
                     self.status_message = Some(format!("Redo: {}", commit.description));
                 }
                 UndoAction::TableViewChanged { commit, description, .. } => {

@@ -71,6 +71,18 @@ impl Spreadsheet {
                         (row, col, None)
                     };
 
+                let target_row = if self.table_view_installed {
+                    match self.row_view.data_to_view(target_row) {
+                        Some(row) => row,
+                        None => {
+                            self.mode = Mode::Navigation;
+                            self.name_box_editing = false;
+                            self.status_message = Some("That cell is hidden by a Table filter. Clear the filter to go there.".into());
+                            cx.notify();
+                            return;
+                        }
+                    }
+                } else { target_row };
                 self.view_state.selected = (target_row, target_col);
                 if let Some(end) = merge_end {
                     if end != (target_row, target_col) {
@@ -141,6 +153,18 @@ impl Spreadsheet {
                         (row, col, None)
                     };
 
+                let target_row = if self.table_view_installed {
+                    match self.row_view.data_to_view(target_row) {
+                        Some(row) => row,
+                        None => {
+                            self.mode = Mode::Navigation;
+                            self.name_box_editing = false;
+                            self.status_message = Some("That cell is hidden by a Table filter. Clear the filter to go there.".into());
+                            cx.notify();
+                            return;
+                        }
+                    }
+                } else { target_row };
                 self.view_state.selected = (target_row, target_col);
                 if let Some(end) = merge_end {
                     if end != (target_row, target_col) {

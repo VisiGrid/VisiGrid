@@ -595,6 +595,7 @@ pub struct Spreadsheet {
     pub formula_nav_mode: crate::mode::FormulaNavMode, // Caret vs Point submode in Formula mode
     pub formula_nav_manual_override: Option<crate::mode::FormulaNavMode>, // F2 toggle latch - wins over auto-switch
     pub formula_home_sheet: Option<usize>,              // Sheet where formula is being entered (for cross-sheet refs)
+    pub(crate) table_edit_target: Option<(usize, usize, usize, u64)>,
     pub formula_edit_cell: Option<(usize, usize)>,     // Cell being edited (preserved across sheet switches in formula mode)
     pub formula_ref_sheet: Option<usize>,               // Sheet where current ref target lives (None = home sheet)
     pub formula_cross_sheet_name: Option<String>,       // Target sheet name when picking cross-sheet refs (None = same sheet)
@@ -1272,6 +1273,7 @@ impl Spreadsheet {
             formula_nav_manual_override: None,
             formula_home_sheet: None,
             formula_edit_cell: None,
+            table_edit_target: None,
             formula_ref_sheet: None,
             formula_cross_sheet_name: None,
             formula_highlighted_refs: Vec::new(),
@@ -2262,8 +2264,10 @@ impl Spreadsheet {
                     self.edit_value = format!("{}{}{}", before, func_text, after);
                     self.edit_cursor += func_text.len();  // Byte length
                 } else {
-                    // Grid navigation: start formula edit with =FUNC(
-                    self.edit_original = self.sheet(cx).get_raw(self.view_state.selected.0, self.view_state.selected.1);
+                    // Use the normal entry path so Table views capture the
+                    // canonical record and the original workbook revision.
+                    if !self.mode.is_editing() { self.start_edit_clear(cx); }
+                    if !self.mode.is_editing() { return; }
                     self.clear_edit_marks();
                     self.edit_value = format!("={}(", name);
                     self.edit_cursor = self.edit_value.len();  // Byte offset at end
@@ -3973,7 +3977,8 @@ impl Spreadsheet {
 
     // Cell reference (A1, B2, etc.)
     pub fn cell_ref(&self) -> String {
-        format!("{}{}", Self::col_letter(self.view_state.selected.1), self.view_state.selected.0 + 1)
+        let row = if self.table_view_installed { self.row_view.view_to_data(self.view_state.selected.0) } else { self.view_state.selected.0 };
+        format!("{}{}", Self::col_letter(self.view_state.selected.1), row + 1)
     }
 
 

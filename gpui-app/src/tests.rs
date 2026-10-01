@@ -3157,6 +3157,8 @@ fn make_internal_clipboard(raw_tsv: &str, id: u128) -> InternalClipboard {
         values: vec![vec![Value::Text(raw_tsv.to_string())]],
         formats: vec![vec![CellFormat::default()]],
         source: (0, 0),
+        source_rows: vec![0],
+        source_formulas: vec![vec![raw_tsv.starts_with('=')]],
         id,
         merges: vec![],
         created_at: std::time::Instant::now(),

@@ -1,5 +1,4 @@
-//! First desktop Table view controls. View changes are saved/undoable; editing
-//! a workbook with active Table criteria stays gated until mapped edits land.
+//! Desktop Table view controls. View changes are saved and undoable.
 use crate::{app::Spreadsheet, history::UndoAction};
 use gpui::*;
 use std::collections::HashSet;
@@ -11,7 +10,7 @@ use visigrid_engine::{
 };
 
 pub(crate) const TABLE_VIEW_EDIT_MESSAGE: &str =
-    "Clear Table sorting and filters before editing. Use Clear view in a Table header menu.";
+    "Clear Table sorting and filters before this operation. Cell edits and pastes within the visible Table body are supported.";
 const VALUE_LIMIT: usize = 500;
 
 pub(crate) fn has_table_criteria(wb: &Workbook) -> bool {
@@ -91,7 +90,7 @@ impl Spreadsheet {
         show.then_some(table.id)
     }
 
-    fn table_layout_check(&self, table: &DataTable) -> Result<(), String> {
+    pub(crate) fn table_layout_check(&self, table: &DataTable) -> Result<(), String> {
         desktop_layout_error(
             table,
             self.row_heights.get(&self.cached_sheet_id()),
