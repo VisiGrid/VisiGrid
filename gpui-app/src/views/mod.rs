@@ -777,7 +777,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(crate::comments::reader_visible(app, cx), |div| div.child(crate::comments::render_reader(app, window, cx)))
         .when(app.comment_editor.is_some(), |div| div.child(crate::comments::render(app, window, cx)))
         .when(show_goto, |div| {
-            div.child(goto_dialog::render_goto_dialog(app))
+            div.child(goto_dialog::render_goto_dialog(app, cx))
         })
         .when(show_find, |div| {
             div.child(find_dialog::render_find_dialog(app))
