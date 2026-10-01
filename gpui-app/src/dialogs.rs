@@ -396,7 +396,7 @@ impl Spreadsheet {
 
         // Execute the selected paste operation
         match self.paste_special_dialog.selected {
-            PasteType::All => self.paste(cx),
+            PasteType::All => self.paste_all(cx),
             PasteType::Values => self.paste_values(cx),
             PasteType::Formulas => self.paste_formulas(cx),
             PasteType::Formats => self.paste_formats(cx),

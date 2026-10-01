@@ -15,7 +15,7 @@ use visigrid_engine::sheet::MergedRegion;
 use visigrid_io::csv as csv_io;
 
 use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
-use crate::history::{CellChange, CellFormatPatch, FormatActionKind, UndoAction};
+use crate::history::{CommentPatch, CellChange, CellFormatPatch, FormatActionKind, UndoAction};
 
 /// Avoid accidental multi-gigabyte allocations when a whole row/column is selected.
 const MAX_PICTURE_CELLS: usize = 10_000;
@@ -86,6 +86,7 @@ pub struct InternalClipboard {
     /// Cell formats for Paste Formats (2D grid with same dimensions as values)
     /// Every position gets a CellFormat, even if default (rectangular, not sparse).
     pub formats: Vec<Vec<CellFormat>>,
+    pub comments: Vec<Vec<Option<visigrid_engine::cell::CellComment>>>,
     /// Top-left cell position of the copied region (for reference adjustment)
     pub source: (usize, usize),
     /// Unique ID written to clipboard metadata for reliable internal detection.
@@ -98,6 +99,21 @@ pub struct InternalClipboard {
     pub merges: Vec<MergedRegion>,
     /// When this clipboard entry was created (for time-bounded Wayland fallback)
     pub created_at: std::time::Instant,
+}
+
+fn full_paste_lines(text: &str, internal: bool) -> Vec<&str> {
+    if internal { text.split('\n').collect() } else { text.lines().collect() }
+}
+
+#[cfg(test)]
+mod comment_clipboard_tests {
+    use super::full_paste_lines;
+    #[test]
+    fn comment_only_cells_keep_their_clipboard_rows() {
+        assert_eq!(full_paste_lines("", true), vec![""]);
+        assert_eq!(full_paste_lines("value\n\n", true), vec!["value", "", ""]);
+        assert_eq!(full_paste_lines("value\r\n", false), vec!["value"]);
+    }
 }
 
 impl Spreadsheet {
@@ -445,6 +461,7 @@ impl Spreadsheet {
         let mut raw_tsv = String::new();
         let mut values = Vec::new();
         let mut formats = Vec::new();
+        let mut comments = Vec::new();
         let mut first_row = true;
         let mut source_row = min_row; // Track first visible row for source
 
@@ -466,6 +483,7 @@ impl Spreadsheet {
 
             let mut row_values = Vec::new();
             let mut row_formats = Vec::new();
+            let mut row_comments = Vec::new();
             for col in min_col..=max_col {
                 if col > min_col {
                     raw_tsv.push('\t');
@@ -474,9 +492,11 @@ impl Spreadsheet {
                 row_values.push(self.sheet(cx).get_computed_value(data_row, col));
                 // Capture format for every cell position (rectangular, not sparse)
                 row_formats.push(self.sheet(cx).get_format(data_row, col).clone());
+                row_comments.push(self.sheet(cx).comment(data_row, col).cloned());
             }
             values.push(row_values);
             formats.push(row_formats);
+            comments.push(row_comments);
         }
 
         // Capture merge metadata (only when not filtered)
@@ -508,6 +528,7 @@ impl Spreadsheet {
             raw_tsv: raw_tsv.clone(),
             values,
             formats,
+            comments,
             source: (source_row, min_col),
             id,
             merges,
@@ -515,7 +536,10 @@ impl Spreadsheet {
         });
         // Write clipboard with metadata ID for reliable internal detection
         let id_json = format!("\"{}\"", id);
-        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(raw_tsv, id_json));
+        // A newline is a valid TSV record for one blank cell. Unlike a zero-byte
+        // payload, it survives clipboard providers that treat empty text as absent.
+        let clipboard_text = if raw_tsv.is_empty() { "\n".to_owned() } else { raw_tsv };
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(clipboard_text, id_json));
 
         // Set visual range for dashed border overlay
         self.clipboard_visual_range = Some((min_row, min_col, max_row, max_col));
@@ -562,6 +586,7 @@ impl Spreadsheet {
         };
 
         let mut changes = Vec::new();
+        let mut comment_patches = Vec::new();
 
         self.wb_mut(cx, |wb| wb.begin_batch());
         for view_row in min_row..=max_row {
@@ -579,6 +604,10 @@ impl Spreadsheet {
                     changes.push(CellChange {
                         row: data_row, col, old_value, new_value: String::new(),
                     });
+                }
+                if let Some(before) = self.sheet(cx).comment(data_row, col).cloned() {
+                    comment_patches.push(CommentPatch { row: data_row, col, before: Some(before), after: None });
+                    self.active_sheet_mut(cx, |s| s.set_comment(data_row, col, None));
                 }
                 self.set_cell_value(data_row, col, "", cx);
             }
@@ -609,29 +638,17 @@ impl Spreadsheet {
             merges_after = self.sheet(cx).merged_regions.clone();
         }
 
-        // Record history: Group if merges were removed, otherwise simple batch
+        let sheet_index = self.sheet_index(cx);
+        let mut actions = vec![UndoAction::Values { sheet_index, changes }];
         if removed_any {
-            let sheet_index = self.sheet_index(cx);
-            let merge_action = UndoAction::SetMerges {
-                sheet_index,
-                before: merges_before,
-                after: merges_after,
-                cleared_values: vec![],
-                description: "Cut: remove source merges".to_string(),
-            };
-            let values_action = UndoAction::Values { sheet_index, changes };
-            // Order matters: redo applies forward, undo applies reverse;
-            // values must precede merges on redo.
-            self.history.record_action_with_provenance(
-                UndoAction::Group {
-                    actions: vec![values_action, merge_action],
-                    description: "Cut".to_string(),
-                },
-                None,
-            );
-        } else {
-            self.history.record_batch(self.sheet_index(cx), changes);
+            actions.push(UndoAction::SetMerges { sheet_index, before: merges_before, after: merges_after,
+                cleared_values: vec![], description: "Cut: remove source merges".into() });
         }
+        if !comment_patches.is_empty() {
+            self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
+            actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Cut comments".into() });
+        }
+        self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Cut".into() }, None);
 
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
@@ -674,6 +691,13 @@ impl Spreadsheet {
             return;
         }
 
+        self.paste_all(cx);
+    }
+
+    /// Full paste is explicit and must not inherit the values-only preference.
+    pub fn paste_all(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if self.mode.is_editing() { self.paste_into_edit(cx); return; }
         // Read clipboard item to get both text and metadata
         let clipboard_item = cx.read_from_clipboard();
         let system_text = clipboard_item.as_ref().and_then(|item| item.text().map(|s| s.to_string()));
@@ -696,13 +720,18 @@ impl Spreadsheet {
             eprintln!("[paste] is_internal={}, metadata={:?}, text_match={}", is_internal, metadata.is_some(), text_match);
         }
 
-        // Get the text to paste (prefer system clipboard for interop)
-        let text = system_text.or_else(|| self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()));
+        // Retain the exact internal rectangle, including blank trailing rows.
+        let text = if is_internal {
+            self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone())
+        } else {
+            system_text
+        };
 
         if let Some(text) = text {
             let (start_row, start_col) = self.view_state.selected;
             let is_filtered = self.row_view.is_filtered();
             let mut changes = Vec::new();
+            let mut comment_patches = Vec::new();
 
             // For external pastes without tabs, try CSV-aware parsing (handles commas,
             // semicolons, pipes, and quoted fields). Only use the result if it found
@@ -733,7 +762,9 @@ impl Spreadsheet {
             };
 
             // Check if clipboard is a single cell (1 line, no tabs, no CSV multi-col)
-            let lines: Vec<&str> = text.lines().collect();
+            // Internal TSV includes its full rectangle, even blank trailing rows
+            // and a single empty cell carrying only a comment.
+            let lines: Vec<&str> = full_paste_lines(&text, is_internal);
             let is_single_cell = parsed_grid.is_none()
                 && lines.len() == 1 && !lines[0].contains('\t');
 
@@ -812,6 +843,15 @@ impl Spreadsheet {
                         });
                     }
                     self.set_cell_value(*data_row, *col, &new_value, cx);
+                    if is_internal {
+                        let after = self.internal_clipboard.as_ref().and_then(|ic| ic.comments.first()).and_then(|r| r.first()).cloned().flatten();
+                        let before = self.sheet(cx).comment(*data_row, *col).cloned();
+                        if before != after {
+                            self.active_sheet_mut(cx, |s| s.set_comment(*data_row, *col, after.clone()));
+                            comment_patches.push(CommentPatch { row: *data_row, col: *col, before, after });
+                        }
+                    }
+
                 }
                 self.end_batch_and_broadcast(cx);
 
@@ -821,7 +861,7 @@ impl Spreadsheet {
                 }
 
                 // Record with provenance
-                if !changes.is_empty() {
+                if !changes.is_empty() || !comment_patches.is_empty() {
                     let data_start_row = self.row_view.view_to_data(start_row);
                     let provenance = MutationOp::Paste {
                         sheet: self.sheet(cx).id,
@@ -831,7 +871,13 @@ impl Spreadsheet {
                         mode: PasteMode::Both,
                     }.to_provenance(&self.sheet(cx).name);
 
-                    self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+                    let sheet_index = self.sheet_index(cx);
+                    let mut actions = vec![UndoAction::Values { sheet_index, changes }];
+                    if !comment_patches.is_empty() {
+                        self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
+                        actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Paste comments".into() });
+                    }
+                    self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                     self.bump_cells_rev();
                     self.is_modified = true;
                 }
@@ -953,6 +999,15 @@ impl Spreadsheet {
                             });
                         }
                         self.set_cell_value(target_data_row, col, &new_value, cx);
+                        if is_internal {
+                            let after = self.internal_clipboard.as_ref().and_then(|ic| ic.comments.get(row_offset)).and_then(|r| r.get(col_offset)).cloned().flatten();
+                            let before = self.sheet(cx).comment(target_data_row, col).cloned();
+                            if before != after {
+                                self.active_sheet_mut(cx, |s| s.set_comment(target_data_row, col, after.clone()));
+                                comment_patches.push(CommentPatch { row: target_data_row, col, before, after });
+                            }
+                        }
+
 
                         // Track paste bounds (in data coordinates)
                         end_data_row = end_data_row.max(target_data_row);
@@ -1030,7 +1085,7 @@ impl Spreadsheet {
             self.end_batch_and_broadcast(cx);
 
             // Record with provenance (only if changes or merge changes were made)
-            if !changes.is_empty() || merge_action.is_some() {
+            if !changes.is_empty() || merge_action.is_some() || !comment_patches.is_empty() {
                 let provenance = MutationOp::Paste {
                     sheet: self.sheet(cx).id,
                     dst_row: data_start_row,
@@ -1039,21 +1094,14 @@ impl Spreadsheet {
                     mode: PasteMode::Both,
                 }.to_provenance(&self.sheet(cx).name);
 
-                if let Some(merge_act) = merge_action {
-                    // Order matters: redo applies forward, undo applies reverse;
-                    // values must precede merges on redo.
-                    let sheet_index = self.sheet_index(cx);
-                    let values_action = UndoAction::Values { sheet_index, changes };
-                    self.history.record_action_with_provenance(
-                        UndoAction::Group {
-                            actions: vec![values_action, merge_act],
-                            description: "Paste".to_string(),
-                        },
-                        Some(provenance),
-                    );
-                } else if !changes.is_empty() {
-                    self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+                let sheet_index = self.sheet_index(cx);
+                let mut actions = vec![UndoAction::Values { sheet_index, changes }];
+                if let Some(action) = merge_action { actions.push(action); }
+                if !comment_patches.is_empty() {
+                    self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
+                    actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Paste comments".into() });
                 }
+                self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                 self.bump_cells_rev();
                 self.is_modified = true;
             }

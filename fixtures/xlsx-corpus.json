@@ -1,0 +1,37 @@
+{
+  "upstream": "apache/poi",
+  "revision": "93b6a820f4aaefd7b062615f843799947872cb24",
+  "license": "https://github.com/apache/poi/blob/93b6a820f4aaefd7b062615f843799947872cb24/LICENSE",
+  "files": [
+    {
+      "file": "55406_Conditional_formatting_sample.xlsx",
+      "url": "https://raw.githubusercontent.com/apache/poi/93b6a820f4aaefd7b062615f843799947872cb24/test-data/spreadsheet/55406_Conditional_formatting_sample.xlsx",
+      "sha256": "882c71f142549f67cfb1231352f0d87059054d9016582de6531142783f2353df"
+    },
+    {
+      "file": "55906-MultiSheetRefs.xlsx",
+      "url": "https://raw.githubusercontent.com/apache/poi/93b6a820f4aaefd7b062615f843799947872cb24/test-data/spreadsheet/55906-MultiSheetRefs.xlsx",
+      "sha256": "7a5cb4687ad8835a83fee98bf451b400b8ec7c2ae7fa88793930cab648c6e362"
+    },
+    {
+      "file": "57893-many-merges.xlsx",
+      "url": "https://raw.githubusercontent.com/apache/poi/93b6a820f4aaefd7b062615f843799947872cb24/test-data/spreadsheet/57893-many-merges.xlsx",
+      "sha256": "f1b0cc07459a2e00f1e930ff54330e45b9d0626f45468b1ffa7eb3dc21d6f46b"
+    },
+    {
+      "file": "WithTable.xlsx",
+      "url": "https://raw.githubusercontent.com/apache/poi/93b6a820f4aaefd7b062615f843799947872cb24/test-data/spreadsheet/WithTable.xlsx",
+      "sha256": "624b33056b0d2686f4264eb21281fc0245167490463d2fdeb556984c239f7fa8"
+    },
+    {
+      "file": "WithThreeCharts.xlsx",
+      "url": "https://raw.githubusercontent.com/apache/poi/93b6a820f4aaefd7b062615f843799947872cb24/test-data/spreadsheet/WithThreeCharts.xlsx",
+      "sha256": "629b69bd250d9b4e173eb2088eb80b656b7748b0287cd7b0df0c2dc22c6af7b0"
+    },
+    {
+      "file": "WithVariousData.xlsx",
+      "url": "https://raw.githubusercontent.com/apache/poi/93b6a820f4aaefd7b062615f843799947872cb24/test-data/spreadsheet/WithVariousData.xlsx",
+      "sha256": "1440a832bb810c09687d3498b841782964b0b697e9242428fed1072ab22d078a"
+    }
+  ]
+}

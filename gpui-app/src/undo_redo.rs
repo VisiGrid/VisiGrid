@@ -37,6 +37,11 @@ impl Spreadsheet {
         if self.block_if_previewing(cx) { return; }
         if let Some(entry) = self.history.undo() {
             match entry.action {
+            UndoAction::Comments { sheet_index, patches, .. } => {
+                self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
+                self.bump_cells_rev();
+            }
+
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -172,7 +177,7 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
                 }
-                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, print_setup_before, formula_rewrites } => {
+                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
                     // Undo delete by re-inserting rows and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -180,6 +185,11 @@ impl Spreadsheet {
                             sheet.print_setup = print_setup_before.clone();
                         }
                         let mut guard = wb.batch_guard();
+                        for (row, col, comment) in deleted_comments {
+                            if let Some(sheet) = guard.sheet_mut(sheet_index) {
+                                sheet.set_comment(row, col, Some(comment));
+                            }
+                        }
                         for (row, col, value, format) in deleted_cells {
                             guard.set_cell_value_tracked(sheet_index, row, col, &value);
                             if let Some(sheet) = guard.sheet_mut(sheet_index) {
@@ -253,7 +263,7 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} column(s)", count));
                 }
-                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, print_setup_before, formula_rewrites } => {
+                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
                     // Undo delete by re-inserting columns and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -261,6 +271,11 @@ impl Spreadsheet {
                             sheet.print_setup = print_setup_before.clone();
                         }
                         let mut guard = wb.batch_guard();
+                        for (row, col, comment) in deleted_comments {
+                            if let Some(sheet) = guard.sheet_mut(sheet_index) {
+                                sheet.set_comment(row, col, Some(comment));
+                            }
+                        }
                         for (row, col, value, format) in deleted_cells {
                             guard.set_cell_value_tracked(sheet_index, row, col, &value);
                             if let Some(sheet) = guard.sheet_mut(sheet_index) {
@@ -482,6 +497,11 @@ impl Spreadsheet {
     /// Apply a single undo action (helper for Group handling)
     fn apply_undo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
+            UndoAction::Comments { sheet_index, patches, .. } => {
+                self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
+                self.bump_cells_rev();
+            }
+
             UndoAction::CondFormatAdded { sheet_index, rule } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -599,13 +619,18 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_row_heights, print_setup_before, formula_rewrites } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_rows(at_row, count);
                         sheet.print_setup = print_setup_before.clone();
                     }
                     let mut guard = wb.batch_guard();
+                    for (row, col, comment) in deleted_comments {
+                        if let Some(sheet) = guard.sheet_mut(sheet_index) {
+                            sheet.set_comment(row, col, Some(comment));
+                        }
+                    }
                     for (row, col, value, format) in deleted_cells {
                         guard.set_cell_value_tracked(sheet_index, row, col, &value);
                         if let Some(sheet) = guard.sheet_mut(sheet_index) {
@@ -671,13 +696,18 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_col_widths, print_setup_before, formula_rewrites } => {
+            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
                         sheet.insert_cols(at_col, count);
                         sheet.print_setup = print_setup_before.clone();
                     }
                     let mut guard = wb.batch_guard();
+                    for (row, col, comment) in deleted_comments {
+                        if let Some(sheet) = guard.sheet_mut(sheet_index) {
+                            sheet.set_comment(row, col, Some(comment));
+                        }
+                    }
                     for (row, col, value, format) in deleted_cells {
                         guard.set_cell_value_tracked(sheet_index, row, col, &value);
                         if let Some(sheet) = guard.sheet_mut(sheet_index) {
@@ -848,6 +878,11 @@ impl Spreadsheet {
     /// Apply a single redo action (helper for Group handling)
     fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
+            UndoAction::Comments { sheet_index, patches, .. } => {
+                self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
+                self.bump_cells_rev();
+            }
+
             UndoAction::CondFormatAdded { sheet_index, rule } => {
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
@@ -1145,6 +1180,11 @@ impl Spreadsheet {
         if self.block_if_previewing(cx) { return; }
         if let Some(entry) = self.history.redo() {
             match entry.action {
+            UndoAction::Comments { sheet_index, patches, .. } => {
+                self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
+                self.bump_cells_rev();
+            }
+
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {

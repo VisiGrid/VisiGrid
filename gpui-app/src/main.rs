@@ -15,6 +15,8 @@ mod ai_actions;
 mod app;
 mod autocomplete;
 mod clipboard;
+mod comments;
+mod comment_sidebar;
 mod color_palette;
 mod command_palette;
 mod cond_format_ui;

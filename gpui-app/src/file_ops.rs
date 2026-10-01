@@ -31,6 +31,7 @@ impl Spreadsheet {
     /// - "New in This Window" menu item (if exposed)
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
+        if self.comment_editor.is_some() { self.close_comment(cx); }
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);
@@ -85,6 +86,11 @@ impl Spreadsheet {
     }
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        if self.comment_editor.is_some() {
+            self.status_message = Some("Save or cancel the comment before opening another workbook".into());
+            cx.notify();
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
@@ -717,6 +723,15 @@ impl Spreadsheet {
     }
 
     fn apply_imported_layouts(&mut self, result: &xlsx::ImportResult, cx: &mut Context<Self>) {
+        // These layouts belong to the newly replaced workbook. Sheet IDs may
+        // be reused, and absent dimensions/hidden axes mean defaults, not that
+        // the previous workbook's layout should survive.
+        self.col_widths.clear();
+        self.row_heights.clear();
+        self.hidden_rows.clear();
+        self.hidden_cols.clear();
+        self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
+        self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
         for (sheet_idx, layout) in result.imported_layouts.iter().enumerate() {
             if layout.col_widths.is_empty()
                 && layout.row_heights.is_empty()

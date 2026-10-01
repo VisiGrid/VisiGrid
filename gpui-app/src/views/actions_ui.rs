@@ -499,7 +499,8 @@ pub(crate) fn bind(
             this.update_title_if_needed(window, cx);
         }))
         // Command palette
-        .on_action(cx.listener(|this, _: &ToggleCommandPalette, _, cx| {
+        .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+            window.focus(&this.focus_handle, cx);
             this.toggle_palette(cx);
         }))
         .on_action(cx.listener(|this, _: &QuickOpen, _, cx| {

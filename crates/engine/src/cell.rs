@@ -1359,13 +1359,23 @@ pub struct SpillError {
     pub blocked_by: (usize, usize),
 }
 
+/// A traditional cell comment (Excel calls these notes), not a threaded discussion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellComment {
+    pub text: String,
+    #[serde(default)]
+    pub author: String,
+}
+
 /// Everything a cell rarely has.
 ///
-/// These five fields were inline on every cell and cost ~96 of its 304 bytes,
+/// The original five fields were inline on every cell and cost ~96 of its 304 bytes,
 /// paid by all of them so that the few with a spill or an import style could
 /// have it. Boxed together, an ordinary cell pays 8.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CellExtras {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<CellComment>,
     /// Index into workbook.style_table — tracks the base style from XLSX import.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_id: Option<u32>,
@@ -1385,7 +1395,8 @@ pub struct CellExtras {
 
 impl CellExtras {
     pub(crate) fn is_empty(&self) -> bool {
-        self.style_id.is_none()
+        self.comment.is_none()
+            && self.style_id.is_none()
             && self.spill_parent.is_none()
             && self.spill_info.is_none()
             && self.spill_error.is_none()
@@ -1464,6 +1475,10 @@ impl<'a> CellRef<'a> {
         self.value().formatted_display(self.format())
     }
 
+    pub fn comment(&self) -> Option<&'a CellComment> {
+        self.extras.and_then(|e| e.comment.as_ref())
+    }
+
     pub fn style_id(&self) -> Option<u32> {
         self.extras.and_then(|e| e.style_id)
     }
@@ -1507,6 +1522,14 @@ impl<'a> CellRef<'a> {
 }
 
 impl Cell {
+    pub fn comment(&self) -> Option<&CellComment> {
+        self.extras.as_ref().and_then(|e| e.comment.as_ref())
+    }
+
+    pub fn set_comment(&mut self, comment: Option<CellComment>) {
+        self.with_extras(|e| e.comment = comment);
+    }
+
     /// Same vocabulary as [`CellRef`], so code reads a cell the same way
     /// whether it holds an owned `Cell` or a borrowed view.
     pub fn value(&self) -> ValueRef<'_> {

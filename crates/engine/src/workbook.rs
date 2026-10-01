@@ -2084,7 +2084,7 @@ impl Workbook {
     }
 
     /// Clear a cell on a specific sheet with dep tracking + recalc notification.
-    /// Removes the cell entirely (including spill state), unlike set_value("").
+    /// Removes the value and spill state, unlike `set_value("")`, but keeps a comment.
     pub fn clear_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize) -> Recalculated {
         let sheet_id = match self.sheets.get(sheet_index) {
             Some(sheet) => sheet.id,

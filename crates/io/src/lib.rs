@@ -7,6 +7,7 @@ pub mod parquet;
 pub mod scripting;
 pub mod truth;
 pub mod xlsx;
+mod xlsx_comments;
 pub mod xlsx_styles;
 pub mod xlsx_validation;
 

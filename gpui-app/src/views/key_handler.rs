@@ -8,6 +8,14 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if this.comments_sidebar_visible && this.comment_search.read(cx).focus.is_focused(window) { return; }
+    if this.mode.is_navigation() && this.comment_reader.is_some() && !event.keystroke.modifiers.modified() {
+        this.comment_reader = None;
+        cx.notify();
+        if event.keystroke.key == "escape" { cx.stop_propagation(); return; }
+    }
+    if this.comment_editor.is_some() { this.comment_key(event, cx); return; }
+    if this.mode == Mode::Preferences { this.preferences_key(event, window, cx); return; }
     // The printable text this keystroke carries, if any: what the cell branch at the
     // bottom would type. Ctrl, Alt and Cmd turn a key into a command, and control
     // characters are handled by actions, never inserted.
@@ -834,18 +842,6 @@ pub(crate) fn handle_key_down(
             this.hide_about(cx);
         }
         return; // Consume all keystrokes in about mode
-    }
-
-    // Preferences numeric fields use the same lightweight editor as other dialogs.
-    if this.mode == Mode::Preferences {
-        if event.keystroke.key == "escape" {
-            this.hide_preferences(cx);
-        } else {
-            let modifiers = event.keystroke.modifiers;
-            this.cell_size_input_key(&event.keystroke.key, event.keystroke.key_char.as_deref(),
-                modifiers.control || modifiers.platform || modifiers.alt, cx);
-        }
-        return;
     }
 
     // Handle Hint mode (Vimium-style jump navigation)

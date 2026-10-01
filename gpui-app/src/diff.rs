@@ -332,6 +332,7 @@ fn process_action(
     format_change_count: &mut usize,
 ) {
     match action {
+        UndoAction::Comments { .. } => {} // Comment metadata does not change calculated values.
         UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => {
             *format_change_count += 1;
         }

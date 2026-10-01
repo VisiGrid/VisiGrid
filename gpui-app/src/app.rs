@@ -454,6 +454,14 @@ pub struct Spreadsheet {
     /// True after KeyTips discovery hint has been shown (once per session)
     pub keytips_hint_shown: bool,
 
+    pub preferences_keyboard: crate::views::preferences_panel::PreferencesKeyboard,
+    pub preferences_page: crate::views::preferences_panel::PreferencesPage,
+    pub comment_reader: Option<crate::comments::CommentReader>,
+    pub comment_editor: Option<crate::comments::CommentEditor>,
+    pub comments_sidebar_visible: bool,
+    pub comments_all_sheets: bool,
+    pub comment_search: Entity<crate::comment_sidebar::CommentSearch>,
+    pub comment_list_scroll: gpui::ScrollHandle,
     pub goto_input: String,
     pub find_input: String,
     pub find_results: Vec<MatchHit>,
@@ -1043,6 +1051,13 @@ impl Spreadsheet {
         let workbook = cx.new(|_| workbook_data);
 
         let focus_handle = cx.focus_handle();
+        let owner = cx.weak_entity();
+        let comment_search = cx.new(|cx| crate::comment_sidebar::CommentSearch::new(owner, cx));
+        cx.observe(&comment_search, |this, _, cx| {
+            this.comment_reader = None;
+            this.comment_list_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+            cx.notify();
+        }).detach();
         let console_focus_handle = cx.focus_handle();
         let terminal_focus_handle = cx.focus_handle();
         let script_view_focus_handle = cx.focus_handle();
@@ -1143,6 +1158,14 @@ impl Spreadsheet {
             keytips_deadline_at: None,
             last_keytips_scope: None,
             keytips_hint_shown: false,
+            preferences_keyboard: crate::views::preferences_panel::PreferencesKeyboard::new(cx),
+            preferences_page: Default::default(),
+            comment_reader: None,
+            comment_editor: None,
+            comments_sidebar_visible: false,
+            comments_all_sheets: true,
+            comment_search,
+            comment_list_scroll: gpui::ScrollHandle::new(),
             goto_input: String::new(),
             find_input: String::new(),
             find_results: Vec::new(),
@@ -2323,6 +2346,14 @@ impl Spreadsheet {
             CommandId::Paste => self.paste(cx),
             CommandId::PasteValues => self.paste_values(cx),
             CommandId::TogglePasteValuesDefault => self.toggle_paste_values_default(cx),
+            CommandId::ToggleCommentPreviews => self.toggle_comment_previews(cx),
+            CommandId::NextComment => self.navigate_comment(true, window, cx),
+            CommandId::PreviousComment => self.navigate_comment(false, window, cx),
+            CommandId::ToggleCommentsSidebar => self.toggle_comments_sidebar(window, cx),
+            CommandId::AddEditComment => {
+                if self.mode == Mode::Command { self.mode = Mode::Navigation; }
+                self.open_comment(window, cx);
+            },
             CommandId::PasteSpecial => self.show_paste_special(cx),
             CommandId::PasteFormulas => self.paste_formulas(cx),
             CommandId::PasteFormats => self.paste_formats(cx),
@@ -4251,6 +4282,7 @@ impl Render for Spreadsheet {
 
         // Flush batched navigation moves (multiple arrow repeats → one batch per frame)
         self.flush_pending_nav_moves(cx);
+        self.dismiss_stale_comment_reader(cx);
         // Flush deferred scroll adjustment (coalesces multiple nav moves per frame)
         self.flush_nav_scroll();
         // Record render timestamp for latency instrumentation
@@ -4367,6 +4399,8 @@ impl Render for Spreadsheet {
             && self.review_has_offscreen_changes(cx)
         {
             crate::views::review_overview_rail::REVIEW_OVERVIEW_RAIL_WIDTH
+        } else if self.comments_sidebar_visible && self.review_mode.is_none() && !self.script.open {
+            crate::comment_sidebar::WIDTH
         } else if self.inspector_visible || self.profiler_visible {
             crate::views::inspector_panel::PANEL_WIDTH
         } else {

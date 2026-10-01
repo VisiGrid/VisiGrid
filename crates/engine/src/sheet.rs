@@ -240,8 +240,19 @@ impl MergedRegion {
         col_width: impl Fn(usize) -> f32,
         row_height: impl Fn(usize) -> f32,
     ) -> (f32, f32, f32, f32) {
-        let x: f32 = (scroll_col..self.start.1).map(&col_width).sum();
-        let y: f32 = (scroll_row..self.start.0).map(&row_height).sum();
+        // Keep the original origin even when it is outside this viewport.
+        // Clamping it to zero repeats text and stretches the visible merge
+        // when a merge crosses a frozen pane or scrolls partially offscreen.
+        let x: f32 = if self.start.1 >= scroll_col {
+            (scroll_col..self.start.1).map(&col_width).sum()
+        } else {
+            -(self.start.1..scroll_col).map(&col_width).sum::<f32>()
+        };
+        let y: f32 = if self.start.0 >= scroll_row {
+            (scroll_row..self.start.0).map(&row_height).sum()
+        } else {
+            -(self.start.0..scroll_row).map(&row_height).sum::<f32>()
+        };
         let w: f32 = (self.start.1..=self.end.1).map(col_width).sum();
         let h: f32 = (self.start.0..=self.end.0).map(row_height).sum();
         (x, y, w, h)
@@ -1399,6 +1410,20 @@ impl Sheet {
         )
     }
 
+    /// Comments do not affect the cell value, format, or calculation graph.
+    pub fn comment(&self, row: usize, col: usize) -> Option<&crate::cell::CellComment> {
+        self.cells.get(row, col).and_then(|c| c.comment())
+    }
+
+    pub fn set_comment(&mut self, row: usize, col: usize, comment: Option<crate::cell::CellComment>) {
+        if comment.is_none() && self.cells.get(row, col).is_none() { return; }
+        self.with_cell(row, col, |cell| cell.set_comment(comment));
+    }
+
+    pub fn comments(&self) -> impl Iterator<Item = ((usize, usize), &crate::cell::CellComment)> {
+        self.cells.iter().filter_map(|(pos, cell)| cell.comment().map(|comment| (pos, comment)))
+    }
+
     pub fn get_format(&self, row: usize, col: usize) -> CellFormat {
         self.cells
             .get(row, col)
@@ -1490,7 +1515,11 @@ impl Sheet {
         self.cells.positions_in(min_row, max_row, min_col, max_col)
     }
 
-    /// Clear a cell completely (remove from HashMap)
+    /// Clear a cell's contents.
+    ///
+    /// The value, format, and spill state go away with the cell record.
+    /// A comment stays: Excel's Delete key clears contents and leaves the
+    /// note. Removing a note is `set_comment(..., None)`.
     pub fn clear_cell(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
@@ -1499,8 +1528,14 @@ impl Sheet {
         }
 
         self.clear_spill_from(row, col);
-        self.cells.remove(row, col);
+        let comment = self
+            .cells
+            .remove(row, col)
+            .and_then(|cell| cell.comment().cloned());
         self.spill_values.remove(&(row, col));
+        if let Some(comment) = comment {
+            self.set_comment(row, col, Some(comment));
+        }
     }
 
     pub fn set_format(&mut self, row: usize, col: usize, format: CellFormat) {
@@ -5169,15 +5204,21 @@ mod tests {
     #[test]
     fn test_merge_pixel_rect_scroll_past_merge_start() {
         // Edge case: scroll position is past the merge start.
-        // x/y should be 0 (or negative in real rendering, but sum of empty range = 0).
-        // The overlay clips via overflow_hidden so this is still correct.
+        // Preserve negative origins so viewport clipping does not relocate text.
         let m = MergedRegion::new(2, 3, 5, 6);
         let (x, y, _w, _h) = m.pixel_rect(4, 5, |_| 80.0, |_| 25.0);
 
-        // scroll_row=4 > merge.start.0=2, so range 4..2 is empty → y = 0
-        assert_eq!(y, 0.0);
-        // scroll_col=5 > merge.start.1=3, so range 5..3 is empty → x = 0
-        assert_eq!(x, 0.0);
+        assert_eq!(y, -50.0);
+        assert_eq!(x, -160.0);
+    }
+
+    #[test]
+    fn merge_across_frozen_column_keeps_one_text_origin_and_right_edge() {
+        let m = MergedRegion::new(10, 0, 10, 2);
+        let widths = [210.0, 168.0, 70.0];
+        let (x, _, width, _) = m.pixel_rect(1, 1, |c| widths[c], |_| 20.0);
+        assert_eq!(x, -210.0);
+        assert_eq!(x + width, 238.0); // Only columns B and C remain in this pane.
     }
 
     #[test]
