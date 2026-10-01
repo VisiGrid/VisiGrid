@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if this.pending_table_recovery.is_some() {
+        if event.keystroke.key == "escape" { this.pending_table_recovery = None; cx.notify(); }
+        cx.stop_propagation();
+        return;
+    }
     if this.comments_sidebar_visible && this.comment_search.read(cx).focus.is_focused(window) { return; }
     if this.mode.is_navigation() && this.comment_reader.is_some() && !event.keystroke.modifiers.modified() {
         this.comment_reader = None;

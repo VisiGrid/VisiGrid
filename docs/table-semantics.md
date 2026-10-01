@@ -95,13 +95,15 @@ Copy/fill preserves structured tokens and adjusts ordinary A1 references in the 
 
 ## Persistence
 
-Native `.sheet` workbook saves (ordinary, metadata, full) store a strict versioned `tables` metadata catalog. The single-sheet native API routes table-bearing sheets through the workbook format. Invalid metadata, duplicate identities/names, invalid bounds, ownership collisions, and headers that disagree with schema cause load failure. Missing catalog in an old native file means no tables. Allocators persist even after the last table is removed.
+Native `.sheet` workbook saves (ordinary, metadata, full) store a strict versioned `tables` metadata catalog. The single-sheet native API routes table-bearing sheets through the workbook format. Strict loaders reject invalid metadata, duplicate identities/names, invalid bounds, ownership collisions, and headers that disagree with schema. Missing catalog in an old native file means no tables. Allocators persist even after the last table is removed.
 
 Full JSON emits version 3 only when a workbook/sheet has Table history, with a required `table_catalog`. Ordinary exports retain existing v1/v2 output. Older JSON readers reject v3 rather than silently dropping definitions.
 
 Native semantic fingerprints use v3 for Table-bearing workbooks, including Table names, sheet ownership, bounds, and column names. Presentation and allocator history are excluded. Table-free workbooks retain existing v2 fingerprints.
 
-**Release gate:** old native readers may ignore this new metadata and drop it when saving. A minimum-reader/required-feature compatibility policy is still needed before public Tables authoring ships. XLSX/ODS/CSV and web/cloud editing do not yet preserve table definitions.
+**Recovery:** the desktop distinguishes future Table catalog versions (upgrade required) from corrupt Table metadata. If the cells can be loaded, the user can explicitly open a read-only recovery view. Stored formula results are preserved without recalculation and labeled potentially stale or unavailable. Editing, recalculation, Save, Save As and workbook exports are blocked, including native and full-JSON save APIs and session batches. Recovery opens the source without migrations. Strict CLI/import callers still reject these files; explicit recovery APIs are opt-in.
+
+**Older releases:** readers shipped before Tables may ignore the metadata, display structured-reference errors and silently drop definitions on re-save. This limitation is documented in the changelog; new recovery behavior cannot retrofit those binaries. XLSX/ODS/CSV and web/cloud editing do not yet preserve Table definitions. Web/server compatibility is deferred from this desktop release work.
 
 ## Desktop authoring
 

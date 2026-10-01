@@ -103,6 +103,17 @@ pub struct SavedTableCatalog {
 }
 
 impl Workbook {
+    pub fn read_only_reason(&self) -> Option<&str> {
+        self.sheets().iter().find_map(|s| s.read_only_reason.as_deref())
+    }
+
+    pub fn ensure_writable(&self) -> Result<(), String> {
+        match self.read_only_reason() {
+            Some(reason) => Err(format!("Read-only recovery: {reason} Saving, including Save As, is disabled.")),
+            None => Ok(()),
+        }
+    }
+
     pub fn prepare_table_row_history(
         &self,
         sheet_index: usize,

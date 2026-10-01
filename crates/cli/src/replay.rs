@@ -269,8 +269,11 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
                 .ok_or_else(|| mlua::Error::external(format!("Invalid cell reference: {}", cell)))?;
 
             let mut state = state.borrow_mut();
-            state.check_nondeterministic(&value);
             state.ensure_sheet(sheet - 1);
+            if let Some(error) = state.sheet_mut(sheet - 1).table_value_write_error(row, col) {
+                return Err(mlua::Error::external(error));
+            }
+            state.check_nondeterministic(&value);
             state.sheet_mut(sheet - 1).set_value(row, col, &value);
             state.hash_operation(&format!("set:{}:{}:{}:{}", sheet, row, col, value));
 
@@ -289,17 +292,21 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
             let mut state = state.borrow_mut();
             state.ensure_sheet(sheet - 1);
 
-            let mut op_parts = Vec::new();
+            let mut writes = Vec::new();
             for pair in cells.pairs::<i64, Table>() {
                 let (_, cell_entry) = pair?;
                 let cell: String = cell_entry.get("cell")?;
                 let value: String = cell_entry.get("value")?;
-
-                state.check_nondeterministic(&value);
-
                 let (row, col) = parse_cell_ref(&cell)
                     .ok_or_else(|| mlua::Error::external(format!("Invalid cell reference: {}", cell)))?;
-
+                if let Some(error) = state.sheet_mut(sheet - 1).table_value_write_error(row, col) {
+                    return Err(mlua::Error::external(error));
+                }
+                writes.push((row, col, value));
+            }
+            let mut op_parts = Vec::new();
+            for (row, col, value) in writes {
+                state.check_nondeterministic(&value);
                 state.sheet_mut(sheet - 1).set_value(row, col, &value);
                 op_parts.push(format!("{}:{}:{}", row, col, value));
             }
@@ -357,7 +364,8 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
 
             let mut state = state.borrow_mut();
             state.ensure_sheet(sheet - 1);
-            state.sheet_mut(sheet - 1).insert_rows(at - 1, count);
+            state.workbook.structural_edit(sheet - 1, visigrid_engine::structural::Axis::Row, at - 1, count, false)
+                .map_err(mlua::Error::external)?;
             state.hash_operation(&format!("insert_rows:{}:{}:{}", sheet, at, count));
 
             Ok(())
@@ -375,7 +383,8 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
 
             let mut state = state.borrow_mut();
             state.ensure_sheet(sheet - 1);
-            state.sheet_mut(sheet - 1).delete_rows(at - 1, count);
+            state.workbook.structural_edit(sheet - 1, visigrid_engine::structural::Axis::Row, at - 1, count, true)
+                .map_err(mlua::Error::external)?;
             state.hash_operation(&format!("delete_rows:{}:{}:{}", sheet, at, count));
 
             Ok(())
@@ -393,7 +402,8 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
 
             let mut state = state.borrow_mut();
             state.ensure_sheet(sheet - 1);
-            state.sheet_mut(sheet - 1).insert_cols(at - 1, count);
+            state.workbook.structural_edit(sheet - 1, visigrid_engine::structural::Axis::Col, at - 1, count, false)
+                .map_err(mlua::Error::external)?;
             state.hash_operation(&format!("insert_cols:{}:{}:{}", sheet, at, count));
 
             Ok(())
@@ -411,7 +421,8 @@ fn register_grid_api(lua: &Lua, state: Rc<RefCell<ReplayState>>) -> LuaResult<()
 
             let mut state = state.borrow_mut();
             state.ensure_sheet(sheet - 1);
-            state.sheet_mut(sheet - 1).delete_cols(at - 1, count);
+            state.workbook.structural_edit(sheet - 1, visigrid_engine::structural::Axis::Col, at - 1, count, true)
+                .map_err(mlua::Error::external)?;
             state.hash_operation(&format!("delete_cols:{}:{}:{}", sheet, at, count));
 
             Ok(())
@@ -1203,5 +1214,33 @@ grid.set_col_width{ sheet_id=1, col="A", width=120 }
         let fp1 = state1.borrow().fingerprint();
         let fp2 = state2.borrow().fingerprint();
         assert_ne!(fp1, fp2, "Layout ops must change the fingerprint");
+    }
+}
+
+#[cfg(test)]
+mod table_protection_tests {
+    use super::{register_grid_api, ReplayState};
+    use std::{cell::RefCell, rc::Rc};
+    use visigrid_engine::table::TableRange;
+
+    #[test]
+    fn replay_rejects_header_batch_and_structural_edits_without_false_success() {
+        let state = Rc::new(RefCell::new(ReplayState::new()));
+        {
+            let mut s = state.borrow_mut();
+            let sheet = s.workbook.active_sheet_id();
+            s.workbook.create_table(sheet, TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 1 }, "Sales").unwrap();
+        }
+        let lua = mlua::Lua::new();
+        register_grid_api(&lua, state.clone()).unwrap();
+        let error = lua.load(r#"grid.set_batch{sheet=1,cells={{cell="A2",value="before"},{cell="A1",value="bad"},{cell="A3",value="after"}}}"#).exec().unwrap_err();
+        assert!(error.to_string().contains("protected table header"));
+        assert_eq!(state.borrow().workbook.active_sheet().get_raw(1, 0), "");
+        assert_eq!(state.borrow().workbook.active_sheet().get_raw(2, 0), "");
+        assert_eq!(state.borrow().operation_count, 0);
+        assert!(lua.load(r#"grid.set{sheet=1,cell="A1",value="bad"}"#).exec().is_err());
+        assert!(lua.load("grid.delete_rows{sheet=1,at=1,count=1}").exec().is_err());
+        assert_eq!(state.borrow().workbook.active_sheet().get_raw(0, 0), "Column1");
+        assert_eq!(state.borrow().operation_count, 0);
     }
 }

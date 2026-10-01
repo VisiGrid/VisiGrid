@@ -575,6 +575,7 @@ impl PreparedOperationPlan {
         source: &Workbook,
         request: OperationPlanRequest,
     ) -> Result<Self, PlanError> {
+        source.ensure_writable().map_err(PlanError::InvalidOperation)?;
         if source.revision() != request.expected_revision {
             return Err(PlanError::RevisionMismatch {
                 expected: request.expected_revision,

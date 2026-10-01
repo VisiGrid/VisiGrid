@@ -24,6 +24,7 @@ impl Spreadsheet {
 
     /// Freeze the top row (row 0)
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         let old_rows = self.view_state.frozen_rows;
         let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 1;
@@ -40,6 +41,7 @@ impl Spreadsheet {
 
     /// Freeze the first column (column A)
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         let old_rows = self.view_state.frozen_rows;
         let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 0;
@@ -57,6 +59,7 @@ impl Spreadsheet {
     /// Freeze panes at the current selection
     /// Freezes all rows above and all columns to the left of the active cell
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         let (row, col) = self.view_state.selected;
         if row == 0 && col == 0 {
             // Nothing to freeze - show message
@@ -85,6 +88,7 @@ impl Spreadsheet {
 
     /// Remove all freeze panes
     pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         if self.view_state.frozen_rows == 0 && self.view_state.frozen_cols == 0 {
             self.status_message = Some("No frozen panes to unfreeze".to_string());
             cx.notify();
@@ -128,6 +132,7 @@ impl Spreadsheet {
 
     /// Save document settings to sidecar if document has a path
     pub(crate) fn save_doc_settings_if_needed(&self) {
+        if self.recovery_warning.is_some() { return; }
         if let Some(ref path) = self.current_file {
             // Best-effort save - don't block on errors
             let _ = crate::settings::save_doc_settings(path, &self.doc_settings);

@@ -257,7 +257,7 @@ impl Spreadsheet {
                 UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, print_setup_before, formula_rewrites } => {
                     if let Some(history) = &table_columns {
                         let result = self.workbook.update(cx, |wb, _| wb.apply_table_column_history(history, true));
-                        if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+                        if let Err(error) = result { self.history.redo(); self.status_message = Some(error); cx.notify(); return; }
                     }
                     // Undo insert by deleting the columns
                     self.workbook.update(cx, |wb, _| {
@@ -294,7 +294,7 @@ impl Spreadsheet {
                 UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
                     if let Some(history) = &table_columns {
                         let result = self.workbook.update(cx, |wb, _| wb.apply_table_column_history(history, true));
-                        if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+                        if let Err(error) = result { self.history.redo(); self.status_message = Some(error); cx.notify(); return; }
                     }
                     // Undo delete by re-inserting columns and restoring data
                     self.workbook.update(cx, |wb, _| {
@@ -925,7 +925,7 @@ impl Spreadsheet {
     }
 
     /// Apply a single redo action (helper for Group handling)
-    fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
+    fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) -> bool {
         match action {
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
@@ -987,7 +987,7 @@ impl Spreadsheet {
             UndoAction::Group { actions, .. } => {
                 // Recursively redo nested groups
                 for sub_action in actions {
-                    self.apply_redo_action(sub_action, cx);
+                    if !self.apply_redo_action(sub_action, cx) { return false; }
                 }
             }
             UndoAction::PlanCommit {
@@ -1014,7 +1014,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
-            UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, false, cx); }
+            UndoAction::TableCommit { commit, .. } => { if !self.replay_table_commit(&commit, false, cx) { return false; } }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
             }
@@ -1024,7 +1024,7 @@ impl Spreadsheet {
                 // formulas, validations, and named ranges are re-adjusted.
                 if let Err(error) = self.workbook.update(cx, |wb, _| {
                     if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false) }
-                }) { self.status_message = Some(error); cx.notify(); return; }
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 // Shift row heights down (per-sheet)
                 let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
                 let heights_to_shift: Vec<_> = sheet_heights
@@ -1045,7 +1045,7 @@ impl Spreadsheet {
             UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, .. } => {
                 if let Err(error) = self.workbook.update(cx, |wb, _| {
                     if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true) }
-                }) { self.status_message = Some(error); cx.notify(); return; }
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 self.sheet_mut(sheet_index, cx, |_sheet| {
                     // structural_edit already performed the delete
                 });
@@ -1066,9 +1066,9 @@ impl Spreadsheet {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
                 // formulas, validations, and named ranges are re-adjusted.
-                let _ = self.workbook.update(cx, |wb, _| {
+                if let Err(error) = self.workbook.update(cx, |wb, _| {
                     if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false) }
-                });
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 // Shift column widths right (per-sheet)
                 let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
                 let widths_to_shift: Vec<_> = sheet_widths
@@ -1087,9 +1087,9 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, .. } => {
-                let _ = self.workbook.update(cx, |wb, _| {
+                if let Err(error) = self.workbook.update(cx, |wb, _| {
                     if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true) }
-                });
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 self.sheet_mut(sheet_index, cx, |_sheet| {
                     // structural_edit already performed the delete
                 });
@@ -1224,6 +1224,7 @@ impl Spreadsheet {
                 });
             }
         }
+        true
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
@@ -1316,7 +1317,7 @@ impl Spreadsheet {
                 UndoAction::Group { actions, description } => {
                     // Redo all actions in order
                     for action in actions {
-                        self.apply_redo_action(action, cx);
+                        if !self.apply_redo_action(action, cx) { self.history.undo(); return; }
                     }
                     self.status_message = Some(format!("Redo: {}", description));
                 }
@@ -1381,7 +1382,7 @@ impl Spreadsheet {
                         UndoAction::ColsDeleted { count, .. } => format!("Redo: delete {} column(s)", count),
                         _ => unreachable!("the outer pattern admits only these four"),
                     };
-                    self.apply_redo_action(action, cx);
+                    if !self.apply_redo_action(action, cx) { self.history.undo(); return; }
                     self.status_message = Some(message);
                 }
                 UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {
