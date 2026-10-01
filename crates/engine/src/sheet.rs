@@ -1134,6 +1134,16 @@ impl Sheet {
                 Some(iso) => iso,
                 None => return self.get_display(row, col),
             },
+            // An unformatted number is written in full. Its on-screen form is
+            // rounded to two decimals, and exporting that turned 1.234 into 1.23
+            // on every CSV save (#65). Explicit number formats still export as
+            // shown, as Excel's do.
+            None | Some(NumberFormat::General) => {
+                return match self.get_computed_value(row, col) {
+                    Value::Number(n) => crate::cell::interchange_number(n),
+                    _ => self.get_display(row, col),
+                };
+            }
             _ => return self.get_display(row, col),
         };
         let serial = match self.get_computed_value(row, col) {
