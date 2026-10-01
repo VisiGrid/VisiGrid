@@ -115,6 +115,7 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Validation...", ShowDataValidation),
                 MenuItem::separator(),
+                MenuItem::action("Create Table...", CreateTable),
                 MenuItem::action("Insert PivotTable...", InsertPivotTable),
                 MenuItem::action("PivotTable Fields", EditPivotFields),
                 MenuItem::action("Refresh PivotTable", RefreshPivot),

@@ -203,6 +203,11 @@ impl Workbook {
 
         // Every cell of the new area must be free: owned by this pivot, or
         // empty, unmerged, not a spill, not another pivot's.
+        if let Some(t) = sheet.tables().iter().find(|t| t.range.intersects(crate::table::TableRange {
+            start_row: r0, start_col: c0, end_row: r1, end_col: c1,
+        })) {
+            return Err(PivotOpError::Blocked { row: r0.max(t.range.start_row), col: c0.max(t.range.start_col), reason: format!("part of table {}", t.name) });
+        }
         for other in sheet.pivots.iter().filter(|p| p.id != table.id) {
             if other.intersects(r0, c0, r1, c1) {
                 let (ar, ac, _, _) = other.region().unwrap();
@@ -392,6 +397,18 @@ impl Workbook {
     /// action itself and for its undo/redo.
     pub fn apply_pivot_state(&mut self, state: &PivotState) -> Result<Vec<CellId>, PivotOpError> {
         let idx = self.sheet_index_by_id(state.sheet_id).ok_or(PivotOpError::SheetMissing)?;
+        if let Some((r0, c0, r1, c1)) = state.table.as_ref().and_then(|p| p.region()) {
+            if let Some(t) = self.sheets[idx].tables().iter().find(|t| t.range.intersects(crate::table::TableRange {
+                start_row: r0, start_col: c0, end_row: r1, end_col: c1,
+            })) {
+                return Err(PivotOpError::Blocked { row: r0, col: c0, reason: format!("part of table {}", t.name) });
+            }
+        }
+        for cell in &state.cells {
+            if let Some(t) = self.sheets[idx].table_at(cell.row as usize, cell.col as usize) {
+                return Err(PivotOpError::Blocked { row: cell.row as usize, col: cell.col as usize, reason: format!("part of table {}", t.name) });
+            }
+        }
         self.begin_batch();
         {
             let sheet = &mut self.sheets[idx];
@@ -651,6 +668,26 @@ mod tests {
             stale: false,
             source_generation: None,
         }
+    }
+
+    #[test]
+    fn editable_table_and_pivot_output_cannot_overlap_even_in_blank_cells() {
+        let (mut wb, data, out) = book();
+        let editable = wb.create_table(out, crate::table::TableRange { start_row: 0, start_col: 0, end_row: 10, end_col: 3 }, "Records").unwrap();
+        let mut pivot = table(&wb, data);
+        pivot.anchor_row = 2;
+        let (snap, gen) = wb.pivot_snapshot(&pivot).unwrap();
+        let output = aggregate(&pivot.definition, &snap).unwrap();
+        assert!(wb.prepare_pivot_commit(out, pivot.clone(), &output, gen, 0).is_err());
+        wb.remove_table(editable.table_id()).unwrap();
+        let commit = wb.prepare_pivot_commit(out, pivot, &output, gen, 0).unwrap();
+        wb.apply_pivot_state(&commit.after).unwrap();
+        assert!(wb.create_table(out, crate::table::TableRange { start_row: 2, start_col: 0, end_row: 10, end_col: 3 }, "Records").is_err());
+        wb.apply_pivot_state(&commit.before).unwrap();
+        wb.create_table(out, crate::table::TableRange { start_row: 0, start_col: 0, end_row: 10, end_col: 3 }, "Records").unwrap();
+        let mut state = commit.after;
+        state.cells.clear();
+        assert!(wb.apply_pivot_state(&state).is_err());
     }
 
     fn refresh(wb: &mut Workbook, out: SheetId, t: PivotTable) -> PivotCommit {

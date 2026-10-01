@@ -924,7 +924,7 @@ impl Spreadsheet {
             self.sheet_context_menu = None;
             self.request_title_refresh(cx);
         } else {
-            self.status_message = Some("Cannot delete the last sheet".to_string());
+            self.status_message = Some(if self.wb(cx).sheet_count() <= 1 { "Cannot delete the last sheet" } else { "Cannot delete this sheet while its Tables are referenced. Convert those Tables to ranges first." }.to_string());
             self.sheet_context_menu = None;
             cx.notify();
         }

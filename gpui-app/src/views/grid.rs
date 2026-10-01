@@ -598,6 +598,12 @@ fn render_cell(
     // Semantic cell style (base layer — explicit formatting overrides per-property)
     let cell_style = resolve_cell_style(app, format.cell_style);
 
+    let table_fill = display_sheet.table_at(display_data_row,col).and_then(|t| {
+        if display_data_row == t.range.start_row { Some(app.token(TokenKey::Accent).opacity(0.20)) }
+        else if t.style.banded_rows && (display_data_row-t.range.start_row)%2 == 0 { Some(app.token(TokenKey::Accent).opacity(0.07)) }
+        else { None }
+    });
+
     // Fills replace the default grid, including inherited and conditional fills.
     // Keep explicit borders and selection outlines independent of this setting.
     let show_gridlines = show_gridlines
@@ -661,8 +667,32 @@ fn render_cell(
         .flex()
         .px_1()
         .overflow_hidden()  // Always clip; spill is rendered in overlay layer
-        .bg(cell_base_background_with_role(app, is_editing, format.background_color, cell_style.fill, role_style))
+        .bg(if !is_editing && format.background_color.is_none() && cell_style.fill.is_none() && role_style.and_then(|s|s.background).is_none() {
+            table_fill.unwrap_or_else(||cell_base_background_with_role(app,is_editing,format.background_color,cell_style.fill,role_style))
+        } else { cell_base_background_with_role(app,is_editing,format.background_color,cell_style.fill,role_style) })
         .border_color(border_color);
+
+    // Membership outline for the Table containing the active cell. This is a
+    // viewport-only overlay; no borders or fills are stamped into cell storage.
+    if !is_frozen_review && !app.is_previewing() {
+        if let Some(table) = display_sheet.table_at(display_data_row,col) {
+            let (selected_row,selected_col)=view_state.selected;
+            if table.range.contains(app.row_view.view_to_data(selected_row),selected_col) {
+                let range=table.range;
+                cell=cell.child(non_interactive_overlay()
+                    .border_color(app.token(TokenKey::Accent).opacity(0.7))
+                    .when(display_data_row==range.start_row,|d|d.border_t_1())
+                    .when(display_data_row==range.end_row,|d|d.border_b_1())
+                    .when(col==range.start_col,|d|d.border_l_1())
+                    .when(col==range.end_col,|d|d.border_r_1()));
+            }
+        }
+    }
+
+    if display_sheet.is_calculated_exception(display_data_row, col) {
+        cell = cell.child(div().absolute().bottom_0().right_0().w(px(5.0)).h(px(5.0))
+            .bg(app.token(TokenKey::Warn).opacity(0.8)));
+    }
 
     if app.sheet(cx).comment(data_row, col).is_some() {
         cell = cell.child(crate::comments::indicator(data_row, col, cx));

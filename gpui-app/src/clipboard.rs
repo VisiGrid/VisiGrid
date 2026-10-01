@@ -562,6 +562,8 @@ impl Spreadsheet {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("cut", cx) { return; }
+        let ((tr0,tc0),(tr1,tc1))=self.selection_range();
+        if self.block_if_table_header(tr0,tc0,tr1,tc1,"cut",cx) { return; }
 
         self.copy(cx);
 
@@ -797,6 +799,7 @@ impl Spreadsheet {
             // If single cell and multi-selection, broadcast to all selected cells
             if is_single_cell && self.is_multi_selection() {
                 if self.block_if_selection_in_pivot("paste", cx) { return; }
+                if self.block_selection_table_headers("paste", cx) { return; }
                 let single_value = lines[0].to_string();
                 let primary_cell = self.view_state.selected;
                 let primary_data_row = self.row_view.view_to_data(primary_cell.0);
@@ -935,6 +938,8 @@ impl Spreadsheet {
             let paste_max_row = (data_start_row + paste_rows).saturating_sub(1);
             let paste_max_col = (start_col + paste_cols).saturating_sub(1);
 
+            if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
+
             // Refuse the whole paste if any target cell is pivot output.
             if self.block_if_pivot(start_row, start_col, start_row + paste_rows - 1, paste_max_col, "paste", cx) {
                 return;
@@ -962,6 +967,18 @@ impl Spreadsheet {
             } else {
                 (0, 0)  // External clipboard - no adjustment
             };
+
+            if !self.sheet(cx).tables().is_empty() {
+                let mut values: Vec<Vec<String>> = parsed_grid.clone().unwrap_or_else(|| lines.iter().map(|l| l.split('\t').map(str::to_owned).collect()).collect());
+                if is_internal {
+                    for value in values.iter_mut().flatten() {
+                        if value.starts_with('=') { *value = self.adjust_formula_refs(value, delta_row, delta_col); }
+                    }
+                }
+                let objects = is_internal && (self.internal_clipboard.as_ref().is_some_and(|ic| !ic.merges.is_empty() || ic.comments.iter().flatten().any(Option::is_some))
+                    || self.sheet(cx).comments().any(|((r,c),_)| r >= data_start_row && r <= paste_max_row && c >= start_col && c <= paste_max_col));
+                if self.paste_table_growth(data_start_row, start_col, &values, objects, cx) { return; }
+            }
 
             // For filtered paste: find the starting visible index
             let visible_start_idx = if is_filtered {
@@ -1314,6 +1331,7 @@ impl Spreadsheet {
                 let lines: Vec<&str> = text.lines().collect();
                 (lines.len(), lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1))
             };
+            if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
             if paste_rows > 0 && paste_cols > 0 {
                 let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
                 let dest_max_col = (start_col + paste_cols).saturating_sub(1);
@@ -1326,6 +1344,15 @@ impl Spreadsheet {
                     return;
                 }
             }
+        }
+
+        if !self.sheet(cx).tables().is_empty() {
+            let values: Vec<Vec<String>> = if use_internal_values {
+                self.internal_clipboard.as_ref().map(|ic| ic.values.iter().map(|row| row.iter().map(Self::value_to_canonical_string).collect()).collect()).unwrap_or_default()
+            } else {
+                system_text.as_deref().unwrap_or("").lines().map(|line| line.split('\t').map(|value| Self::value_to_canonical_string(&Self::parse_external_value(value))).collect()).collect()
+            };
+            if self.paste_table_growth(data_start_row, start_col, &values, false, cx) { return; }
         }
 
         let mut changes = Vec::new();
@@ -1633,9 +1660,10 @@ impl Spreadsheet {
         // Block if paste would split a merged region
         {
             let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.as_str()).unwrap_or("");
-            let lines: Vec<&str> = raw_tsv.lines().collect();
+            let lines = full_paste_lines(raw_tsv, true);
             let paste_rows = lines.len();
             let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+            if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
             if paste_rows > 0 && paste_cols > 0 {
                 let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
                 let dest_max_col = (start_col + paste_cols).saturating_sub(1);
@@ -1660,6 +1688,13 @@ impl Spreadsheet {
         let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()).unwrap_or_default();
         let src_data_row = self.row_view.view_to_data(src_row);
         let (delta_row, delta_col) = (data_start_row as i32 - src_data_row as i32, start_col as i32 - src_col as i32);
+
+        if !self.sheet(cx).tables().is_empty() {
+            let values: Vec<Vec<String>> = full_paste_lines(&raw_tsv, true).into_iter().map(|line| line.split('\t').map(|value| {
+                if value.starts_with('=') { self.adjust_formula_refs(value, delta_row, delta_col) } else { value.to_owned() }
+            }).collect()).collect();
+            if self.paste_table_growth(data_start_row, start_col, &values, false, cx) { return; }
+        }
 
         // For filtered paste: find the starting visible index
         let visible_start_idx = if is_filtered {
@@ -1866,6 +1901,7 @@ impl Spreadsheet {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("clear", cx) { return; }
+        if self.block_selection_table_headers("clear", cx) { return; }
 
         let mut changes = Vec::new();
         let mut skipped_spill_receivers = false;

@@ -31,6 +31,8 @@ pub struct SemanticVerification {
 
 /// Fingerprint format version. Increment on breaking changes to fingerprint computation.
 /// v2: includes iteration settings (enabled, max_iters, tolerance).
+/// Table-bearing workbooks use v3, which also includes their semantic schema.
+/// Table-free workbooks retain v2 for existing verification stamps.
 const FINGERPRINT_VERSION: u32 = 2;
 
 /// Compute semantic fingerprint of a workbook.
@@ -82,9 +84,33 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         }
     }
 
+    // Table membership/column names affect structured formulas even when the
+    // newly included cells are blank. Keep ordinary workbook v2 fingerprints
+    // unchanged; Table-bearing semantics use a distinct fingerprint version.
+    let mut tables: Vec<_> = workbook.tables().collect();
+    tables.sort_by_key(|(_, t)| t.name.to_ascii_lowercase());
+    for (sheet_id, table) in &tables {
+        let schema = serde_json::to_vec(&(
+            workbook.sheet_index_by_id(*sheet_id), &table.name, table.range,
+            table.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        )).expect("table schema contains only finite coordinates and text");
+        hasher.update(b"table:");
+        hasher.update(&schema);
+        hasher.update(b"\n");
+    }
+    for (_, table) in &tables {
+        for column in &table.columns {
+            if let Some(formula) = &column.formula {
+                hasher.update(b"calculated-column:");
+                hasher.update(&serde_json::to_vec(&(&table.name, &column.name, formula, column.formula_origin)).unwrap());
+                hasher.update(b"\n");
+            }
+        }
+    }
+    let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else { 3 };
     let hash = hasher.finalize();
     let hash_hex = &hash.to_hex()[0..16]; // First 16 hex chars (64 bits)
-    format!("v{}:{}:{}", FINGERPRINT_VERSION, op_count, hash_hex)
+    format!("v{}:{}:{}", fingerprint_version, op_count, hash_hex)
 }
 
 const SCHEMA: &str = r#"
@@ -584,6 +610,9 @@ fn write_fresh_db(
 }
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
+    if sheet.has_table_history() {
+        return save_workbook(&Workbook::from_sheets(vec![sheet.clone()], 0), path);
+    }
     write_fresh_db(path, |conn| write_sheet(conn, sheet))
 }
 
@@ -733,6 +762,16 @@ fn build_number_format(
 
 pub fn load(path: &Path) -> Result<Sheet, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let has_tables: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'tables')", [], |r| r.get(0))
+        .unwrap_or(false);
+    if has_tables {
+        if conn.prepare("SELECT sheet_idx FROM sheets LIMIT 1").is_err() {
+            return Err("Tables metadata requires the workbook file format.".into());
+        }
+        let wb = load_workbook(path)?;
+        return Ok(wb.active_sheet().clone());
+    }
+
 
     // Run migrations (adds new columns if missing)
     let _ = migrate(&conn); // Ignore errors (read-only DBs)
@@ -1041,6 +1080,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
 
     save_cond_formats(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
+    save_tables(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1213,6 +1253,7 @@ fn write_workbook_with_metadata(
 
     save_cond_formats(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
+    save_tables(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1506,6 +1547,7 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     }
     // After cells: a pivot's ownership must not block loading its own output.
     load_pivots(&conn, &mut workbook);
+    load_tables(&conn, &mut workbook)?;
 
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
@@ -1668,6 +1710,27 @@ fn load_tab_colors(conn: &Connection, workbook: &mut Workbook) {
             }
         }
     }
+}
+
+fn save_tables(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+    conn.execute("DELETE FROM meta WHERE key = 'tables'", []).map_err(|e| e.to_string())?;
+    if workbook.has_table_history() {
+        let json = serde_json::to_string(&workbook.saved_tables()).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO meta (key, value) VALUES ('tables', ?1)", params![json])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_tables(conn: &Connection, workbook: &mut Workbook) -> Result<(), String> {
+    use rusqlite::OptionalExtension;
+    let json: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0))
+        .optional().map_err(|e| e.to_string())?;
+    if let Some(json) = json {
+        let saved = serde_json::from_str(&json).map_err(|e| format!("Invalid Tables metadata: {e}"))?;
+        workbook.restore_tables(saved).map_err(|e| format!("Invalid Tables metadata: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Pivot tables per sheet, as JSON meta blobs `pivots_{sheet_idx}`. Absent
@@ -2699,6 +2762,8 @@ fn write_workbook_full(
     }
 
     save_sheet_defaults(conn, workbook)?;
+
+    save_tables(conn, workbook)?;
 
     // Save scripts
     save_scripts(&conn, scripts).map_err(|e| e.to_string())?;

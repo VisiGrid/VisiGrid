@@ -281,6 +281,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "pageup"), PrevSheet, Some("Spreadsheet")),
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
 
+        KeyBinding::new(&kb(m, "t"), CreateTable, Some("Spreadsheet")),
+
         // Pivot tables (Excel: Alt+F5 refresh, Ctrl+Alt+F5 refresh all)
         KeyBinding::new("alt-f5", RefreshPivot, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "alt-f5"), RefreshAllPivots, Some("Spreadsheet")),
@@ -295,6 +297,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("enter", PaletteExecute, Some("CommandPalette")),
         KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
+        KeyBinding::new("pageup", PalettePageUp, Some("CommandPalette")),
+        KeyBinding::new("pagedown", PalettePageDown, Some("CommandPalette")),
+        KeyBinding::new("home", PaletteHome, Some("CommandPalette")),
+        KeyBinding::new("end", PaletteEnd, Some("CommandPalette")),
 
         // Lua debugger (in LuaDebug context — active when Debug tab is focused)
         KeyBinding::new("f5", DebugStartOrContinue, Some("LuaDebug")),

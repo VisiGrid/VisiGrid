@@ -283,6 +283,8 @@ actions!(sheets, [
     AddSheet,
 ]);
 
+actions!(table, [CreateTable]);
+
 // Pivot tables
 actions!(pivot, [
     InsertPivotTable,   // Insert a pivot table from the selection / current region
@@ -328,6 +330,10 @@ actions!(palette, [
     PaletteExecute,
     PalettePreview,   // Shift+Enter - preview without closing
     PaletteCancel,    // Escape - cancel and restore
+    PalettePageUp,
+    PalettePageDown,
+    PaletteHome,
+    PaletteEnd,
 ]);
 
 // Alt accelerator actions (open Command Palette scoped to menu)

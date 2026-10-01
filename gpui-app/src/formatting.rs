@@ -604,7 +604,7 @@ impl Spreadsheet {
             for row in min_row..=max_row {
                 for col in min_col..=max_col {
                     // Safety net: convert text "X%" to number when applying Percent format
-                    if matches!(format, NumberFormat::Percent { .. }) {
+                    if matches!(format, NumberFormat::Percent { .. }) && self.sheet(cx).table_header_at(row,col).is_none() {
                         let raw = self.sheet(cx).get_raw(row, col);
                         if let Some(pct) = raw.strip_suffix('%') {
                             let clean: String = pct.chars()
@@ -1220,6 +1220,10 @@ impl Spreadsheet {
         // Canonicalize selection range
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
 
+        if self.sheet(cx).tables().iter().any(|t|t.range.intersects(visigrid_engine::table::TableRange {start_row:min_row,start_col:min_col,end_row:max_row,end_col:max_col})) {
+            self.status_message=Some("Cannot merge cells inside a Table. Convert it to a range first.".into()); cx.notify(); return;
+        }
+
         // Guard: must select more than one cell
         if min_row == max_row && min_col == max_col {
             self.status_message = Some("Select a range of cells to merge".to_string());
@@ -1306,6 +1310,10 @@ impl Spreadsheet {
                     }
                 }
             }
+        }
+
+        if self.sheet(cx).tables().iter().any(|t|t.range.intersects(visigrid_engine::table::TableRange {start_row:min_row,start_col:min_col,end_row:max_row,end_col:max_col})) {
+            self.status_message=Some("Cannot merge cells inside a Table. Convert it to a range first.".into()); cx.notify(); return;
         }
 
         // Remove any existing merges fully inside the selection

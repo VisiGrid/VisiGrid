@@ -39,7 +39,22 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    pub(crate) fn parse_goto_destination(input: &str) -> Result<(usize, usize), &'static str> {
+        let (row, col) = Self::parse_cell_ref(input)
+            .ok_or("Enter a cell reference, such as A1 or B25.")?;
+        if row >= NUM_ROWS || col >= NUM_COLS {
+            return Err("That cell is outside this worksheet. Choose a closer destination.");
+        }
+        Ok((row, col))
+    }
+
     pub fn confirm_goto(&mut self, cx: &mut Context<Self>) {
+        // Keep invalid input in place so it can be corrected in the dialog.
+        if Self::parse_goto_destination(&self.goto_input).is_err() {
+            cx.notify();
+            return;
+        }
+
         // Close validation dropdown when jumping to a cell
         self.close_validation_dropdown(
             crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
@@ -2011,6 +2026,8 @@ impl Spreadsheet {
             MutationSource::Human
         };
 
+        if self.block_if_table_header(row,col,row,col,"insert a formula",cx) { return; }
+
         // Record change in history with AI source
         let sheet_idx = self.sheet_index(cx);
         self.history.record_change_with_source(sheet_idx, row, col, old_value, formula.clone(), source);
@@ -2686,4 +2703,21 @@ fn call_entry_explanation_ai(
         .to_string();
 
     Ok(content)
+}
+
+#[cfg(test)]
+mod goto_destination_tests {
+    use super::{Spreadsheet, NUM_ROWS};
+
+    #[test]
+    fn accepts_cell_addresses_and_rejects_invalid_or_out_of_bounds_destinations() {
+        assert_eq!(Spreadsheet::parse_goto_destination(" b25 "), Ok((24, 1)));
+        assert_eq!(Spreadsheet::parse_goto_destination("AA100"), Ok((99, 26)));
+        for input in ["", "A", "0", "A0", "A1:B2", "Sheet2!A1", "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ1"] {
+            assert!(Spreadsheet::parse_goto_destination(input).is_err(), "{input}");
+        }
+        assert!(Spreadsheet::parse_goto_destination(&format!("A{}", NUM_ROWS + 1)).is_err());
+        assert!(Spreadsheet::parse_goto_destination("XFE1").is_err());
+        assert_eq!(Spreadsheet::parse_goto_destination(&format!("A{NUM_ROWS}")), Ok((NUM_ROWS - 1, 0)));
+    }
 }

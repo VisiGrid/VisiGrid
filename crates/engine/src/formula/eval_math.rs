@@ -368,7 +368,10 @@ fn sumproduct_grid<L: CellLookup>(arg: &BoundExpr, lookup: &L) -> Result<Vec<Vec
             .map(|r| {
                 (c0..=c1)
                     .map(|c| {
-                        let text = lookup.get_text(r, c);
+                        let text = match arg {
+                            Expr::Range { sheet, .. } | Expr::CellRef { sheet, .. } => super::eval_helpers::get_text_for_sheet(lookup, sheet, r, c)?,
+                            _ => lookup.get_text(r,c),
+                        };
                         if text.starts_with('#') {
                             Err(text)
                         } else {

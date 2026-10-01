@@ -14,7 +14,7 @@ pub enum RangeAxis {
 /// Generic expression AST, parameterized over sheet reference type.
 /// - Parser outputs `ParsedExpr = Expr<UnboundSheetRef>` (sheet names unresolved)
 /// - After binding, becomes `BoundExpr = Expr<SheetRef>` (sheet IDs resolved)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr<S> {
     Number(f64),
     Text(String),
@@ -61,6 +61,10 @@ pub enum Expr<S> {
     },
     /// Named range reference (resolved at evaluation time)
     NamedRange(String),
+    StructuredRef(super::structured::StructuredReference),
+    /// Runtime-only results of resolving a symbolic table reference.
+    EmptyRange { columns: usize },
+    ReferenceError(String),
     /// A reference whose target no longer exists — the cell or range it
     /// pointed at was deleted by a structural edit. Excel stores this in the
     /// formula TEXT (`=A1+B1` becomes `=#REF!+B1`), permanently: re-inserting
@@ -130,6 +134,7 @@ enum Token {
     /// The `#REF!` literal (a reference whose target was deleted)
     RefError,
     Ident(String),
+    StructuredRef(super::structured::StructuredReference),
     Plus,
     Minus,
     Star,
@@ -158,6 +163,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
     while let Some(&c) = chars.peek() {
         match c {
+            '[' => {
+                let remaining: String = chars.clone().collect();
+                let n = super::structured::bracket_len(&remaining)?;
+                let reference = super::structured::parse(None, &remaining[..n])?;
+                for _ in remaining[..n].chars() { chars.next(); }
+                tokens.push(Token::StructuredRef(reference));
+            }
             ' ' | '\t' => { chars.next(); }
             '+' => { tokens.push(Token::Plus); chars.next(); }
             '-' => { tokens.push(Token::Minus); chars.next(); }
@@ -241,7 +253,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 tokens.push(Token::SheetPrefix(sheet_name));
             }
-            'A'..='Z' | 'a'..='z' => {
+            'A'..='Z' | 'a'..='z' | '_' => {
                 // Could be cell reference (A1), function name (SUM), or sheet prefix (Sheet1!)
                 let mut ident = String::new();
                 while let Some(&ch) = chars.peek() {
@@ -277,6 +289,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     } else {
                         break;
                     }
+                }
+
+                if chars.peek() == Some(&'[') {
+                    let remaining: String = chars.clone().collect();
+                    let n = super::structured::bracket_len(&remaining)?;
+                    let reference = super::structured::parse(Some(ident), &remaining[..n])?;
+                    for _ in remaining[..n].chars() { chars.next(); }
+                    tokens.push(Token::StructuredRef(reference));
+                    continue;
                 }
 
                 // Check if followed by ! (sheet reference prefix)
@@ -430,9 +451,11 @@ fn try_parse_cell_ref(s: &str) -> Option<Token> {
     }
 
     // Convert column letters to number (A=0, B=1, ..., Z=25, AA=26, AB=27, etc.)
-    let col = col_str.chars().fold(0usize, |acc, c| {
-        acc * 26 + (c as usize - 'A' as usize + 1)
-    }) - 1;
+    let col = col_str.chars().try_fold(0usize, |acc, c| {
+        acc.checked_mul(26)?.checked_add(c as usize - 'A' as usize + 1)
+    })?.checked_sub(1)?;
+    // Table1 and similar valid names are not off-grid cell addresses.
+    if col >= crate::sheet::NUM_COLS || row > crate::sheet::NUM_ROWS { return None; }
 
     Some(Token::CellRef { col, row: row - 1, col_abs, row_abs })
 }
@@ -629,6 +652,11 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
     let mut i = 0;
     while i < bytes.len() {
         let start = i;
+        if bytes[i] == b'[' {
+            if let Ok(n) = super::structured::bracket_len(&formula[i..]) {
+                result.push_str(&formula[i..i+n]); i += n; continue;
+            }
+        }
         if bytes[i] == b'"' || bytes[i] == b'\'' {
             let quote = bytes[i];
             i += 1;
@@ -657,7 +685,7 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
         i = end;
         let next = skip_space(bytes, end);
         // Sheet names and function names may themselves look like cell refs.
-        if matches!(bytes.get(next), Some(b'!' | b'(')) {
+        if matches!(bytes.get(next), Some(b'!' | b'(' | b'[')) {
             result.push_str(&formula[start..end]);
             continue;
         }
@@ -698,7 +726,7 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
                 shift(col, col_abs, delta_col),
                 shift(row, row_abs, delta_row),
             ) {
-                (Some(col), Some(row)) => {
+                (Some(col), Some(row)) if col < crate::sheet::NUM_COLS && row < crate::sheet::NUM_ROWS => {
                     result.push_str(&format_cell_addr(col, row, col_abs, row_abs))
                 }
                 _ => result.push_str("#REF!"),
@@ -765,6 +793,7 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
     }
 
     match &tokens[pos] {
+        Token::StructuredRef(r) => Ok((Expr::StructuredRef(r.clone()), pos + 1)),
         Token::Number(n, _) => Ok((Expr::Number(*n), pos + 1)),
         Token::RefError => Ok((Expr::RefError, pos + 1)),
         Token::StringLit(s) => Ok((Expr::Text(s.clone()), pos + 1)),
@@ -949,6 +978,9 @@ where
         Expr::Number(n) => Expr::Number(*n),
         Expr::Text(s) => Expr::Text(s.clone()),
         Expr::Boolean(b) => Expr::Boolean(*b),
+        Expr::StructuredRef(r) => Expr::StructuredRef(r.clone()),
+        Expr::EmptyRange { columns } => Expr::EmptyRange { columns: *columns },
+        Expr::ReferenceError(e) => Expr::ReferenceError(e.clone()),
         Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
         Expr::RefError => Expr::RefError,
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
@@ -1065,6 +1097,21 @@ fn format_whole_range(
     format!("{}:{}", endpoint(start, start_abs), endpoint(end, end_abs))
 }
 
+/// Keep grouping when a structural edit reformats a stored formula.
+fn format_binary<S>(op: Op, left: &Expr<S>, right: &Expr<S>, render: impl Fn(&Expr<S>) -> String) -> String {
+    let precedence = |op| match op {
+        Op::Lt | Op::Gt | Op::Eq | Op::LtEq | Op::GtEq | Op::NotEq => 0,
+        Op::Concat => 1, Op::Add | Op::Sub => 2, Op::Mul | Op::Div => 3, Op::Pow => 4,
+    };
+    let child = |expr: &Expr<S>, right: bool| {
+        let text = render(expr);
+        let parens = matches!(expr, Expr::BinaryOp { op: child, .. } if precedence(*child) < precedence(op)
+            || (precedence(*child) == precedence(op) && if op == Op::Pow { !right } else { right }));
+        if parens { format!("({text})") } else { text }
+    };
+    format!("{}{}{}", child(left,false), format_op(op), child(right,true))
+}
+
 pub fn format_parsed_expr(expr: &ParsedExpr) -> String {
     format!("={}", format_parsed_expr_inner(expr))
 }
@@ -1085,6 +1132,9 @@ fn format_parsed_expr_inner(expr: &ParsedExpr) -> String {
         }
         Expr::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
         Expr::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        Expr::StructuredRef(r) => r.format(),
+        Expr::EmptyRange { .. } => "#CALC!".into(),
+        Expr::ReferenceError(e) => e.clone(),
         Expr::NamedRange(name) => name.clone(),
         Expr::RefError => "#REF!".to_string(),
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
@@ -1106,12 +1156,7 @@ fn format_parsed_expr_inner(expr: &ParsedExpr) -> String {
             name,
             args.iter().map(format_parsed_expr_inner).collect::<Vec<_>>().join(", ")
         ),
-        Expr::BinaryOp { op, left, right } => format!(
-            "{}{}{}",
-            format_parsed_expr_inner(left),
-            format_op(*op),
-            format_parsed_expr_inner(right)
-        ),
+        Expr::BinaryOp { op, left, right } => format_binary(*op, left, right, format_parsed_expr_inner),
     }
 }
 
@@ -1142,6 +1187,9 @@ where
         }
         Expr::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
         Expr::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        Expr::StructuredRef(r) => r.format(),
+        Expr::EmptyRange { .. } => "#CALC!".into(),
+        Expr::ReferenceError(e) => e.clone(),
         Expr::NamedRange(name) => name.clone(),
         Expr::RefError => "#REF!".to_string(),
         Expr::CellRef { sheet, col, row, col_abs, row_abs } => {
@@ -1163,25 +1211,7 @@ where
                 .collect();
             format!("{}({})", name, args_str.join(","))
         }
-        Expr::BinaryOp { op, left, right } => {
-            let left_str = format_expr_inner(left, name_resolver);
-            let right_str = format_expr_inner(right, name_resolver);
-            let op_str = match op {
-                Op::Add => "+",
-                Op::Sub => "-",
-                Op::Mul => "*",
-                Op::Div => "/",
-                Op::Lt => "<",
-                Op::Gt => ">",
-                Op::Eq => "=",
-                Op::LtEq => "<=",
-                Op::GtEq => ">=",
-                Op::NotEq => "<>",
-                Op::Concat => "&",
-                Op::Pow => "^",
-            };
-            format!("{}{}{}", left_str, op_str, right_str)
-        }
+        Expr::BinaryOp { op, left, right } => format_binary(*op, left, right, |expr| format_expr_inner(expr, name_resolver)),
     }
 }
 
@@ -1268,7 +1298,7 @@ pub fn extract_cell_refs<S>(expr: &Expr<S>) -> Vec<(usize, usize)> {
 
 fn collect_cell_refs<S>(expr: &Expr<S>, refs: &mut Vec<(usize, usize)>) {
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) | Expr::Empty
+        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::NamedRange(_) | Expr::StructuredRef(_) | Expr::EmptyRange { .. } | Expr::ReferenceError(_) | Expr::Empty
         | Expr::RefError | Expr::WholeRange { .. } => {
             // NamedRange refs are resolved at evaluation time with access to NamedRangeStore;
             // RefError has no target by definition.

@@ -86,6 +86,10 @@ everything.
 
 ---
 
+### Go To Cell dialog
+
+Go To accepts a single cell address on the current sheet. Its preview validates the address and worksheet bounds before enabling the primary action. Enter or **Go to cell** navigates to a valid destination using the existing merged-cell selection rules. Invalid input stays in the dialog for correction without changing selection. Escape, Cancel, or clicking outside dismisses the dialog without navigating. The dialog shows the current cell and clears its input when reopened.
+
 ## Selection Expansion Rules
 
 ### Shift+Arrow

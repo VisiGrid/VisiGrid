@@ -106,7 +106,7 @@ fn collect<F>(
     use super::parser::Expr;
 
     match expr {
-        Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Empty | Expr::RefError | Expr::WholeRange { .. } => {
+        Expr::StructuredRef(_) | Expr::EmptyRange { .. } | Expr::ReferenceError(_) | Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Empty | Expr::RefError | Expr::WholeRange { .. } => {
             // Literals have no dependencies; a dead reference has no target
         }
 
@@ -235,6 +235,9 @@ mod tests {
                 start_abs: *start_abs, end_abs: *end_abs,
             },
             Expr::NamedRange(name) => Expr::NamedRange(name.clone()),
+            Expr::StructuredRef(r) => Expr::StructuredRef(r.clone()),
+            Expr::EmptyRange { columns } => Expr::EmptyRange { columns: *columns },
+            Expr::ReferenceError(e) => Expr::ReferenceError(e.clone()),
             Expr::Function { name, args } => {
                 Expr::Function {
                     name: name.clone(),

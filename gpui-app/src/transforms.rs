@@ -215,6 +215,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         if self.block_if_previewing(cx) { return; }
+        if self.block_selection_table_headers("transform", cx) { return; }
 
         let policy = op.policy();
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
@@ -303,6 +304,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) -> Option<TransformPreview> {
         if self.block_if_previewing(cx) { return None; }
+        if self.block_selection_table_headers("transform", cx) { return None; }
 
         let policy = op.policy();
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
@@ -354,6 +356,7 @@ impl Spreadsheet {
         preview: &TransformPreview,
         cx: &mut Context<Self>,
     ) {
+        for diff in &preview.diffs { if self.block_if_table_header(diff.row,diff.col,diff.row,diff.col,"transform",cx) { return; } }
         let mut changes = Vec::new();
 
         self.workbook.update(cx, |wb, _| wb.begin_batch());

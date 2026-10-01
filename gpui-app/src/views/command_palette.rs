@@ -1,56 +1,95 @@
 //! Command palette rendering
 //!
 //! This module provides the UI for the command palette overlay.
-//! Search logic is handled by the search engine in `search.rs`.
+//! Search logic is handled by the search engine in `search.rs`; grouping and
+//! windowing live in `command_palette.rs`.
 
 use std::time::Duration;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 
-use crate::actions::{PaletteUp, PaletteDown, PaletteExecute, PalettePreview, PaletteCancel};
+use crate::actions::{
+    PaletteUp, PaletteDown, PaletteExecute, PalettePreview, PaletteCancel,
+    PalettePageUp, PalettePageDown, PaletteHome, PaletteEnd,
+};
 use crate::app::{Spreadsheet, PaletteScope};
-use crate::search::{SearchItem, MenuCategory};
+use crate::command_palette::{is_open_from_disk, palette_row_has_second_line};
+use crate::search::{SearchAction, SearchItem, SearchKind, SearchQuery};
 use crate::theme::TokenKey;
 
-/// Get display name for a palette scope (uppercase for breadcrumb)
-fn scope_name(scope: &PaletteScope) -> &'static str {
+/// Colors the palette draws with, read once per frame.
+#[derive(Clone, Copy)]
+struct Palette {
+    panel_bg: Hsla,
+    border: Hsla,
+    text: Hsla,
+    muted: Hsla,
+    disabled: Hsla,
+    selection_bg: Hsla,
+    selection_text: Hsla,
+    hover: Hsla,
+    accent: Hsla,
+    ok: Hsla,
+    cell_ref: Hsla,
+    function: Hsla,
+}
+
+impl Palette {
+    fn new(app: &Spreadsheet) -> Self {
+        Self {
+            panel_bg: app.token(TokenKey::PanelBg),
+            border: app.token(TokenKey::PanelBorder),
+            text: app.token(TokenKey::TextPrimary),
+            muted: app.token(TokenKey::TextMuted),
+            disabled: app.token(TokenKey::TextDisabled),
+            selection_bg: app.token(TokenKey::SelectionBg),
+            selection_text: app.token(TokenKey::SelectionText),
+            hover: app.token(TokenKey::ToolbarButtonHoverBg),
+            accent: app.token(TokenKey::Accent),
+            ok: app.token(TokenKey::Ok),
+            cell_ref: app.token(TokenKey::FormulaCellRef),
+            function: app.token(TokenKey::FormulaFunction),
+        }
+    }
+
+    /// Icon tint per kind: commands accent, files green, cells and ranges the
+    /// cell-reference color, functions the function color.
+    fn tint(&self, item: &SearchItem) -> Hsla {
+        match item.kind {
+            _ if is_open_from_disk(item) => self.muted,
+            SearchKind::Command => self.accent,
+            SearchKind::RecentFile => self.ok,
+            SearchKind::Formula => self.function,
+            SearchKind::Setting => self.muted,
+            SearchKind::Cell
+            | SearchKind::NamedRange
+            | SearchKind::GoTo
+            | SearchKind::Reference
+            | SearchKind::Precedent => self.cell_ref,
+        }
+    }
+}
+
+/// Label in the scope pill.
+fn scope_label(scope: &PaletteScope) -> &'static str {
     match scope {
-        PaletteScope::Menu(cat) => match cat {
-            MenuCategory::File => "FILE",
-            MenuCategory::Edit => "EDIT",
-            MenuCategory::View => "VIEW",
-            MenuCategory::Format => "FORMAT",
-            MenuCategory::Data => "DATA",
-            MenuCategory::Tools => "TOOLS",
-            MenuCategory::Help => "HELP",
-        },
-        PaletteScope::QuickOpen => "FILES",
+        PaletteScope::Menu(cat) => cat.name(),
+        PaletteScope::QuickOpen => "Open file",
     }
 }
 
 /// Render the command palette overlay
 pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    let results = app.palette_results();
-    let selected_idx = app.palette_selected;
-    let scroll_offset = app.palette_scroll_offset;
+    let c = Palette::new(app);
     let query = app.palette_query.clone();
     let has_query = !query.is_empty();
-    let is_previewing = app.palette_previewing;
-    let total_results = app.palette_total_results;
-    let shown_results = results.len();
-    let is_truncated = total_results > shown_results;
-    let scope = app.palette_scope.as_ref();
-    let has_scope = scope.is_some();
+    let scope = app.palette_scope;
 
-    // Theme colors
-    let panel_bg = app.token(TokenKey::PanelBg);
-    let panel_border = app.token(TokenKey::PanelBorder);
-    let text_primary = app.token(TokenKey::TextPrimary);
-    let text_muted = app.token(TokenKey::TextMuted);
-    let text_disabled = app.token(TokenKey::TextDisabled);
-    let selection_bg = app.token(TokenKey::SelectionBg);
-    let selection_text = app.token(TokenKey::SelectionText);
-    let toolbar_hover = app.token(TokenKey::ToolbarButtonHoverBg);
+    let placeholder = match scope {
+        Some(PaletteScope::QuickOpen) => "Search recent files…".to_string(),
+        Some(PaletteScope::Menu(cat)) => format!("Search {} commands…", cat.name()),
+        None => "Search commands, files and ranges…".to_string(),
+    };
 
     div()
         .absolute()
@@ -58,7 +97,7 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
         .flex()
         .items_start()
         .justify_center()
-        .pt(px(100.0))
+        .pt(px(72.0))
         .bg(hsla(0.0, 0.0, 0.0, 0.4))
         // Click outside to close
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
@@ -68,10 +107,11 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
             div()
                 .key_context("CommandPalette")
                 .track_focus(&app.focus_handle)
-                .w(px(500.0))
-                .max_h(px(380.0))
-                .bg(panel_bg)
-                .rounded_md()
+                .w(px(600.0))
+                .bg(c.panel_bg)
+                .border_1()
+                .border_color(c.border)
+                .rounded_lg()
                 .shadow_lg()
                 .overflow_hidden()
                 .flex()
@@ -92,329 +132,251 @@ pub fn render_command_palette(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
                 .on_action(cx.listener(|this, _: &PaletteCancel, _, cx| {
                     this.hide_palette(cx);
                 }))
+                .on_action(cx.listener(|this, _: &PalettePageUp, _, cx| {
+                    this.palette_move(-(Spreadsheet::PALETTE_VISIBLE as isize), cx);
+                }))
+                .on_action(cx.listener(|this, _: &PalettePageDown, _, cx| {
+                    this.palette_move(Spreadsheet::PALETTE_VISIBLE as isize, cx);
+                }))
+                .on_action(cx.listener(|this, _: &PaletteHome, _, cx| {
+                    this.palette_move(isize::MIN / 2, cx);
+                }))
+                .on_action(cx.listener(|this, _: &PaletteEnd, _, cx| {
+                    this.palette_move(isize::MAX / 2, cx);
+                }))
                 // Stop click propagation on the palette itself
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
-                // Search input
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .px_3()
-                        .py(px(10.0))
-                        .border_b_1()
-                        .border_color(panel_border)
-                        // Input area with cursor
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                // Scope badge (when scoped via Alt accelerator)
-                                .when(has_scope, |d| {
-                                    let scope_text = scope.map(scope_name).unwrap_or("");
-                                    d.child(
-                                        div()
-                                            .px_2()
-                                            .py(px(2.0))
-                                            .mr_2()  // margin-right to separate from query text
-                                            .bg(selection_bg)
-                                            .rounded_sm()
-                                            .text_size(px(11.0))
-                                            .text_color(selection_text)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            // ASCII rather than U+25B8: that triangle is in seven fonts on a
-// stock Linux install and rendered as an empty badge here.
-.child(format!("{} >", scope_text))  // "FILE >"
-                                    )
-                                })
-                                // Query text or placeholder
-                                .child(
-                                    div()
-                                        .text_color(if has_query { text_primary } else { text_disabled })
-                                        .text_size(px(13.0))
-                                        .child(if has_query {
-                                            query.clone()
-                                        } else if has_scope {
-                                            match scope {
-                                                Some(PaletteScope::QuickOpen) => "Open file...".to_string(),
-                                                _ => format!("{} commands...", scope.map(scope_name).unwrap_or("")),
-                                            }
-                                        } else {
-                                            "Execute a command...".to_string()
-                                        })
-                                )
-                                // Blinking cursor
-                                .child(
-                                    div()
-                                        .w(px(1.0))
-                                        .h(px(14.0))
-                                        .bg(text_primary)
-                                        .ml(px(1.0))
-                                        .with_animation(
-                                            "cursor-blink",
-                                            Animation::new(Duration::from_millis(530))
-                                                .repeat()
-                                                .with_easing(pulsating_between(0.0, 1.0)),
-                                            |div, delta| {
-                                                let opacity = if delta > 0.5 { 0.0 } else { 1.0 };
-                                                div.opacity(opacity)
-                                            },
-                                        )
-                                )
-                        )
-                )
-                // Prefix hint chips (clickable, context-aware)
-                .when(!has_query && !matches!(scope, Some(PaletteScope::Menu(_))), |d| {
-                    d.child(render_prefix_chips(scope, text_muted, text_disabled, toolbar_hover, panel_border, cx))
-                })
-                // Result list
-                .child({
-                    let mut list = div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .py_1();
-
-                    // Show help hints when query is empty and no scope active
-                    if !has_query && !has_scope {
-                        list = list.child(
-                            div()
-                                .px_4()
-                                .py_2()
-                                .text_color(text_disabled)
-                                .text_size(px(11.0))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                // Alt scope hints (Excel-style command access)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .pb_2()
-                                        .mb_1()
-                                        .border_b_1()
-                                        .border_color(panel_border)
-                                        .text_size(px(10.0))
-                                        .children(
-                                            MenuCategory::all_for_hints().iter().map(|cat| {
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(
-                                                        div()
-                                                            .px(px(4.0))
-                                                            .py(px(1.0))
-                                                            .bg(toolbar_hover)
-                                                            .rounded_sm()
-                                                            .text_color(text_muted)
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .child(format!("Alt+{}", cat.key_hint()))
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_color(text_disabled)
-                                                            .child(cat.name())
-                                                    )
-                                            })
-                                        )
-                                )
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .text_color(text_muted.opacity(0.7))
-                                        .italic()
-                                        .child("Refactor spreadsheets like code.")
-                                )
-                        );
-                    }
-
-                    // Add search results — windowed so keyboard navigation
-                    // scrolls instead of walking off the visible panel.
-                    let visible_end = (scroll_offset
-                        + crate::app::Spreadsheet::PALETTE_VISIBLE)
-                        .min(results.len());
-                    let window = scroll_offset.min(results.len())..visible_end;
-                    list = list.children(
-                        results[window.clone()].iter().enumerate().map(|(i, item)| {
-                            let idx = window.start + i;
-                            let is_selected = idx == selected_idx;
-                            render_search_item(item, is_selected, idx, text_primary, text_muted, selection_bg, selection_text, toolbar_hover, cx)
-                        })
-                    );
-
-                    if results.is_empty() && (has_query || has_scope) {
-                        let (title, hint) = if matches!(scope, Some(PaletteScope::QuickOpen)) {
-                            ("No recent files yet", Some("Open a workbook to see it here."))
-                        } else {
-                            ("No matching commands", None)
-                        };
-                        let mut empty = div()
-                            .px_4()
-                            .py_6()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_color(text_muted)
-                                    .text_size(px(14.0))
-                                    .child(title)
-                            );
-                        if let Some(h) = hint {
-                            empty = empty.child(
-                                div()
-                                    .text_color(text_disabled)
-                                    .text_size(px(12.0))
-                                    .child(h)
-                            );
-                        }
-                        list.child(empty)
-                    } else {
-                        list
-                    }
-                })
-                // Footer with hints
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_3()
-                        .py(px(6.0))
-                        .border_t_1()
-                        .border_color(panel_border)
-                        .text_size(px(11.0))
-                        .text_color(text_muted)
-                        // Left side: preview indicator or truncation notice
-                        .child(
-                            div()
-                                .when(is_previewing, |el| {
-                                    el.child("Previewing - Esc to restore")
-                                })
-                                .when(!is_previewing && is_truncated, |el| {
-                                    el.child(format!("Showing {} of {} matches", shown_results, total_results))
-                                })
-                        )
-                        // Right side: keyboard hints
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child("Alt")
-                                        .child(
-                                            div()
-                                                .text_color(text_disabled)
-                                                .child("ctrl+↵")
-                                        )
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child("Preview")
-                                        .child(
-                                            div()
-                                                .text_color(text_disabled)
-                                                .child("shift+↵")
-                                        )
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child("Run")
-                                        .child(
-                                            div()
-                                                .text_color(text_disabled)
-                                                .child("↵")
-                                        )
-                                )
-                        )
-                )
+                .child(render_input(&c, scope, &query, &placeholder))
+                .when(!has_query && scope.is_none(), |d| d.child(render_prefix_chips(&c, cx)))
+                .child(render_results(app, &c, cx))
+                .child(render_footer(app, &c))
         )
 }
 
-/// Render clickable prefix hint chips (shown when query is empty).
-/// Context-aware: FILES scope shows file-relevant prefixes, default shows all.
-fn render_prefix_chips(
-    scope: Option<&PaletteScope>,
-    text_muted: Hsla,
-    text_disabled: Hsla,
-    toolbar_hover: Hsla,
-    panel_border: Hsla,
-    cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
-    let hints: Vec<(&str, &str, char)> = if matches!(scope, Some(PaletteScope::QuickOpen)) {
-        vec![
-            (":A1", "go to cell", ':'),
-            ("$name", "named range", '$'),
-            (">", "commands", '>'),
-        ]
-    } else {
-        vec![
-            (">", "commands", '>'),
-            (":A1", "go to cell", ':'),
-            ("$name", "named range", '$'),
-            ("=", "functions", '='),
-            ("@", "search cells", '@'),
-        ]
-    };
+fn render_input(c: &Palette, scope: Option<PaletteScope>, query: &str, placeholder: &str) -> impl IntoElement {
+    let has_query = !query.is_empty();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(14.0))
+        .py(px(11.0))
+        .border_b_1()
+        .border_color(c.border)
+        .when_some(scope, |d, scope| {
+            d.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(c.accent.opacity(0.16))
+                    .text_size(px(12.0))
+                    .text_color(c.text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(scope_label(&scope))
+            )
+        })
+        .child({
+            // Blinking cursor: after the query, or before the placeholder,
+            // where typing will start
+            let cursor = div()
+                .w(px(1.0))
+                .h(px(15.0))
+                .bg(c.text)
+                .mx(px(1.0))
+                .with_animation(
+                    "cursor-blink",
+                    Animation::new(Duration::from_millis(530))
+                        .repeat()
+                        .with_easing(pulsating_between(0.0, 1.0)),
+                    |div, delta| {
+                        let opacity = if delta > 0.5 { 0.0 } else { 1.0 };
+                        div.opacity(opacity)
+                    },
+                );
+            let text = div()
+                .text_color(if has_query { c.text } else { c.disabled })
+                .child(if has_query { query.to_string() } else { placeholder.to_string() });
+            let line = div().flex_1().flex().items_center().text_size(px(14.0));
+            if has_query { line.child(text).child(cursor) } else { line.child(cursor).child(text) }
+        })
+        .child(keycap("Esc", c))
+}
+
+/// A key drawn as a cap: "Esc", "Ctrl", "↵".
+fn keycap(label: impl Into<SharedString>, c: &Palette) -> Div {
+    div()
+        .px(px(5.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(c.border)
+        .text_size(px(11.0))
+        .text_color(c.muted)
+        .child(label.into())
+}
+
+/// "Ctrl+Shift+L" → ["Ctrl", "Shift", "L"]; "Ctrl++" → ["Ctrl", "+"].
+fn shortcut_keys(shortcut: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = shortcut;
+    while !rest.is_empty() {
+        // Skip the first character so a literal "+" key is never a separator
+        let first = rest.chars().next().map_or(0, char::len_utf8);
+        match rest[first..].find('+').map(|i| i + first) {
+            Some(i) => {
+                keys.push(rest[..i].to_string());
+                rest = &rest[i + 1..];
+            }
+            None => {
+                keys.push(rest.to_string());
+                break;
+            }
+        }
+    }
+    keys
+}
+
+/// Clickable prefix chips, shown when nothing is typed.
+fn render_prefix_chips(c: &Palette, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let hints: [(char, &str); 6] = [
+        ('>', "commands"),
+        (':', "go to cell"),
+        ('$', "named range"),
+        ('=', "function"),
+        ('@', "cell value"),
+        ('#', "setting"),
+    ];
 
     let mut row = div()
         .flex()
         .items_center()
         .flex_wrap()
-        .gap_1()
-        .px_3()
-        .py(px(5.0))
+        .gap(px(6.0))
+        .px(px(14.0))
+        .py(px(7.0))
         .border_b_1()
-        .border_color(panel_border);
+        .border_color(c.border);
 
-    for (prefix, label, ch) in hints {
+    for (ch, label) in hints {
+        let hover = c.hover;
         row = row.child(
             div()
                 .id(SharedString::from(format!("hint-{}", ch)))
                 .flex()
                 .items_center()
-                .gap_1()
-                .px(px(6.0))
+                .gap(px(5.0))
+                .px(px(7.0))
                 .py(px(2.0))
-                .rounded_sm()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(c.border)
                 .cursor_pointer()
-                .hover(move |s| s.bg(toolbar_hover))
+                .hover(move |s| s.bg(hover))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.palette_insert_char(ch, cx);
                 }))
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .text_color(text_muted)
+                        .text_size(px(12.0))
+                        .text_color(c.text)
                         .font_weight(FontWeight::MEDIUM)
-                        .child(prefix.to_string())
+                        .child(ch.to_string())
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .text_color(text_disabled)
-                        .child(label.to_string())
+                        .text_size(px(12.0))
+                        .text_color(c.muted)
+                        .child(label)
                 )
         );
     }
 
     row
+}
+
+fn render_results(app: &Spreadsheet, c: &Palette, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    let results = app.palette_results();
+    let offset = app.palette_scroll_offset.min(results.len());
+    let end = app.palette_window_end(offset);
+
+    let mut list = div()
+        .id("palette-list")
+        .flex()
+        .flex_col()
+        .py(px(4.0))
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            let delta = event.delta.pixel_delta(px(30.0));
+            let dy: f32 = delta.y.into();
+            let rows = (dy / -30.0).round() as isize;
+            if rows != 0 {
+                this.palette_scroll(rows, cx);
+            }
+            cx.stop_propagation();
+        }));
+
+    if results.is_empty() {
+        return list.child(render_empty(app, c));
+    }
+
+    for idx in offset..end {
+        if let Some(section) = app.palette_heading_at(idx, idx == offset) {
+            list = list.child(if section.title.is_empty() {
+                div()
+                    .h(px(Spreadsheet::PALETTE_DIVIDER_H))
+                    .flex()
+                    .items_center()
+                    .px(px(14.0))
+                    .child(div().h(px(1.0)).w_full().bg(c.border))
+            } else {
+                div()
+                    .h(px(Spreadsheet::PALETTE_HEADER_H))
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .px(px(14.0))
+                    .pb(px(5.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c.muted)
+                            .child(section.title.to_uppercase())
+                    )
+                    .when(section.len > 3, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(c.disabled)
+                                .child(section.len.to_string())
+                        )
+                    })
+            });
+        }
+        list = list.child(render_row(&results[idx], idx == app.palette_selected, idx, c, cx));
+    }
+
+    list
+}
+
+fn render_empty(app: &Spreadsheet, c: &Palette) -> impl IntoElement {
+    let query = SearchQuery::parse(&app.palette_query);
+    let (title, hint) = match query.prefix {
+        Some(':') if query.needle.is_empty() => ("Type a cell".to_string(), "Like B5 or AA100"),
+        Some(':') => (format!("\"{}\" is not a cell", query.needle), "Try a cell like B5"),
+        _ if query.needle.is_empty() => ("Nothing here yet".to_string(), "Type to search, or a prefix: > : $ = @ #"),
+        _ => (format!("No matches for \"{}\"", query.needle), "Try fewer letters, or a prefix: > : $ = @ #"),
+    };
+    div()
+        .py(px(24.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(div().text_size(px(13.0)).text_color(c.text).child(title))
+        .child(div().text_size(px(12.0)).text_color(c.muted).child(hint))
 }
 
 /// Render text with highlighted spans
@@ -424,36 +386,30 @@ fn render_highlighted_text(
     normal_color: Hsla,
     highlight_color: Hsla,
 ) -> Div {
-    if highlights.is_empty() {
-        return div()
-            .flex()
-            .text_color(normal_color)
-            .text_size(px(13.0))
-            .child(text.to_string());
-    }
-
     let mut container = div()
         .flex()
         .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
         .text_size(px(13.0));
+
+    if highlights.is_empty() {
+        return container.text_color(normal_color).child(text.to_string());
+    }
 
     let chars: Vec<char> = text.chars().collect();
     let mut pos = 0;
 
     for &(start, end) in highlights {
         // Clamp to valid range
-        let start = start.min(chars.len());
+        let start = start.min(chars.len()).max(pos);
         let end = end.min(chars.len());
 
-        // Add text before highlight
         if pos < start {
             let segment: String = chars[pos..start].iter().collect();
-            container = container.child(
-                div().text_color(normal_color).child(segment)
-            );
+            container = container.child(div().text_color(normal_color).child(segment));
         }
 
-        // Add highlighted text
         if start < end {
             let segment: String = chars[start..end].iter().collect();
             container = container.child(
@@ -464,98 +420,190 @@ fn render_highlighted_text(
             );
         }
 
-        pos = end;
+        pos = end.max(pos);
     }
 
-    // Add remaining text after last highlight
     if pos < chars.len() {
         let segment: String = chars[pos..].iter().collect();
-        container = container.child(
-            div().text_color(normal_color).child(segment)
-        );
+        container = container.child(div().text_color(normal_color).child(segment));
     }
 
     container
 }
 
-fn render_search_item(
+fn render_row(
     item: &SearchItem,
     is_selected: bool,
     idx: usize,
-    text_primary: Hsla,
-    text_muted: Hsla,
-    selection_bg: Hsla,
-    selection_text: Hsla,
-    hover_bg: Hsla,
+    c: &Palette,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
-    let title = item.title.clone();
-    let subtitle = item.subtitle.clone();
-    let kind = item.kind;
-    let highlights = item.highlights.clone();
-
-    let bg_color = if is_selected { selection_bg } else { hsla(0.0, 0.0, 0.0, 0.0) };
-
-    // Icon based on result kind (use the centralized icon from SearchKind)
-    let icon = kind.icon();
+    let two_line = palette_row_has_second_line(item);
+    let tint = c.tint(item);
 
     // On an opaque selection row (VisiCalc inverse video), all text flips to
-    // the selection text color — the hardcoded cyan drowned in the block.
-    let title_color = if is_selected { selection_text } else { text_primary };
-    let icon_color = if is_selected { selection_text.opacity(0.7) } else { text_muted };
-    let sub_color = if is_selected { selection_text.opacity(0.7) } else { text_muted };
-    let highlight_color = if is_selected {
-        selection_text
+    // the selection text color.
+    let (title_color, dim, highlight) = if is_selected {
+        (c.selection_text, c.selection_text.opacity(0.75), c.selection_text)
     } else {
-        hsla(0.55, 0.8, 0.65, 1.0) // bright cyan for matched characters
+        (c.text, c.muted, c.accent)
+    };
+    let (icon_bg, icon_fg) = if is_selected {
+        (c.selection_text.opacity(0.15), c.selection_text)
+    } else {
+        (tint.opacity(0.15), tint)
     };
 
     let mut row = div()
         .id(ElementId::NamedInteger("palette-item".into(), idx as u64))
+        .h(px(if two_line { Spreadsheet::PALETTE_ROW2_H } else { Spreadsheet::PALETTE_ROW_H }))
         .flex()
         .items_center()
-        .justify_between()
-        .px_3()
-        .py(px(6.0))
+        .gap(px(10.0))
+        .px(px(14.0))
         .cursor_pointer()
-        .bg(bg_color)
+        .when(is_selected, |d| d.bg(c.selection_bg))
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
-            // Select this item and execute
             this.palette_selected = idx;
             this.palette_execute(window, cx);
         }))
+        // Kind icon in a tinted square
         .child(
             div()
+                .size(px(20.0))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap_2()
-                // Kind icon
-                .child(
-                    div()
-                        .text_color(icon_color)
-                        .text_size(px(12.0))
-                        .w(px(12.0))
-                        .child(icon)
-                )
-                // Title with highlighted matches
-                .child(
-                    render_highlighted_text(&title, &highlights, title_color, highlight_color)
-                )
-        );
+                .justify_center()
+                .rounded(px(5.0))
+                .bg(icon_bg)
+                .text_color(icon_fg)
+                .text_size(px(12.0))
+                .child(item.kind.icon())
+        )
+        // Title, and a second line for files, functions and settings
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(render_highlighted_text(&item.title, &item.highlights, title_color, highlight))
+                .when(two_line, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(dim)
+                            .truncate()
+                            .child(item.subtitle.clone().unwrap_or_default())
+                    )
+                })
+        )
+        .when_some(item.meta.clone(), |d, meta| {
+            d.child(div().flex_shrink_0().text_size(px(11.0)).text_color(dim).child(meta))
+        });
 
-    if !is_selected {
-        row = row.hover(move |s| s.bg(hover_bg));
+    // A command's shortcut, as key caps
+    if item.kind == SearchKind::Command {
+        if let Some(shortcut) = &item.subtitle {
+            let mut keys = div().flex().flex_shrink_0().gap(px(3.0));
+            for key in shortcut_keys(shortcut) {
+                keys = keys.child(keycap(key, c).when(is_selected, |d| {
+                    d.text_color(c.selection_text).border_color(c.selection_text.opacity(0.4))
+                }));
+            }
+            row = row.child(keys);
+        }
     }
 
-    // Subtitle (shortcut or description)
-    if let Some(sub) = subtitle {
-        row = row.child(
-            div()
-                .text_color(sub_color)
-                .text_size(px(12.0))
-                .child(sub)
-        );
+    if !is_selected {
+        let hover = c.hover;
+        row = row.hover(move |s| s.bg(hover));
     }
 
     row
+}
+
+/// What Enter (and Ctrl/Shift+Enter) will do to the selected row.
+fn footer_keys(item: &SearchItem) -> Vec<(&'static str, &'static str)> {
+    let mut keys = match &item.action {
+        _ if is_open_from_disk(item) => vec![("↵", "Browse")],
+        SearchAction::OpenFile(_) => vec![("↵", "Open")],
+        SearchAction::JumpToCell { .. } => vec![("↵", "Go"), ("Shift ↵", "Peek")],
+        SearchAction::JumpToNamedRange { .. } => vec![("↵", "Go")],
+        SearchAction::InsertFormula { .. } => vec![("↵", "Insert")],
+        SearchAction::OpenSetting { .. } => vec![("↵", "Open setting")],
+        SearchAction::ShowReferences { .. } | SearchAction::ShowPrecedents { .. } => vec![("↵", "Show")],
+        _ => vec![("↵", "Run")],
+    };
+    match (&item.action, &item.secondary_action) {
+        (SearchAction::OpenFile(_), Some(_)) => keys.push(("Ctrl ↵", "Copy path")),
+        (SearchAction::InsertFormula { .. }, Some(_)) => keys.push(("Ctrl ↵", "Show help")),
+        (_, Some(SearchAction::CopyToClipboard { .. })) => keys.push(("Ctrl ↵", "Copy reference")),
+        (_, Some(_)) => keys.push(("Ctrl ↵", "More")),
+        _ => {}
+    }
+    keys
+}
+
+fn render_footer(app: &Spreadsheet, c: &Palette) -> impl IntoElement {
+    let has_query = !app.palette_query.is_empty();
+    let mut keys: Vec<(&'static str, &'static str)> = if app.palette_previewing {
+        vec![("Esc", "Restore"), ("↵", "Keep")]
+    } else {
+        app.palette_results()
+            .get(app.palette_selected)
+            .map(footer_keys)
+            .unwrap_or_default()
+    };
+    if app.palette_scope.is_some() && !has_query {
+        keys.push(("Backspace", "All commands"));
+    }
+
+    let count = app.palette_total_results;
+    let count_text = if has_query || app.palette_scope.is_some() {
+        if count == 1 { "1 result".to_string() } else { format!("{count} results") }
+    } else {
+        String::new()
+    };
+
+    let mut left = div().flex().items_center().gap(px(14.0));
+    for (key, label) in keys {
+        left = left.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(keycap(key, c))
+                .child(label)
+        );
+    }
+
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(14.0))
+        .py(px(7.0))
+        .border_t_1()
+        .border_color(c.border)
+        .text_size(px(11.0))
+        .text_color(c.muted)
+        .child(left)
+        .child(div().child(count_text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shortcut_keys;
+
+    #[test]
+    fn shortcuts_split_into_key_caps() {
+        assert_eq!(shortcut_keys("Ctrl+Shift+L"), ["Ctrl", "Shift", "L"]);
+        assert_eq!(shortcut_keys("Ctrl++"), ["Ctrl", "+"]);
+        assert_eq!(shortcut_keys("Ctrl+-"), ["Ctrl", "-"]);
+        assert_eq!(shortcut_keys("Alt+="), ["Alt", "="]);
+        assert_eq!(shortcut_keys("F9"), ["F9"]);
+        assert_eq!(shortcut_keys("Ctrl+Shift+*"), ["Ctrl", "Shift", "*"]);
+    }
 }

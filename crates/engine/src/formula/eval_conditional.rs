@@ -8,6 +8,7 @@ use super::parser::{BoundExpr, Expr};
 
 /// Extracted range with sheet context.
 struct RangeRef {
+    empty: bool,
     sheet: SheetRef,
     start_row: usize,
     start_col: usize,
@@ -20,7 +21,7 @@ impl RangeRef {
     fn min_col(&self) -> usize { self.start_col.min(self.end_col) }
     fn max_row(&self) -> usize { self.start_row.max(self.end_row) }
     fn max_col(&self) -> usize { self.start_col.max(self.end_col) }
-    fn num_rows(&self) -> usize { self.max_row() - self.min_row() + 1 }
+    fn num_rows(&self) -> usize { if self.empty { 0 } else { self.max_row() - self.min_row() + 1 } }
     fn num_cols(&self) -> usize { self.max_col() - self.min_col() + 1 }
 }
 
@@ -29,8 +30,12 @@ fn extract_range<L: CellLookup>(
     expr: &BoundExpr, lookup: &L, arg_name: &str,
 ) -> Result<RangeRef, String> {
     match expr {
+        Expr::ReferenceError(error) => Err(error.clone()),
+        Expr::RefError => Err("#REF!".into()),
+        Expr::EmptyRange { columns } => Ok(RangeRef { empty: true, sheet: SheetRef::Current, start_row: 0, end_row: 0, start_col: 0, end_col: columns.saturating_sub(1) }),
         Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
             Ok(RangeRef {
+                empty: false,
                 sheet: sheet.clone(),
                 start_row: *start_row, start_col: *start_col,
                 end_row: *end_row, end_col: *end_col,
@@ -38,6 +43,7 @@ fn extract_range<L: CellLookup>(
         }
         Expr::CellRef { sheet, col, row, .. } => {
             Ok(RangeRef {
+                empty: false,
                 sheet: sheet.clone(),
                 start_row: *row, start_col: *col,
                 end_row: *row, end_col: *col,
@@ -47,12 +53,14 @@ fn extract_range<L: CellLookup>(
             match lookup.resolve_named_range(name) {
                 Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
                     Ok(RangeRef {
+                        empty: false,
                         sheet: SheetRef::Current,
                         start_row, start_col, end_row, end_col,
                     })
                 }
                 Some(NamedRangeResolution::Cell { row, col }) => {
                     Ok(RangeRef {
+                        empty: false,
                         sheet: SheetRef::Current,
                         start_row: row, start_col: col,
                         end_row: row, end_col: col,
@@ -130,12 +138,15 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 None
             };
+            if sum_range.as_ref().is_some_and(|r| r.empty) && !range.empty {
+                return Some(EvalResult::Error("#VALUE! Empty sum range for nonempty criteria range".into()));
+            }
 
             let mut sum = 0.0;
-            let (min_row, min_col, max_row, max_col) = (range.min_row(), range.min_col(), range.max_row(), range.max_col());
+            let (min_row, min_col) = (range.min_row(), range.min_col());
 
-            for row_offset in 0..=(max_row - min_row) {
-                for col_offset in 0..=(max_col - min_col) {
+            for row_offset in 0..range.num_rows() {
+                for col_offset in 0..range.num_cols() {
                     let r = min_row + row_offset;
                     let c = min_col + col_offset;
                     let cell_text = range_get_text(lookup, &range.sheet, r, c);
@@ -172,13 +183,16 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             } else {
                 None
             };
+            if avg_range.as_ref().is_some_and(|r| r.empty) && !range.empty {
+                return Some(EvalResult::Error("#VALUE! Empty average range for nonempty criteria range".into()));
+            }
 
             let mut sum = 0.0;
             let mut count = 0;
-            let (min_row, min_col, max_row, max_col) = (range.min_row(), range.min_col(), range.max_row(), range.max_col());
+            let (min_row, min_col) = (range.min_row(), range.min_col());
 
-            for row_offset in 0..=(max_row - min_row) {
-                for col_offset in 0..=(max_col - min_col) {
+            for row_offset in 0..range.num_rows() {
+                for col_offset in 0..range.num_cols() {
                     let r = min_row + row_offset;
                     let c = min_col + col_offset;
                     let cell_text = range_get_text(lookup, &range.sheet, r, c);
@@ -215,10 +229,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let criteria = evaluate(&args[1], lookup);
 
             let mut count = 0;
-            let (min_row, min_col, max_row, max_col) = (range.min_row(), range.min_col(), range.max_row(), range.max_col());
+            let (min_row, min_col) = (range.min_row(), range.min_col());
 
-            for r in min_row..=max_row {
-                for c in min_col..=max_col {
+            for r in min_row..min_row + range.num_rows() {
+                for c in min_col..min_col + range.num_cols() {
                     let cell_text = range_get_text(lookup, &range.sheet, r, c);
                     let cell_value = text_to_eval_result(&cell_text, false);
 
@@ -239,10 +253,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
 
             let mut count = 0;
-            let (min_row, min_col, max_row, max_col) = (range.min_row(), range.min_col(), range.max_row(), range.max_col());
+            let (min_row, min_col) = (range.min_row(), range.min_col());
 
-            for r in min_row..=max_row {
-                for c in min_col..=max_col {
+            for r in min_row..min_row + range.num_rows() {
+                for c in min_col..min_col + range.num_cols() {
                     if range_get_text(lookup, &range.sheet, r, c).is_empty() {
                         count += 1;
                     }
