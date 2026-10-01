@@ -327,6 +327,10 @@ actions!(palette, [
     PaletteExecute,
     PalettePreview,   // Shift+Enter - preview without closing
     PaletteCancel,    // Escape - cancel and restore
+    PalettePageUp,
+    PalettePageDown,
+    PaletteHome,
+    PaletteEnd,
 ]);
 
 // Alt accelerator actions (open Command Palette scoped to menu)
