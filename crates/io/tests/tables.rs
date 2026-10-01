@@ -191,3 +191,52 @@ fn table_catalog_remaps_sheet_ids_and_retains_column_allocators() {
         assert_eq!(loaded.tables().count(), 2);
     }
 }
+
+#[test]
+fn structured_formulas_survive_rename_save_reopen_and_recalculate() {
+    let mut wb = table_book();
+    let id = wb.table_by_name("Sales").unwrap().1.id;
+    wb.set_cell_value_tracked(0, 1, 1, "=[@[42]]*2");
+    let index = wb.add_sheet_named("Report").unwrap();
+    wb.set_cell_value_tracked(index, 0, 0, "=SUM(Sales[Column2])");
+    wb.rename_table_columns(id, &["Qty".into(), "Net [Amount]".into()])
+        .unwrap();
+    wb.rename_table(id, "Orders").unwrap();
+    assert_eq!(wb.sheet(index).unwrap().get_display(0, 0), "34");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("structured.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let json = json::export_workbook(&wb, &[], 0).unwrap();
+    for mut loaded in [
+        native::load_workbook(&path).unwrap(),
+        json::import_any(&json).unwrap().0,
+    ] {
+        assert_eq!(loaded.sheet(index).unwrap().get_display(0, 0), "34");
+        assert_eq!(
+            loaded.sheet(index).unwrap().get_raw(0, 0),
+            wb.sheet(index).unwrap().get_raw(0, 0)
+        );
+        loaded.set_cell_value_tracked(0, 1, 0, "25");
+        assert_eq!(loaded.sheet(index).unwrap().get_display(0, 0), "50");
+        let mut extent = loaded.table(id).unwrap().1.range;
+        extent.end_row = 5;
+        loaded.set_cell_value_tracked(0, 5, 1, "9");
+        loaded.resize_table(id, extent).unwrap();
+        assert_eq!(loaded.sheet(index).unwrap().get_display(0, 0), "59");
+    }
+}
+
+#[test]
+fn table_shape_is_part_of_semantic_fingerprint() {
+    let mut wb = table_book();
+    let id = wb.table_by_name("Sales").unwrap().1.id;
+    let before = native::compute_semantic_fingerprint(&wb);
+    assert!(before.starts_with("v3:"));
+    let mut extent = wb.table(id).unwrap().1.range;
+    extent.end_row += 1;
+    let resize = wb.resize_table(id, extent).unwrap();
+    assert_ne!(native::compute_semantic_fingerprint(&wb), before);
+    wb.apply_table_commit(&resize, true).unwrap();
+    assert_eq!(native::compute_semantic_fingerprint(&wb), before);
+    assert!(native::compute_semantic_fingerprint(&Workbook::new()).starts_with("v2:"));
+}

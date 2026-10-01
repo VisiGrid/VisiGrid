@@ -379,6 +379,27 @@ pub struct Sheet {
 }
 
 impl CellLookup for Sheet {
+    fn is_table_name(&self, name: &str) -> bool { self.tables().iter().any(|t| t.name.eq_ignore_ascii_case(name)) }
+    fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {
+        let target = match &reference.table {
+            Some(name) => self.tables().iter().find(|t| t.name.eq_ignore_ascii_case(name)),
+            None => cell.and_then(|(row,col)| self.table_at(row,col)),
+        };
+        match target {
+            Some(table) => {
+                use crate::formula::parser::Expr;
+                let mut resolved = crate::formula::structured::resolve_region(table, self.id, self.id, cell, reference);
+                // A standalone Sheet lookup has no cross-sheet ID registry.
+                match &mut resolved {
+                    Expr::CellRef { sheet, .. } | Expr::Range { sheet, .. } => *sheet = SheetRef::Current,
+                    _ => {}
+                }
+                resolved
+            }
+            None => crate::formula::parser::Expr::ReferenceError(if reference.table.is_some() { "#NAME? Unknown table" } else { "#VALUE! Structured reference requires a table context" }.into()),
+        }
+    }
+
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) {
         match sheet { SheetRef::Current => self.data_bounds(), _ => (0, 0) }
     }

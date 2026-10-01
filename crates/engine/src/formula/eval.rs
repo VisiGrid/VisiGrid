@@ -110,6 +110,12 @@ pub trait CellLookup {
         None
     }
 
+    fn is_table_name(&self, _name: &str) -> bool { false }
+
+    fn resolve_table_reference(&self, _reference: &super::structured::StructuredReference, _cell: Option<(usize, usize)>) -> BoundExpr {
+        Expr::ReferenceError("#NAME? Unknown table".into())
+    }
+
     /// Return diagnostic context info (for debugging recalc issues).
     /// Default implementation returns empty string.
     fn debug_context(&self) -> String {
@@ -218,6 +224,11 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
         (self.resolver)(name)
     }
 
+    fn is_table_name(&self, name: &str) -> bool { self.inner.is_table_name(name) }
+    fn resolve_table_reference(&self, reference: &super::structured::StructuredReference, cell: Option<(usize, usize)>) -> BoundExpr {
+        self.inner.resolve_table_reference(reference, cell)
+    }
+
     fn current_cell(&self) -> Option<(usize, usize)> {
         self.inner.current_cell()
     }
@@ -306,6 +317,11 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         self.inner.resolve_named_range(name)
+    }
+
+    fn is_table_name(&self, name: &str) -> bool { self.inner.is_table_name(name) }
+    fn resolve_table_reference(&self, reference: &super::structured::StructuredReference, cell: Option<(usize, usize)>) -> BoundExpr {
+        self.inner.resolve_table_reference(reference, cell)
     }
 
     fn current_cell(&self) -> Option<(usize, usize)> {
@@ -664,6 +680,9 @@ const MULTI_CELL: &str = "#VALUE! Expected a single value, got an array";
 
 pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
+        Expr::StructuredRef(_) => evaluate_table_reference(expr, lookup),
+        Expr::EmptyRange { columns } => EvalResult::Array(Array2D::new(0, *columns)),
+        Expr::ReferenceError(error) => EvalResult::Error(error.clone()),
         Expr::Empty => EvalResult::Empty,
         // Target deleted by a structural edit — stored in the formula text.
         Expr::RefError => EvalResult::Error("#REF!".to_string()),
@@ -696,6 +715,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
             EvalResult::Error("#VALUE! Array arithmetic not supported".to_string())
         }
         Expr::NamedRange(name) => {
+            if lookup.is_table_name(name) { return evaluate_table_reference(expr, lookup); }
             // Resolve the named range and evaluate
             match lookup.resolve_named_range(name) {
                 None => EvalResult::Error(format!("#NAME? '{}'", name)),
@@ -736,6 +756,21 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
             }
             scalar_binary(*op, left_result, right_result)
         }
+    }
+}
+
+/// A direct structured range is an array; function arguments instead resolve
+/// to reference descriptors so SUM, INDEX, COUNTIF, etc. keep range semantics.
+fn evaluate_table_reference<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
+    match super::structured::resolve(expr, lookup) {
+        Expr::Range { sheet, start_row, start_col, end_row, end_col, .. } => {
+            match range_array(lookup, &sheet, start_row, start_col, end_row, end_col) {
+                EvalResult::Array(a) => EvalResult::Array(a),
+                scalar => EvalResult::Array(Array2D::from_vec(vec![vec![scalar.to_value()]])),
+            }
+        }
+        Expr::EmptyRange { .. } => EvalResult::Error("#CALC! Empty table array".into()),
+        resolved => evaluate(&resolved, lookup),
     }
 }
 
@@ -1007,6 +1042,11 @@ fn eval_function_args<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<Eval
 fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
     // Keep open ranges in the stored AST. Only the arguments being consumed
     // are bounded, so nested/lazy functions still evaluate through this path.
+    let table_args;
+    let args = if args.iter().any(|arg| matches!(arg, Expr::StructuredRef(_)) || matches!(arg, Expr::NamedRange(n) if lookup.is_table_name(n))) {
+        table_args = args.iter().map(|arg| super::structured::resolve(arg, lookup)).collect::<Vec<_>>();
+        table_args.as_slice()
+    } else { args };
     let bounded;
     let args = if args.iter().any(|arg| matches!(arg, Expr::WholeRange { .. })) {
         bounded = args.iter().map(|arg| super::whole_range::bound_for_evaluation(arg, lookup)).collect::<Vec<_>>();

@@ -31,6 +31,8 @@ pub struct SemanticVerification {
 
 /// Fingerprint format version. Increment on breaking changes to fingerprint computation.
 /// v2: includes iteration settings (enabled, max_iters, tolerance).
+/// Table-bearing workbooks use v3, which also includes their semantic schema.
+/// Table-free workbooks retain v2 for existing verification stamps.
 const FINGERPRINT_VERSION: u32 = 2;
 
 /// Compute semantic fingerprint of a workbook.
@@ -82,9 +84,24 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         }
     }
 
+    // Table membership/column names affect structured formulas even when the
+    // newly included cells are blank. Keep ordinary workbook v2 fingerprints
+    // unchanged; Table-bearing semantics use a distinct fingerprint version.
+    let mut tables: Vec<_> = workbook.tables().collect();
+    tables.sort_by_key(|(_, t)| t.name.to_ascii_lowercase());
+    for (sheet_id, table) in &tables {
+        let schema = serde_json::to_vec(&(
+            workbook.sheet_index_by_id(*sheet_id), &table.name, table.range,
+            table.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        )).expect("table schema contains only finite coordinates and text");
+        hasher.update(b"table:");
+        hasher.update(&schema);
+        hasher.update(b"\n");
+    }
+    let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else { 3 };
     let hash = hasher.finalize();
     let hash_hex = &hash.to_hex()[0..16]; // First 16 hex chars (64 bits)
-    format!("v{}:{}:{}", FINGERPRINT_VERSION, op_count, hash_hex)
+    format!("v{}:{}:{}", fingerprint_version, op_count, hash_hex)
 }
 
 const SCHEMA: &str = r#"

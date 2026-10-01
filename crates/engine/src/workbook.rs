@@ -6,6 +6,8 @@ mod pivot_ops;
 pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot};
 #[path = "workbook_table.rs"]
 mod table_ops;
+#[path = "workbook_table_refs.rs"]
+mod table_refs;
 pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
@@ -323,6 +325,7 @@ impl Workbook {
             return false;
         }
 
+        if self.has_external_table_references(self.sheets[index].id) { return false; }
         self.sheets.remove(index);
         self.refresh_table_name_reservations();
 
@@ -342,6 +345,7 @@ impl Workbook {
         if self.sheets.len() <= 1 || index >= self.sheets.len() {
             return None;
         }
+        if self.has_external_table_references(self.sheets[index].id) { return None; }
         let sheet = self.sheets.remove(index);
         self.refresh_table_name_reservations();
         if self.active_sheet >= self.sheets.len() {
@@ -1020,9 +1024,14 @@ impl Workbook {
     /// instead of holding an edge per cell, which made a running total
     /// quadratic, and it no longer walks the sheet for each whole-column
     /// reference.
-    fn formula_dependencies(&self, bound: &crate::formula::parser::BoundExpr, sheet_id: SheetId)
+    fn formula_dependencies(&self, bound: &crate::formula::parser::BoundExpr, sheet_id: SheetId, row: usize, col: usize)
         -> (FxHashSet<CellId>, Vec<crate::dep_graph::RangeRef>)
     {
+        let resolved;
+        let bound = if self.tables().next().is_some() {
+            resolved = crate::formula::structured::resolve_tree(bound, &WorkbookLookup::with_cell_context(self, sheet_id, row, col));
+            &resolved
+        } else { bound };
         let (refs, mut ranges) = crate::formula::refs::extract_refs(bound, sheet_id, &self.named_ranges, |idx| self.sheet_id_at_idx(idx));
         ranges.extend(
             crate::formula::whole_range::extract_whole_ranges(bound, sheet_id)
@@ -1049,7 +1058,7 @@ impl Workbook {
                     let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
 
                     // Extract cell references
-                    let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
+                    let (refs, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
 
                     let formula_cell = CellId::new(sheet_id, row, col);
                     if !refs.is_empty() {
@@ -1082,7 +1091,7 @@ impl Workbook {
         if let Some(ast) = ast {
             // Bind and extract references
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
-            let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
+            let (refs, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
 
             Arc::make_mut(&mut self.dep_graph).replace_edges(cell_id, refs);
             Arc::make_mut(&mut self.dep_graph).set_ranges(cell_id, ranges);
@@ -2598,7 +2607,7 @@ impl Workbook {
         let bound = bind_expr(&parsed, |name| self.sheet_id_by_name(name));
 
         // Extract new precedents
-        let (mut new_preds, ranges) = self.formula_dependencies(&bound, sheet_id);
+        let (mut new_preds, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
         // The proposed formula may occupy a previously empty coordinate.
         if ranges.iter().any(|range| range.contains(cell_id)) {
@@ -2928,6 +2937,21 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
                 }
             }
         })
+    }
+
+    fn is_table_name(&self, name: &str) -> bool { self.workbook.table_by_name(name).is_some() }
+
+    fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {
+        use crate::formula::parser::Expr;
+        let target = match &reference.table {
+            Some(name) => self.workbook.table_by_name(name),
+            None => cell.and_then(|(row,col)| self.workbook.sheet_by_id(self.current_sheet_id)
+                .and_then(|s| s.table_at(row,col)).map(|t| (self.current_sheet_id,t))),
+        };
+        match target {
+            Some((sheet, table)) => crate::formula::structured::resolve_region(table, sheet, self.current_sheet_id, cell, reference),
+            None => Expr::ReferenceError(if reference.table.is_some() { "#NAME? Unknown table" } else { "#VALUE! Structured reference requires a table context" }.into()),
+        }
     }
 
     fn current_cell(&self) -> Option<(usize, usize)> {

@@ -1,6 +1,8 @@
-//! Workbook Table operations. A commit retains headers and schema only, never
-//! the body or a workbook snapshot. Public operations validate before writing.
+//! Workbook Table operations. A commit retains schema, headers and dependent
+//! formula changes, never a body or workbook snapshot. Public operations
+//! validate before writing.
 
+use super::table_refs::TableFormulaChange;
 use super::Workbook;
 use crate::cell::{CellValue, ValueRef};
 use crate::sheet::SheetId;
@@ -30,6 +32,8 @@ pub struct TableCommit {
     id: TableId,
     before: TableState,
     after: TableState,
+    formulas: Vec<TableFormulaChange>,
+    creation_references: Option<Vec<(crate::cell_id::CellId, String)>>,
 }
 
 impl TableCommit {
@@ -286,8 +290,8 @@ impl Workbook {
         Ok(commit)
     }
 
-    /// Remove metadata, preserving cells and explicit formatting. Structured
-    /// formula/style conversion will extend this operation in the next slice.
+    /// Convert to a range: remove metadata and rewrite dependent structured
+    /// formulas to absolute A1 references, preserving explicit formatting.
     pub fn remove_table(&mut self, id: TableId) -> Result<TableCommit, String> {
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
         let commit = self.table_commit(sheet_id, id, Some(old.clone()), None)?;
@@ -347,7 +351,17 @@ impl Workbook {
                 }
             }
         }
+        let creation_references = if before.is_none() {
+            after
+                .as_ref()
+                .map(|table| self.table_reference_sources(sheet_id, table))
+        } else {
+            None
+        };
+        let formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
         Ok(TableCommit {
+            creation_references,
+            formulas,
             sheet_id,
             id,
             before: TableState {
@@ -427,6 +441,46 @@ impl Workbook {
                 Some(commit.id),
             )?;
         }
+        for change in &commit.formulas {
+            let expected_source = if undo { &change.after } else { &change.before };
+            let formula_sheet = self
+                .sheet_by_id(change.cell.sheet)
+                .ok_or("Formula sheet no longer exists.")?;
+            if formula_sheet.get_raw(change.cell.row, change.cell.col) != *expected_source
+                || formula_sheet
+                    .table_header_at(change.cell.row, change.cell.col)
+                    .is_some()
+                || formula_sheet.is_pivot_owned(change.cell.row, change.cell.col)
+            {
+                return Err(
+                    "A dependent formula changed since the table operation was prepared.".into(),
+                );
+            }
+        }
+        // Refuse replay if newer formulas would also require a rewrite. Existing
+        // destructive rewrites (#REF!/A1 conversion) are restored from the commit.
+        if let Some(sources) = &commit.creation_references {
+            // Undo creation restores the originally unbound formulas, rather
+            // than converting them to A1. New references make that undo stale.
+            let table = commit.after.table.as_ref().unwrap();
+            if self.table_reference_sources(commit.sheet_id, table) != *sources {
+                return Err("Table references changed since creation.".into());
+            }
+        } else {
+            for change in self.table_formula_changes(
+                commit.sheet_id,
+                expected.table.as_ref(),
+                target.table.as_ref(),
+            )? {
+                if !commit
+                    .formulas
+                    .iter()
+                    .any(|saved| saved.cell == change.cell)
+                {
+                    return Err("New dependent formulas require a fresh table operation.".into());
+                }
+            }
+        }
         let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
         sheet.data_tables.retain(|t| t.id != commit.id);
         for cell in &target.headers {
@@ -451,10 +505,18 @@ impl Workbook {
         sheet.mark_table_changed();
         self.next_table_id = self.next_table_id.max(commit.id.0 + 1);
         self.refresh_table_name_reservations();
-        if !target.headers.is_empty() {
-            self.rebuild_dep_graph();
-            self.recompute_full_ordered();
+        for change in &commit.formulas {
+            let source = if undo { &change.before } else { &change.after };
+            self.sheet_by_id_mut(change.cell.sheet).unwrap().set_value(
+                change.cell.row,
+                change.cell.col,
+                source,
+            );
         }
+        // Membership changes affect symbolic shape dependencies even when no
+        // cell was written (including empty -> nonempty bodies).
+        self.rebuild_dep_graph();
+        self.recompute_full_ordered();
         self.bump_revision_for_structure();
         Ok(())
     }
