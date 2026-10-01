@@ -12,7 +12,9 @@
 use crate::app::Spreadsheet;
 use crate::cloud::identity::CloudSyncState;
 use crate::cloud::sheets_client::{conflict_revision, is_unauthorized, SheetsClient};
+use crate::cloud::grid;
 use crate::hub::client::{hash_bytes, HubError};
+use visigrid_hub_client::grid::{GridClient, GridError};
 
 /// How a finished upload attempt ended.
 enum UploadOutcome {
@@ -23,6 +25,11 @@ enum UploadOutcome {
     /// Failed. `reserved` is a revision the save request took on the server
     /// before the upload failed, so a retry can recognise it as ours.
     Failed { error: HubError, reserved: Option<i64> },
+    /// A file linked to an old Rails sheet was found in Grid.
+    /// Its Grid revision is unknown, so nothing was uploaded.
+    LinkedToGrid,
+    /// Grid no longer accepts this computer's sign-in.
+    GridSignedOut,
 }
 
 impl Spreadsheet {
@@ -150,7 +157,15 @@ impl Spreadsheet {
             let byte_size = file_bytes.len() as u64;
             let sheet_id = identity.sheet_id;
 
-            let outcome = smol::unblock(move || upload(sheet_id, file_bytes, byte_size, expected, reserved)).await;
+            // With a Grid sign-in, cloud sheets live in Grid; without one the
+            // Rails client keeps working until the freeze.
+            let to_grid = identity.grid_pid.is_some() || grid::signed_in();
+            let grid_link = (identity.grid_pid.clone(), identity.public_id.clone(), sheet_id);
+            let (linked, outcome) = if to_grid {
+                smol::unblock(move || upload_grid(grid_link, file_bytes, expected)).await
+            } else {
+                (None, smol::unblock(move || upload(sheet_id, file_bytes, byte_size, expected, reserved)).await)
+            };
 
             let _ = this.update(cx, |this, cx| {
                 this.cloud_upload_in_flight = false;
@@ -158,6 +173,18 @@ impl Spreadsheet {
                 // Another file was opened mid-upload; this result isn't about it.
                 if this.cloud_identity.as_ref().map(|id| id.sheet_id) != Some(sheet_id) {
                     return;
+                }
+
+                // An old Rails link now points at its Grid sheet. Persisted
+                // before the outcome so a failed save still remembers it.
+                if let Some(pid) = linked {
+                    if let Some(ref mut id) = this.cloud_identity {
+                        id.grid_pid = Some(pid);
+                        id.api_base = grid::configured_base().unwrap_or_else(|| id.api_base.clone());
+                        if let Err(e) = crate::cloud::save_cloud_identity(&path, id) {
+                            eprintln!("Warning: failed to persist cloud identity: {}", e);
+                        }
+                    }
                 }
 
                 match outcome {
@@ -190,6 +217,29 @@ impl Spreadsheet {
                                 .to_string(),
                         );
                         cx.notify();
+                        return;
+                    }
+                    UploadOutcome::LinkedToGrid => {
+                        if let Some(ref mut id) = this.cloud_identity {
+                            id.last_synced_revision = None;
+                            if let Err(e) = crate::cloud::save_cloud_identity(&path, id) {
+                                eprintln!("Warning: failed to persist cloud identity: {}", e);
+                            }
+                        }
+                        this.cloud_sync_state = CloudSyncState::Conflict;
+                        this.cloud_last_error = Some("Linked to Grid; Grid's copy may differ".to_string());
+                        this.status_message = Some(
+                            "This file's cloud sheet is now in Grid, and Grid's copy may have changed. Nothing was uploaded. \
+                             Run \"Cloud: Overwrite Cloud Copy\" to replace Grid's copy, or File > Open Cloud to take it (your copy is kept)."
+                                .to_string(),
+                        );
+                        cx.notify();
+                        return;
+                    }
+                    UploadOutcome::GridSignedOut => {
+                        this.cloud_sync_state = CloudSyncState::Error;
+                        this.cloud_last_error = Some("Signed out of Grid".to_string());
+                        this.grid_sign_in_expired(cx);
                         return;
                     }
                     UploadOutcome::Failed { error, reserved } => {
@@ -264,6 +314,59 @@ fn upload(
     match client.complete_save(sheet_id, &save_resp.blob_key, byte_size) {
         Ok(revision) => UploadOutcome::Synced(revision),
         Err(error) => UploadOutcome::Failed { error, reserved },
+    }
+}
+
+/// Save the document to Grid. A file still linked to its old Rails sheet is
+/// first found in Grid by that sheet's id; returns the pid when it was.
+fn upload_grid(
+    (grid_pid, public_id, sheet_id): (Option<String>, String, i64),
+    document: Vec<u8>,
+    expected: Option<i64>,
+) -> (Option<String>, UploadOutcome) {
+    let client = match GridClient::from_saved() {
+        Ok(c) => c,
+        Err(error) => return (None, grid_failure(error)),
+    };
+    let (pid, linked) = match grid_pid {
+        Some(pid) => (pid, None),
+        None => {
+            let identifier = if public_id.is_empty() { sheet_id.to_string() } else { public_id };
+            match client.resolve_legacy(&identifier) {
+                Ok(pid) => (pid.clone(), Some(pid)),
+                Err(GridError::Http(404, _)) => {
+                    let error = HubError::Http(404, "This file's cloud sheet is not in Grid".into());
+                    return (None, UploadOutcome::Failed { error, reserved: None });
+                }
+                Err(error) => return (None, grid_failure(error)),
+            }
+        }
+    };
+    // Just linked, and not an explicit overwrite: Grid's copy may have moved
+    // on since this file last synced with Rails. Ask before replacing it.
+    if linked.is_some() && expected.is_some() {
+        return (linked, UploadOutcome::LinkedToGrid);
+    }
+    let expected = match expected {
+        Some(revision) => revision,
+        // An explicit overwrite: replace whatever Grid holds now.
+        None => match client.get(&pid) {
+            Ok(sheet) => sheet.revision,
+            Err(error) => return (linked, grid_failure(error)),
+        },
+    };
+    let outcome = match client.save(&pid, expected, &document) {
+        Ok(saved) => UploadOutcome::Synced(saved.revision),
+        Err(GridError::Conflict) => UploadOutcome::Conflict { current_revision: None },
+        Err(error) => grid_failure(error),
+    };
+    (linked, outcome)
+}
+
+fn grid_failure(error: GridError) -> UploadOutcome {
+    match error {
+        GridError::SignedOut => UploadOutcome::GridSignedOut,
+        error => UploadOutcome::Failed { error: grid::hub_error(error), reserved: None },
     }
 }
 

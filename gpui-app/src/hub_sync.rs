@@ -894,6 +894,7 @@ impl Spreadsheet {
         }
 
         // Show paste token dialog as fallback
+        self.grid_sign_in_base = None;
         self.hub_token_input.clear();
         self.mode = crate::mode::Mode::HubPasteToken;
         self.status_message = Some("Opening browser... Paste token below if callback fails.".to_string());
@@ -906,6 +907,11 @@ impl Spreadsheet {
         if token.is_empty() {
             self.status_message = Some("Token cannot be empty".to_string());
             cx.notify();
+            return;
+        }
+        // The same dialog collects a Grid device code; that goes to grid-auth.json, never auth.json.
+        if let Some(base) = self.grid_sign_in_base.clone() {
+            self.grid_complete_sign_in(token, base, cx);
             return;
         }
 
@@ -974,6 +980,7 @@ impl Spreadsheet {
     pub fn hub_cancel_sign_in(&mut self, cx: &mut Context<Self>) {
         self.mode = crate::mode::Mode::Navigation;
         self.hub_token_input.clear();
+        self.grid_sign_in_base = None;
         self.status_message = None;
         cx.notify();
     }
