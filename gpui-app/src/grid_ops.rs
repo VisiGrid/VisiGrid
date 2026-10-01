@@ -242,6 +242,11 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        if self.wb(cx).tables().any(|(_,t)|t.columns.iter().any(|c|c.formula.is_some())) {
+            self.status_message = Some("Column insertion/deletion is not supported with calculated columns yet. Convert the Tables to ranges first.".into());
+            cx.notify(); return;
+        }
+
         self.set_repeat(RepeatAction::InsertCols(count));
         let sheet_index = self.sheet_index(cx);
         let print_setup_before = self.sheet(cx).print_setup.clone();
@@ -292,6 +297,11 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        if self.wb(cx).tables().any(|(_,t)|t.columns.iter().any(|c|c.formula.is_some())) {
+            self.status_message = Some("Column insertion/deletion is not supported with calculated columns yet. Convert the Tables to ranges first.".into());
+            cx.notify(); return;
+        }
+
         self.set_repeat(RepeatAction::DeleteCols(count));
         let sheet_index = self.sheet_index(cx);
         let print_setup_before = self.sheet(cx).print_setup.clone();

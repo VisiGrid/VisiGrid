@@ -16,6 +16,7 @@ pub(crate) enum TableDialogKind {
     Rename(TableId),
     Resize(TableId),
     Convert(TableId),
+    ColumnFormula(TableId, usize, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +95,50 @@ fn header_in_view_rect(
 }
 
 impl Spreadsheet {
+    pub(crate) fn commit_calculated_value(
+        &mut self,
+        view_row: usize,
+        col: usize,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let row = self.row_view.view_to_data(view_row);
+        let sheet = self.sheet(cx).id;
+        let result = self.workbook.update(cx, |wb, _| {
+            wb.try_calculated_column(sheet, row, col, source)
+        });
+        match result {
+            Ok(None) => None,
+            Ok(Some(commit)) => {
+                self.record_table_commit(commit, "Fill calculated column".into(), cx);
+                Some(true)
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                Some(false)
+            }
+        }
+    }
+
+    pub(crate) fn restore_column_formula(&mut self, id: TableId, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) || self.mode.is_editing() {
+            return;
+        }
+        let (row, col) = self.view_state.selected;
+        let row = self.row_view.view_to_data(row);
+        match self
+            .workbook
+            .update(cx, |wb, _| wb.restore_calculated_cell(id, row, col))
+        {
+            Ok(commit) => self.record_table_commit(commit, "Restore column formula".into(), cx),
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
     fn table_growth_blocked(&mut self, cx: &mut Context<Self>) -> bool {
         if self.block_if_previewing(cx) {
             return true;
@@ -138,7 +183,7 @@ impl Spreadsheet {
             return Some(false);
         }
         let result = self.workbook.update(cx, |wb, _| {
-            wb.append_table_rows(id, 1, &[(row, col, value.into())])
+            wb.append_table_rows_with_edit(id, 1, row, col, value)
         });
         Some(match result {
             Ok(commit) => {
@@ -166,9 +211,13 @@ impl Spreadsheet {
         writes: Vec<(usize, usize, String)>,
         cx: &mut Context<Self>,
     ) {
-        let result = self
-            .workbook
-            .update(cx, |wb, _| wb.append_table_rows(id, 1, &writes));
+        let result = self.workbook.update(cx, |wb, _| {
+            if let [(row, col, value)] = writes.as_slice() {
+                wb.append_table_rows_with_edit(id, 1, *row, *col, value)
+            } else {
+                wb.append_table_rows(id, 1, &writes)
+            }
+        });
         match result {
             Ok(commit) => {
                 let range = commit.after_table().unwrap().range;
@@ -401,7 +450,8 @@ impl Spreadsheet {
         let id = match kind {
             TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
-            | TableDialogKind::Convert(id) => id,
+            | TableDialogKind::Convert(id)
+            | TableDialogKind::ColumnFormula(id, _, _) => id,
             _ => return,
         };
         let Some((sheet, table)) = self.wb(cx).table(id) else {
@@ -410,8 +460,31 @@ impl Spreadsheet {
         self.table_dialog = Some(TableDialog {
             kind,
             sheet,
-            name: table.name.clone(),
-            range: range_label(table.range),
+            name: if let TableDialogKind::ColumnFormula(_, col, _) = kind {
+                let row = self.row_view.view_to_data(self.view_state.selected.0);
+                if table.columns[col - table.range.start_col].formula.is_some() {
+                    table.columns[col - table.range.start_col]
+                        .formula
+                        .clone()
+                        .unwrap()
+                } else {
+                    self.sheet(cx).get_raw(row, col)
+                }
+            } else {
+                table.name.clone()
+            },
+            range: if let TableDialogKind::ColumnFormula(_, col, _) = kind {
+                let column = &table.columns[col - table.range.start_col];
+                if column.formula.is_some() {
+                    (table.range.start_row + column.formula_origin).to_string()
+                } else {
+                    self.row_view
+                        .view_to_data(self.view_state.selected.0)
+                        .to_string()
+                }
+            } else {
+                range_label(table.range)
+            },
             field: usize::from(matches!(kind, TableDialogKind::Resize(_))),
             select_all: true,
             error: None,
@@ -435,6 +508,13 @@ impl Spreadsheet {
                 parse_range(&draft.range).and_then(|r| wb.resize_table(id, r))
             }
             TableDialogKind::Convert(id) => wb.remove_table(id),
+            TableDialogKind::ColumnFormula(id, col, replace) => {
+                let row = draft
+                    .range
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid formula origin.".to_string());
+                row.and_then(|row| wb.set_calculated_column(id, col, row, &draft.name, replace))
+            }
         });
         match result {
             Ok(commit) => {
@@ -443,6 +523,7 @@ impl Spreadsheet {
                     TableDialogKind::Rename(_) => "Rename Table",
                     TableDialogKind::Resize(_) => "Resize Table",
                     TableDialogKind::Convert(_) => "Convert Table to range",
+                    TableDialogKind::ColumnFormula(_, _, _) => "Set column formula",
                 };
                 self.record_table_commit(commit, format!("{verb}: {}", draft.name.trim()), cx);
                 self.table_dialog = None;

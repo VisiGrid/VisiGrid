@@ -2,6 +2,9 @@
 //! formula changes, never a body or workbook snapshot. Public operations
 //! validate before writing.
 
+#[path = "workbook_calculated.rs"]
+mod calculated;
+
 use super::table_refs::TableFormulaChange;
 use super::Workbook;
 use crate::cell::{CellValue, ValueRef};
@@ -36,6 +39,7 @@ pub struct TableCommit {
     creation_references: Option<Vec<(crate::cell_id::CellId, String)>>,
     cells: Vec<(HeaderCell, HeaderCell)>,
     append_region: Option<TableRange>,
+    rules: Vec<calculated::RuleChange>,
 }
 
 impl TableCommit {
@@ -67,6 +71,7 @@ pub struct TableRowHistory {
     delete: bool,
     before: Vec<DataTable>,
     after: Vec<DataTable>,
+    rules: Vec<calculated::RuleChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +109,14 @@ impl Workbook {
             delete,
         )?;
         let sheet = &self.sheets[sheet_index];
-        if sheet.tables().is_empty() {
+        let rules = self.structural_rule_changes(
+            sheet_index,
+            crate::structural::Axis::Row,
+            at,
+            count,
+            delete,
+        );
+        if sheet.tables().is_empty() && rules.is_empty() {
             return Ok(None);
         }
         let before = sheet.tables().to_vec();
@@ -120,8 +132,23 @@ impl Workbook {
             .ok_or("Cannot delete a Table header. Convert to a range first.")?;
             table.range.start_row = start;
             table.range.end_row = end;
+            for change in rules.iter().filter(|r| r.table == table.id) {
+                table
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.id == change.column)
+                    .unwrap()
+                    .formula = Some(change.after.clone());
+                table
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.id == change.column)
+                    .unwrap()
+                    .formula_origin = change.after_origin;
+            }
         }
         Ok(Some(TableRowHistory {
+            rules,
             sheet: sheet.id,
             at,
             count,
@@ -152,6 +179,7 @@ impl Workbook {
         {
             return Err("Tables changed since the row operation was prepared.".into());
         }
+        self.validate_rule_changes(&history.rules, undo)?;
         self.validate_structural_edit(
             index,
             crate::structural::Axis::Row,
@@ -168,26 +196,34 @@ impl Workbook {
     ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
         self.validate_table_row_history(history, undo)?;
         let index = self.sheet_index_by_id(history.sheet).unwrap();
-        let rewrites = self.structural_edit(
+        let rewrites = self.structural_edit_with_rules(
             index,
             crate::structural::Axis::Row,
             history.at,
             history.count,
             history.delete != undo,
+            !undo,
         )?;
+        self.apply_rule_changes(&history.rules, undo);
         let target = if undo {
             &history.before
         } else {
             &history.after
         };
-        // Only bounds change. Preserve allocator high-water marks and all IDs.
+        // Restore exact bounds and rules, preserving allocator high-water marks and IDs.
         let mut corrected = false;
         for table in &mut self.sheets[index].data_tables {
             let range = target.iter().find(|t| t.id == table.id).unwrap().range;
             corrected |= table.range != range;
             table.range = range;
+            table.columns = target
+                .iter()
+                .find(|t| t.id == table.id)
+                .unwrap()
+                .columns
+                .clone();
         }
-        if corrected {
+        if corrected || !history.rules.is_empty() {
             self.rebuild_dep_graph();
             self.recompute_full_ordered();
         }
@@ -320,6 +356,8 @@ impl Workbook {
             .into_iter()
             .enumerate()
             .map(|(i, name)| TableColumn {
+                formula: None,
+                formula_origin: 1,
                 id: TableColumnId(i as u64 + 1),
                 name,
             })
@@ -403,6 +441,8 @@ impl Workbook {
                 let col_id = new.next_column_id;
                 new.next_column_id = col_id.checked_add(1).ok_or("Column IDs exhausted.")?;
                 new.columns.push(TableColumn {
+                    formula: None,
+                    formula_origin: 1,
                     id: TableColumnId(col_id),
                     name,
                 });
@@ -450,6 +490,27 @@ impl Workbook {
         count: usize,
         writes: &[(usize, usize, String)],
     ) -> Result<TableCommit, String> {
+        self.append_table_rows_impl(id, count, writes, false)
+    }
+
+    pub fn append_table_rows_with_edit(
+        &mut self,
+        id: TableId,
+        count: usize,
+        row: usize,
+        col: usize,
+        value: &str,
+    ) -> Result<TableCommit, String> {
+        self.append_table_rows_impl(id, count, &[(row, col, value.into())], true)
+    }
+
+    fn append_table_rows_impl(
+        &mut self,
+        id: TableId,
+        count: usize,
+        writes: &[(usize, usize, String)],
+        infer_rule: bool,
+    ) -> Result<TableCommit, String> {
         if count == 0 {
             return Err("Append at least one row.".into());
         }
@@ -466,8 +527,29 @@ impl Workbook {
             ..new.range
         };
         self.validate_empty_table_append(sheet_id, region)?;
-        let mut seen = HashSet::new();
+        let mut inferred = None;
         let sheet = self.sheet_by_id(sheet_id).unwrap();
+        if infer_rule && writes.len() == 1 {
+            let (row, col, source) = &writes[0];
+            if new.range.contains(*row, *col)
+                && *row > new.range.start_row
+                && source.starts_with('=')
+                && new.columns[*col - new.range.start_col].formula.is_none()
+                && (old.range.start_row + 1..=old.range.end_row)
+                    .all(|r| r == *row || sheet.get_raw(r, *col).is_empty())
+            {
+                crate::formula::parser::parse(source)
+                    .map_err(|e| format!("Invalid column formula: {e}"))?;
+                new.columns[*col - new.range.start_col].formula = Some(source.clone());
+                new.columns[*col - new.range.start_col].formula_origin = *row - new.range.start_row;
+                inferred = Some(*col);
+            }
+        }
+        if inferred.is_some() {
+            let (row, col, source) = &writes[0];
+            self.validate_calculated_formula(sheet_id, *row, *col, source)?;
+        }
+        let mut seen = HashSet::new();
         let mut cells = Vec::with_capacity(writes.len());
         for (row, col, text) in writes {
             if *row <= old.range.start_row
@@ -488,6 +570,33 @@ impl Workbook {
                     value: CellValue::from_input(text),
                 },
             ));
+        }
+        let fill_start = if inferred.is_some() {
+            new.range.start_row + 1
+        } else {
+            region.start_row
+        };
+        for row in fill_start..=new.range.end_row {
+            for col in region.start_col..=region.end_col {
+                if (row >= region.start_row || inferred == Some(col)) && !seen.contains(&(row, col))
+                {
+                    if let Some(formula) = new.formula_at(row, col) {
+                        self.validate_calculated_formula(sheet_id, row, col, &formula)?;
+                        cells.push((
+                            HeaderCell {
+                                row,
+                                col,
+                                value: sheet.get_cell(row, col).value,
+                            },
+                            HeaderCell {
+                                row,
+                                col,
+                                value: CellValue::from_input(&formula),
+                            },
+                        ));
+                    }
+                }
+            }
         }
         let mut commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
         commit.cells = cells;
@@ -541,7 +650,7 @@ impl Workbook {
         sheet_id: SheetId,
         id: TableId,
         before: Option<DataTable>,
-        after: Option<DataTable>,
+        mut after: Option<DataTable>,
     ) -> Result<TableCommit, String> {
         let sheet = self
             .sheet_by_id(sheet_id)
@@ -596,7 +705,19 @@ impl Workbook {
             None
         };
         let formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
+        let rules = self.schema_rule_changes(sheet_id, before.as_ref(), after.as_ref())?;
+        // The operation's own rule changes are part of its primary schema state.
+        if let Some(table) = &mut after {
+            for change in rules.iter().filter(|r| r.table == id) {
+                if let Some(column) = table.columns.iter_mut().find(|c| c.id == change.column) {
+                    column.formula = Some(change.after.clone());
+                    column.formula_origin = change.after_origin;
+                }
+            }
+        }
+        let rules = rules.into_iter().filter(|r| r.table != id).collect();
         Ok(TableCommit {
+            rules,
             cells: Vec::new(),
             append_region: None,
             creation_references,
@@ -753,6 +874,21 @@ impl Workbook {
                 }
             }
         }
+        self.validate_rule_changes(&commit.rules, undo)?;
+        let fresh_rules = self.schema_rule_changes(
+            commit.sheet_id,
+            expected.table.as_ref(),
+            target.table.as_ref(),
+        )?;
+        if fresh_rules.iter().any(|r| {
+            r.table != commit.id
+                && !commit
+                    .rules
+                    .iter()
+                    .any(|saved| saved.table == r.table && saved.column == r.column)
+        }) {
+            return Err("New calculated-column references require a fresh Table operation.".into());
+        }
         let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
         sheet.data_tables.retain(|t| t.id != commit.id);
         for cell in &target.headers {
@@ -791,6 +927,7 @@ impl Workbook {
                 .unwrap()
                 .write_table_header(cell.row, cell.col, cell.value.clone());
         }
+        self.apply_rule_changes(&commit.rules, undo);
         // Membership changes affect symbolic shape dependencies even when no
         // cell was written (including empty -> nonempty bodies).
         self.rebuild_dep_graph();
@@ -805,7 +942,14 @@ impl Workbook {
 
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
-            version: 1,
+            version: if self
+                .tables()
+                .any(|(_, t)| t.columns.iter().any(|c| c.formula.is_some()))
+            {
+                2
+            } else {
+                1
+            },
             next_table_id: self.next_table_id,
             sheets: self
                 .sheets
@@ -824,7 +968,7 @@ impl Workbook {
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
     /// before recalculation. Reject corrupt metadata, never discard silently.
     pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
-        if saved.version != 1 || saved.next_table_id == 0 {
+        if ![1, 2].contains(&saved.version) || saved.next_table_id == 0 {
             return Err("Unsupported or invalid Tables metadata version/allocator.".into());
         }
         let mut names = HashSet::new();
@@ -846,6 +990,9 @@ impl Workbook {
             }
             for (i, table) in entry.tables.iter().enumerate() {
                 table.validate(sheet.rows, sheet.cols)?;
+                if saved.version == 1 && table.columns.iter().any(|c| c.formula.is_some()) {
+                    return Err("Calculated columns require Tables metadata version 2.".into());
+                }
                 if table.id.0 >= saved.next_table_id
                     || !ids.insert(table.id)
                     || !names.insert(table.name.to_lowercase())

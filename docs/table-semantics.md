@@ -1,6 +1,6 @@
-# Tables: engine, structured references, desktop authoring, and row growth
+# Tables: engine, structured references, desktop authoring, row growth, and calculated columns
 
-Status: desktop authoring and safe row growth implementation, 2026-10-01. This is the staged implementation contract, not a declaration that the complete Tables release is ready. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
+Status: desktop authoring, safe row growth, and calculated columns implementation, 2026-10-01. This is the staged implementation contract, not a declaration that the complete Tables release is ready. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
 
 ## Model
 
@@ -34,9 +34,27 @@ Desktop entry points:
 - Tab from the last body cell appends one empty row and selects its first column. An in-progress edit in that last cell joins the append commit. A header-only Table uses the **Add row** control; that control is also available for nonempty Tables.
 - Clearing cell values retains membership. Appending and structural row edits refuse active sorting/filtering until cleared.
 
-Normal paste, Paste Values and Paste Formulas share append preflight. An internal normal paste carrying merges/comments (or replacing destination comments) refuses growth with guidance to use Paste Values or resize first; it never silently drops those objects. Calculated-column propagation is not yet implemented, so added rows have only the supplied values/formulas.
+Normal paste, Paste Values and Paste Formulas share append preflight. An internal normal paste carrying merges/comments (or replacing destination comments) refuses growth with guidance to use Paste Values or resize first; it never silently drops those objects. Omitted cells in calculated columns receive their rule; supplied values/formulas, including explicit blank cells, take priority.
 
 Undo/redo checks both schema and typed values owned by the append commit. Redo refuses newly occupied space; undo refuses edits to appended cells or new data/comments in previously untouched appended cells. Rewind replays append and whole-row history through the same engine operations. Grouped arbitrary structural mutations are not exposed as a new API in this slice.
+
+## Calculated columns
+
+A column may own a formula rule plus its authored row offset. The origin is retained rather than rebasing the stored formula to the first record, which could lose relative references above row 1. Formulas are materialized in the ordinary cell store; existing relative/absolute A1 translation applies, and structured tokens stay symbolic. Import, creation and bulk setters never infer a rule.
+
+- Direct formula entry in an otherwise empty body column creates its rule and fills all records as one guarded Table commit. Tab with a last-cell edit and typing an appended record can establish the rule within the same append commit.
+- In an already populated column, direct entry changes only that cell. Selecting a formula offers **Use formula for entire column** with a preview of the existing values/formulas it will replace.
+- In an established column, individual cell edits are overrides. A small amber corner and the contextual **Override** label identify them. **Restore column formula** restores the selected cell in one undoable operation.
+- **Edit column formula** updates cells that follow the rule and preserves overrides. **Replace entire column** is separate and previews the overwrite before applying. All these operations support undo/redo and rewind.
+- New records from Add row, Tab, typing, append paste or whole-row insertion receive the rule. Explicit paste writes take priority; explicit blank cells stay blank, while omitted trailing cells receive formulas. Clearing a formula does not remove the rule.
+
+Exception state is derived from authoritative cell contents, rather than duplicated in a mutable exception registry. A cell is an exception when its value/formula differs from the projected rule; an empty cell is an exception. Equivalent parsed formulas (including the same formula pasted back) follow the rule again. This deliberate implementation choice makes existing clear/paste/fill, history and persistence paths consistent and avoids stale override flags. It does not retain provenance for an explicit override that is identical to the rule.
+
+Rules follow Table/column renames, conversion, removed-column references and whole-row history, including external rules referring to an edited sheet. Deleting all records retains the rule for future rows. Desktop worksheet-column insertion/deletion is refused while any calculated rule exists until column undo captures those rule changes; converting Tables to ranges is the available escape hatch.
+
+Rule creation rejects malformed formulas and formulas that evaluate to arrays at preflight. Later inputs can still make a formula return an array; the existing Table spill barrier reports `#SPILL!` without writing outside the cell. Cycles retain the engine's existing behavior. Schema/rule commits check the cells they will overwrite before replay, so stale undo cannot silently erase later overrides.
+
+Native/JSON catalogs containing rules use Tables metadata version 2, which the previous Table reader rejects. Version 1 remains valid for workbooks without rules. Formula source/origin are persisted and included in semantic fingerprints, even for header-only Tables; overridden cell values remain ordinary persisted cells. The broader minimum-native-reader release gate still applies.
 
 ## Structured formulas
 
@@ -83,11 +101,11 @@ Native semantic fingerprints use v3 for Table-bearing workbooks, including Table
 - Creation, rename, resize, banding, conversion, and header edits use sparse `TableCommit` history entries. Rewind can replay them and locate their Table range. Stale top-level undo/redo reports an error and retains its history position.
 - Worksheet sort/AutoFilter refuses Table-bearing sheets pending Table-aware views. Merge refuses Table cells before clearing any values. Desktop Excel export refuses Tables until the user converts them to ranges or saves in `.sheet` format; XLSX Table interchange is still unimplemented.
 
-Calculated-column propagation, Table-backed pivot sources, headerless creation, multi-header paste, and Table-local filters remain outside this slice.
+Table-backed pivot sources, headerless creation, multi-header paste, and Table-local filters remain outside this slice.
 
 ## Next slices
 
-1. Calculated-column rules and visible exceptions, followed by headerless creation and remaining column structural history.
+1. Headerless creation and remaining column structural history.
 2. Multi-header schema paste and remaining formula editing/interchange integrations.
 3. Table-backed pivot sources with stable field IDs, explicit refresh, and stale-state feedback.
 4. XLSX interoperability subset, required-feature file compatibility, web/cloud preservation, and export-loss messaging.
@@ -110,3 +128,5 @@ Verified 2026-10-01: 1,279 tests passed, zero failed, 24 existing tests ignored 
 Desktop validation, 2026-10-01: `cargo test -p visigrid-gpui --bin visigrid` passed 577 tests, zero failures, three existing ignores; `cargo build -p visigrid-gpui --bin visigrid` passed. New tests cover dialog ranges, canonical-row header preflight, schema/formula/style history replay and stale refusal, and structured-selector editor recognition. Linux live checks cover creation preview, controls and pointer geometry, Table/header rename, direct structured formula entry, header rename undo/redo, resize, banding undo, atomic clear refusal, conversion confirmation/cancellation A1 conversion undo, and native save/reopen preserving the Table and structured formula. macOS/Windows UI and XLSX interchange remain untested.
 
 Row growth validation, 2026-10-01: the full engine/IO/session-host run passed 1,287 tests (24 existing ignores), and the additional native/JSON append round-trip test passed. The final desktop suite passed 578 tests (3 existing ignores); the launchable build passed. Eight new engine regressions cover explicit intent, 1,000-row paste with blank records, collisions/stale replay, one-revision append, header-only membership, grid bounds and structural row history. Desktop rewind covers append and whole-row insertion/deletion. Linux live checks confirmed typing growth with undo/redo, Tab with and without an in-progress edit, Add row including header-only Tables, overlapping rectangular paste with one-step undo, deleting all body rows with undo/redo, and occupied-row refusal with unchanged bounds/data. The temporary QA workbook was saved. macOS/Windows UI remain untested.
+
+Calculated-column validation, 2026-10-01: the engine/IO/session-host suite passed 1,301 tests (24 existing ignores), and the desktop suite passed 579 tests (3 existing ignores), with zero failures. The launchable desktop build passed. Twelve engine regressions in `crates/engine/tests/calculated_columns.rs` cover automatic fill, populated-column opt-in, overrides, explicit blanks versus omitted cells, append/Tab commits, authored A1 origins, schema changes, structural history and guarded replay. Native/JSON round trips preserve rules and overrides; desktop rewind preserves cleared overrides across rule changes. Linux live checks confirmed automatic fill with one-step undo/redo, visible overrides, Add row filling, editing the rule while preserving an override, and Restore column formula. The temporary workbook was saved. macOS/Windows UI and XLSX Table interchange remain untested.

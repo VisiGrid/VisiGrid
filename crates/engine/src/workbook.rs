@@ -2248,6 +2248,10 @@ impl Workbook {
         count: usize,
         delete: bool,
     ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        self.structural_edit_with_rules(sheet_index, axis, at, count, delete, true)
+    }
+
+    fn structural_edit_with_rules(&mut self, sheet_index: usize, axis: crate::structural::Axis, at: usize, count: usize, delete: bool, fill_rules: bool) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
         use crate::structural::{adjust_formula_text, Axis, StructuralEdit};
 
         let is_row = axis == Axis::Row;
@@ -2259,6 +2263,7 @@ impl Workbook {
             .clone();
 
         self.validate_structural_edit(sheet_index, axis, at, count, delete)?;
+        let rule_changes = self.structural_rule_changes(sheet_index, axis, at, count, delete);
 
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
@@ -2320,6 +2325,8 @@ impl Workbook {
             self.sheets[idx].set_value(row, col, &new_raw);
         }
 
+        self.apply_rule_changes(&rule_changes, false);
+        if fill_rules && is_row && !delete { self.fill_inserted_calculated_rows(sheet_index, at, count); }
         self.rebuild_dep_graph();
         self.recompute_full_ordered();
         self.increment_revision();

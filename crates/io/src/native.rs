@@ -98,6 +98,15 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         hasher.update(&schema);
         hasher.update(b"\n");
     }
+    for (_, table) in &tables {
+        for column in &table.columns {
+            if let Some(formula) = &column.formula {
+                hasher.update(b"calculated-column:");
+                hasher.update(&serde_json::to_vec(&(&table.name, &column.name, formula, column.formula_origin)).unwrap());
+                hasher.update(b"\n");
+            }
+        }
+    }
     let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else { 3 };
     let hash = hasher.finalize();
     let hash_hex = &hash.to_hex()[0..16]; // First 16 hex chars (64 bits)

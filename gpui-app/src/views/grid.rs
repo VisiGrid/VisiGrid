@@ -689,6 +689,11 @@ fn render_cell(
         }
     }
 
+    if display_sheet.is_calculated_exception(display_data_row, col) {
+        cell = cell.child(div().absolute().bottom_0().right_0().w(px(5.0)).h(px(5.0))
+            .bg(app.token(TokenKey::Warn).opacity(0.8)));
+    }
+
     if app.sheet(cx).comment(data_row, col).is_some() {
         cell = cell.child(crate::comments::indicator(data_row, col, cx));
     }

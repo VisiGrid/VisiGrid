@@ -88,97 +88,109 @@ impl Workbook {
                 else {
                     continue;
                 };
-                let mut replacements = Vec::new();
-                for (start, end, reference) in structured::source_references(source) {
-                    if !self.reference_targets_table(
-                        &reference,
-                        sheet.id,
-                        row,
-                        col,
-                        owner_sheet,
-                        before,
-                    ) {
-                        continue;
-                    }
-                    let replacement = if let Some(after) = after {
-                        let mut rewritten = reference.clone();
-                        if let Some((a, b)) = &reference.columns {
-                            let mut renamed = Vec::new();
-                            let mut removed = false;
-                            for name in [a, b] {
-                                if let Some(old) = before.column_by_name(name) {
-                                    if let Some(new) = after.columns.iter().find(|c| c.id == old.id)
-                                    {
-                                        renamed.push(if old.name == new.name {
-                                            name.clone()
-                                        } else {
-                                            new.name.clone()
-                                        });
-                                    } else {
-                                        removed = true;
-                                        break;
-                                    }
-                                } else {
-                                    renamed.push(name.clone());
-                                }
-                            }
-                            if removed {
-                                replacements.push((start, end, "#REF!".into()));
-                                continue;
-                            }
-                            rewritten.columns = Some((renamed[0].clone(), renamed[1].clone()));
-                        }
-                        if reference.table.is_some() && before.name != after.name {
-                            rewritten.table = Some(after.name.clone());
-                        }
-                        // A released row must not silently adopt another table's
-                        // local context when that rectangle is reused later.
-                        if reference.table.is_none() && !after.range.contains(row, col) {
-                            rewritten.table = Some(after.name.clone());
-                        }
-                        if rewritten == reference {
-                            continue;
-                        }
-                        if !source[start..end].contains('[') {
-                            after.name.clone()
-                        } else {
-                            rewritten.format()
-                        }
-                    } else {
-                        // Convert to Range preserves formulas as absolute A1 refs.
-                        // An empty body has no lossless A1 representation.
-                        let resolved = structured::resolve_region(
-                            before,
-                            owner_sheet,
-                            sheet.id,
-                            Some((row, col)),
-                            &reference,
-                        );
-                        match resolved {
-                            Expr::Range { .. } | Expr::CellRef { .. } => format_expr(&resolved, |id| self.sheet_by_id(id).map(|s| s.name.clone()))[1..].to_string(),
-                            Expr::EmptyRange { .. } => return Err("Cannot convert a referenced empty table to a range; it has no A1 representation.".into()),
-                            _ => return Err("Cannot convert this table while it has unresolved structured references.".into()),
-                        }
-                    };
-                    replacements.push((start, end, replacement));
-                }
-                if !replacements.is_empty() {
-                    let mut rewritten = source.to_string();
-                    for (start, end, replacement) in replacements.into_iter().rev() {
-                        rewritten.replace_range(start..end, &replacement);
-                    }
-                    if rewritten != source {
-                        changes.push(TableFormulaChange {
-                            cell: CellId::new(sheet.id, row, col),
-                            before: source.to_string(),
-                            after: rewritten,
-                        });
-                    }
+                let rewritten = self.rewrite_table_formula_source(
+                    owner_sheet,
+                    before,
+                    after,
+                    sheet.id,
+                    row,
+                    col,
+                    source,
+                )?;
+                if rewritten != source {
+                    changes.push(TableFormulaChange {
+                        cell: CellId::new(sheet.id, row, col),
+                        before: source.to_string(),
+                        after: rewritten,
+                    });
                 }
             }
         }
         changes.sort_by_key(|c| (c.cell.sheet.0, c.cell.row, c.cell.col));
         Ok(changes)
+    }
+
+    pub(crate) fn rewrite_table_formula_source(
+        &self,
+        owner_sheet: SheetId,
+        before: &DataTable,
+        after: Option<&DataTable>,
+        sheet: SheetId,
+        row: usize,
+        col: usize,
+        source: &str,
+    ) -> Result<String, String> {
+        let mut replacements = Vec::new();
+        for (start, end, reference) in structured::source_references(source) {
+            if !self.reference_targets_table(&reference, sheet, row, col, owner_sheet, before) {
+                continue;
+            }
+            let replacement = if let Some(after) = after {
+                let mut rewritten = reference.clone();
+                if let Some((a, b)) = &reference.columns {
+                    let mut renamed = Vec::new();
+                    let mut removed = false;
+                    for name in [a, b] {
+                        if let Some(old) = before.column_by_name(name) {
+                            if let Some(new) = after.columns.iter().find(|c| c.id == old.id) {
+                                renamed.push(if old.name == new.name {
+                                    name.clone()
+                                } else {
+                                    new.name.clone()
+                                });
+                            } else {
+                                removed = true;
+                                break;
+                            }
+                        } else {
+                            renamed.push(name.clone());
+                        }
+                    }
+                    if removed {
+                        replacements.push((start, end, "#REF!".into()));
+                        continue;
+                    }
+                    rewritten.columns = Some((renamed[0].clone(), renamed[1].clone()));
+                }
+                if reference.table.is_some() && before.name != after.name {
+                    rewritten.table = Some(after.name.clone());
+                }
+                // A released row must not silently adopt another table's
+                // local context when that rectangle is reused later.
+                if reference.table.is_none() && !after.range.contains(row, col) {
+                    rewritten.table = Some(after.name.clone());
+                }
+                if rewritten == reference {
+                    continue;
+                }
+                if !source[start..end].contains('[') {
+                    after.name.clone()
+                } else {
+                    rewritten.format()
+                }
+            } else {
+                // Convert to Range preserves formulas as absolute A1 refs.
+                // An empty body has no lossless A1 representation.
+                let resolved = structured::resolve_region(
+                    before,
+                    owner_sheet,
+                    sheet,
+                    Some((row, col)),
+                    &reference,
+                );
+                match resolved {
+                            Expr::Range { .. } | Expr::CellRef { .. } => format_expr(&resolved, |id| self.sheet_by_id(id).map(|s| s.name.clone()))[1..].to_string(),
+                            Expr::EmptyRange { .. } => return Err("Cannot convert a referenced empty table to a range; it has no A1 representation.".into()),
+                            _ => return Err("Cannot convert this table while it has unresolved structured references.".into()),
+                        }
+            };
+            replacements.push((start, end, replacement));
+        }
+        let mut rewritten = source.to_string();
+        for (start, end, replacement) in replacements.into_iter().rev() {
+            rewritten.replace_range(start..end, &replacement);
+        }
+        Ok(rewritten)
     }
 
     /// Sheet history does not yet capture cross-sheet Table-reference rewrites.
@@ -195,7 +207,22 @@ impl Workbook {
             .iter()
             .filter(|s| s.id != sheet_id)
             .any(|sheet| {
-                sheet.cells_iter().any(|((row, col), cell)| {
+                sheet.tables().iter().any(|t| {
+                    t.columns.iter().any(|c| {
+                        c.formula.as_ref().is_some_and(|source| {
+                            structured::source_references(source)
+                                .iter()
+                                .any(|(_, _, r)| {
+                                    r.table.as_ref().is_some_and(|name| {
+                                        owner
+                                            .tables()
+                                            .iter()
+                                            .any(|owned| owned.name.eq_ignore_ascii_case(name))
+                                    })
+                                })
+                        })
+                    })
+                }) || sheet.cells_iter().any(|((row, col), cell)| {
                     let ValueRef::Formula {
                         source,
                         ast: Some(_),

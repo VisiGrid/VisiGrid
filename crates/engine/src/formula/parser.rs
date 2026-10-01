@@ -14,7 +14,7 @@ pub enum RangeAxis {
 /// Generic expression AST, parameterized over sheet reference type.
 /// - Parser outputs `ParsedExpr = Expr<UnboundSheetRef>` (sheet names unresolved)
 /// - After binding, becomes `BoundExpr = Expr<SheetRef>` (sheet IDs resolved)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr<S> {
     Number(f64),
     Text(String),

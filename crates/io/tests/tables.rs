@@ -265,3 +265,56 @@ fn appended_records_and_structured_dependencies_survive_native_and_json() {
         assert_eq!(loaded.active_sheet().get_display(0, 4), "40");
     }
 }
+
+#[test]
+fn calculated_rules_and_blank_overrides_roundtrip_and_affect_fingerprint() {
+    let mut wb = table_book();
+    let id = wb.table_by_name("Sales").unwrap().1.id;
+    wb.set_calculated_column(id, 1, 1, "=[@[42]]*2", true)
+        .unwrap();
+    wb.clear_cell_tracked(0, 2, 1);
+    wb.set_cell_value_tracked(0, 3, 1, "99");
+    assert_eq!(wb.saved_tables().version, 2);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calculated.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let content = json::export_workbook(&wb, &[], 0).unwrap();
+    for mut loaded in [
+        native::load_workbook(&path).unwrap(),
+        json::import_any(&content).unwrap().0,
+    ] {
+        assert_eq!(
+            loaded.table(id).unwrap().1.columns[1].formula.as_deref(),
+            Some("=[@[42]]*2")
+        );
+        assert!(loaded.active_sheet().is_calculated_exception(2, 1));
+        assert!(loaded.active_sheet().is_calculated_exception(3, 1));
+        loaded
+            .append_table_rows(id, 1, &[(5, 0, "5".into())])
+            .unwrap();
+        assert_eq!(loaded.active_sheet().get_display(5, 1), "10");
+        loaded
+            .set_calculated_column(id, 1, 1, "=[@[42]]*3", false)
+            .unwrap();
+        assert_eq!(loaded.active_sheet().get_raw(2, 1), "");
+        assert_eq!(loaded.active_sheet().get_raw(3, 1), "99");
+    }
+    // Header-only rules change future behavior even without materialized cells.
+    wb.resize_table(
+        id,
+        TableRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 1,
+        },
+    )
+    .unwrap();
+    let before = native::compute_semantic_fingerprint(&wb);
+    wb.set_calculated_column(id, 1, 1, "=[@[42]]*4", false)
+        .unwrap();
+    assert_ne!(before, native::compute_semantic_fingerprint(&wb));
+    let mut invalid = wb.saved_tables();
+    invalid.version = 1;
+    assert!(wb.restore_tables(invalid).is_err());
+}

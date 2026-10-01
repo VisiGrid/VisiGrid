@@ -685,6 +685,17 @@ impl Sheet {
         ))
     }
 
+    /// Derived from authoritative cell contents, so clear/paste/undo and load
+    /// cannot leave a second exception registry out of sync.
+    pub fn is_calculated_exception(&self, row: usize, col: usize) -> bool {
+        let Some(table) = self.table_at(row, col) else { return false; };
+        if row == table.range.start_row { return false; }
+        let Some(expected) = table.formula_at(row, col) else { return false; };
+        let actual = self.get_raw(row, col);
+        actual != expected && !(actual.starts_with('=')
+            && crate::formula::parser::parse(&actual).ok() == crate::formula::parser::parse(&expected).ok())
+    }
+
     pub fn table_structural_error(&self, is_row: bool, at: usize, count: usize, delete: bool) -> Option<String> {
         if count == 0 { return None; }
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };

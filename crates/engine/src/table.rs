@@ -56,6 +56,25 @@ impl TableRange {
 pub struct TableColumn {
     pub id: TableColumnId,
     pub name: String,
+    /// Formula expressed at its authored origin in this column. Cell contents
+    /// are authoritative: a differing formula/value (including blank) is an
+    /// exception. This keeps every editing/history path consistent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
+    /// Offset from header to the authored formula's row. Retaining its origin
+    /// avoids losing relative references when projecting above row 1.
+    #[serde(
+        default = "formula_origin_default",
+        skip_serializing_if = "formula_origin_is_default"
+    )]
+    pub formula_origin: usize,
+}
+
+fn formula_origin_default() -> usize {
+    1
+}
+fn formula_origin_is_default(value: &usize) -> bool {
+    *value == 1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +105,19 @@ impl DataTable {
         self.columns.iter().find(|c| c.name.to_lowercase() == key)
     }
 
+    pub fn formula_at(&self, row: usize, col: usize) -> Option<String> {
+        if col < self.range.start_col || col > self.range.end_col {
+            return None;
+        }
+        let column = &self.columns[col - self.range.start_col];
+        let formula = column.formula.as_ref()?;
+        Some(crate::formula::parser::adjust_formula_refs(
+            formula,
+            row as i32 - (self.range.start_row + column.formula_origin) as i32,
+            0,
+        ))
+    }
+
     pub fn validate(&self, rows: usize, cols: usize) -> Result<(), String> {
         self.range.validate(rows, cols)?;
         validate_table_name(&self.name)?;
@@ -96,6 +128,14 @@ impl DataTable {
         let mut ids = HashSet::new();
         for col in &self.columns {
             validate_column_name(&col.name)?;
+            if let Some(formula) = &col.formula {
+                if col.formula_origin > NUM_ROWS
+                    || !formula.starts_with('=')
+                    || crate::formula::parser::parse(formula).is_err()
+                {
+                    return Err("Invalid calculated-column formula.".into());
+                }
+            }
             if !names.insert(col.name.to_lowercase())
                 || !ids.insert(col.id)
                 || col.id.0 == 0

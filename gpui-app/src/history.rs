@@ -2142,6 +2142,26 @@ mod tests {
     }
 
     #[test]
+    fn calculated_column_rewind_preserves_cleared_exceptions_and_rule_updates() {
+        use visigrid_engine::table::TableRange;
+        let mut wb = Workbook::new();
+        let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row:0,start_col:0,end_row:3,end_col:1 }, "Sales").unwrap().table_id();
+        let mut replay = wb.clone();
+        let mut view = crate::app::PreviewViewState::default();
+        let rule = wb.set_calculated_column(id,1,1,"=A2*2",true).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit {sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}).unwrap();
+        let before = wb.active_sheet().get_raw(2,1);
+        wb.clear_cell_tracked(0,2,1);
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::Values {sheet_index:0,changes:vec![CellChange {row:2,col:1,old_value:before,new_value:String::new()}]}).unwrap();
+        let update = wb.set_calculated_column(id,1,1,"=A2*3",false).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit {sheet_index:0,commit:Box::new(update),description:"Update rule".into()}).unwrap();
+        assert!(replay.active_sheet().is_calculated_exception(2,1));
+        assert_eq!(replay.active_sheet().get_raw(2,1),"");
+        assert_eq!(replay.active_sheet().get_raw(3,1),"=A4*3");
+        assert_eq!(replay.table(id).unwrap().1,wb.table(id).unwrap().1);
+    }
+
+    #[test]
     fn table_history_replay_reports_stale_state_without_overwriting() {
         use visigrid_engine::table::TableRange;
         let mut workbook = Workbook::new();

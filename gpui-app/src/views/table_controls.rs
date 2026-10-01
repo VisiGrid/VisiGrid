@@ -74,6 +74,77 @@ pub(crate) fn render_table_controls(
                 )),
         )
         .child(div().flex_1())
+        .children({
+            let (row, col) = app.view_state.selected;
+            let row = app.row_view.view_to_data(row);
+            let column = &table.columns[col - table.range.start_col];
+            let mut controls: Vec<AnyElement> = Vec::new();
+            if column.formula.is_some() {
+                let exception = app.sheet(cx).is_calculated_exception(row, col);
+                controls.push(
+                    div()
+                        .text_color(app.token(TokenKey::TextMuted))
+                        .child(format!(
+                            "{} · {}",
+                            if exception { "Override" } else { "Formula" },
+                            column.name
+                        ))
+                        .into_any_element(),
+                );
+                if exception {
+                    controls.push(
+                        button(
+                            "table-restore-formula",
+                            "Restore column formula",
+                            app,
+                            move |s, cx| s.restore_column_formula(id, cx),
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                }
+                controls.push(
+                    button(
+                        "table-edit-formula",
+                        "Edit column formula",
+                        app,
+                        move |s, cx| {
+                            s.open_table_dialog(TableDialogKind::ColumnFormula(id, col, false), cx)
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                controls.push(
+                    button(
+                        "table-replace-formula",
+                        "Replace entire column",
+                        app,
+                        move |s, cx| {
+                            s.open_table_dialog(TableDialogKind::ColumnFormula(id, col, true), cx)
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            } else if row > table.range.start_row
+                && app.sheet(cx).get_raw(row, col).starts_with('=')
+            {
+                controls.push(
+                    button(
+                        "table-use-formula",
+                        "Use formula for entire column",
+                        app,
+                        move |s, cx| {
+                            s.open_table_dialog(TableDialogKind::ColumnFormula(id, col, true), cx)
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            controls
+        })
         .child(button(
             "table-add-row",
             "Add row",
@@ -125,6 +196,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         TableDialogKind::Rename(_) => "Rename Table",
         TableDialogKind::Resize(_) => "Resize Table",
         TableDialogKind::Convert(_) => "Convert to range",
+        TableDialogKind::ColumnFormula(_, _, true) => "Use formula for entire column",
+        TableDialogKind::ColumnFormula(_, _, false) => "Edit column formula",
     };
     let text = app.token(TokenKey::TextPrimary);
     let muted = app.token(TokenKey::TextMuted);
@@ -132,9 +205,14 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let accent = app.token(TokenKey::Accent);
     let mut fields = div().flex().flex_col().gap_3();
     for (index, label, value) in [(0, "Table name", &d.name), (1, "Range", &d.range)] {
+        let label = if matches!(d.kind, TableDialogKind::ColumnFormula(..)) {
+            "Column formula"
+        } else {
+            label
+        };
         let show = match d.kind {
             TableDialogKind::Create => true,
-            TableDialogKind::Rename(_) => index == 0,
+            TableDialogKind::Rename(_) | TableDialogKind::ColumnFormula(..) => index == 0,
             TableDialogKind::Resize(_) => index == 1,
             TableDialogKind::Convert(_) => false,
         };
@@ -203,6 +281,17 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
         TableDialogKind::Resize(_)=>preview=preview.child("Keep the top-left cell fixed. Cells released by shrinking stay in place; references to removed columns become #REF!."),
+        TableDialogKind::ColumnFormula(id,col,replace) => {
+            if let Some((sheet,table)) = app.wb(cx).table(id) {
+                let sheet = app.wb(cx).sheet_by_id(sheet).unwrap();
+                let exceptions = (table.range.start_row+1..=table.range.end_row).filter(|r|sheet.is_calculated_exception(*r,col)).count();
+                let populated = (table.range.start_row+1..=table.range.end_row).filter(|r|!sheet.get_raw(*r,col).is_empty()).count();
+                preview = preview.child(format!("{} · {} · {} records",table.name,table.columns[col-table.range.start_col].name,table.range.data_rows()));
+                preview = preview.child(if replace {format!("Replace {populated} existing values/formulas and fill all {} records, including {exceptions} overrides. One undo step.",table.range.data_rows())}
+                    else {format!("Update {} formula cells. Preserve {exceptions} overrides, including cleared cells.",table.range.data_rows()-exceptions)});
+                preview = preview.child(format!("Formula shown at row {}. New rows use this rule; cell edits remain overrides.", d.range.parse::<usize>().unwrap_or(0)+1));
+            }
+        }
         TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding disappears; explicit formatting is kept. You can undo this change.",d.name,d.range)),
     }
     let content = div()

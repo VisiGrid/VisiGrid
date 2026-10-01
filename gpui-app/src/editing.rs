@@ -290,7 +290,7 @@ impl Spreadsheet {
             }
         }
 
-        match self.commit_table_append_value(row, col, &new_value, cx) {
+        match self.commit_calculated_value(row, col, &new_value, cx).or_else(|| self.commit_table_append_value(row, col, &new_value, cx)) {
             Some(false) => { self.cancel_edit(cx); return; }
             Some(true) => {}
             None => {
@@ -909,7 +909,7 @@ impl Spreadsheet {
             let (r,c) = self.view_state.selected;
             let r = self.row_view.view_to_data(r);
             let range = visigrid_engine::table::TableRange { start_row:r, end_row:r, start_col:c, end_col:c };
-            if matches!(self.wb(cx).table_append_target(self.sheet(cx).id, range), Ok(Some(_))) {
+            if (self.edit_value.starts_with('=') && self.sheet(cx).table_at(r,c).is_some()) || matches!(self.wb(cx).table_append_target(self.sheet(cx).id, range), Ok(Some(_))) {
                 self.commit_current_edit(cx); return;
             }
         }
@@ -1416,7 +1416,7 @@ impl Spreadsheet {
         // Capture raw edit value before clearing for percent auto-format check
         let raw_edit = self.edit_value.clone();
 
-        match self.commit_table_append_value(row, col, &new_value, cx) {
+        match self.commit_calculated_value(row, col, &new_value, cx).or_else(|| self.commit_table_append_value(row, col, &new_value, cx)) {
             Some(false) => { self.cancel_edit(cx); return false; }
             Some(true) => {}
             None => {
