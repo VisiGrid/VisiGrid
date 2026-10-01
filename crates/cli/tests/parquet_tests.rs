@@ -185,6 +185,8 @@ fn convert_csv_writes_timestamps_and_dates_as_iso_8601() {
     let csv = stdout(&out);
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines[0], "order_id,placed_at,ship_date,amount,status");
-    assert_eq!(lines[1], "007,2026-09-01 14:02:00,2026-09-03,1234.50,paid");
+    // Unformatted numbers are written in full, not padded to the on-screen two
+    // decimals: 1234.5, and 1.234 stays 1.234 rather than becoming 1.23 (#65).
+    assert_eq!(lines[1], "007,2026-09-01 14:02:00,2026-09-03,1234.5,paid");
     assert_eq!(lines[2], "008,2026-09-01 14:07:30.123,2026-09-04,89,pending");
 }
