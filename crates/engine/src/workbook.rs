@@ -4,6 +4,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[path = "workbook_pivot.rs"]
 mod pivot_ops;
 pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot};
+#[path = "workbook_table.rs"]
+mod table_ops;
+pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
 use crate::cell_id::CellId;
@@ -65,6 +68,8 @@ pub struct Workbook {
     /// Next ID to assign to a new sheet. Monotonically increasing, never reused.
     #[serde(default = "default_next_sheet_id")]
     next_sheet_id: u64,
+    #[serde(default = "default_next_sheet_id")]
+    next_table_id: u64,
     #[serde(default)]
     named_ranges: NamedRangeStore,
 
@@ -154,6 +159,7 @@ impl Workbook {
             sheets: vec![sheet],
             active_sheet: 0,
             next_sheet_id: 2, // Next ID will be 2
+            next_table_id: 1,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: Arc::default(),
@@ -282,9 +288,10 @@ impl Workbook {
     /// Append a complete copy of an existing sheet under a fresh identity.
     /// Cell state, formulas, formatting, validation, conditional formatting,
     /// merges, and other sheet-owned state are preserved. Only identity and
-    /// display name are replaced.
+    /// display name are replaced. Tables currently refuse cloning until
+    /// table identity remapping and structured-reference rewriting are integrated.
     pub fn add_sheet_clone_named(&mut self, source: &Sheet, name: &str) -> Option<usize> {
-        if !is_valid_sheet_name(name) || self.sheet_name_exists(name) {
+        if !is_valid_sheet_name(name) || self.sheet_name_exists(name) || !source.tables().is_empty() {
             return None;
         }
         let mut sheet = source.clone();
@@ -317,6 +324,7 @@ impl Workbook {
         }
 
         self.sheets.remove(index);
+        self.refresh_table_name_reservations();
 
         // Adjust active sheet if needed
         if self.active_sheet >= self.sheets.len() {
@@ -335,6 +343,7 @@ impl Workbook {
             return None;
         }
         let sheet = self.sheets.remove(index);
+        self.refresh_table_name_reservations();
         if self.active_sheet >= self.sheets.len() {
             self.active_sheet = self.sheets.len() - 1;
         } else if self.active_sheet > index {
@@ -351,9 +360,13 @@ impl Workbook {
         if self.sheets.iter().any(|s| s.id == sheet.id || s.name_key == sheet.name_key) {
             return false;
         }
+        if sheet.tables().iter().any(|t| self.table(t.id).is_some()
+            || self.table_by_name(&t.name).is_some() || self.get_named_range(&t.name).is_some()) { return false; }
+        self.next_table_id = self.next_table_id.max(sheet.table_id_high_water.saturating_add(1));
         let index = index.min(self.sheets.len());
         self.next_sheet_id = self.next_sheet_id.max(sheet.id.0 + 1);
         self.sheets.insert(index, sheet);
+        self.refresh_table_name_reservations();
         if self.active_sheet >= index && self.sheets.len() > 1 && index <= self.active_sheet {
             // Keep the same sheet active.
             self.active_sheet += 1;
@@ -472,13 +485,17 @@ impl Workbook {
     /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
     pub fn from_sheets(sheets: Vec<Sheet>, active: usize) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
+        let next_table_id = sheets.iter().map(|s| s.table_id_high_water).max().unwrap_or(0).saturating_add(1);
+        let mut named_ranges = NamedRangeStore::new();
+        named_ranges.table_names = sheets.iter().flat_map(|s| s.tables().iter().map(|t| t.name.to_lowercase())).collect();
         // Calculate next_sheet_id as max existing id + 1
         let max_id = sheets.iter().map(|s| s.id.raw()).max().unwrap_or(0);
         Self {
             sheets,
             active_sheet,
             next_sheet_id: max_id + 1,
-            named_ranges: NamedRangeStore::new(),
+            next_table_id,
+            named_ranges,
             style_table: Vec::new(),
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
@@ -499,11 +516,15 @@ impl Workbook {
     /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
     pub fn from_sheets_with_meta(sheets: Vec<Sheet>, active: usize, next_sheet_id: u64) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
+        let next_table_id = sheets.iter().map(|s| s.table_id_high_water).max().unwrap_or(0).saturating_add(1);
+        let mut named_ranges = NamedRangeStore::new();
+        named_ranges.table_names = sheets.iter().flat_map(|s| s.tables().iter().map(|t| t.name.to_lowercase())).collect();
         Self {
             sheets,
             active_sheet,
             next_sheet_id,
-            named_ranges: NamedRangeStore::new(),
+            next_table_id,
+            named_ranges,
             style_table: Vec::new(),
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
@@ -2077,6 +2098,9 @@ impl Workbook {
             // No such sheet: nothing written, so nothing recalculated.
             None => return Recalculated::Cells(Vec::new()),
         };
+        if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
+            return Recalculated::Cells(Vec::new());
+        }
         self.sheets[sheet_index].set_value(row, col, value);
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
@@ -2091,6 +2115,9 @@ impl Workbook {
             // No such sheet: nothing written, so nothing recalculated.
             None => return Recalculated::Cells(Vec::new()),
         };
+        if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
+            return Recalculated::Cells(Vec::new());
+        }
         self.sheets[sheet_index].clear_cell(row, col);
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
@@ -2233,7 +2260,7 @@ impl Workbook {
                 .map(|((r, c), _)| if is_row { r } else { c })
                 .max();
             if let Some(last) = last_used {
-                if last >= at && last + count >= limit {
+                if last >= at && last.checked_add(count).is_none_or(|v| v >= limit) {
                     return Err(format!(
                         "inserting {} {}(s) would push data past the end of the sheet",
                         count,
@@ -2245,6 +2272,9 @@ impl Workbook {
 
         // Pivot outputs move as a whole or not at all: an edit that would cut
         // through one is refused before anything changes.
+        if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
+            return Err(error);
+        }
         if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
             return Err(format!(
                 "this would cut through {name}; move or delete the pivot table first"

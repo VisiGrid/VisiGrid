@@ -1,0 +1,584 @@
+//! Workbook Table operations. A commit retains headers and schema only, never
+//! the body or a workbook snapshot. Public operations validate before writing.
+
+use super::Workbook;
+use crate::cell::{CellValue, ValueRef};
+use crate::sheet::SheetId;
+use crate::table::{self, DataTable, TableColumn, TableColumnId, TableId, TableRange, TableStyle};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
+
+#[derive(Debug, Clone)]
+struct HeaderCell {
+    row: usize,
+    col: usize,
+    value: CellValue,
+}
+
+#[derive(Debug, Clone)]
+struct TableState {
+    table: Option<DataTable>,
+    headers: Vec<HeaderCell>,
+    checks: Vec<HeaderCell>,
+}
+
+/// Opaque, validated change. Replay through `apply_table_commit`, which checks
+/// both schema and header preconditions before touching the workbook.
+#[derive(Debug, Clone)]
+pub struct TableCommit {
+    sheet_id: SheetId,
+    id: TableId,
+    before: TableState,
+    after: TableState,
+}
+
+impl TableCommit {
+    pub fn table_id(&self) -> TableId {
+        self.id
+    }
+    pub fn before_table(&self) -> Option<&DataTable> {
+        self.before.table.as_ref()
+    }
+    pub fn after_table(&self) -> Option<&DataTable> {
+        self.after.table.as_ref()
+    }
+    pub fn header_cell_count(&self) -> usize {
+        self.before.headers.len()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedTableSheet {
+    pub sheet: usize,
+    pub tables: Vec<DataTable>,
+    #[serde(default)]
+    pub column_allocators: BTreeMap<u64, u64>,
+}
+
+/// Versioned, workbook-wide envelope. Sheet IDs are remapped on load; Table
+/// and column IDs survive. Keep the allocator even after the final deletion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedTableCatalog {
+    pub version: u32,
+    pub next_table_id: u64,
+    pub sheets: Vec<SavedTableSheet>,
+}
+
+impl Workbook {
+    pub fn tables(&self) -> impl Iterator<Item = (SheetId, &DataTable)> {
+        self.sheets
+            .iter()
+            .flat_map(|s| s.tables().iter().map(move |t| (s.id, t)))
+    }
+
+    pub fn table(&self, id: TableId) -> Option<(SheetId, &DataTable)> {
+        self.tables().find(|(_, t)| t.id == id)
+    }
+
+    pub fn table_by_name(&self, name: &str) -> Option<(SheetId, &DataTable)> {
+        self.tables()
+            .find(|(_, t)| t.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn next_table_name(&self) -> String {
+        (1u64..)
+            .map(|i| format!("Table{i}"))
+            .find(|name| self.table_by_name(name).is_none() && self.get_named_range(name).is_none())
+            .expect("table name space exhausted")
+    }
+
+    pub fn has_table_history(&self) -> bool {
+        self.next_table_id > 1 || self.tables().next().is_some()
+    }
+
+    fn validate_table_name_available(
+        &self,
+        name: &str,
+        except: Option<TableId>,
+    ) -> Result<(), String> {
+        table::validate_table_name(name)?;
+        if self.get_named_range(name).is_some()
+            || self
+                .tables()
+                .any(|(_, t)| Some(t.id) != except && t.name.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "The name '{name}' is already used by a table or named range."
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_table_region(
+        &self,
+        sheet_id: SheetId,
+        range: TableRange,
+        except: Option<TableId>,
+    ) -> Result<(), String> {
+        let sheet = self
+            .sheet_by_id(sheet_id)
+            .ok_or("Table sheet no longer exists.")?;
+        range.validate(sheet.rows, sheet.cols)?;
+        if let Some(t) = sheet
+            .tables()
+            .iter()
+            .find(|t| Some(t.id) != except && t.range.intersects(range))
+        {
+            return Err(format!("Table range overlaps '{}'.", t.name));
+        }
+        if sheet.merged_regions.iter().any(|m| {
+            range.intersects(TableRange {
+                start_row: m.start.0,
+                start_col: m.start.1,
+                end_row: m.end.0,
+                end_col: m.end.1,
+            })
+        }) {
+            return Err("Table range contains merged cells. Unmerge them first.".into());
+        }
+        if let Some(p) = sheet.pivot_in_rect(
+            range.start_row,
+            range.start_col,
+            range.end_row,
+            range.end_col,
+        ) {
+            return Err(format!("Table range overlaps {}'s pivot output.", p.name));
+        }
+        // Sparse iteration: even a header-only table on a large empty range
+        // never allocates one entry per body cell.
+        for ((row, col), cell) in sheet.cells_iter() {
+            if range.contains(row, col)
+                && (cell.spill_parent().is_some() || cell.spill_info().is_some())
+            {
+                return Err(format!(
+                    "Table range contains an array spill at row {}, column {}.",
+                    row + 1,
+                    col + 1
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Preview header normalization without changing values or allocating IDs.
+    pub fn preview_table_headers(
+        &self,
+        sheet_id: SheetId,
+        range: TableRange,
+    ) -> Result<Vec<String>, String> {
+        self.validate_table_region(sheet_id, range, None)?;
+        let sheet = self.sheet_by_id(sheet_id).unwrap();
+        Ok(table::normalize_headers(
+            &(range.start_col..=range.end_col)
+                .map(|col| sheet.get_display(range.start_row, col))
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    /// Create from an explicit range whose first row supplies headers. Header
+    /// insertion and automatic region detection belong to the later UI slice.
+    pub fn create_table(
+        &mut self,
+        sheet_id: SheetId,
+        range: TableRange,
+        name: &str,
+    ) -> Result<TableCommit, String> {
+        self.validate_table_name_available(name, None)?;
+        let names = self.preview_table_headers(sheet_id, range)?;
+        let id = TableId(self.next_table_id);
+        let next_id = id.0.checked_add(1).ok_or("Table IDs exhausted.")?;
+        let columns: Vec<_> = names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| TableColumn {
+                id: TableColumnId(i as u64 + 1),
+                name,
+            })
+            .collect();
+        let table = DataTable {
+            id,
+            name: name.into(),
+            range,
+            next_column_id: columns.len() as u64 + 1,
+            columns,
+            style: TableStyle::default(),
+        };
+        let commit = self.table_commit(sheet_id, id, None, Some(table))?;
+        self.apply_table_commit(&commit, false)?;
+        self.next_table_id = self.next_table_id.max(next_id);
+        Ok(commit)
+    }
+
+    pub fn rename_table(&mut self, id: TableId, name: &str) -> Result<TableCommit, String> {
+        self.validate_table_name_available(name, Some(id))?;
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        let mut new = old.clone();
+        new.name = name.into();
+        let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    /// Rename multiple headers together, so swapping two names is atomic.
+    pub fn rename_table_columns(
+        &mut self,
+        id: TableId,
+        names: &[String],
+    ) -> Result<TableCommit, String> {
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        if names.len() != old.columns.len() {
+            return Err("Supply one name for every table column.".into());
+        }
+        let mut new = old.clone();
+        for (col, name) in new.columns.iter_mut().zip(names) {
+            col.name = name.clone();
+        }
+        let sheet = self.sheet_by_id(sheet_id).unwrap();
+        new.validate(sheet.rows, sheet.cols)?;
+        let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    /// Explicitly include/release existing cells. Only bottom/right edges may
+    /// move. Body cells and cells released by shrinking are never rewritten.
+    pub fn resize_table(&mut self, id: TableId, range: TableRange) -> Result<TableCommit, String> {
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        if (range.start_row, range.start_col) != (old.range.start_row, old.range.start_col) {
+            return Err("Resize keeps the table's header and first column fixed.".into());
+        }
+        self.validate_table_region(sheet_id, range, Some(id))?;
+        let mut new = old.clone();
+        new.range = range;
+        new.columns.truncate(range.width());
+        if range.width() > old.columns.len() {
+            let sheet = self.sheet_by_id(sheet_id).unwrap();
+            let mut names: Vec<_> = old.columns.iter().map(|c| c.name.clone()).collect();
+            names.extend(
+                (old.range.end_col + 1..=range.end_col)
+                    .map(|c| sheet.get_display(range.start_row, c)),
+            );
+            let names = table::normalize_headers(&names);
+            // Existing names win over new headers. Normalize each incoming
+            // header against those names, without changing existing columns.
+            let mut used: HashSet<_> = old.columns.iter().map(|c| c.name.to_lowercase()).collect();
+            for name in names.into_iter().skip(old.columns.len()) {
+                let base = name.clone();
+                let mut name = name;
+                let mut suffix = 2;
+                while used.contains(&name.to_lowercase()) {
+                    name = format!("{base}{suffix}");
+                    suffix += 1;
+                }
+                used.insert(name.to_lowercase());
+                let col_id = new.next_column_id;
+                new.next_column_id = col_id.checked_add(1).ok_or("Column IDs exhausted.")?;
+                new.columns.push(TableColumn {
+                    id: TableColumnId(col_id),
+                    name,
+                });
+            }
+        }
+        let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    /// Remove metadata, preserving cells and explicit formatting. Structured
+    /// formula/style conversion will extend this operation in the next slice.
+    pub fn remove_table(&mut self, id: TableId) -> Result<TableCommit, String> {
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        let commit = self.table_commit(sheet_id, id, Some(old.clone()), None)?;
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    fn table_commit(
+        &self,
+        sheet_id: SheetId,
+        id: TableId,
+        before: Option<DataTable>,
+        after: Option<DataTable>,
+    ) -> Result<TableCommit, String> {
+        let sheet = self
+            .sheet_by_id(sheet_id)
+            .ok_or("Table sheet no longer exists.")?;
+        let mut headers = Vec::new();
+        let mut changed = Vec::new();
+        let mut before_checks = Vec::new();
+        let mut after_checks = Vec::new();
+        if let Some(table) = &after {
+            for (offset, column) in table.columns.iter().enumerate() {
+                let (row, col) = (table.range.start_row, table.range.start_col + offset);
+                let value = sheet.get_cell(row, col).value;
+                before_checks.push(HeaderCell {
+                    row,
+                    col,
+                    value: value.clone(),
+                });
+                after_checks.push(HeaderCell {
+                    row,
+                    col,
+                    value: CellValue::Text(column.name.clone()),
+                });
+                if !matches!(&value, CellValue::Text(t) if t == &column.name) {
+                    headers.push(HeaderCell { row, col, value });
+                    changed.push(HeaderCell {
+                        row,
+                        col,
+                        value: CellValue::Text(column.name.clone()),
+                    });
+                }
+            }
+        }
+        if let Some(table) = &before {
+            for offset in 0..table.columns.len() {
+                let (row, col) = (table.range.start_row, table.range.start_col + offset);
+                if offset >= after.as_ref().map_or(0, |t| t.columns.len()) {
+                    let cell = HeaderCell {
+                        row,
+                        col,
+                        value: sheet.get_cell(row, col).value,
+                    };
+                    before_checks.push(cell.clone());
+                    after_checks.push(cell);
+                }
+            }
+        }
+        Ok(TableCommit {
+            sheet_id,
+            id,
+            before: TableState {
+                table: before,
+                headers,
+                checks: before_checks,
+            },
+            after: TableState {
+                table: after,
+                headers: changed,
+                checks: after_checks,
+            },
+        })
+    }
+
+    /// `undo = true` restores the before state; false reapplies the after
+    /// state. A stale commit fails atomically instead of overwriting edits.
+    pub fn apply_table_commit(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
+        let (expected, target) = if undo {
+            (&commit.after, &commit.before)
+        } else {
+            (&commit.before, &commit.after)
+        };
+        let sheet = self
+            .sheet_by_id(commit.sheet_id)
+            .ok_or("Table sheet no longer exists.")?;
+        let current = sheet.tables().iter().find(|t| t.id == commit.id);
+        let same_schema = match (current, expected.table.as_ref()) {
+            (Some(a), Some(b)) => {
+                let mut a = a.clone();
+                a.next_column_id = b.next_column_id;
+                a == *b
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_schema {
+            return Err("Table changed since this operation was prepared.".into());
+        }
+        for cell in &expected.checks {
+            let value = sheet.get_cell(cell.row, cell.col).value;
+            let same = match (&value, &cell.value) {
+                (CellValue::Empty, CellValue::Empty) => true,
+                (CellValue::Number(a), CellValue::Number(b)) => a.to_bits() == b.to_bits(),
+                (CellValue::Text(a), CellValue::Text(b)) => a == b,
+                (CellValue::Formula { source: a, .. }, CellValue::Formula { source: b, .. }) => {
+                    a == b
+                }
+                _ => false,
+            };
+            if !same {
+                return Err("Table header changed since this operation was prepared.".into());
+            }
+        }
+        if let Some(table) = &target.table {
+            table.validate(sheet.rows, sheet.cols)?;
+            self.validate_table_name_available(&table.name, Some(commit.id))?;
+            self.validate_table_region(commit.sheet_id, table.range, Some(commit.id))?;
+            if self
+                .tables()
+                .any(|(s, t)| t.id == table.id && s != commit.sheet_id)
+            {
+                return Err("Table identity is already used on another sheet.".into());
+            }
+        }
+        // Headers share one row. Validate their bounding span once, avoiding
+        // a full sparse-cell scan for every changed column on a wide table.
+        if let (Some(first), Some(last)) = (target.headers.first(), target.headers.last()) {
+            self.validate_table_region(
+                commit.sheet_id,
+                TableRange {
+                    start_row: first.row,
+                    end_row: first.row,
+                    start_col: first.col,
+                    end_col: last.col,
+                },
+                Some(commit.id),
+            )?;
+        }
+        let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
+        sheet.data_tables.retain(|t| t.id != commit.id);
+        for cell in &target.headers {
+            sheet.write_table_header(cell.row, cell.col, cell.value.clone());
+        }
+        let allocator = sheet
+            .table_column_allocators
+            .entry(commit.id.0)
+            .or_insert(1);
+        for table in [commit.before.table.as_ref(), commit.after.table.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            *allocator = (*allocator).max(table.next_column_id);
+        }
+        if let Some(table) = &target.table {
+            let mut table = table.clone();
+            table.next_column_id = table.next_column_id.max(*allocator);
+            sheet.data_tables.push(table);
+        }
+        sheet.table_id_high_water = sheet.table_id_high_water.max(commit.id.0);
+        sheet.mark_table_changed();
+        self.next_table_id = self.next_table_id.max(commit.id.0 + 1);
+        self.refresh_table_name_reservations();
+        if !target.headers.is_empty() {
+            self.rebuild_dep_graph();
+            self.recompute_full_ordered();
+        }
+        self.bump_revision_for_structure();
+        Ok(())
+    }
+
+    pub(crate) fn refresh_table_name_reservations(&mut self) {
+        self.named_ranges.table_names = self.tables().map(|(_, t)| t.name.to_lowercase()).collect();
+    }
+
+    pub fn saved_tables(&self) -> SavedTableCatalog {
+        SavedTableCatalog {
+            version: 1,
+            next_table_id: self.next_table_id,
+            sheets: self
+                .sheets
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| !s.tables().is_empty() || !s.table_column_allocators.is_empty())
+                .map(|(i, s)| SavedTableSheet {
+                    sheet: i,
+                    tables: s.tables().to_vec(),
+                    column_allocators: s.table_column_allocators.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
+    /// before recalculation. Reject corrupt metadata, never discard silently.
+    pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
+        if saved.version != 1 || saved.next_table_id == 0 {
+            return Err("Unsupported or invalid Tables metadata version/allocator.".into());
+        }
+        let mut names = HashSet::new();
+        let mut ids = HashSet::new();
+        let mut sheet_indices = HashSet::new();
+        for entry in &saved.sheets {
+            if !sheet_indices.insert(entry.sheet) {
+                return Err("Duplicate table sheet entry.".into());
+            }
+            let sheet = self
+                .sheet(entry.sheet)
+                .ok_or("Table references a missing sheet.")?;
+            if entry
+                .column_allocators
+                .iter()
+                .any(|(&id, &next)| id == 0 || id >= saved.next_table_id || next == 0)
+            {
+                return Err("Invalid saved column allocator.".into());
+            }
+            for (i, table) in entry.tables.iter().enumerate() {
+                table.validate(sheet.rows, sheet.cols)?;
+                if table.id.0 >= saved.next_table_id
+                    || !ids.insert(table.id)
+                    || !names.insert(table.name.to_lowercase())
+                    || self.get_named_range(&table.name).is_some()
+                {
+                    return Err("Duplicate table name/identity or invalid table allocator.".into());
+                }
+                if entry.tables[..i]
+                    .iter()
+                    .any(|t| t.range.intersects(table.range))
+                {
+                    return Err("Saved tables overlap.".into());
+                }
+                // Existing tables are replaced only after validating the whole
+                // envelope; collisions against their old bounds are irrelevant.
+                if sheet.merged_regions.iter().any(|m| {
+                    table.range.intersects(TableRange {
+                        start_row: m.start.0,
+                        start_col: m.start.1,
+                        end_row: m.end.0,
+                        end_col: m.end.1,
+                    })
+                }) || sheet
+                    .pivot_in_rect(
+                        table.range.start_row,
+                        table.range.start_col,
+                        table.range.end_row,
+                        table.range.end_col,
+                    )
+                    .is_some()
+                {
+                    return Err("Saved table overlaps merged cells or pivot output.".into());
+                }
+                for (offset, col) in table.columns.iter().enumerate() {
+                    if !matches!(sheet.get_cell_opt(table.range.start_row, table.range.start_col + offset).map(|c| c.value()), Some(ValueRef::Text(t)) if t == col.name)
+                    {
+                        return Err(format!(
+                            "Saved table '{}' does not match its header cells.",
+                            table.name
+                        ));
+                    }
+                }
+                for ((r, c), cell) in sheet.cells_iter() {
+                    if table.range.contains(r, c)
+                        && (cell.spill_info().is_some() || cell.spill_parent().is_some())
+                    {
+                        return Err("Saved table overlaps an array spill.".into());
+                    }
+                }
+            }
+        }
+        for sheet in &mut self.sheets {
+            sheet.data_tables.clear();
+        }
+        for entry in saved.sheets {
+            let sheet = &mut self.sheets[entry.sheet];
+            for (id, next) in entry.column_allocators {
+                let current = sheet.table_column_allocators.entry(id).or_insert(1);
+                *current = (*current).max(next);
+            }
+            sheet.data_tables = entry.tables;
+            for table in &mut sheet.data_tables {
+                let next = sheet.table_column_allocators.entry(table.id.0).or_insert(1);
+                *next = (*next).max(table.next_column_id);
+                table.next_column_id = *next;
+            }
+        }
+        self.next_table_id = self.next_table_id.max(saved.next_table_id);
+        // Retain the allocator when a caller later extracts a single Sheet.
+        for sheet in &mut self.sheets {
+            sheet.table_id_high_water = self.next_table_id - 1;
+        }
+        self.refresh_table_name_reservations();
+        Ok(())
+    }
+}

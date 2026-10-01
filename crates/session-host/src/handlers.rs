@@ -582,7 +582,15 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
     // Up-front validation of the entire batch
     let sheet_count = wb.sheets().len();
     for (i, op) in req.ops.iter().enumerate() {
-        if let Some((code, message, suggestion)) = validate_session_op(op, sheet_count) {
+        let table_error = match op {
+            Op::SetCellValue { sheet, row, col, .. }
+            | Op::SetCellFormula { sheet, row, col, .. }
+            | Op::ClearCell { sheet, row, col } => wb.sheet(*sheet)
+                .and_then(|s| s.table_value_write_error(*row, *col))
+                .map(|reason| ("table_header", reason, None)),
+            _ => None,
+        };
+        if let Some((code, message, suggestion)) = validate_session_op(op, sheet_count).or(table_error) {
             return reject(
                 Some(ApplyOpsError::OpFailed(OpError {
                     code: code.to_string(),
@@ -807,6 +815,27 @@ pub fn inspect(wb: &Workbook, req: &InspectRequest, title: &str) -> InspectRespo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_header_write_rejects_entire_session_batch() {
+        let mut wb = Workbook::new();
+        let sid = wb.active_sheet().id;
+        wb.create_table(sid, visigrid_engine::table::TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 0 }, "Sales").unwrap();
+        let rev = wb.revision();
+        let req = ApplyOpsRequest {
+            request_id: String::new(), batch_name: String::new(), atomic: true,
+            expected_revision: None, client: None,
+            ops: vec![
+                Op::SetCellValue { sheet: 0, row: 1, col: 0, value: "99".into() },
+                Op::ClearCell { sheet: 0, row: 0, col: 0 },
+            ],
+        };
+        let outcome = apply_ops(&mut wb, &req);
+        assert!(outcome.response.error.is_some());
+        assert_eq!(wb.revision(), rev);
+        assert_eq!(wb.active_sheet().get_raw(1, 0), "");
+        assert_eq!(wb.active_sheet().get_raw(0, 0), "Column1");
+    }
 
     /// The delta of an op must name the cells the op changed indirectly, or
     /// a subscriber mirroring the sheet keeps showing the old dependent.
