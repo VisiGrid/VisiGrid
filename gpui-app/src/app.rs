@@ -4257,31 +4257,19 @@ impl Spreadsheet {
     /// Block a bulk operation when the active sheet contains merged cells.
     /// Returns true (and sets status message) if merges exist, false otherwise.
     /// `op_name` is a user-facing verb phrase like "sort", "fill", "replace".
-    pub fn block_if_merged(&mut self, op_name: &str, cx: &mut Context<Self>) -> bool {
-        if !self.sheet(cx).merged_regions.is_empty() {
-            self.status_message = Some(format!(
-                "Cannot {op_name}: this operation can't be applied to merged cells. Unmerge first."
-            ));
-            cx.notify();
-            true
-        } else {
-            false
-        }
-    }
-
     /// Refuse a sort/filter only when a merge overlaps the rows it would
     /// move (`rows`, inclusive). Merged titles above or below the table are
-    /// fine, as in Excel. When the blockers are merged titles (single-row),
-    /// the message offers the fix: Ctrl+Alt+C converts them to Center Across.
+    /// fine, as in Excel.
     pub fn block_if_merges_in_rows(&mut self, op_name: &str, rows: (usize, usize), cx: &mut Context<Self>) -> bool {
-        let (lo, hi) = rows;
-        let blocking: Vec<visigrid_engine::sheet::MergedRegion> = self
-            .sheet(cx)
-            .merged_regions
-            .iter()
-            .filter(|m| m.start.0 <= hi && m.end.0 >= lo)
-            .cloned()
-            .collect();
+        self.block_if_merges_in(op_name, (rows.0, 0, rows.1, usize::MAX), cx)
+    }
+
+    /// Refuse an operation only when a merge overlaps the cells it writes
+    /// (`area` = (r0, c0, r1, c1), inclusive). Merges elsewhere on the sheet
+    /// don't matter. When the blockers are single-row merges (merged titles),
+    /// the message offers the fix: Ctrl+Alt+C converts them to Center Across.
+    pub fn block_if_merges_in(&mut self, op_name: &str, area: (usize, usize, usize, usize), cx: &mut Context<Self>) -> bool {
+        let blocking = crate::sort_filter::merges_overlapping(self.sheet(cx), area);
         if blocking.is_empty() {
             return false;
         }

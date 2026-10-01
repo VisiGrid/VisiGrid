@@ -1446,7 +1446,10 @@ impl Spreadsheet {
         use crate::history::CellChange;
         use visigrid_engine::provenance::MutationOp;
 
-        if self.block_if_merged("fill selection", cx) { return; }
+        // Only merges inside the selected areas get in the way.
+        for ((r0, c0), (r1, c1)) in self.all_selection_ranges() {
+            if self.block_if_merges_in("fill selection", (r0, c0, r1, c1), cx) { return; }
+        }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
 
         let primary_cell = self.view_state.selected;

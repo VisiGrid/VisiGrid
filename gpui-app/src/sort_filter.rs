@@ -497,6 +497,21 @@ pub(crate) fn table_range_around(
     (r1 > r0).then_some((r0, c0, r1, c1))
 }
 
+/// Merges overlapping `area` = (r0, c0, r1, c1), inclusive: the ones that
+/// get in the way of an operation writing or moving those cells.
+pub(crate) fn merges_overlapping(
+    sheet: &visigrid_engine::sheet::Sheet,
+    area: (usize, usize, usize, usize),
+) -> Vec<visigrid_engine::sheet::MergedRegion> {
+    let (r0, c0, r1, c1) = area;
+    sheet
+        .merged_regions
+        .iter()
+        .filter(|m| m.start.0 <= r1 && m.end.0 >= r0 && m.start.1 <= c1 && m.end.1 >= c0)
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod table_range_tests {
     use super::table_range_around;
@@ -528,6 +543,20 @@ mod table_range_tests {
         assert_eq!(table_range_around(&s, 2, 1), Some((1, 0, 3, 2)));
         // From the title cell too.
         assert_eq!(table_range_around(&s, 0, 0), Some((1, 0, 3, 2)));
+    }
+
+    #[test]
+    fn only_merges_in_the_affected_area_block() {
+        use super::merges_overlapping;
+        use visigrid_engine::sheet::MergedRegion;
+        let mut s = sheet(&[&["Title", "", ""], &["Region", "Amount", ""], &["West", "10", ""]]);
+        s.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap(); // A1:C1 title
+        // Filling B2:B3 or sorting rows 3+ doesn't touch the title.
+        assert!(merges_overlapping(&s, (1, 1, 2, 1)).is_empty());
+        assert!(merges_overlapping(&s, (2, 0, 2, usize::MAX)).is_empty());
+        // Anything that writes row 1 under the title does.
+        assert_eq!(merges_overlapping(&s, (0, 2, 2, 2)).len(), 1);
+        assert_eq!(merges_overlapping(&s, (0, 0, 0, usize::MAX)).len(), 1);
     }
 
     #[test]
