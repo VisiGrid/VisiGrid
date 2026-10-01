@@ -375,7 +375,8 @@ mod tests {
 
 #[cfg(test)]
 mod drift_tests {
-    use super::*;
+    // Not `super::*`: that brings in gpui's `test` attribute, which shadows the standard one.
+    use super::{menu_entries, Menu, MenuEntry};
 
     /// The in-window menu bar (Linux, Windows) draws its items by hand in
     /// views/menu_bar.rs, but keyboard selection runs this model's action at
