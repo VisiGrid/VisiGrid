@@ -1,6 +1,6 @@
 # Tables: engine, structured references, desktop authoring, row growth, and calculated columns
 
-Status: desktop authoring, safe row growth, and calculated columns implementation, 2026-10-01. This is the staged implementation contract, not a declaration that the complete Tables release is ready. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
+Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 starts with the engine foundation for Table views, 2026-10-01; desktop sort/filter integration remains pending. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
 
 ## Model
 
@@ -118,16 +118,39 @@ Native semantic fingerprints use v3 for Table-bearing workbooks, including Table
 
 Table-backed pivot sources, multi-header paste, and Table-local filters remain outside this slice.
 
-## Next slices
+## Phase 2: Table view engine foundation
 
-1. Multi-header schema paste and remaining formula editing/interchange integrations.
+`table_view::TableView` builds an immutable row projection from a computed sheet snapshot. It never changes cells, formula coordinates, workbook revision, aggregate membership or pivot sources. Only the Table body is sorted/filtered; its header and represented rows above/below stay visible and map to themselves. The host supplies its represented worksheet extent, which must include the entire Table. There is no 10,000-record scan limit or inferred A1 region.
+
+`TableViewSpec` binds one sort and per-column filters to stable Table/column IDs. Renames and column insertions retain those bindings; a removed ID is rejected even if its name is reused. Multiple column filters combine with AND and use the existing typed-key normalization: text is trimmed and case-insensitive; numbers, text, booleans, errors and blanks remain distinct. Sort groups are numbers, text, booleans, errors, then blanks in both directions. Direction reverses values within a group; equal keys retain canonical record order so a rebuild or criteria-only restore is deterministic. This Table policy does not change existing worksheet sorting.
+
+The builder checks the supplied current owner: another Table or worksheet-range view must be cleared explicitly first. Hiding filter buttons preserves all criteria. Clearing sort and clearing filters are separate changes to the spec. The DTO can serialize criteria, but **is not yet included in native/JSON workbook persistence or undo history**.
+
+Whole-row projection is eligible only when the Table's body row band has no meaningful neighboring content. A sparse layout check refuses adjacent values (including formulas displaying blank), comments, explicit/inherited formats, styles, frozen-formula metadata, validation and conditional-format ranges. Merges, spills, other Tables and pivot output intersecting body rows also refuse activation. Titles and notes above/below are allowed. The same check runs on rebuild and mutation preflight, so later neighboring content is detected too.
+
+`validate_mutation_ranges` preflights a batch of canonical rectangles, rejecting adjacent body-row targets or changed Table bounds before a caller applies writes. It is an opt-in check, not an installed guard on Sheet setters, and does not replace header/pivot protections. `visible_body_rows` plans paste destinations once, skips hidden records and rejects overflow beyond the visible body. `focus_record` preserves the canonical record after rebuild, or selects the nearest visible row and reports that the record was filtered out. Hosts must rebuild after edits and recalculation, including cross-sheet precedent changes; these snapshots do not update themselves.
+
+### Remaining integration before enabling desktop Table views
+
+1. Store one owner per sheet, persist criteria with reader-version/recovery handling, and add undo/redo for view changes.
+2. Route rendering, selection, copy/paste/fill, comments and all editing paths through the same current projection. Preflight complete batches, rebuild after calculation, preserve record focus and reject stale asynchronous results. Include desktop-only row/column metadata in layout checks.
+3. Add exact-bound header filter menus, clear-sort/clear-filter actions and button visibility; keep append/structural changes gated until view transitions are safe.
+4. Exercise save/reopen, undo/redo, session/script mutations, filtered editing and large datasets in desktop QA. Existing worksheet Table sort/filter refusal stays in place until these are complete.
+
+## Next Phase 2 slices
+
+1. Complete Table sort/filter desktop integration above.
 2. Table-backed pivot sources with stable field IDs, explicit refresh, and stale-state feedback.
-3. XLSX interoperability subset, required-feature file compatibility, web/cloud preservation, and export-loss messaging.
-4. Local table views and visible-record paste after the current row-view constraints are addressed.
+3. XLSX Table interoperability subset and export-loss messaging.
+4. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
+
+Totals rows and saved views come later. Web/cloud preservation is deferred.
 
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+Phase 2 view foundation, 2026-10-01: `cargo test -p visigrid-engine` passed 953 tests with zero failures and 15 existing ignores. The 17 regressions in `crates/engine/tests/table_views.rs` cover bounded/stable sorting, typed combined filters, stable IDs, criterion serialization, owner/layout refusal, canonical mutation footprints, visible-record paste planning, edit/recalculation focus, and all 20,000 records of a larger Table. The final focused rerun also passed. Engine Clippy (`--all-targets`) passed with existing warnings and none in the new module/tests; rustfmt and diff checks passed. Desktop integration and workbook view persistence are not enabled or validated by this slice.
 
 Behavior tests are in `crates/engine/tests/tables.rs`, `crates/engine/tests/table_growth.rs`, `crates/engine/tests/structured_tables.rs`, and `crates/io/tests/tables.rs`; session-host and operation-plan tests cover atomic header rejection. Run:
 

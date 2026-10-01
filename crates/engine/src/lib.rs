@@ -16,6 +16,7 @@ pub mod sheet;
 mod store;
 pub mod structural;
 pub mod table;
+pub mod table_view;
 pub mod validation;
 pub mod workbook;
 
