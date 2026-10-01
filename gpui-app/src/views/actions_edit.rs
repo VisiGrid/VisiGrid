@@ -311,6 +311,11 @@ pub(crate) fn bind(
                 Mode::CloudOpen => this.cloud_open_selected(cx),
                 Mode::ExportPdf => this.confirm_pdf_action(cx),
                 Mode::PasteSpecial => this.apply_paste_special(cx),
+                Mode::HubLink => {
+                    if !this.hub_new_dataset_name.trim().is_empty() {
+                        this.hub_create_and_link(cx);
+                    }
+                }
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
@@ -410,6 +415,10 @@ pub(crate) fn bind(
                 this.close_pdf_export(cx);
             } else if this.mode == Mode::PasteSpecial {
                 this.hide_paste_special(cx);
+            } else if this.mode == Mode::ExportReport {
+                this.hide_export_report(cx);
+            } else if this.mode == Mode::HubPublishConfirm {
+                this.hub_cancel_publish_confirm(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
             } else if this.mode == Mode::RenameSymbol {

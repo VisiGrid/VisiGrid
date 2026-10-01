@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Dialogs and the keyboard
+
+- **Data Validation works from the keyboard.** Typing, Tab, Backspace, Enter and Escape never reached it, so a list of allowed values could not be typed in. Up/Down now also step through the Allow type and the comparison when that field has focus.
+- **The Convert picker and the Transform preview answer Enter, Escape and the arrow keys.** Enter used to move the cursor behind the dialog instead.
+- **Enter creates and links the dataset** in the VisiHub link dialog, and **Escape closes** Export Report and the VisiHub publish confirmation.
+
 ### Merged cells and Center Across Selection
 
 - **Sorting and AutoFilter no longer refuse because of a merged title.** They used to refuse if any merged cell existed anywhere on the sheet. Now only merges in the rows being sorted or filtered get in the way, as in Excel, and the sorted table is the one around the cursor: a title row above the header is skipped instead of being taken for the header.

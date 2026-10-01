@@ -143,29 +143,6 @@ pub fn render_convert_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         );
 
     let dialog_content = div()
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    this.cancel_convert_picker(cx);
-                }
-                "enter" => {
-                    this.execute_convert(window, cx);
-                }
-                "up" => {
-                    if this.convert_picker_selected > 0 {
-                        this.convert_picker_selected -= 1;
-                        cx.notify();
-                    }
-                }
-                "down" => {
-                    if (this.convert_picker_selected as usize) < FORMAT_OPTIONS.len() - 1 {
-                        this.convert_picker_selected += 1;
-                        cx.notify();
-                    }
-                }
-                _ => {}
-            }
-        }))
         .child(
             DialogFrame::new(body, panel_bg, panel_border)
                 .size(DialogSize::Md)
@@ -179,4 +156,29 @@ pub fn render_convert_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         dialog_content,
         cx,
     )
+}
+
+impl Spreadsheet {
+    /// Keys for the Convert picker. Routed from `key_handler`: the dialog has
+    /// no focus of its own, and the window uses the "Dialog" key context while
+    /// it's open so the grid's bindings stay out of the way.
+    pub(crate) fn convert_picker_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.cancel_convert_picker(cx),
+            "enter" => self.execute_convert(window, cx),
+            "up" => {
+                if self.convert_picker_selected > 0 {
+                    self.convert_picker_selected -= 1;
+                    cx.notify();
+                }
+            }
+            "down" => {
+                if (self.convert_picker_selected as usize) < FORMAT_OPTIONS.len() - 1 {
+                    self.convert_picker_selected += 1;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
 }

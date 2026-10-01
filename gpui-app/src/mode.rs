@@ -131,6 +131,13 @@ impl Mode {
         matches!(self, Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen)
     }
 
+    /// Dialogs that read raw keys through `key_handler`. While one is open the
+    /// window's key context is "Dialog", which has no bindings, so Enter, Tab,
+    /// arrows and Backspace reach the dialog instead of the grid's actions.
+    pub fn owns_raw_keys(&self) -> bool {
+        matches!(self, Mode::ValidationDialog | Mode::ConvertPicker | Mode::TransformPreview)
+    }
+
     /// True if this mode has text input active (typing should work normally).
     /// Used to guard Option+letter accelerators on macOS to avoid
     /// conflicting with character composition (accents, special chars).
