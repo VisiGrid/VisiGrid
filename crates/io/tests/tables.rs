@@ -348,3 +348,26 @@ fn column_edits_roundtrip_rules_overrides_and_allocator_history() {
         assert!(loaded.table(id).unwrap().1.columns[1].id.0 > columns[1].id.0);
     }
 }
+
+#[test]
+fn headerless_creation_roundtrips_all_records_and_adjusted_references() {
+    let mut wb = Workbook::from_sheets(vec![Sheet::new_with_name(SheetId(7), 100, 20, "Data")], 0);
+    wb.set_cell_value_tracked(0, 0, 0, "42");
+    wb.set_cell_value_tracked(0, 0, 1, "=A1*2");
+    wb.set_cell_value_tracked(0, 1, 0, "17");
+    let id = wb.create_table_without_headers(SheetId(7), TableRange {
+        start_row: 0, start_col: 0, end_row: 1, end_col: 1,
+    }, "Sales").unwrap().table_id();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headerless.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let content = json::export_workbook(&wb, &[], 0).unwrap();
+    for loaded in [native::load_workbook(&path).unwrap(), json::import_any(&content).unwrap().0] {
+        assert_eq!(loaded.table(id).unwrap().1.columns, wb.table(id).unwrap().1.columns);
+        assert_eq!(loaded.table(id).unwrap().1.range.data_rows(), 2);
+        assert_eq!(loaded.active_sheet().get_raw(0,0), "Column1");
+        assert_eq!(loaded.active_sheet().get_raw(1,0), "42");
+        assert_eq!(loaded.active_sheet().get_display(1,1), "84");
+        assert_eq!(loaded.active_sheet().get_raw(2,0), "17");
+    }
+}

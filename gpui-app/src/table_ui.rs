@@ -25,6 +25,7 @@ pub(crate) struct TableDialog {
     pub sheet: SheetId,
     pub name: String,
     pub range: String,
+    pub has_headers: bool,
     pub field: usize,
     pub select_all: bool,
     pub error: Option<String>,
@@ -435,6 +436,7 @@ impl Spreadsheet {
                 end_row: r1,
                 end_col: c1,
             }),
+            has_headers: true,
             field: 0,
             select_all: true,
             error: None,
@@ -485,6 +487,7 @@ impl Spreadsheet {
             } else {
                 range_label(table.range)
             },
+            has_headers: true,
             field: usize::from(matches!(kind, TableDialogKind::Resize(_))),
             select_all: true,
             error: None,
@@ -500,9 +503,18 @@ impl Spreadsheet {
         let Some(draft) = self.table_dialog.clone() else {
             return;
         };
+        if draft.kind == TableDialogKind::Create && !draft.has_headers {
+            let last = self.wb(cx).sheet_by_id(draft.sheet).map(|s| s.rows - 1).unwrap_or(crate::app::NUM_ROWS - 1);
+            if self.row_heights.get(&draft.sheet).is_some_and(|h| h.contains_key(&last))
+                || self.hidden_rows.get(&draft.sheet).is_some_and(|h| h.contains(&last)) {
+                self.table_dialog.as_mut().unwrap().error = Some("Inserting a header would push row formatting off the sheet.".into());
+                cx.notify(); return;
+            }
+        }
         let result = self.workbook.update(cx, |wb, _| match draft.kind {
             TableDialogKind::Create => parse_range(&draft.range)
-                .and_then(|r| wb.create_table(draft.sheet, r, draft.name.trim())),
+                .and_then(|r| if draft.has_headers { wb.create_table(draft.sheet, r, draft.name.trim()) }
+                    else { wb.create_table_without_headers(draft.sheet, r, draft.name.trim()) }),
             TableDialogKind::Rename(id) => wb.rename_table(id, draft.name.trim()),
             TableDialogKind::Resize(id) => {
                 parse_range(&draft.range).and_then(|r| wb.resize_table(id, r))
@@ -564,6 +576,7 @@ impl Spreadsheet {
         description: String,
         cx: &mut Context<Self>,
     ) {
+        self.update_header_insertion_view(&commit, false, cx);
         self.history.record_action_with_provenance(
             UndoAction::TableCommit {
                 sheet_index: self
@@ -592,6 +605,7 @@ impl Spreadsheet {
             .update(cx, |wb, _| wb.apply_table_commit(commit, undo))
         {
             Ok(()) => {
+                self.update_header_insertion_view(commit, undo, cx);
                 self.bump_cells_rev();
                 self.is_modified = true;
                 cx.notify();
@@ -605,6 +619,31 @@ impl Spreadsheet {
                 cx.notify();
                 false
             }
+        }
+    }
+
+    /// Mirror the composite header insertion in GUI-owned row presentation.
+    fn update_header_insertion_view(&mut self, commit: &TableCommit, undo: bool, cx: &mut Context<Self>) {
+        let Some(at) = commit.inserted_header_row() else { return; };
+        let sheet = commit.sheet_id();
+        if let Some(heights) = self.row_heights.get_mut(&sheet) {
+            *heights = heights.drain().filter_map(|(row, height)| {
+                if undo && row == at { None }
+                else { Some((if row >= at { if undo { row - 1 } else { row + 1 } } else { row }, height)) }
+            }).collect();
+        }
+        if let Some(hidden) = self.hidden_rows.get_mut(&sheet) {
+            *hidden = hidden.iter().copied().filter_map(|row| {
+                if undo && row == at { None }
+                else { Some(if row >= at { if undo { row - 1 } else { row + 1 } } else { row }) }
+            }).collect();
+        }
+        if self.sheet(cx).id == sheet {
+            if undo { self.row_view.delete_row(at); } else { self.row_view.insert_row(at); }
+            let range = commit.after_table().unwrap().range;
+            self.view_state.selected = (range.start_row, range.start_col);
+            self.view_state.selection_end = Some((range.end_row - usize::from(undo), range.end_col));
+            self.view_state.additional_selections.clear();
         }
     }
 
@@ -730,9 +769,17 @@ impl Spreadsheet {
             return true;
         }
         if key.key == "tab" && d.kind == TableDialogKind::Create {
-            d.field = 1 - d.field;
+            d.field = (d.field + if key.modifiers.shift { 2 } else { 1 }) % 3;
             d.select_all = true;
             cx.notify();
+            return true;
+        }
+        if d.field == 2 {
+            if key.key == "space" || key.key_char.as_deref() == Some(" ") {
+                d.has_headers = !d.has_headers;
+                d.error = None;
+                cx.notify();
+            }
             return true;
         }
         let buffer = if d.field == 0 {

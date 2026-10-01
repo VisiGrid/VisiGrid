@@ -258,6 +258,27 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 ),
         );
     }
+    if d.kind == TableDialogKind::Create {
+        fields = fields.child(div()
+            .id("table-has-headers")
+            .flex().items_center().gap_2().px_2().py_1().rounded_sm().border_1()
+            .border_color(if d.field == 2 { accent } else { border })
+            .cursor_pointer().text_color(text)
+            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                cx.stop_propagation();
+                if let Some(d) = s.table_dialog.as_mut() {
+                    d.has_headers = !d.has_headers;
+                    d.field = 2;
+                    d.error = None;
+                }
+                cx.notify();
+            }))
+            .child(div().size(px(14.0)).flex().items_center().justify_center()
+                .border_1().rounded_sm().border_color(if d.has_headers { accent } else { border })
+                .text_size(px(11.0)).text_color(accent)
+                .child(if d.has_headers { "✓" } else { "" }))
+            .child("My data has headers"));
+    }
     let mut preview = div()
         .flex()
         .flex_col()
@@ -266,13 +287,17 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .text_color(muted);
     match d.kind {
         TableDialogKind::Create => {
-            preview = preview.child("The first row supplies the column headers. Your data stays in place.");
-            match parse_range(&d.range).and_then(|r|app.wb(cx).preview_table_headers(d.sheet,r).map(|h|(r,h))) {
+            preview = preview.child(if d.has_headers {
+                "The first row supplies the column headers. Your data stays in place."
+            } else {
+                "Insert a whole worksheet row above the data. All cells on this sheet at or below that row move down; every selected row stays as data."
+            });
+            match parse_range(&d.range).and_then(|r|app.wb(cx).preview_table_creation(d.sheet,r,d.has_headers)) {
                 Ok((range,headers)) => {
-                    preview = preview.child(format!("{} records · {} columns",range.data_rows(),headers.len()));
+                    preview = preview.child(format!("{} · {} records · {} columns",range_label(range),range.data_rows(),headers.len()));
                     for (offset,name) in headers.iter().enumerate().take(6) {
                         let old=app.wb(cx).sheet_by_id(d.sheet).map(|s|s.get_display(range.start_row,range.start_col+offset)).unwrap_or_default();
-                        preview=preview.child(if old==*name {name.clone()} else {format!("{} → {name}",if old.is_empty(){"(blank)"}else{&old})});
+                        preview=preview.child(if !d.has_headers || old==*name {name.clone()} else {format!("{} → {name}",if old.is_empty(){"(blank)"}else{&old})});
                     }
                     if headers.len()>6 {preview=preview.child(format!("…and {} more columns",headers.len()-6));}
                 }
@@ -350,7 +375,9 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             div()
                 .text_size(px(11.0))
                 .text_color(muted)
-                .child("Tab to switch fields · Enter to apply · Esc to cancel"),
+                .child(if d.kind == TableDialogKind::Create {
+                    "Tab to switch fields · Space to toggle headers · Enter to apply · Esc to cancel"
+                } else { "Tab to switch fields · Enter to apply · Esc to cancel" }),
         );
     crate::ui::modal_overlay(
         "table-dialog",

@@ -1622,8 +1622,14 @@ impl History {
                     }
                 }
             }
-            UndoAction::TableCommit { commit, .. } => {
+            UndoAction::TableCommit { sheet_index, commit, .. } => {
                 workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
+                if commit.inserted_header_row().is_some() {
+                    if let Some(view) = view_state.per_sheet.get_mut(*sheet_index) {
+                        view.row_order = None;
+                        view.sort = None;
+                    }
+                }
             }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 if let Some((index, sheet)) = created_sheet {
@@ -2143,6 +2149,31 @@ mod tests {
             }
         }
         assert_eq!(replay.table(id).unwrap().1.range.data_rows(), 0);
+    }
+
+    #[test]
+    fn headerless_table_rewind_matches_live_and_preserves_records() {
+        use visigrid_engine::table::TableRange;
+        let mut workbook = Workbook::new();
+        workbook.set_cell_value_tracked(0, 0, 0, "42");
+        workbook.set_cell_value_tracked(0, 0, 1, "=A1*2");
+        workbook.set_cell_value_tracked(0, 1, 0, "17");
+        let mut replay = workbook.clone();
+        let mut view = crate::app::PreviewViewState::default();
+        let commit = workbook.create_table_without_headers(workbook.active_sheet_id(), TableRange {
+            start_row: 0, start_col: 0, end_row: 1, end_col: 1,
+        }, "Sales").unwrap();
+        let id = commit.table_id();
+        let action = UndoAction::TableCommit { sheet_index: 0, commit: Box::new(commit.clone()), description: "Create Table: Sales".into() };
+        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
+        assert_eq!(replay.active_sheet().get_display(1,1), "84");
+        assert_eq!(replay.active_sheet().get_raw(2,0), "17");
+        replay.apply_table_commit(&commit, true).unwrap();
+        assert!(replay.table(id).is_none());
+        assert_eq!(replay.active_sheet().get_display(0,1), "84");
+        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
     }
 
     #[test]

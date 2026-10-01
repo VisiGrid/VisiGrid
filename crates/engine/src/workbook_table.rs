@@ -7,6 +7,8 @@ mod calculated;
 #[path = "workbook_table_columns.rs"]
 mod columns;
 pub use columns::TableColumnHistory;
+#[path = "workbook_table_create.rs"]
+mod create;
 
 use super::table_refs::TableFormulaChange;
 use super::Workbook;
@@ -42,10 +44,14 @@ pub struct TableCommit {
     creation_references: Option<Vec<(crate::cell_id::CellId, String)>>,
     cells: Vec<(HeaderCell, HeaderCell)>,
     append_region: Option<TableRange>,
+    header_insertion: Option<Box<create::HeaderInsertion>>,
     rules: Vec<calculated::RuleChange>,
 }
 
 impl TableCommit {
+    pub fn inserted_header_row(&self) -> Option<usize> {
+        self.header_insertion.as_ref().map(|h| h.at)
+    }
     pub fn table_id(&self) -> TableId {
         self.id
     }
@@ -343,8 +349,8 @@ impl Workbook {
         ))
     }
 
-    /// Create from an explicit range whose first row supplies headers. Header
-    /// insertion and automatic region detection belong to the later UI slice.
+    /// Create from an explicit range whose first row supplies headers.
+    /// Use `create_table_without_headers` to preserve every selected data row.
     pub fn create_table(
         &mut self,
         sheet_id: SheetId,
@@ -723,6 +729,7 @@ impl Workbook {
             rules,
             cells: Vec::new(),
             append_region: None,
+            header_insertion: None,
             creation_references,
             formulas,
             sheet_id,
@@ -743,6 +750,13 @@ impl Workbook {
     /// `undo = true` restores the before state; false reapplies the after
     /// state. A stale commit fails atomically instead of overwriting edits.
     pub fn apply_table_commit(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
+        if commit.header_insertion.is_some() {
+            return self.apply_headerless_table_commit(commit, undo);
+        }
+        self.apply_table_commit_inner(commit, undo)
+    }
+
+    fn apply_table_commit_inner(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
         let (expected, target) = if undo {
             (&commit.after, &commit.before)
         } else {
