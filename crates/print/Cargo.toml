@@ -10,6 +10,7 @@ default = []
 pdf-spike = ["dep:krilla"]
 pdf = ["dep:krilla", "dep:cosmic-text", "dep:visigrid-engine", "dep:tempfile"]
 preview = ["pdf", "dep:hayro"]
+native-print = ["pdf", "dep:ashpd", "dep:futures-lite"]
 
 [dependencies]
 krilla = { version = "0.8.2", default-features = false, features = ["simple-text"], optional = true }
@@ -18,7 +19,12 @@ visigrid-engine = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
 hayro = { version = "0.7.1", default-features = false, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "print"], optional = true }
+futures-lite = { version = "2", optional = true }
+
 [dev-dependencies]
+smol = "2"
 visigrid-io = { workspace = true }
 
 [[example]]
@@ -32,3 +38,7 @@ required-features = ["pdf"]
 [[example]]
 name = "preview_pdf"
 required-features = ["preview"]
+
+[[example]]
+name = "system_print"
+required-features = ["native-print"]

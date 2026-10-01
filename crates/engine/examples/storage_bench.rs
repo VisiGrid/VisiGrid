@@ -182,6 +182,34 @@ fn main() {
     );
     println!("check        {} / {}", wb.sheets()[0].get_display(1, 3), sum as u64 % 1000);
 
+    // #29: a running total over a column of FORMULAS. A_n = C_n*2,
+    // B_n = SUM($A$1:A_n). Every A is a formula inside every later B's range.
+    for rows in [8_000usize, 100_000] {
+        let mut ft = Sheet::new(SheetId(3), NUM_ROWS, NUM_COLS);
+        for r in 0..rows {
+            ft.set_value_deferred(r, 2, &format!("{}", r % 100));
+            ft.set_value_deferred(r, 0, &format!("=C{}*2", r + 1));
+            ft.set_value_deferred(r, 1, &format!("=SUM($A$1:A{})", r + 1));
+        }
+        let mut wb = Workbook::from_sheets(vec![ft], 0);
+        let before = LIVE.load(Ordering::Relaxed);
+        let t = Instant::now();
+        wb.rebuild_dep_graph();
+        let graph_ms = ms(t);
+        let graph = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+        let t = Instant::now();
+        wb.recompute_full_ordered();
+        let full_ms = ms(t);
+        let t = Instant::now();
+        wb.set_cell_value_tracked(0, 0, 2, "7");
+        let edit_ms = ms(t);
+        println!(
+            "fml running {rows:>7} rows: graph {graph_ms:>8.1} ms {:>7.1} MiB   recompute {full_ms:>8.1} ms   edit C1 {edit_ms:>8.1} ms   (B{rows} = {})",
+            mib(graph),
+            wb.sheets()[0].get_display(rows - 1, 1)
+        );
+    }
+
     // Snapshots (#18 phase 3): the desktop keeps a clone of the workbook for
     // rewind preview, and preview clones that again. Measure a clone, then
     // what the first edits cost while the snapshot is alive.

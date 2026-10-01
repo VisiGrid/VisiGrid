@@ -1098,8 +1098,8 @@ fn key_hint(key: &'static str, text: Hsla, border: Hsla) -> Div {
 }
 
 /// Render the close-window save confirmation dialog.
-fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    use crate::ui::{modal_backdrop, Button, DialogFrame, DialogSize};
+fn render_close_confirm_dialog(app: &Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    use crate::ui::{modal_backdrop, Button, DialogFrame};
 
     let panel_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
@@ -1136,7 +1136,7 @@ fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut
     // Footer buttons with focus ring
     let cancel_btn = Button::new("close-cancel-btn", "Cancel")
         .secondary(if focused == 0 { accent } else { panel_border }, if focused == 0 { text_primary } else { text_muted })
-        .flex().items_center().gap(px(6.0))
+        .px(px(12.0)).flex_shrink_0().flex().items_center().gap(px(6.0))
         .child(key_hint("Esc", text_muted, panel_border))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.resolve_close_confirm(0, window, cx);
@@ -1144,7 +1144,7 @@ fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut
 
     let dont_save_btn = Button::new("close-dont-save-btn", "Don't Save")
         .secondary(if focused == 1 { accent } else { panel_border }, if focused == 1 { text_primary } else { text_muted })
-        .flex().items_center().gap(px(6.0))
+        .px(px(12.0)).flex_shrink_0().flex().items_center().gap(px(6.0))
         .child(key_hint("D", text_muted, panel_border))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.resolve_close_confirm(1, window, cx);
@@ -1152,7 +1152,7 @@ fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut
 
     let save_btn = Button::new("close-save-btn", "Save")
         .primary(accent, rgb(0xffffff).into())
-        .flex().items_center().gap(px(6.0))
+        .px(px(12.0)).flex_shrink_0().flex().items_center().gap(px(6.0))
         .child(key_hint("S", hsla(0.0, 0.0, 1.0, 0.85), hsla(0.0, 0.0, 1.0, 0.45)))
         .when(focused == 2, |b| b.border_1().border_color(hsla(0.0, 0.0, 1.0, 1.0)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
@@ -1161,6 +1161,8 @@ fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut
 
     let footer = div()
         .flex()
+        .w_full()
+        .flex_wrap()
         .justify_end()
         .gap_2()
         .child(cancel_btn)
@@ -1176,7 +1178,7 @@ fn render_close_confirm_dialog(app: &Spreadsheet, _window: &mut Window, cx: &mut
     modal_backdrop(
         "close-confirm-dialog",
         DialogFrame::new(body, panel_bg, panel_border)
-            .size(DialogSize::Md)
+            .width(px(440.0).min(window.viewport_size().width - px(32.0)))
             .header(header)
             .footer(footer),
     )

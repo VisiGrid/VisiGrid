@@ -170,6 +170,7 @@ pub enum CommandId {
     SaveAs,
     ExportCsv,
     ExportPdf,
+    PrintPreview,
     ExportTsv,
     ExportJson,
 
@@ -391,6 +392,7 @@ impl CommandId {
             Self::SaveAs => "Save As",
             Self::ExportCsv => "Export as CSV",
             Self::ExportPdf => "Export PDF",
+            Self::PrintPreview => "Print",
             Self::ExportTsv => "Export as TSV",
             Self::ExportJson => "Export as JSON",
             Self::SelectTheme => "Select Theme...",
@@ -672,6 +674,7 @@ impl CommandId {
             Self::SaveAs => "write export",
             Self::ExportCsv => "save comma",
             Self::ExportPdf => "print preview portable document paper page gridlines",
+            Self::PrintPreview => "printer print preview copies pages paper",
             Self::ExportTsv => "save tab separated",
             Self::ExportJson => "save array",
             Self::SelectTheme => "appearance color scheme dark light",
@@ -862,6 +865,7 @@ impl CommandId {
             Self::SaveAs,
             Self::ExportCsv,
             Self::ExportPdf,
+            Self::PrintPreview,
             Self::ExportTsv,
             Self::ExportJson,
             Self::SelectTheme,
@@ -971,6 +975,7 @@ impl CommandId {
             | Self::OpenFile
             | Self::Save
             | Self::SaveAs
+            | Self::PrintPreview
             | Self::ExportPdf
             | Self::ExportCsv
             | Self::ExportTsv

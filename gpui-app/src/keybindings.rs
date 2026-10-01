@@ -45,6 +45,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
     // Build keybinding strings based on modifier preference
     let mut bindings: Vec<KeyBinding> = vec![
+        KeyBinding::new(&kb(m, "p"), PrintPreview, Some("Spreadsheet")),
         // Navigation (in Spreadsheet context)
         KeyBinding::new("up", MoveUp, Some("Spreadsheet")),
         KeyBinding::new("down", MoveDown, Some("Spreadsheet")),

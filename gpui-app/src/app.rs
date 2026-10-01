@@ -434,6 +434,8 @@ pub struct Spreadsheet {
     /// The next composition keystroke replaces this range instead of appending after it.
     pub edit_marked_range: Option<std::ops::Range<usize>>,
     pub edit_original: String,
+    /// Explicit text editing keeps horizontal arrows inside the editor.
+    pub text_edit_caret_mode: bool,
     pub edit_scroll_x: f32,  // Horizontal scroll offset for in-cell editor (<=0, updated by ensure_caret_visible)
     pub(crate) edit_scroll_dirty: bool, // True when caret/text changed; triggers ensure_caret_visible once
 
@@ -1146,6 +1148,7 @@ impl Spreadsheet {
             edit_selection_anchor: None,
             edit_marked_range: None,
             edit_original: String::new(),
+            text_edit_caret_mode: false,
             edit_scroll_x: 0.0,
             edit_scroll_dirty: false,
             caret_visible: true,
@@ -2421,6 +2424,7 @@ impl Spreadsheet {
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
             CommandId::ExportPdf => self.show_pdf_export(cx),
+            CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
 

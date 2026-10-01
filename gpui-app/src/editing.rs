@@ -33,6 +33,7 @@ impl Spreadsheet {
 
     /// Reset formula/edit transient state. Called on every exit from edit mode.
     fn reset_edit_state(&mut self) {
+        self.text_edit_caret_mode = false;
         self.clear_edit_marks();
         self.formula_nav_mode = crate::mode::FormulaNavMode::Point;
         self.formula_nav_manual_override = None;
@@ -86,7 +87,11 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn start_edit(&mut self, cx: &mut Context<Self>) {
-        if self.mode.is_editing() { return; }
+        if self.mode.is_editing() {
+            self.text_edit_caret_mode = true;
+            cx.notify();
+            return;
+        }
 
         // Block editing during preview mode
         if self.block_if_previewing(cx) { return; }
@@ -116,6 +121,7 @@ impl Spreadsheet {
         }
         if self.block_if_pivot(row, col, row, col, "edit", cx) { return; }
 
+        self.text_edit_caret_mode = true;
         self.edit_original = self.sheet(cx).get_raw(row, col);
         self.edit_value = self.edit_original.clone();
         self.edit_cursor = self.edit_value.len();  // Cursor at end (byte offset)
@@ -165,6 +171,7 @@ impl Spreadsheet {
 
     pub fn start_edit_clear(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.text_edit_caret_mode = false;
 
         // Block editing during preview mode
         if self.block_if_previewing(cx) { return; }
@@ -223,7 +230,8 @@ impl Spreadsheet {
     ///
     /// # Commit-on-Arrow Policy (Excel-like fast data entry)
     ///
-    /// In Mode::Edit (non-formula): Arrow keys commit the edit and move selection.
+    /// Direct entry commits on arrows. Explicit text editing uses Left/Right
+    /// for the caret; Enter/Tab still commit and navigate.
     /// In Mode::Formula: Arrow keys do ref-picking (Option A), NOT commit.
     pub fn confirm_edit(&mut self, cx: &mut Context<Self>) {
         // Excel semantics: Enter commits ONLY the active cell, even with a
@@ -253,6 +261,11 @@ impl Spreadsheet {
 
         let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
+        if self.edit_value == old_value {
+            self.cancel_edit(cx);
+            return;
+        }
+
 
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {
@@ -755,7 +768,8 @@ impl Spreadsheet {
     ///
     /// # Commit-on-Arrow Policy (Excel-like fast data entry)
     ///
-    /// In Mode::Edit (non-formula): Arrow keys commit the edit and move selection.
+    /// Direct entry commits on arrows. Explicit text editing uses Left/Right
+    /// for the caret; Enter/Tab still commit and navigate.
     /// This enables fast grid data entry without pressing Enter after each cell.
     ///
     /// In Mode::Formula: Arrow keys do ref-picking (Option A), NOT commit.
@@ -982,7 +996,7 @@ impl Spreadsheet {
         self.clear_formula_ref_colors();
         self.autocomplete_visible = false;
         self.bump_cells_rev();
-        self.is_modified = true;
+        self.is_modified |= had_changes;
         self.maybe_smoke_recalc(cx);
 
         // Show cycle banner if this edit introduced circular references
@@ -1281,6 +1295,7 @@ impl Spreadsheet {
             self.edit_scroll_dirty = true;
             self.formula_bar_cache_dirty = true;
             self.formula_bar_scroll_x = 0.0;
+            self.text_edit_caret_mode = false;
             self.active_editor = EditorSurface::Cell;
 
             // Start caret blinking
@@ -1341,6 +1356,11 @@ impl Spreadsheet {
 
         let (row, col) = self.view_state.selected;
         let old_value = self.edit_original.clone();
+        if self.edit_value == old_value {
+            self.cancel_edit(cx);
+            return true;
+        }
+
 
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {

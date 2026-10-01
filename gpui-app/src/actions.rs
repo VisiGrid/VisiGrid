@@ -134,6 +134,7 @@ actions!(file, [
     ExportJson,
     ExportXlsx,
     ExportPdf,
+    PrintPreview,
     ExportProvenance,  // Phase 9A: Export history as Lua script
     CloseWindow,
     Quit,

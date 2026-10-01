@@ -228,6 +228,7 @@ fn render_file_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Export as JSON...", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.export_json(cx); }))
         .child(menu_item("Export to Excel (.xlsx)...", None, 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.export_xlsx(cx); }))
         .child(menu_item("Export PDF...", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_pdf_export(cx); }))
+        .child(menu_item_with_accel("Print...", Some("Ctrl+P"), Some('r'), 11, h(11), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.show_print_preview(cx); }))
 }
 
 fn render_edit_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hsla, selection_bg: Hsla, border: Hsla, cx: &mut Context<Spreadsheet>) -> Div {
