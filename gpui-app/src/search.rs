@@ -1193,24 +1193,37 @@ pub enum SearchKind {
 }
 
 impl SearchKind {
-    /// Icon or prefix character for visual typing
+    /// Icon shown in the row's tinted square.
+    ///
+    /// Non-ASCII glyphs come from the bundled VisiGrid Symbols font
+    /// (`build-symbol-font.py` picks them up from this file), so they render on
+    /// a bare Linux font stack. The test at the bottom holds that line.
     pub fn icon(&self) -> &'static str {
         match self {
-            Self::Command => ">",
-            // Glyphs here must be ones a plain Linux font stack actually has.
-            // ⏱ and ⚙ exist in about four fonts on a stock Arch install, so
-            // they fell back to a missing-glyph box — obvious on the VisiCalc
-            // theme, where the box sits on bright green, and easy to miss
-            // everywhere else. macOS ships fonts covering them, which is why
-            // this only showed on Linux.
-            Self::RecentFile => "~",
+            Self::Command => "›",
+            Self::RecentFile => "▤",
             Self::Formula => "ƒ",
-            Self::Cell => "@",
-            Self::NamedRange => "$",
-            Self::Setting => "*",
-            Self::GoTo => ":",
+            Self::Cell => "⌕",
+            Self::NamedRange => "⌗",
+            Self::Setting => "⚙",
+            Self::GoTo => "▦",
             Self::Reference => "→",   // Arrow pointing to dependents
             Self::Precedent => "←",   // Arrow pointing to precedents
+        }
+    }
+
+    /// Section heading when results are grouped by kind.
+    pub fn section_title(&self) -> &'static str {
+        match self {
+            Self::Command => "Commands",
+            Self::RecentFile => "Files",
+            Self::Formula => "Functions",
+            Self::Cell => "Cells",
+            Self::NamedRange => "Named ranges",
+            Self::Setting => "Settings",
+            Self::GoTo => "Go to",
+            Self::Reference => "References",
+            Self::Precedent => "Precedents",
         }
     }
 
@@ -1276,6 +1289,8 @@ pub struct SearchItem {
     pub kind: SearchKind,
     pub title: String,
     pub subtitle: Option<String>,
+    /// Dim right-aligned detail: a command's menu, a file's age, a range's address.
+    pub meta: Option<String>,
     pub score: f32,
     pub action: SearchAction,
     /// Optional secondary action (Ctrl+Enter)
@@ -1291,6 +1306,7 @@ impl SearchItem {
             kind,
             title: title.into(),
             subtitle: None,
+            meta: None,
             score: 0.0,
             action,
             secondary_action: None,
@@ -1301,6 +1317,12 @@ impl SearchItem {
     /// Builder: set subtitle
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// Builder: set meta
+    pub fn with_meta(mut self, meta: impl Into<String>) -> Self {
+        self.meta = Some(meta.into());
         self
     }
 
@@ -1388,6 +1410,12 @@ pub trait SearchProvider: Send + Sync {
     /// Empty slice means provider participates in unprefixed (general) search.
     fn prefixes(&self) -> &'static [char];
 
+    /// Whether the provider also answers unprefixed queries. Defaults to
+    /// "has no prefix"; commands answer both `>` and plain text.
+    fn general(&self) -> bool {
+        self.prefixes().is_empty()
+    }
+
     /// Search for items matching the query.
     /// Implementations should:
     /// - Respect the limit parameter
@@ -1429,7 +1457,7 @@ impl SearchEngine {
                 // 2. Query has no prefix AND provider has empty prefixes (general search)
                 match query.prefix {
                     Some(prefix) => p.prefixes().contains(&prefix),
-                    None => p.prefixes().is_empty(),
+                    None => p.general(),
                 }
             })
             .flat_map(|p| p.search(&query, limit))
@@ -1510,6 +1538,23 @@ pub fn score_substring_match(needle: &str, haystack: &str) -> Option<(f32, Vec<(
     None
 }
 
+/// The `limit` best items, best first. Stable, so equal scores keep the
+/// provider's own order (recency for files, declaration order for commands).
+///
+/// Providers used to `.take(limit)` straight off the filter, which kept the
+/// first matches in declaration order rather than the best ones: "sum" could
+/// fill up on SUMIF and SUMPRODUCT before reaching SUM.
+trait Best: Iterator<Item = SearchItem> + Sized {
+    fn best(self, limit: usize) -> Vec<SearchItem> {
+        let mut items: Vec<SearchItem> = self.collect();
+        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        items.truncate(limit);
+        items
+    }
+}
+
+impl<I: Iterator<Item = SearchItem>> Best for I {}
+
 // ============================================================================
 // Built-in Providers
 // ============================================================================
@@ -1523,53 +1568,38 @@ impl SearchProvider for CommandSearchProvider {
     }
 
     fn prefixes(&self) -> &'static [char] {
-        &[] // Participates in unprefixed search
+        &['>']
+    }
+
+    fn general(&self) -> bool {
+        true // Commands are also the main body of unprefixed search
     }
 
     fn search(&self, query: &SearchQuery, limit: usize) -> Vec<SearchItem> {
-        CommandId::all()
-            .iter()
-            .filter_map(|&cmd| {
-                let name = cmd.name();
-                let keywords = cmd.keywords();
+        let items = CommandId::all().iter().filter_map(|&cmd| {
+            let name = cmd.name();
 
-                // Try matching name first
-                if let Some((score, highlights)) = score_substring_match(query.needle, name) {
-                    let mut item = SearchItem::new(
-                        SearchKind::Command,
-                        name,
-                        SearchAction::RunCommand(cmd),
-                    )
-                    .with_score(score)
-                    .with_highlights(highlights);
-
-                    if let Some(shortcut) = cmd.shortcut() {
-                        item = item.with_subtitle(shortcut);
-                    }
-
-                    return Some(item);
+            // Name match first; a keyword-only match ranks below any name match
+            let (score, highlights) = match score_substring_match(query.needle, name) {
+                Some(hit) => hit,
+                None => {
+                    score_substring_match(query.needle, cmd.keywords())?;
+                    (0.5, Vec::new())
                 }
+            };
 
-                // Try matching keywords
-                if score_substring_match(query.needle, keywords).is_some() {
-                    let mut item = SearchItem::new(
-                        SearchKind::Command,
-                        name,
-                        SearchAction::RunCommand(cmd),
-                    )
-                    .with_score(0.5); // Lower score for keyword match
-
-                    if let Some(shortcut) = cmd.shortcut() {
-                        item = item.with_subtitle(shortcut);
-                    }
-
-                    return Some(item);
-                }
-
-                None
-            })
-            .take(limit)
-            .collect()
+            let mut item = SearchItem::new(SearchKind::Command, name, SearchAction::RunCommand(cmd))
+                .with_score(score)
+                .with_highlights(highlights);
+            if let Some(shortcut) = cmd.shortcut() {
+                item = item.with_subtitle(shortcut);
+            }
+            if let Some(category) = cmd.menu_category() {
+                item = item.with_meta(category.name());
+            }
+            Some(item)
+        });
+        items.best(limit)
     }
 }
 
@@ -1612,8 +1642,7 @@ impl SearchProvider for FormulaSearchProvider {
                     None
                 }
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
@@ -1769,8 +1798,7 @@ impl SearchProvider for SettingsSearchProvider {
                     None
                 }
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
@@ -1832,7 +1860,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                         &entry.name,
                         SearchAction::JumpToCell { row: entry.target_row, col: entry.target_col },
                     )
-                    .with_subtitle(&entry.reference)
+                    .with_meta(&entry.reference)
                     .with_score(score)
                     .with_highlights(highlights);
 
@@ -1850,7 +1878,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                         &entry.name,
                         SearchAction::JumpToCell { row: entry.target_row, col: entry.target_col },
                     )
-                    .with_subtitle(&entry.reference)
+                    .with_meta(&entry.reference)
                     .with_score(0.6);
 
                     item = item.with_secondary_action(SearchAction::CopyToClipboard {
@@ -1868,7 +1896,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                                 &entry.name,
                                 SearchAction::JumpToCell { row: entry.target_row, col: entry.target_col },
                             )
-                            .with_subtitle(&entry.reference)
+                            .with_meta(&entry.reference)
                             .with_score(0.5);  // Lower score for description match
 
                             item = item.with_secondary_action(SearchAction::CopyToClipboard {
@@ -1882,8 +1910,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                     None
                 }
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
@@ -1980,14 +2007,45 @@ impl SearchProvider for CellSearchProvider {
                     None
                 }
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
 // ============================================================================
 // Recent Files Provider (requires app state snapshot)
 // ============================================================================
+
+/// A folder as people read it: home shown as `~`.
+pub fn display_folder(dir: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = dir.strip_prefix(&home) {
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            };
+        }
+    }
+    dir.display().to_string()
+}
+
+/// "just now", "5 min ago", "3 hours ago", "yesterday", "4 days ago", or a date.
+pub fn relative_age(then: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    let secs = now.duration_since(then).map(|d| d.as_secs()).unwrap_or(0);
+    let plural = |n: u64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => plural(secs / 3600, "hour"),
+        86_400..=172_799 => "yesterday".to_string(),
+        172_800..=604_799 => plural(secs / 86_400, "day"),
+        604_800..=2_419_199 => plural(secs / 604_800, "week"),
+        _ => {
+            let dt: chrono::DateTime<chrono::Local> = then.into();
+            dt.format("%b %-d, %Y").to_string()
+        }
+    }
+}
 
 /// Recent files provider - searches recently opened files
 /// Create with a snapshot of recent file paths
@@ -2024,12 +2082,18 @@ impl SearchProvider for RecentFilesProvider {
                 };
 
                 let path_str = path.display().to_string();
-                Some(SearchItem::new(
+                let mut item = SearchItem::new(
                     SearchKind::RecentFile,
                     filename,
                     SearchAction::OpenFile(path.clone()),
                 )
-                .with_subtitle(path.parent()?.to_str()?.to_string())
+                .with_subtitle(display_folder(
+                    &std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).parent()?.to_path_buf(),
+                ));
+                if let Some(age) = std::fs::metadata(path).ok().and_then(|m| m.modified().ok()) {
+                    item = item.with_meta(relative_age(age, std::time::SystemTime::now()));
+                }
+                Some(item
                 .with_score(score)
                 .with_highlights(highlights)
                 .with_secondary_action(SearchAction::CopyToClipboard {
@@ -2037,8 +2101,7 @@ impl SearchProvider for RecentFilesProvider {
                     description: "Copied path to clipboard".into(),
                 }))
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
@@ -2112,8 +2175,7 @@ impl SearchProvider for ReferencesProvider {
                     .with_score(0.8))
                 }
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
@@ -2187,8 +2249,7 @@ impl SearchProvider for PrecedentsProvider {
                     .with_score(0.8))
                 }
             })
-            .take(limit)
-            .collect()
+            .best(limit)
     }
 }
 
@@ -2283,6 +2344,47 @@ mod tests {
         // : prefix should only get goto
         let results = engine.search(":A1", 10);
         assert!(results.iter().all(|r| r.kind == SearchKind::GoTo));
+    }
+
+    #[test]
+    fn command_prefix_returns_commands() {
+        let mut engine = SearchEngine::new();
+        engine.register(Box::new(CommandSearchProvider));
+        engine.register(Box::new(GoToSearchProvider));
+
+        // ">" alone lists commands; it used to match no provider at all
+        let results = engine.search(">", 500);
+        assert_eq!(results.len(), CommandId::all().len());
+        assert!(results.iter().all(|r| r.kind == SearchKind::Command));
+
+        let results = engine.search("> fill", 50);
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| r.kind == SearchKind::Command));
+    }
+
+    #[test]
+    fn providers_keep_the_best_matches_not_the_first() {
+        // With a limit of 1, the exact name must win over earlier-declared
+        // commands that merely contain or keyword-match the needle.
+        for cmd in CommandId::all() {
+            let results = CommandSearchProvider.search(&SearchQuery::parse(cmd.name()), 1);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].score, 1.0, "{} lost to {}", cmd.name(), results[0].title);
+        }
+    }
+
+    #[test]
+    fn relative_ages_read_naturally() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let ago = |s: u64| relative_age(now - Duration::from_secs(s), now);
+        assert_eq!(ago(10), "just now");
+        assert_eq!(ago(120), "2 min ago");
+        assert_eq!(ago(3600), "1 hour ago");
+        assert_eq!(ago(3 * 3600), "3 hours ago");
+        assert_eq!(ago(90_000), "yesterday");
+        assert_eq!(ago(4 * 86_400), "4 days ago");
+        assert_eq!(ago(14 * 86_400), "2 weeks ago");
     }
 
     #[test]
@@ -2680,33 +2782,24 @@ mod tests {
 mod icon_glyph_tests {
     use super::SearchKind;
 
-    /// Every palette icon is a character a plain font stack actually has.
+    /// Every palette icon is a character the bundled symbol font carries.
     ///
-    /// Not a style rule — a rendering one. ⏱ and ⚙ are present in about four
-    /// fonts on a stock Linux install, so they fell back to a missing-glyph
-    /// box. It went unnoticed because macOS ships fonts that cover them, and
-    /// because on a dark theme a box looks like an icon; the VisiCalc theme
-    /// puts it on bright green and it becomes obvious.
-    ///
-    /// ASCII is the safe range. The wider fix is a bundled fallback font, at
-    /// which point this test stops being the thing holding the line.
+    /// Not a style rule — a rendering one. ⏱ and ⚙ once fell back to a
+    /// missing-glyph box on Linux, unnoticed on macOS and on dark themes where
+    /// a box passes for an icon. The bundled VisiGrid Symbols font fixed that
+    /// for whatever it covers; this keeps the icons inside its coverage.
     #[test]
-    fn palette_icons_stay_within_ascii() {
+    fn palette_icons_are_in_the_bundled_font() {
         use SearchKind::*;
-
-        // ASCII, or one of these — each measured on a stock Arch install and
-        // carried by 40+ fonts, against the four or seven that carried the
-        // glyphs this replaced. Adding to this list should mean counting
-        // first, not assuming: `fc-list :charset=<hex> family | wc -l`.
-        const MEASURED_SAFE: [char; 3] = ['ƒ', '→', '←'];
+        let covered = include_str!("../assets/fonts/visigrid-symbols/COVERED-GLYPHS.txt");
 
         for kind in [Command, RecentFile, Formula, Cell, NamedRange, Setting, GoTo, Reference, Precedent] {
-            let icon = kind.icon();
-            for ch in icon.chars() {
+            for ch in kind.icon().chars() {
+                let line = format!("U+{:04X}\t{ch}", ch as u32);
                 assert!(
-                    ch.is_ascii() || MEASURED_SAFE.contains(&ch),
-                    "{kind:?} uses {ch:?}, which is not known to render on Linux — \
-                     count the fonts carrying it before adding it here"
+                    ch.is_ascii() || covered.lines().any(|l| l == line),
+                    "{kind:?} uses {ch:?}, which the bundled symbol font lacks — \
+                     run scripts/build-symbol-font.py"
                 );
             }
         }

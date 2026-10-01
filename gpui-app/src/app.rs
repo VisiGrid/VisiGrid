@@ -478,7 +478,9 @@ pub struct Spreadsheet {
     pub palette_scope: Option<PaletteScope>,  // Menu scope for Alt accelerators
     pub(crate) search_engine: SearchEngine,
     pub(crate) palette_results: Vec<SearchItem>,
-    pub palette_total_results: usize,  // Total matches before truncation
+    /// Headings over runs of `palette_results` (empty = no headings).
+    pub(crate) palette_sections: Vec<crate::command_palette::PaletteSection>,
+    pub palette_total_results: usize,  // Matches counted for the footer
     // Pre-palette state for preview/restore
     pub(crate) palette_pre_selection: (usize, usize),
     pub(crate) palette_pre_selection_end: Option<(usize, usize)>,
@@ -1179,6 +1181,7 @@ impl Spreadsheet {
             palette_scope: None,
             search_engine: Self::create_search_engine(),
             palette_results: Vec::new(),
+            palette_sections: Vec::new(),
             palette_total_results: 0,
             palette_pre_selection: (0, 0),
             palette_pre_selection_end: None,

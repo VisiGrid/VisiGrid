@@ -291,6 +291,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("enter", PaletteExecute, Some("CommandPalette")),
         KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
+        KeyBinding::new("pageup", PalettePageUp, Some("CommandPalette")),
+        KeyBinding::new("pagedown", PalettePageDown, Some("CommandPalette")),
+        KeyBinding::new("home", PaletteHome, Some("CommandPalette")),
+        KeyBinding::new("end", PaletteEnd, Some("CommandPalette")),
 
         // Lua debugger (in LuaDebug context — active when Debug tab is focused)
         KeyBinding::new("f5", DebugStartOrContinue, Some("LuaDebug")),
