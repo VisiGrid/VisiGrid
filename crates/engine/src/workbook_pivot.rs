@@ -7,10 +7,10 @@
 //! before and after. Applying `after` performs the action; applying `before`
 //! undoes it. Both are bounded by the output budget in [`crate::pivot`].
 
-use crate::cell::NumberFormat;
+use crate::cell::{CellFormat, NumberFormat};
 use crate::cell_id::CellId;
 use crate::formula::eval::Value;
-use crate::pivot::{self, PivotError, PivotOutput, PivotSnapshot, PivotTable, RefreshRecord};
+use crate::pivot::{self, without_number_format, PivotError, PivotOutput, PivotShape, PivotSnapshot, PivotTable, RefreshRecord};
 use crate::sheet::{SheetId, NUM_COLS, NUM_ROWS};
 
 use super::Workbook;
@@ -30,9 +30,9 @@ pub struct PivotState {
     pub pivot_id: u64,
     /// `None` = no such pivot (before a create, after a delete).
     pub table: Option<PivotTable>,
-    /// Cells over the union of the old and new regions: value and number
-    /// format. `Value::Empty` clears the value but keeps the cell's other
-    /// formatting. Other style attributes are never touched by a pivot.
+    /// Cells over the union of the old and new regions: value and full
+    /// format. `Value::Empty` clears the value. Formats the user set are
+    /// carried through unchanged; see `prepare_pivot_commit`.
     pub cells: Vec<PivotCell>,
 }
 
@@ -42,7 +42,7 @@ pub struct PivotCell {
     pub row: u32,
     pub col: u32,
     pub value: Value,
-    pub number_format: NumberFormat,
+    pub format: CellFormat,
 }
 
 impl PivotState {
@@ -52,7 +52,7 @@ impl PivotState {
             .cells
             .iter()
             .map(|c| {
-                64 + match &c.value {
+                160 + match &c.value {
                     Value::Text(s) | Value::Error(s) => s.len(),
                     _ => 0,
                 }
@@ -256,35 +256,67 @@ impl Workbook {
             }
         }
 
-        let current_format = |r: usize, c: usize| sheet.get_format(r, c).number_format.clone();
+        let current_format = |r: usize, c: usize| sheet.get_format(r, c).clone();
         let before_cells: Vec<PivotCell> = coords
             .iter()
             .map(|&(r, c)| PivotCell {
                 row: r as u32,
                 col: c as u32,
                 value: if in_old(r, c) { owned_value(sheet, r, c) } else { Value::Empty },
-                number_format: current_format(r, c),
+                format: current_format(r, c),
             })
             .collect();
+
+        // Formatting. The pivot owns the styling its shape implies (header
+        // rows, totals row, totals columns) and its value fields' number
+        // formats. A cell still holding exactly what the pivot wrote last time
+        // is restyled for the new shape; anything else was set by the user and
+        // is kept. So styling follows the layout, and user formatting survives
+        // refresh and rearrangement.
+        let old_shape = old.as_ref().and_then(|o| {
+            o.extent.map(|(oh, ow)| (o, PivotShape::of(&o.definition, oh as usize, ow as usize)))
+        });
+        let new_shape = PivotShape::of(&table.definition, h, w);
         let after_cells: Vec<PivotCell> = coords
             .iter()
             .map(|&(r, c)| {
                 let inside = r >= r0 && r <= r1 && c >= c0 && c <= c1;
                 let value = if inside { output.cells[r - r0][c - c0].clone() } else { Value::Empty };
-                // Value cells take their field's format; everything else keeps
-                // whatever the cell has, so user formatting survives refresh.
-                let field_format = inside
+                let cur = current_format(r, c);
+                // What the pivot last wrote here: (style, value-field number format).
+                let old_owned = old_shape.and_then(|(o, shape)| {
+                    let (or, oc) = (o.anchor_row as usize, o.anchor_col as usize);
+                    o.contains(r, c).then(|| {
+                        let field_nf = shape
+                            .value_field(r - or, c - oc)
+                            .and_then(|vi| o.definition.values.get(vi))
+                            .and_then(|v| v.number_format.clone());
+                        (shape.style(r - or, c - oc), field_nf)
+                    })
+                });
+                let style_was_pivots = match &old_owned {
+                    Some((style, _)) => without_number_format(&cur) == *style,
+                    None => without_number_format(&cur) == CellFormat::default(),
+                };
+                let new_style = if inside { new_shape.style(r - r0, c - c0) } else { CellFormat::default() };
+                let mut format = if style_was_pivots { new_style } else { without_number_format(&cur) };
+
+                let nf_was_pivots = match &old_owned {
+                    Some((_, Some(field_nf))) => cur.number_format == *field_nf,
+                    _ => cur.number_format == NumberFormat::General,
+                };
+                let field_nf = inside
                     .then(|| r - r0 >= output.header_rows)
                     .filter(|&is_data| is_data)
                     .and_then(|_| output.value_columns.get(c - c0).copied().flatten())
                     .and_then(|vi| table.definition.values.get(vi))
                     .and_then(|v| v.number_format.clone());
-                PivotCell {
-                    row: r as u32,
-                    col: c as u32,
-                    value,
-                    number_format: field_format.unwrap_or_else(|| current_format(r, c)),
-                }
+                format.number_format = match (nf_was_pivots, field_nf) {
+                    (true, Some(nf)) => nf,
+                    (true, None) => NumberFormat::General,
+                    (false, _) => cur.number_format.clone(),
+                };
+                PivotCell { row: r as u32, col: c as u32, value, format }
             })
             .collect();
 
@@ -375,9 +407,9 @@ impl Workbook {
         if let Some((r0, c0, r1, c1)) = table.region() {
             for r in r0..=r1 {
                 for c in c0..=c1 {
-                    let nf = sheet.get_format(r, c).number_format.clone();
-                    before_cells.push(PivotCell { row: r as u32, col: c as u32, value: owned_value(sheet, r, c), number_format: nf.clone() });
-                    after_cells.push(PivotCell { row: r as u32, col: c as u32, value: Value::Empty, number_format: nf });
+                    let f = sheet.get_format(r, c).clone();
+                    before_cells.push(PivotCell { row: r as u32, col: c as u32, value: owned_value(sheet, r, c), format: f.clone() });
+                    after_cells.push(PivotCell { row: r as u32, col: c as u32, value: Value::Empty, format: f });
                 }
             }
         }
@@ -401,8 +433,8 @@ impl Workbook {
             for cell in &state.cells {
                 let (r, c) = (cell.row as usize, cell.col as usize);
                 sheet.write_pivot_cell(r, c, &cell.value);
-                if sheet.get_format(r, c).number_format != cell.number_format {
-                    sheet.set_number_format(r, c, cell.number_format.clone());
+                if sheet.get_format(r, c) != cell.format {
+                    sheet.set_format(r, c, cell.format.clone());
                 }
             }
             if let Some(t) = &state.table {
@@ -1006,5 +1038,96 @@ mod tests {
         let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
         assert!(wb.create_pivot(source, def).is_err());
         assert_eq!(wb.sheets().len(), sheets);
+    }
+
+    fn is_header(f: &CellFormat) -> bool {
+        f.bold && f.background_color == Some([232, 239, 250, 255])
+    }
+    fn is_total_row(f: &CellFormat) -> bool {
+        f.bold && f.background_color == Some([241, 245, 251, 255])
+    }
+
+    #[test]
+    fn user_number_formats_on_value_cells_survive_refresh() {
+        let (mut wb, data, out) = book();
+        let mut t = table(&wb, data);
+        let money = NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None };
+        let whole = NumberFormat::Custom("$#,##0".into());
+        t.definition.values[0].number_format = Some(money.clone());
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        // The user reformats one value cell and the grand total.
+        wb.sheet_mut(oi).unwrap().set_number_format(1, 1, whole.clone());
+        wb.sheet_mut(oi).unwrap().set_number_format(3, 1, whole.clone());
+        let t2 = wb.find_pivot(id).unwrap().1.clone();
+        refresh(&mut wb, out, t2);
+        let sh = wb.sheet(oi).unwrap();
+        assert_eq!(sh.get_format(1, 1).number_format, whole, "user format kept");
+        assert_eq!(sh.get_format(3, 1).number_format, whole, "user format on the total kept");
+        assert_eq!(sh.get_format(2, 1).number_format, money, "untouched cells keep the field format");
+    }
+
+    #[test]
+    fn styling_follows_the_shape_when_groups_are_added() {
+        let (mut wb, data, out) = book();
+        let t = table(&wb, data);
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        // East, West, Grand Total: the totals band is on row 3.
+        assert!(is_header(&wb.sheet(oi).unwrap().get_format(0, 0)));
+        assert!(is_total_row(&wb.sheet(oi).unwrap().get_format(3, 0)));
+        // The user italicizes West's label.
+        wb.sheet_mut(oi).unwrap().set_italic(2, 0, true);
+
+        // A new region appears in the source; refresh with the extended source.
+        let di = wb.sheet_index_by_id(data).unwrap();
+        wb.sheet_mut(di).unwrap().set_value(4, 0, "North");
+        wb.sheet_mut(di).unwrap().set_value(4, 1, "7");
+        let mut t2 = wb.find_pivot(id).unwrap().1.clone();
+        t2.source.end_row = 4;
+        let commit = refresh(&mut wb, out, t2);
+        let sh = wb.sheet(oi).unwrap();
+        // East, North, West, Grand Total: the band moved to row 4; row 3 is plain data.
+        assert_eq!(sh.get_display(3, 0), "West");
+        assert!(!is_total_row(&sh.get_format(3, 0)), "old totals band removed");
+        assert!(is_total_row(&sh.get_format(4, 0)), "totals band on the new last row");
+        assert!(sh.get_format(2, 0).italic, "user formatting kept where the user put it");
+
+        // Undo restores the previous styling exactly.
+        wb.apply_pivot_state(&commit.before).unwrap();
+        let sh = wb.sheet(oi).unwrap();
+        assert!(is_total_row(&sh.get_format(3, 0)));
+        assert!(!is_total_row(&sh.get_format(4, 0)));
+    }
+
+    #[test]
+    fn styling_follows_a_layout_change() {
+        let (mut wb, data, out) = book();
+        let di = wb.sheet_index_by_id(data).unwrap();
+        for (r, q) in ["Q", "Q1", "Q2", "Q1"].iter().enumerate() {
+            wb.sheet_mut(di).unwrap().set_value(r, 2, q);
+        }
+        let mut t = table(&wb, data);
+        t.source.end_col = 2;
+        t.definition.column = Some(PivotField { offset: 2, header: "Q".into() });
+        let id = t.id;
+        refresh(&mut wb, out, t);
+        let oi = wb.sheet_index_by_id(out).unwrap();
+        // Cross-tab: two header rows, a bold Grand Total column.
+        assert!(is_header(&wb.sheet(oi).unwrap().get_format(1, 0)));
+        assert!(wb.sheet(oi).unwrap().get_format(2, 3).bold, "grand total column");
+
+        // Remove the column field: one header row, two value columns fewer.
+        let mut t2 = wb.find_pivot(id).unwrap().1.clone();
+        t2.definition.column = None;
+        refresh(&mut wb, out, t2);
+        let sh = wb.sheet(oi).unwrap();
+        assert_eq!(sh.get_display(1, 0), "East");
+        assert!(!is_header(&sh.get_format(1, 0)), "a former header row that is now data is unstyled");
+        assert!(is_header(&sh.get_format(0, 0)));
+        assert!(is_total_row(&sh.get_format(3, 0)));
+        assert_eq!(sh.get_format(2, 3), CellFormat::default(), "cells left behind lose the pivot's styling");
     }
 }

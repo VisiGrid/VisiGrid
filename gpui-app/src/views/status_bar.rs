@@ -575,12 +575,18 @@ fn render_status_message(
             .into_any_element();
     }
 
-    // Priority: hint buffer > status message > mode text
+    // Priority: hint buffer > a pivot warning > status message > mode text.
+    // A pivot that is out of date or failed to refresh must not hide behind a
+    // leftover message (status messages persist until replaced).
+    let pivot = app.pivot_status_text(cx);
+    let pivot_needs_attention = app.pivot_needs_attention(cx);
     let message = if let Some(hint) = hint_buffer {
         hint.to_string()
+    } else if let (Some(pivot), true) = (&pivot, pivot_needs_attention) {
+        if mode_text.is_empty() { pivot.clone() } else { format!("{mode_text} \u{00b7} {pivot}") }
     } else if let Some(msg) = &app.status_message {
         msg.clone()
-    } else if let Some(pivot) = app.pivot_status_text(cx) {
+    } else if let Some(pivot) = pivot {
         if mode_text.is_empty() { pivot } else { format!("{mode_text} \u{00b7} {pivot}") }
     } else {
         mode_text.to_string()

@@ -861,10 +861,13 @@ impl Spreadsheet {
                 });
             }
             PivotPanelMode::Edit { pivot_id } => {
-                let Some((idx, _)) = self.wb(cx).find_pivot(pivot_id) else {
+                let Some((idx, old_table)) = self.wb(cx).find_pivot(pivot_id) else {
                     self.pivot_job_failed(&job, "This pivot table no longer exists.".into(), cx);
                     return false;
                 };
+                // A changed layout refits the output's columns (as Excel does on
+                // update); a plain refresh never touches widths.
+                let layout_changed = old_table.definition != job.table.definition;
                 let sheet_id = self.wb(cx).sheet(idx).map(|s| s.id).unwrap();
                 let commit = match self.wb(cx).prepare_pivot_commit(sheet_id, job.table.clone(), &output, job.source_generation, now) {
                     Ok(c) => c,
@@ -874,7 +877,33 @@ impl Spreadsheet {
                     }
                 };
                 let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
-                self.record_pivot_commit(commit, None, job.description.clone());
+                if layout_changed {
+                    let anchor = job.table.anchor_col as usize;
+                    let columns: Vec<usize> = (anchor..anchor + cols).collect();
+                    let widths = match self.wb(cx).sheet(idx) {
+                        Some(sheet) => self.measure_columns_in(sheet, &columns, None),
+                        None => Default::default(),
+                    };
+                    let mut actions = vec![crate::history::UndoAction::PivotCommit {
+                        commit: Box::new(commit),
+                        created_sheet: None,
+                        description: job.description.clone(),
+                    }];
+                    for col in columns {
+                        let width = widths.get(&col).copied().unwrap_or(0.0).max(self.metrics.default_cell_sizes.column_width);
+                        let old = self.col_widths.get(&sheet_id).and_then(|m| m.get(&col)).copied();
+                        if old != Some(width) {
+                            self.set_col_width_on(sheet_id, col, width);
+                            actions.push(crate::history::UndoAction::ColumnWidthSet { sheet_id, col, old, new: Some(width) });
+                        }
+                    }
+                    self.history.record_action_with_provenance(
+                        crate::history::UndoAction::Group { actions, description: job.description.clone() },
+                        None,
+                    );
+                } else {
+                    self.record_pivot_commit(commit, None, job.description.clone());
+                }
                 let growth = self.wb(cx).pivot_source_growth(&job.table);
                 let note = growth.map(|last| {
                     format!(
@@ -916,6 +945,12 @@ impl Spreadsheet {
 
 impl Spreadsheet {
     /// Status-bar text when the cursor is inside a pivot's output.
+    /// Is the pivot under the cursor out of date or failing to refresh?
+    pub(crate) fn pivot_needs_attention(&self, cx: &App) -> bool {
+        self.pivot_under_cursor(cx)
+            .is_some_and(|t| self.pivot_errors.contains_key(&t.id) || self.wb(cx).is_pivot_stale(&t))
+    }
+
     pub(crate) fn pivot_status_text(&self, cx: &App) -> Option<String> {
         let t = self.pivot_under_cursor(cx)?;
         let wb = self.wb(cx);

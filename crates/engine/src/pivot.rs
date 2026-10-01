@@ -709,42 +709,97 @@ pub fn format_new_pivot_values(definition: &mut PivotDefinition, output: &PivotO
 /// sheet snapshot, so redo restores the style without a workbook-sized copy.
 /// Refresh deliberately leaves these formats and later user edits alone.
 pub fn style_new_pivot(sheet: &mut Sheet, table: &PivotTable, output: &PivotOutput) {
+    let shape = PivotShape::of(&table.definition, output.height(), output.width());
     let (r0, c0) = (table.anchor_row as usize, table.anchor_col as usize);
-    let border = CellBorder { color: Some([177, 192, 213, 255]), ..CellBorder::thin() };
-    // Fill and foreground travel together, remaining legible in either theme.
-    let header = CellFormat {
-        bold: true,
-        background_color: Some([232, 239, 250, 255]),
-        font_color: Some([34, 53, 78, 255]),
-        ..CellFormat::default()
-    };
-    for r in 0..output.header_rows {
-        for c in 0..output.width() {
-            let mut format = header.clone();
-            if r + 1 == output.header_rows { format.border_bottom = border; }
-            sheet.set_format(r0 + r, c0 + c, format);
-        }
-    }
-    let has_total = !table.definition.values.is_empty() || table.definition.column.is_some();
-    if has_total && output.height() > output.header_rows {
-        let total = CellFormat {
-            background_color: Some([241, 245, 251, 255]),
-            border_top: border,
-            ..header.clone()
-        };
-        for c in 0..output.width() {
-            sheet.set_format(r0 + output.height() - 1, c0 + c, total.clone());
-        }
-    }
-    if table.definition.column.is_some() {
-        let first_total = output.width() - table.definition.values.len().max(1);
-        for r in 0..output.height() {
-            for c in first_total..output.width() {
-                sheet.set_bold(r0 + r, c0 + c, true);
+    for r in 0..shape.height {
+        for c in 0..shape.width {
+            let style = shape.style(r, c);
+            if style != CellFormat::default() {
+                sheet.set_format(r0 + r, c0 + c, style);
             }
-            sheet.set_border_left(r0 + r, c0 + first_total, border);
         }
     }
+}
+
+/// The layout of a pivot's output, derivable from its definition and size:
+/// which rows are headers and totals, which columns hold which value field.
+/// The pivot owns the styling this implies, so styling follows the shape when
+/// a refresh adds groups or the layout changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PivotShape {
+    pub height: usize,
+    pub width: usize,
+    pub header_rows: usize,
+    pub label_cols: usize,
+    pub n_values: usize,
+    pub has_col: bool,
+    pub has_total_row: bool,
+}
+
+impl PivotShape {
+    /// Mirrors the sizing in [`aggregate`].
+    pub fn of(def: &PivotDefinition, height: usize, width: usize) -> PivotShape {
+        let has_col = def.column.is_some();
+        let n_values = def.values.len();
+        PivotShape {
+            height,
+            width,
+            header_rows: if has_col { 2 } else { 1 },
+            label_cols: def.rows.len().max(if has_col || n_values > 0 { 1 } else { 0 }),
+            n_values,
+            has_col,
+            has_total_row: n_values > 0 || has_col,
+        }
+    }
+
+    /// First column of the grand-total block (cross-tabs only).
+    pub fn total_col_start(&self) -> Option<usize> {
+        self.has_col.then(|| self.width.saturating_sub(self.n_values.max(1)))
+    }
+
+    /// The value field whose results the cell holds, if any.
+    pub fn value_field(&self, r: usize, c: usize) -> Option<usize> {
+        if r < self.header_rows || c < self.label_cols || self.n_values == 0 || c >= self.width {
+            return None;
+        }
+        Some(if self.has_col { (c - self.label_cols) % self.n_values } else { c - self.label_cols })
+    }
+
+    /// The pivot's own styling for a cell (number format excluded, General).
+    pub fn style(&self, r: usize, c: usize) -> CellFormat {
+        let border = CellBorder { color: Some([177, 192, 213, 255]), ..CellBorder::thin() };
+        // Fill and foreground travel together, remaining legible in either theme.
+        let header = CellFormat {
+            bold: true,
+            background_color: Some([232, 239, 250, 255]),
+            font_color: Some([34, 53, 78, 255]),
+            ..CellFormat::default()
+        };
+        let mut f = CellFormat::default();
+        if r < self.header_rows {
+            f = header.clone();
+            if r + 1 == self.header_rows {
+                f.border_bottom = border;
+            }
+        }
+        if self.has_total_row && self.height > self.header_rows && r + 1 == self.height {
+            f = CellFormat { background_color: Some([241, 245, 251, 255]), border_top: border, ..header };
+        }
+        if let Some(ft) = self.total_col_start() {
+            if c >= ft {
+                f.bold = true;
+            }
+            if c == ft {
+                f.border_left = border;
+            }
+        }
+        f
+    }
+}
+
+/// A format without its number format, for comparing styling alone.
+pub fn without_number_format(f: &CellFormat) -> CellFormat {
+    CellFormat { number_format: NumberFormat::General, ..f.clone() }
 }
 
 // ---------------------------------------------------------------------------
