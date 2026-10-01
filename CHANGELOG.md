@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.41.0
+
+### Printing
+
+- **Print preview.** The Export PDF dialog now shows the actual pages on white paper beside the settings: page through with Previous/Next (PgUp/PgDn), zoom or fit the page, and every change of settings redraws it. Export saves exactly the pages you previewed. ([#51](https://github.com/VisiGrid/VisiGrid/pull/51))
+- **Print gridlines**, and **repeat header rows** on every page. Hidden and filtered rows stay out, and a header can't split a merged cell. ([#51](https://github.com/VisiGrid/VisiGrid/pull/51))
+- **Print area and page setup saved with the sheet.** **Use selection** sets the print area and **Clear print area** goes back to automatic. **Save setup to sheet** keeps paper, orientation, scaling, gridlines, page numbers, print area and header rows on that sheet, as one undoable change saved with the workbook. They follow the sheet when it's copied or moved. ([#51](https://github.com/VisiGrid/VisiGrid/pull/51))
+- **Print on Linux:** **File → Print…** (Ctrl+P) opens the preview and sends exactly those pages to the system print dialog, where you choose the printer, copies and page range. On macOS and Windows, Ctrl+P / Cmd+P opens the preview for PDF export for now. ([#60](https://github.com/VisiGrid/VisiGrid/pull/60))
+
+### Comments
+
+- **Cell comments.** Add, edit and delete a comment on any cell (**Shift+F2**), even an empty one. Hover a marked cell to read it, and use Previous/Next Comment to step through them even with hover previews turned off. The **Comments** sidebar searches comment text, authors, sheet names and cell addresses, filters to the current sheet or the whole workbook, and jumps to the comment you pick. Comments follow their cells through inserted and deleted rows and columns, sorting, cut and paste and sheet copies, and every change can be undone. Deleting a cell's contents keeps its comment, as in Excel. ([#59](https://github.com/VisiGrid/VisiGrid/pull/59))
+- **Excel Notes round-trip through .xlsx:** text, author and the cell they belong to, including notes on empty cells. Rich-text notes import as plain text. **Threaded comments** from Excel 365 import as the Notes Excel saves beside them, and the import report says that replies and resolved status are not kept and that saving as .xlsx replaces the threads with those Notes. A workbook always opens whatever state its notes are in; any note that can't be read is skipped and named in the import report. Comments are not yet kept by cloud sync ([#63](https://github.com/VisiGrid/VisiGrid/issues/63)). ([#59](https://github.com/VisiGrid/VisiGrid/pull/59))
+- **Preferences** are regrouped into sections, with keyboard navigation and editable number fields.
+
+### Formulas
+
+- **Value functions work on ranges, element by element.** `=LEN(A2:A5)`, `=IF(B2:B5>15,"big","small")` and `=IFERROR(B2:B5/(B2:B5-10),"skip")` return one result per cell and spill, as in Excel. Inside SUMPRODUCT this makes the usual idioms work: `=SUMPRODUCT(LEN(A2:A5))`, `=SUMPRODUCT(--ISNUMBER(B2:B5))`, `=SUMPRODUCT(--REGEXTEST(A2:A5,"^[AB]"))`. Several of these used to give **wrong answers without an error**: `LEN(A2:A5)` returned 38, the length of an error message, and `SUMPRODUCT(--ISNUMBER(B2:B5))` returned 0. An error in a cell now passes through (`LEN` of a `#DIV/0!` cell is `#DIV/0!`, not 7), and IF only evaluates the branch each element takes. ([#54](https://github.com/VisiGrid/VisiGrid/pull/54), [#43](https://github.com/VisiGrid/VisiGrid/issues/43))
+- **SORT, UNIQUE and TRANSPOSE work on computed arrays**, so `=SORT(UNIQUE(A1:A5))`, `=UNIQUE(FILTER(…))` and `=TRANSPOSE(SORT(…))` do what they say. They used to return their input unchanged, with no error. ([#52](https://github.com/VisiGrid/VisiGrid/pull/52))
+- **XIRR, XNPV, RATE and NPER**, matching Microsoft's documented examples. That brings the total to 142 functions. ([#55](https://github.com/VisiGrid/VisiGrid/pull/55))
+
+### Editing and files
+
+- **Left and Right move the caret while editing text.** After F2, a double-click, or a click in the formula bar, Left and Right move within the text instead of committing and leaving the cell. F2 during an edit keeps what you typed. Typing straight into a cell still commits on an arrow, for fast data entry. ([#61](https://github.com/VisiGrid/VisiGrid/pull/61))
+- **Saving a new workbook on macOS works when the app was opened from Finder.** Save As and the exports used to default to the root folder, so the save failed and the window stayed open. New saves and exports now default to Documents (or your home folder). A save that fails shows an alert and keeps your changes open. Closing after Save waits for the save to succeed, and cancelling Save As also cancels a pending quit. Leaving an edit unchanged no longer marks the workbook as modified. Cmd+W asks to save in the same cases as the window's close button. ([#61](https://github.com/VisiGrid/VisiGrid/pull/61))
+- **Text that looks like a number or formula stays text** when saved and reopened: `00123`, `=A1` entered as text, and similar values used to come back as 123 or as a live formula. ([#59](https://github.com/VisiGrid/VisiGrid/pull/59))
+
+### Performance
+
+- **Running totals over a column of formulas are fast.** A balance column like `=SUM($A$1:A2)` over formulas used to make the dependency graph grow with the square of the rows: 8,000 rows took 16 seconds and 2.6 GB just to set up, and 30 seconds per edit. Setting up now takes 15 ms and 10 MB, and an edit about half a second. 100,000 rows sets up in a quarter of a second. Recalculating such a column is also about 3 times faster. The sum itself still reads every row above, so a 100,000-row running total takes about a minute to recalculate; the equivalent `=B1+A2` filled down reads one row each. ([#29](https://github.com/VisiGrid/VisiGrid/issues/29))
+- **Formula-heavy sheets use less memory:** the dependency graph is about a third smaller (617 → 393 bytes per formula on a 200,000-formula benchmark).
 
 ### Terminal
 
