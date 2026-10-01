@@ -287,7 +287,8 @@ fn render_insert_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: 
         .child(menu_item_disabled("Rows", text_disabled))
         .child(menu_item_disabled("Columns", text_disabled))
         .child(menu_separator(border))
-        .child(menu_item("PivotTable...", None, 0, h(0), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.insert_pivot_table(cx); }))
+        .child(menu_item("Table...", Some("Ctrl+T"), 0, h(0), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.create_table_dialog(cx); }))
+        .child(menu_item("PivotTable...", None, 1, h(1), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.insert_pivot_table(cx); }))
         .child(menu_separator(border))
         .child(menu_item_disabled("Function...", text_disabled))
 }

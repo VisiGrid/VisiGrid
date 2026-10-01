@@ -40,6 +40,9 @@ impl TableCommit {
     pub fn table_id(&self) -> TableId {
         self.id
     }
+    pub fn sheet_id(&self) -> SheetId {
+        self.sheet_id
+    }
     pub fn before_table(&self) -> Option<&DataTable> {
         self.before.table.as_ref()
     }
@@ -285,6 +288,15 @@ impl Workbook {
                 });
             }
         }
+        let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    pub fn set_table_style(&mut self, id: TableId, style: TableStyle) -> Result<TableCommit, String> {
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        let mut new = old.clone();
+        new.style = style;
         let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
         self.apply_table_commit(&commit, false)?;
         Ok(commit)

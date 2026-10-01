@@ -631,6 +631,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &AddSheet, _, cx| {
             this.add_sheet(cx);
         }))
+        .on_action(cx.listener(|this, _: &CreateTable, window, cx| { if this.focus_handle.is_focused(window) { this.create_table_dialog(cx); } }))
         .on_action(cx.listener(|this, _: &InsertPivotTable, _, cx| {
             this.insert_pivot_table(cx);
         }))

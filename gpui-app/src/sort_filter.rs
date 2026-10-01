@@ -158,6 +158,9 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         use visigrid_engine::filter::{sort_by_column, SortState};
+        if !self.sheet(cx).tables().is_empty() {
+            self.status_message=Some("Sorting sheets with Tables is not available yet. Convert to a range to use worksheet sorting.".into()); cx.notify(); return;
+        }
 
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
@@ -266,6 +269,9 @@ impl Spreadsheet {
             self.filter_state.disable();
             self.status_message = Some("AutoFilter disabled".to_string());
         } else {
+            if !self.sheet(cx).tables().is_empty() {
+                self.status_message=Some("Table filters are not available yet. Convert to a range to use worksheet AutoFilter.".into()); cx.notify(); return;
+            }
             // TODO(engine): enforce in engine filter API too once available (UI guard is not sufficient for headless).
             if self.block_if_merged("enable AutoFilter", cx) { return; }
 

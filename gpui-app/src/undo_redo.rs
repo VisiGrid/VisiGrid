@@ -140,6 +140,10 @@ impl Spreadsheet {
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
                     self.status_message = Some(format!("Undo: {}", commit.description));
                 }
+                UndoAction::TableCommit { commit, description, .. } => {
+                    if !self.replay_table_commit(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
+                }
                 UndoAction::PivotCommit { commit, created_sheet, description } => {
                     self.pivot_undo(&commit, &created_sheet, cx);
                     self.status_message = Some(format!("Undo: {}", description));
@@ -587,6 +591,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
+            UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, true, cx); }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_undo(&commit, &created_sheet, cx);
             }
@@ -965,6 +970,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
+            UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, false, cx); }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
             }
@@ -1283,6 +1289,10 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
                     self.status_message = Some(format!("Redo: {}", commit.description));
+                }
+                UndoAction::TableCommit { commit, description, .. } => {
+                    if !self.replay_table_commit(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::PivotCommit { commit, created_sheet, description } => {
                     self.pivot_redo(&commit, &created_sheet, cx);

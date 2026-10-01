@@ -762,6 +762,7 @@ pub struct Spreadsheet {
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
+    pub(crate) table_dialog: Option<crate::table_ui::TableDialog>,
     pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
     pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
@@ -1039,6 +1040,7 @@ impl Spreadsheet {
     /// workbook until one of them is edited (#18 phase 3), so it costs about
     /// nothing at any size and afterwards only the chunks edits touch.
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
+        self.table_dialog = None;
         let snapshot = self.wb(cx).clone();
         self.base_workbook = Some(snapshot);
     }
@@ -1330,6 +1332,7 @@ impl Spreadsheet {
             cf_preview_id: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
+            table_dialog: None,
             pivot_panel: None,
             pivot_errors: std::collections::HashMap::new(),
             cf_edit_backup: None,
@@ -2530,6 +2533,7 @@ impl Spreadsheet {
             CommandId::NextSheet => self.next_sheet(cx),
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
+            CommandId::CreateTable => self.create_table_dialog(cx),
             CommandId::InsertPivotTable => self.insert_pivot_table(cx),
             CommandId::RefreshPivot => self.refresh_pivot(cx),
             CommandId::RefreshAllPivots => self.refresh_all_pivots(cx),
@@ -3849,6 +3853,7 @@ impl Spreadsheet {
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
     ///   Formula bar    (FORMULA_BAR_HEIGHT, hidden in zen mode)
     ///   Format bar     (FORMAT_BAR_HEIGHT, hidden in zen mode or when disabled)
+    ///   Table controls (TABLE_CONTROLS_HEIGHT, when the active cell is in a Table)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
     /// This is the single source of truth for grid_body_origin.y and visible_rows().
@@ -3867,7 +3872,8 @@ impl Spreadsheet {
                 Setting::Inherit => crate::views::format_bar::FORMAT_BAR_HEIGHT,
             }
         };
-        titlebar_h + menu_h + formula_h + format_h + self.metrics.header_h
+        let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
+        titlebar_h + menu_h + formula_h + format_h + table_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {

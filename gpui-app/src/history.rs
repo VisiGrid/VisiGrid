@@ -224,6 +224,11 @@ pub enum UndoAction {
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    TableCommit {
+        sheet_index: usize,
+        commit: Box<visigrid_engine::workbook::TableCommit>,
+        description: String,
+    },
     /// Pivot table action (create, apply fields, refresh, delete). Scoped to
     /// the pivot object and its output cells; never a workbook snapshot.
     PivotCommit {
@@ -465,6 +470,7 @@ impl UndoAction {
             }
             UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
+            UndoAction::TableCommit { description, .. } => description.clone(),
             UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
                 if *count == 1 {
@@ -1169,6 +1175,10 @@ impl History {
     /// Extract sheet index, affected cells, and bounding range from an action.
     fn extract_action_details(action: &UndoAction) -> (Option<usize>, Vec<(usize, usize, String, String)>, Option<(usize, usize, usize, usize)>) {
         match action {
+            UndoAction::TableCommit { sheet_index, commit, .. } => {
+                let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
+                (Some(*sheet_index),vec![],range)
+            }
             UndoAction::Comments { sheet_index, patches, .. } => {
                 let cells: Vec<_> = patches.iter().map(|p| (p.row, p.col, String::new(), String::new())).collect();
                 (Some(*sheet_index), vec![], Self::bounding_box(&cells))
@@ -1608,6 +1618,9 @@ impl History {
                     }
                 }
             }
+            UndoAction::TableCommit { commit, .. } => {
+                workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
+            }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 if let Some((index, sheet)) = created_sheet {
                     if workbook.sheet_index_by_id(sheet.id).is_none() {
@@ -1770,6 +1783,7 @@ pub enum UndoActionKind {
     PlanCommit,
     WorkbookSnapshot,
     PivotCommit,
+    TableCommit,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1809,6 +1823,7 @@ impl UndoActionKind {
             UndoActionKind::PrintSetupChanged => true,
             UndoActionKind::Comments => true,
             UndoActionKind::WorkbookSnapshot => true,
+            UndoActionKind::TableCommit => true,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
@@ -1855,6 +1870,7 @@ impl UndoActionKind {
             UndoActionKind::PrintSetupChanged => "Print setup",
             UndoActionKind::Comments => "Comment",
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
+            UndoActionKind::TableCommit => "Table",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
@@ -1894,6 +1910,7 @@ impl UndoActionKind {
             UndoActionKind::PrintSetupChanged => 0x1D,
             UndoActionKind::Comments => 0x1E,
             UndoActionKind::WorkbookSnapshot => 0x1B,
+            UndoActionKind::TableCommit => 0x1F,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
@@ -1933,6 +1950,7 @@ impl UndoAction {
             UndoAction::PrintSetupChanged { .. } => UndoActionKind::PrintSetupChanged,
             UndoAction::Comments { .. } => UndoActionKind::Comments,
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
+            UndoAction::TableCommit { .. } => UndoActionKind::TableCommit,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
@@ -2016,6 +2034,98 @@ pub enum PreviewBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_history_replays_schema_formulas_and_style_without_body_snapshots() {
+        use visigrid_engine::table::TableRange;
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_id();
+        workbook.set_cell_value_tracked(0, 0, 0, "Amount");
+        workbook.set_cell_value_tracked(0, 1, 0, "12");
+        workbook.set_cell_value_tracked(0, 0, 3, "=SUM(Sales[Amount])");
+        let base = workbook.clone();
+        let create = workbook
+            .create_table(
+                sheet,
+                TableRange {
+                    start_row: 0,
+                    start_col: 0,
+                    end_row: 1,
+                    end_col: 0,
+                },
+                "Sales",
+            )
+            .unwrap();
+        let id = create.table_id();
+        let rename = workbook.rename_table(id, "Orders").unwrap();
+        let style = workbook
+            .set_table_style(
+                id,
+                visigrid_engine::table::TableStyle { banded_rows: false },
+            )
+            .unwrap();
+        let mut replay = base;
+        let mut view = crate::app::PreviewViewState::default();
+        for commit in [&create, &rename, &style] {
+            let action = UndoAction::TableCommit {
+                sheet_index: 0,
+                commit: Box::new(commit.clone()),
+                description: "Table change".into(),
+            };
+            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            assert!(UndoActionKind::TableCommit.is_replay_supported());
+        }
+        assert_eq!(
+            replay.saved_tables().sheets[0].tables,
+            workbook.saved_tables().sheets[0].tables
+        );
+        assert_eq!(replay.active_sheet().get_raw(1, 0), "12");
+        assert_eq!(replay.active_sheet().get_display(0, 3), "12");
+        assert!(replay
+            .active_sheet()
+            .get_raw(0, 3)
+            .contains("Orders[Amount]"));
+        for commit in [&style, &rename, &create] {
+            replay.apply_table_commit(commit, true).unwrap();
+        }
+        assert_eq!(replay.tables().count(), 0);
+        assert_eq!(replay.active_sheet().get_raw(1, 0), "12");
+    }
+
+    #[test]
+    fn table_history_replay_reports_stale_state_without_overwriting() {
+        use visigrid_engine::table::TableRange;
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_id();
+        workbook.set_cell_value_tracked(0, 0, 0, "Amount");
+        let create = workbook
+            .create_table(
+                sheet,
+                TableRange {
+                    start_row: 0,
+                    start_col: 0,
+                    end_row: 1,
+                    end_col: 0,
+                },
+                "Sales",
+            )
+            .unwrap();
+        let rename = workbook.rename_table(create.table_id(), "Orders").unwrap();
+        workbook.apply_table_commit(&rename, true).unwrap();
+        workbook.rename_table(create.table_id(), "Changed").unwrap();
+        let action = UndoAction::TableCommit {
+            sheet_index: 0,
+            commit: Box::new(rename),
+            description: "Rename Table".into(),
+        };
+        assert!(History::apply_action_forward(
+            &mut workbook,
+            &mut crate::app::PreviewViewState::default(),
+            &action
+        )
+        .is_err());
+        assert!(workbook.table_by_name("Changed").is_some());
+    }
 
     #[test]
     fn print_setup_replay_targets_sheet_identity_and_preserves_values() {
@@ -2257,6 +2367,8 @@ mod tests {
             UndoActionKind::PlanCommit,
             UndoActionKind::PrintSetupChanged,
             UndoActionKind::WorkbookSnapshot,
+            UndoActionKind::TableCommit,
+            UndoActionKind::PivotCommit,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,
             UndoActionKind::ColsInserted,

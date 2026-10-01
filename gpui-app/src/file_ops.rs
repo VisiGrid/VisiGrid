@@ -1043,6 +1043,9 @@ impl Spreadsheet {
     /// Export workbook to Excel (.xlsx) format
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+        if self.wb(cx).tables().next().is_some() {
+            self.status_message = Some("Excel export does not preserve Tables yet. Save as .sheet, or convert Tables to ranges before exporting.".into()); cx.notify(); return;
+        }
         // Commit any pending edit so it's included in the export
         self.commit_pending_edit(cx);
 
@@ -1072,6 +1075,10 @@ impl Spreadsheet {
                 let _ = this.update(cx, |this, cx| {
                     // Rebuild layouts in case data changed
                     let layouts = this.build_export_layouts(cx);
+
+                    if this.wb(cx).tables().next().is_some() {
+                        this.status_message=Some("Convert Tables to ranges before exporting to Excel.".into()); cx.notify(); return;
+                    }
 
                     match xlsx::export(this.wb(cx), &path, Some(&layouts)) {
                         Ok(result) => {
@@ -1248,7 +1255,8 @@ impl Spreadsheet {
                 let _ = this.update(cx, |this, cx| {
                     match export_fn(this.sheet(cx), &path) {
                         Ok(()) => {
-                            this.status_message = Some(format!("Exported: {}", path.display()));
+                            let note = if this.sheet(cx).tables().is_empty() { "" } else { " · values only; save .sheet to preserve Tables" };
+                            this.status_message = Some(format!("Exported: {}{}", path.display(), note));
                         }
                         Err(e) => {
                             this.status_message = Some(format!("Error exporting: {}", e));

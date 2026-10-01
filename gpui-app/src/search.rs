@@ -229,6 +229,7 @@ pub enum CommandId {
     AddSheet,
 
     // Pivot tables
+    CreateTable,
     InsertPivotTable,
     RefreshPivot,
     RefreshAllPivots,
@@ -437,6 +438,7 @@ impl CommandId {
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
+            Self::CreateTable => "Create Table",
             Self::InsertPivotTable => "Insert PivotTable",
             Self::RefreshPivot => "Refresh PivotTable",
             Self::RefreshAllPivots => "Refresh All PivotTables",
@@ -550,6 +552,7 @@ impl CommandId {
             Self::ToggleAutoFilter => Some("Ctrl+Shift+L"),
             Self::RefreshPivot => Some("Alt+F5"),
             Self::RefreshAllPivots => Some("Ctrl+Alt+F5"),
+            Self::CreateTable => Some("Ctrl+T"),
             Self::InsertPivotTable | Self::EditPivotFields | Self::DeletePivot => None,
             #[cfg(target_os = "macos")]
             Self::SwitchWindow => Some("Cmd+`"),
@@ -706,6 +709,7 @@ impl CommandId {
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
+            Self::CreateTable => "table structured named columns headers banding range",
             Self::InsertPivotTable => "pivot table summarize group aggregate crosstab report sum count distinct",
             Self::RefreshPivot => "pivot table refresh update recalculate",
             Self::RefreshAllPivots => "pivot tables refresh all update",
@@ -909,6 +913,7 @@ impl CommandId {
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,
+            Self::CreateTable,
             Self::InsertPivotTable,
             Self::RefreshPivot,
             Self::RefreshAllPivots,
@@ -1112,6 +1117,7 @@ impl CommandId {
             | Self::TransformTitleCase
             | Self::TransformSentenceCase
             | Self::AutoSum
+            | Self::CreateTable
             | Self::InsertPivotTable
             | Self::RefreshPivot
             | Self::RefreshAllPivots

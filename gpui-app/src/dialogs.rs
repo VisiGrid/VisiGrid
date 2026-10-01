@@ -1983,6 +1983,8 @@ impl Spreadsheet {
             MutationSource::Human
         };
 
+        if self.block_if_table_header(row,col,row,col,"insert a formula",cx) { return; }
+
         // Record change in history with AI source
         let sheet_idx = self.sheet_index(cx);
         self.history.record_change_with_source(sheet_idx, row, col, old_value, formula.clone(), source);

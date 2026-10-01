@@ -267,6 +267,11 @@ impl Spreadsheet {
         }
 
 
+        if self.commit_table_header(row, col, &self.edit_value.clone(), cx).is_some() {
+            self.cancel_edit(cx);
+            return;
+        }
+
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {
             format!("={}", &self.edit_value[1..])
@@ -814,7 +819,7 @@ impl Spreadsheet {
     pub fn confirm_edit_enter(&mut self, cx: &mut Context<Self>) {
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             // Commit the edit if currently editing
-            self.commit_current_edit(cx);
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             // Move to next row at the origin column
             let (row, _) = self.active_view_state().selected;
             let new_row = self.next_visible_row(row, 1);
@@ -841,7 +846,7 @@ impl Spreadsheet {
     /// Shift+Enter key: confirm edit and move up, with tab-chain return.
     pub fn confirm_edit_up_enter(&mut self, cx: &mut Context<Self>) {
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
-            self.commit_current_edit(cx);
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             let (row, _) = self.active_view_state().selected;
             let new_row = self.next_visible_row(row, -1);
             self.close_validation_dropdown(
@@ -893,6 +898,13 @@ impl Spreadsheet {
             self.start_edit(cx);
             return;
         }
+
+        let (header_view_row, header_col) = self.view_state.selected;
+        if !self.is_multi_selection() && self.sheet(cx).table_header_at(self.row_view.view_to_data(header_view_row), header_col).is_some() {
+            self.commit_current_edit(cx);
+            return;
+        }
+        if self.block_selection_table_headers("fill", cx) { return; }
 
         // Convert leading + to = for formulas (Excel compatibility)
         let mut base_value = if self.edit_value.starts_with('+') {
@@ -1362,6 +1374,13 @@ impl Spreadsheet {
         }
 
 
+        if let Some(success) = self.commit_table_header(row, col, &self.edit_value.clone(), cx) {
+            let tab_origin = self.tab_chain_origin_col;
+            self.cancel_edit(cx);
+            if success { self.tab_chain_origin_col = tab_origin; }
+            return success;
+        }
+
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {
             format!("={}", &self.edit_value[1..])
@@ -1432,7 +1451,7 @@ impl Spreadsheet {
             return;
         }
 
-        self.commit_current_edit(cx);
+        if !self.commit_current_edit(cx) { return; }
 
         // Move after confirming
         self.move_selection(dr, dc, cx);
@@ -1448,6 +1467,7 @@ impl Spreadsheet {
 
         if self.block_if_merged("fill selection", cx) { return; }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
+        if self.block_selection_table_headers("fill", cx) { return; }
 
         let primary_cell = self.view_state.selected;
         let base_value = self.sheet(cx).get_raw(primary_cell.0, primary_cell.1);

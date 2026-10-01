@@ -277,6 +277,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "pageup"), PrevSheet, Some("Spreadsheet")),
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
 
+        KeyBinding::new(&kb(m, "t"), CreateTable, Some("Spreadsheet")),
+
         // Pivot tables (Excel: Alt+F5 refresh, Ctrl+Alt+F5 refresh all)
         KeyBinding::new("alt-f5", RefreshPivot, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "alt-f5"), RefreshAllPivots, Some("Spreadsheet")),

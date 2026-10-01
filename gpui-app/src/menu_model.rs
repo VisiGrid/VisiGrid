@@ -33,7 +33,7 @@ pub enum MenuAction {
     FillDown, FillRight,
     CircleInvalid, ClearCircles,
     InsertFormulaAI, AnalyzeAI,
-    InsertPivot, RefreshPivot, RefreshAllPivots, EditPivotFields, DeletePivot,
+    CreateTable, InsertPivot, RefreshPivot, RefreshAllPivots, EditPivotFields, DeletePivot,
     OpenDocs, About, License,
 }
 
@@ -109,6 +109,7 @@ pub fn insert_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Disabled("Rows"),
         MenuEntry::Disabled("Columns"),
         MenuEntry::Separator,
+        MenuEntry::Item { label: "Table...", shortcut: Some("Ctrl+T"), action: MenuAction::CreateTable, accel: None },
         MenuEntry::Item { label: "PivotTable...", shortcut: None, action: MenuAction::InsertPivot, accel: None },
         MenuEntry::Separator,
         MenuEntry::Disabled("Function..."),
@@ -304,6 +305,7 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ExcludeValidation => app.exclude_from_validation(cx),
         MenuAction::ClearExclusions => app.clear_validation_exclusions(cx),
         MenuAction::FillDown => app.fill_down(cx),
+        MenuAction::CreateTable => app.create_table_dialog(cx),
         MenuAction::InsertPivot => app.insert_pivot_table(cx),
         MenuAction::RefreshPivot => app.refresh_pivot(cx),
         MenuAction::RefreshAllPivots => app.refresh_all_pivots(cx),

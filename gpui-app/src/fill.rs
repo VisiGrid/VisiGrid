@@ -55,6 +55,8 @@ impl Spreadsheet {
             min_row
         };
 
+        if self.block_if_table_header(src_row+1,min_col,max_row,max_col,"fill",cx) { return; }
+
         let mut changes = Vec::new();
 
         // Batch recalc: defer incremental recalc until all cells are set
@@ -150,6 +152,8 @@ impl Spreadsheet {
         } else {
             min_col
         };
+
+        if self.block_if_table_header(min_row,src_col+1,max_row,max_col,"fill",cx) { return; }
 
         let mut changes = Vec::new();
 
@@ -364,6 +368,7 @@ impl Spreadsheet {
             return;
         }
 
+        for (r,c,_) in &writes { if self.block_if_table_header(*r,*c,*r,*c,"AutoSum",cx) { return; } }
         let mut changes = Vec::new();
         self.workbook.update(cx, |wb, _| wb.begin_batch());
         for (row, col, formula) in &writes {
@@ -688,6 +693,7 @@ impl Spreadsheet {
             let (r0, r1) = (anchor.0.min(source_end.0).min(end.0), anchor.0.max(source_end.0).max(end.0));
             let (c0, c1) = (anchor.1.min(source_end.1), anchor.1.max(source_end.1).max(end.1));
             if self.block_if_pivot(r0, c0, r1, c1, "fill", cx) { return; }
+            if self.block_if_table_header(r0, c0, r1, c1, "fill", cx) { return; }
         }
 
         let col = anchor.1;
@@ -861,6 +867,7 @@ impl Spreadsheet {
             let (c0, c1) = (anchor.1.min(source_end.1).min(end.1), anchor.1.max(source_end.1).max(end.1));
             let (r0, r1) = (anchor.0.min(source_end.0), anchor.0.max(source_end.0).max(end.0));
             if self.block_if_pivot(r0, c0, r1, c1, "fill", cx) { return; }
+            if self.block_if_table_header(r0, c0, r1, c1, "fill", cx) { return; }
         }
 
         let row = anchor.0;
