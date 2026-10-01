@@ -992,7 +992,10 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
             "Row deletion requires the AI Lua Review preview so it can be applied atomically.",
         ));
     } else if result.has_mutations() {
-        let (changes, format_patches) = apply_lua_ops(app, sheet_index, &result.ops, cx);
+        let (changes, format_patches) = match apply_lua_ops(app, sheet_index, &result.ops, cx) {
+                Ok(result) => result,
+                Err(error) => { app.lua_console.push_output(OutputEntry::error(error)); cx.notify(); return; }
+            };
         let cells_modified = changes.len() as i64;
         let has_values = !changes.is_empty();
         let has_formats = !format_patches.is_empty();
@@ -1133,9 +1136,9 @@ pub(crate) fn apply_lua_ops(
     sheet_index: usize,
     ops: &[LuaOp],
     cx: &mut gpui::Context<Spreadsheet>,
-) -> (Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>) {
+) -> Result<(Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>), String> {
     if ops.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     app.workbook.update(cx, |wb, _| apply_captured_lua_ops(wb, sheet_index, ops))
@@ -1148,15 +1151,28 @@ pub(crate) fn apply_captured_lua_ops(
     workbook: &mut visigrid_engine::workbook::Workbook,
     sheet_index: usize,
     ops: &[LuaOp],
-) -> (Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>) {
+) -> Result<(Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>), String> {
     use crate::history::CellChange;
     use crate::history::CellFormatPatch;
     use visigrid_engine::cell::CellStyle;
 
     if ops.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
+    workbook.ensure_writable()?;
+    let sheet = workbook.sheet(sheet_index).ok_or("Script sheet no longer exists")?;
+    for (index, op) in ops.iter().enumerate() {
+        match op {
+            LuaOp::SetValue { row, col, .. } | LuaOp::SetFormula { row, col, .. } | LuaOp::ClearCell { row, col } => {
+                if let Some(error) = sheet.table_value_write_error(*row as usize, *col as usize) {
+                    return Err(format!("Script operation {}: {error}", index + 1));
+                }
+            }
+            LuaOp::DeleteRows { .. } => return Err("Row deletion requires the AI Lua Review preview so it can be applied atomically.".into()),
+            _ => {},
+        }
+    }
     let mut guard = workbook.batch_guard();
     let mut changes = Vec::new();
     let mut format_patches = Vec::new();
@@ -1249,7 +1265,7 @@ pub(crate) fn apply_captured_lua_ops(
         }
     }
 
-    (changes, format_patches)
+    Ok((changes, format_patches))
 }
 
 /// Convert LuaCellValue to a string suitable for sheet.set_value()
@@ -1289,7 +1305,7 @@ mod captured_apply_tests {
         // If Apply reran the script it would now write 99. Committing the
         // frozen operations must write the value observed during preview.
         workbook.set_cell_value_tracked(0, 0, 0, "99");
-        let _ = apply_captured_lua_ops(&mut workbook, 0, &preview.ops);
+        apply_captured_lua_ops(&mut workbook, 0, &preview.ops).unwrap();
         assert_eq!(workbook.active_sheet().get_display(0, 1), "10");
     }
 }
@@ -1454,7 +1470,10 @@ fn handle_debug_completed(
                 "[debug] row deletion requires the AI Lua Review preview",
             ));
         } else if result.has_mutations() {
-            let (changes, format_patches) = apply_lua_ops(app, target_index, &result.ops, cx);
+            let (changes, format_patches) = match apply_lua_ops(app, target_index, &result.ops, cx) {
+                Ok(result) => result,
+                Err(error) => { app.lua_console.push_output(OutputEntry::error(error)); cx.notify(); return; }
+            };
             let has_values = !changes.is_empty();
             let has_formats = !format_patches.is_empty();
 
@@ -2384,5 +2403,30 @@ mod debug_ui {
                         .child(entry.text.clone())
                 })
             )
+    }
+}
+
+#[cfg(test)]
+mod table_batch_tests {
+    use super::apply_captured_lua_ops;
+    use visigrid_engine::{workbook::Workbook, table::TableRange};
+    use crate::scripting::{LuaRuntime, SheetSnapshot};
+    #[test]
+    fn protected_header_in_middle_rejects_all_captured_lua_writes() {
+        let mut wb = Workbook::new();
+        wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 1 }, "Sales").unwrap();
+        let revision = wb.revision();
+        let runtime = LuaRuntime::new().unwrap();
+        let preview = runtime.eval_with_sheet(
+            "sheet:set_value(2, 1, 1); sheet:set_value(1, 1, 2); sheet:set_value(3, 1, 3)",
+            Box::new(SheetSnapshot::from_sheet(wb.active_sheet())),
+        );
+        assert!(preview.error.is_none());
+        assert_eq!(preview.ops.len(), 3);
+        assert!(apply_captured_lua_ops(&mut wb, 0, &preview.ops).unwrap_err().contains("operation 2"));
+        assert_eq!(wb.active_sheet().get_raw(1, 0), "");
+        assert_eq!(wb.active_sheet().get_raw(2, 0), "");
+        assert_eq!(wb.active_sheet().get_raw(0, 0), "Column1");
+        assert_eq!(wb.revision(), revision);
     }
 }

@@ -385,6 +385,10 @@ fn col_to_letter(col: usize) -> String {
 pub struct NamedRangeStore {
     /// Named ranges keyed by lowercase name for case-insensitive lookup
     ranges: HashMap<String, NamedRange>,
+    /// Shared namespace with editable Tables. Kept even in serde snapshots;
+    /// workbook loading rebuilds this from validated table metadata.
+    #[serde(default)]
+    pub(crate) table_names: std::collections::HashSet<String>,
 }
 
 impl NamedRangeStore {
@@ -395,6 +399,9 @@ impl NamedRangeStore {
     /// Add or update a named range
     pub fn set(&mut self, range: NamedRange) -> Result<(), String> {
         is_valid_name(&range.name)?;
+        if self.table_names.contains(&range.name.to_lowercase()) {
+            return Err(format!("'{}' is already a table name.", range.name));
+        }
         self.ranges.insert(range.name.to_lowercase(), range);
         Ok(())
     }
@@ -474,6 +481,9 @@ impl NamedRangeStore {
 
     /// Rename a named range (returns error if old name doesn't exist or new name is invalid/taken)
     pub fn rename(&mut self, old_name: &str, new_name: &str) -> Result<(), String> {
+        if self.table_names.contains(&new_name.to_lowercase()) {
+            return Err(format!("'{new_name}' is already a table name."));
+        }
         is_valid_name(new_name)?;
 
         let old_key = old_name.to_lowercase();

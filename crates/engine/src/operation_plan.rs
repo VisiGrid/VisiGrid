@@ -575,6 +575,7 @@ impl PreparedOperationPlan {
         source: &Workbook,
         request: OperationPlanRequest,
     ) -> Result<Self, PlanError> {
+        source.ensure_writable().map_err(PlanError::InvalidOperation)?;
         if source.revision() != request.expected_revision {
             return Err(PlanError::RevisionMismatch {
                 expected: request.expected_revision,
@@ -864,6 +865,9 @@ fn normalize_operations(
             PlannedOp::SetCellValue { coordinate, value } => {
                 expanded_cell_touches = expanded_cell_touches.saturating_add(1);
                 validate_coordinate(sheet, coordinate)?;
+                if let Some(reason) = sheet.table_value_write_error(coordinate.row, coordinate.col) {
+                    return Err(PlanError::InvalidOperation(reason));
+                }
                 if matches!(value, PlannedCellValue::Number(number) if !number.is_finite()) {
                     return Err(PlanError::InvalidOperation(
                         "cell numbers must be finite".into(),
@@ -883,6 +887,9 @@ fn normalize_operations(
             } => {
                 expanded_cell_touches = expanded_cell_touches.saturating_add(1);
                 validate_coordinate(sheet, coordinate)?;
+                if let Some(reason) = sheet.table_value_write_error(coordinate.row, coordinate.col) {
+                    return Err(PlanError::InvalidOperation(reason));
+                }
                 if !formula.starts_with('=') {
                     return Err(PlanError::InvalidOperation(
                         "formulas must start with '='".into(),
@@ -902,6 +909,9 @@ fn normalize_operations(
             PlannedOp::ClearCell { coordinate } => {
                 expanded_cell_touches = expanded_cell_touches.saturating_add(1);
                 validate_coordinate(sheet, coordinate)?;
+                if let Some(reason) = sheet.table_value_write_error(coordinate.row, coordinate.col) {
+                    return Err(PlanError::InvalidOperation(reason));
+                }
                 cell_writes.insert(
                     coordinate,
                     PlannedOperation {
@@ -925,6 +935,9 @@ fn normalize_operations(
                 for row in range.start.row..=range.end.row {
                     for col in range.start.col..=range.end.col {
                         let coordinate = CellCoordinate { row, col };
+                        if let Some(reason) = sheet.table_value_write_error(row, col) {
+                            return Err(PlanError::InvalidOperation(reason));
+                        }
                         cell_writes.insert(
                             coordinate,
                             PlannedOperation {
@@ -2050,6 +2063,20 @@ mod tests {
                 label: None,
             }],
         }
+    }
+
+    #[test]
+    fn table_headers_reject_planned_clear_and_write_batches() {
+        let mut wb = Workbook::new();
+        let sid = wb.active_sheet().id;
+        wb.create_table(sid, crate::table::TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 0 }, "Sales").unwrap();
+        for op in [
+            PlannedOp::ClearCell { coordinate: CellCoordinate { row: 0, col: 0 } },
+            PlannedOp::SetCellValue { coordinate: CellCoordinate { row: 0, col: 0 }, value: PlannedCellValue::Text("Wrong".into()) },
+        ] {
+            assert!(PreparedOperationPlan::materialize(&wb, request(&wb, vec![op])).is_err());
+        }
+        assert_eq!(wb.active_sheet().get_raw(0, 0), "Column1");
     }
 
     #[test]

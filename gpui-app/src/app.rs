@@ -463,6 +463,8 @@ pub struct Spreadsheet {
     pub comment_search: Entity<crate::comment_sidebar::CommentSearch>,
     pub comment_list_scroll: gpui::ScrollHandle,
     pub goto_input: String,
+    pub recovery_warning: Option<String>,
+    pub pending_table_recovery: Option<(std::path::PathBuf, visigrid_io::table_recovery::TableLoadIssue)>,
     pub find_input: String,
     pub find_results: Vec<MatchHit>,
     pub find_index: usize,
@@ -478,7 +480,9 @@ pub struct Spreadsheet {
     pub palette_scope: Option<PaletteScope>,  // Menu scope for Alt accelerators
     pub(crate) search_engine: SearchEngine,
     pub(crate) palette_results: Vec<SearchItem>,
-    pub palette_total_results: usize,  // Total matches before truncation
+    /// Headings over runs of `palette_results` (empty = no headings).
+    pub(crate) palette_sections: Vec<crate::command_palette::PaletteSection>,
+    pub palette_total_results: usize,  // Matches counted for the footer
     // Pre-palette state for preview/restore
     pub(crate) palette_pre_selection: (usize, usize),
     pub(crate) palette_pre_selection_end: Option<(usize, usize)>,
@@ -762,6 +766,7 @@ pub struct Spreadsheet {
     pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
+    pub(crate) table_dialog: Option<crate::table_ui::TableDialog>,
     pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
     pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
@@ -964,6 +969,11 @@ pub struct Spreadsheet {
 
     // Merge cells confirmation dialog
     pub merge_confirm: MergeConfirmState,
+    /// Set when a sort or filter is refused because merged titles are in the
+    /// way: (merge origins, cursor at refusal, when). Ctrl+Alt+C converts
+    /// exactly those while the cursor hasn't moved, so the refusal's "press
+    /// Ctrl+Alt+C" never reformats an unrelated cell.
+    pub merge_block_offer: Option<(Vec<(usize, usize)>, (usize, usize), std::time::Instant)>,
 
     // Close-window save confirmation dialog
     pub close_confirm_visible: bool,
@@ -1039,6 +1049,7 @@ impl Spreadsheet {
     /// workbook until one of them is edited (#18 phase 3), so it costs about
     /// nothing at any size and afterwards only the chunks edits touch.
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
+        self.table_dialog = None;
         let snapshot = self.wb(cx).clone();
         self.base_workbook = Some(snapshot);
     }
@@ -1167,6 +1178,8 @@ impl Spreadsheet {
             comment_search,
             comment_list_scroll: gpui::ScrollHandle::new(),
             goto_input: String::new(),
+            recovery_warning: None,
+            pending_table_recovery: None,
             find_input: String::new(),
             find_results: Vec::new(),
             find_index: 0,
@@ -1179,6 +1192,7 @@ impl Spreadsheet {
             palette_scope: None,
             search_engine: Self::create_search_engine(),
             palette_results: Vec::new(),
+            palette_sections: Vec::new(),
             palette_total_results: 0,
             palette_pre_selection: (0, 0),
             palette_pre_selection_end: None,
@@ -1330,6 +1344,7 @@ impl Spreadsheet {
             cf_preview_id: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
+            table_dialog: None,
             pivot_panel: None,
             pivot_errors: std::collections::HashMap::new(),
             cf_edit_backup: None,
@@ -1490,6 +1505,7 @@ impl Spreadsheet {
             cycle_banner: CycleBannerState::default(),
 
             merge_confirm: MergeConfirmState::default(),
+            merge_block_offer: None,
             close_confirm_visible: false,
             quit_after_close: false,
             quit_discarded: false,
@@ -2367,6 +2383,7 @@ impl Spreadsheet {
             CommandId::AlignRight => self.set_alignment_selection(visigrid_engine::cell::Alignment::Right, cx),
             CommandId::AlignGeneral => self.set_alignment_selection(visigrid_engine::cell::Alignment::General, cx),
             CommandId::CenterAcrossSelection => self.center_across_selection_toggle(cx),
+            CommandId::ConvertMergesToCenterAcross => self.convert_merges_to_center_across(cx),
             CommandId::ToggleItalic => self.toggle_italic(cx),
             CommandId::ToggleUnderline => self.toggle_underline(cx),
             CommandId::FormatCurrency => self.format_currency(cx),
@@ -2530,6 +2547,7 @@ impl Spreadsheet {
             CommandId::NextSheet => self.next_sheet(cx),
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
+            CommandId::CreateTable => self.create_table_dialog(cx),
             CommandId::InsertPivotTable => self.insert_pivot_table(cx),
             CommandId::RefreshPivot => self.refresh_pivot(cx),
             CommandId::RefreshAllPivots => self.refresh_all_pivots(cx),
@@ -3849,13 +3867,15 @@ impl Spreadsheet {
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
     ///   Formula bar    (FORMULA_BAR_HEIGHT, hidden in zen mode)
     ///   Format bar     (FORMAT_BAR_HEIGHT, hidden in zen mode or when disabled)
+    ///   Table controls (TABLE_CONTROLS_HEIGHT, when the active cell is in a Table)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
     /// This is the single source of truth for grid_body_origin.y and visible_rows().
     pub fn top_chrome_height(&self, cx: &App) -> f32 {
+        let recovery_h = if self.recovery_warning.is_some() { 56.0 } else { 0.0 };
         if self.zen_mode {
-            // Zen hides menu, formula bar, format bar — only column headers remain
-            return self.metrics.header_h;
+            // Recovery remains visible even when normal chrome is hidden.
+            return self.metrics.header_h + recovery_h;
         }
         let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
         let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
@@ -3867,7 +3887,8 @@ impl Spreadsheet {
                 Setting::Inherit => crate::views::format_bar::FORMAT_BAR_HEIGHT,
             }
         };
-        titlebar_h + menu_h + formula_h + format_h + self.metrics.header_h
+        let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
+        titlebar_h + menu_h + formula_h + format_h + table_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {
@@ -4243,23 +4264,53 @@ impl Spreadsheet {
 
     /// Check if editing is allowed (blocked during preview)
     pub fn can_edit(&self) -> bool {
-        !self.is_previewing() && self.review_mode.is_none()
+        self.recovery_warning.is_none() && !self.is_previewing() && self.review_mode.is_none()
     }
 
 
     /// Block a bulk operation when the active sheet contains merged cells.
     /// Returns true (and sets status message) if merges exist, false otherwise.
     /// `op_name` is a user-facing verb phrase like "sort", "fill", "replace".
-    pub fn block_if_merged(&mut self, op_name: &str, cx: &mut Context<Self>) -> bool {
-        if !self.sheet(cx).merged_regions.is_empty() {
-            self.status_message = Some(format!(
-                "Cannot {op_name}: this operation can't be applied to merged cells. Unmerge first."
-            ));
-            cx.notify();
-            true
-        } else {
-            false
+    /// Refuse a sort/filter only when a merge overlaps the rows it would
+    /// move (`rows`, inclusive). Merged titles above or below the table are
+    /// fine, as in Excel.
+    pub fn block_if_merges_in_rows(&mut self, op_name: &str, rows: (usize, usize), cx: &mut Context<Self>) -> bool {
+        self.block_if_merges_in(op_name, (rows.0, 0, rows.1, usize::MAX), cx)
+    }
+
+    /// Refuse an operation only when a merge overlaps the cells it writes
+    /// (`area` = (r0, c0, r1, c1), inclusive). Merges elsewhere on the sheet
+    /// don't matter. When the blockers are single-row merges (merged titles),
+    /// the message offers the fix: Ctrl+Alt+C converts them to Center Across.
+    pub fn block_if_merges_in(&mut self, op_name: &str, area: (usize, usize, usize, usize), cx: &mut Context<Self>) -> bool {
+        let blocking = crate::sort_filter::merges_overlapping(self.sheet(cx), area);
+        if blocking.is_empty() {
+            return false;
         }
+        let addr = |m: &visigrid_engine::sheet::MergedRegion| {
+            format!("{}{}:{}{}", Self::col_letter(m.start.1), m.start.0 + 1, Self::col_letter(m.end.1), m.end.0 + 1)
+        };
+        let what = if blocking.len() == 1 { addr(&blocking[0]) } else { format!("{} and {} more", addr(&blocking[0]), blocking.len() - 1) };
+        let convertible: Vec<(usize, usize)> = blocking
+            .iter()
+            .filter(|m| m.start.0 == m.end.0 && m.end.1 > m.start.1)
+            .map(|m| m.start)
+            .collect();
+        if convertible.len() == blocking.len() {
+            self.merge_block_offer = Some((convertible, self.view_state.selected, std::time::Instant::now()));
+            self.status_message = Some(format!(
+                "Can't {op_name}: {what} {} merged. Press Ctrl+Alt+C to convert to Center Across Selection: same look, and {op_name} works.",
+                if blocking.len() == 1 { "is" } else { "are" }
+            ));
+        } else {
+            self.merge_block_offer = None;
+            self.status_message = Some(format!(
+                "Can't {op_name}: {what} {} merged across rows. Unmerge first.",
+                if blocking.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        cx.notify();
+        true
     }
 }
 

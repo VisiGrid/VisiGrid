@@ -598,6 +598,12 @@ fn render_cell(
     // Semantic cell style (base layer — explicit formatting overrides per-property)
     let cell_style = resolve_cell_style(app, format.cell_style);
 
+    let table_fill = display_sheet.table_at(display_data_row,col).and_then(|t| {
+        if display_data_row == t.range.start_row { Some(app.token(TokenKey::Accent).opacity(0.20)) }
+        else if t.style.banded_rows && (display_data_row-t.range.start_row)%2 == 0 { Some(app.token(TokenKey::Accent).opacity(0.07)) }
+        else { None }
+    });
+
     // Fills replace the default grid, including inherited and conditional fills.
     // Keep explicit borders and selection outlines independent of this setting.
     let show_gridlines = show_gridlines
@@ -661,8 +667,32 @@ fn render_cell(
         .flex()
         .px_1()
         .overflow_hidden()  // Always clip; spill is rendered in overlay layer
-        .bg(cell_base_background_with_role(app, is_editing, format.background_color, cell_style.fill, role_style))
+        .bg(if !is_editing && format.background_color.is_none() && cell_style.fill.is_none() && role_style.and_then(|s|s.background).is_none() {
+            table_fill.unwrap_or_else(||cell_base_background_with_role(app,is_editing,format.background_color,cell_style.fill,role_style))
+        } else { cell_base_background_with_role(app,is_editing,format.background_color,cell_style.fill,role_style) })
         .border_color(border_color);
+
+    // Membership outline for the Table containing the active cell. This is a
+    // viewport-only overlay; no borders or fills are stamped into cell storage.
+    if !is_frozen_review && !app.is_previewing() {
+        if let Some(table) = display_sheet.table_at(display_data_row,col) {
+            let (selected_row,selected_col)=view_state.selected;
+            if table.range.contains(app.row_view.view_to_data(selected_row),selected_col) {
+                let range=table.range;
+                cell=cell.child(non_interactive_overlay()
+                    .border_color(app.token(TokenKey::Accent).opacity(0.7))
+                    .when(display_data_row==range.start_row,|d|d.border_t_1())
+                    .when(display_data_row==range.end_row,|d|d.border_b_1())
+                    .when(col==range.start_col,|d|d.border_l_1())
+                    .when(col==range.end_col,|d|d.border_r_1()));
+            }
+        }
+    }
+
+    if display_sheet.is_calculated_exception(display_data_row, col) {
+        cell = cell.child(div().absolute().bottom_0().right_0().w(px(5.0)).h(px(5.0))
+            .bg(app.token(TokenKey::Warn).opacity(0.8)));
+    }
 
     if app.sheet(cx).comment(data_row, col).is_some() {
         cell = cell.child(crate::comments::indicator(data_row, col, cx));
@@ -1283,8 +1313,16 @@ fn render_cell(
                 window,
             );
 
-        // CenterAcrossSelection: continuation cells suppress text entirely
-        let suppress_text = matches!(center_across_span, Some(w) if w == 0.0);
+        // CenterAcrossSelection: continuation cells suppress text entirely.
+        // A source cell whose span reaches past its own column is drawn by
+        // the text overlay instead (render_region_text_spill), above the
+        // neighbours' backgrounds; drawn here, cells to the right paint over
+        // it and a short title centered over them vanishes. Review cells keep
+        // the in-cell drawing, as the overlay skips them.
+        let cas_overlay_owned = matches!(center_across_span, Some(w) if w > col_width + 0.5)
+            && review_change.is_none()
+            && !review_row_deleted;
+        let suppress_text = matches!(center_across_span, Some(w) if w == 0.0) || cas_overlay_owned;
 
         if !use_spill_overlay && !suppress_text {
             let text_content: SharedString = value.clone().into();
@@ -3039,19 +3077,31 @@ fn render_region_text_spill(
                 Value::Number(_)
             );
 
-            if !should_alignment_spill(format.alignment, is_number) {
-                continue;
-            }
-
             // Calculate cell width
             let col_width = metrics.col_width(app.col_width(col));
+
+            // Center Across Selection: the overlay draws the title centered
+            // over its whole span (MUST mirror cas_overlay_owned in render_cell).
+            let cas_span = if format.alignment == Alignment::CenterAcrossSelection {
+                let span = center_across_span_width(display_data_row, col, col_width, display_sheet, app);
+                if span <= col_width + 0.5 {
+                    continue; // No span: the cell draws it, centered in itself
+                }
+                Some(span)
+            } else {
+                None
+            };
+
+            if cas_span.is_none() && !should_alignment_spill(format.alignment, is_number) {
+                continue;
+            }
 
             let text_owned = display.clone();
             let text_width = measure_spill_text(&display, &format, app, window);
             let padding = 8.0; // px_1 = 4px each side
             let available_width = col_width - padding;
 
-            if text_width <= available_width {
+            if cas_span.is_none() && text_width <= available_width {
                 continue; // Text fits, no spill needed
             }
 
@@ -3061,7 +3111,7 @@ fn render_region_text_spill(
             let mut check_col = col + 1;
             let max_col = col + 10; // Limit spillover
 
-            while spill_width < overflow_needed && check_col < max_col {
+            while cas_span.is_none() && spill_width < overflow_needed && check_col < max_col {
                 // Check if adjacent cell is empty
                 let adjacent_display =
                     display_sheet.get_formatted_display(display_data_row, check_col);
@@ -3075,7 +3125,7 @@ fn render_region_text_spill(
                 check_col += 1;
             }
 
-            if spill_width <= 0.0 {
+            if cas_span.is_none() && spill_width <= 0.0 {
                 continue; // Can't spill anywhere
             }
 
@@ -3093,8 +3143,9 @@ fn render_region_text_spill(
             spill_runs.entry((data_row, col)).or_insert(SpillRun {
                 x,
                 y,
-                base_width: col_width,           // Original cell width for alignment
-                total_width: col_width + spill_width,  // Extended paint region
+                // A Center Across title is aligned within its whole span.
+                base_width: cas_span.unwrap_or(col_width),
+                total_width: cas_span.unwrap_or(col_width + spill_width),
                 height: row_height,
                 text: text_owned,
                 text_width,                      // For alignment calculation
@@ -3120,7 +3171,7 @@ fn render_region_text_spill(
                 },
                 font_size: app.cell_font_size(format.font_size),
                 font_family: Some(app.cell_font_family(format.font_family.as_deref()).to_string()),
-                alignment: effective_alignment,  // Resolved alignment for text positioning
+                alignment: if cas_span.is_some() { Alignment::Center } else { effective_alignment },
                 bold: format.bold || spill_cs.bold,
                 italic: format.italic || spill_cs.italic,
                 underline: format.underline,

@@ -39,7 +39,22 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    pub(crate) fn parse_goto_destination(input: &str) -> Result<(usize, usize), &'static str> {
+        let (row, col) = Self::parse_cell_ref(input)
+            .ok_or("Enter a cell reference, such as A1 or B25.")?;
+        if row >= NUM_ROWS || col >= NUM_COLS {
+            return Err("That cell is outside this worksheet. Choose a closer destination.");
+        }
+        Ok((row, col))
+    }
+
     pub fn confirm_goto(&mut self, cx: &mut Context<Self>) {
+        // Keep invalid input in place so it can be corrected in the dialog.
+        if Self::parse_goto_destination(&self.goto_input).is_err() {
+            cx.notify();
+            return;
+        }
+
         // Close validation dropdown when jumping to a cell
         self.close_validation_dropdown(
             crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
@@ -351,8 +366,34 @@ impl Spreadsheet {
         );
         self.lua_console.visible = false;
 
+        // Read the clipboard once, so the dialog can say what it's pasting.
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(|i| i.text().map(|s| s.to_string()));
+        let metadata = item.as_ref().and_then(|i| i.metadata().cloned());
+        let from_visigrid = Self::is_internal_paste(self.internal_clipboard.as_ref(), text.as_deref(), metadata.as_deref());
+        let (rows, cols) = match (&self.internal_clipboard, from_visigrid) {
+            (Some(ic), true) => (ic.values.len(), ic.values.first().map_or(0, |r| r.len())),
+            _ => text.as_deref().map_or((0, 0), |t| {
+                let lines: Vec<&str> = t.lines().collect();
+                (lines.len(), lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(0))
+            }),
+        };
+        if rows == 0 || cols == 0 {
+            self.status_message = Some("Nothing to paste \u{00b7} copy some cells first".to_string());
+            cx.notify();
+            return;
+        }
+
+        let dialog = &mut self.paste_special_dialog;
+        dialog.rows = rows;
+        dialog.cols = cols;
+        dialog.from_visigrid = from_visigrid;
         // Initialize with last selected mode (session memory)
-        self.paste_special_dialog.selected = self.last_paste_special_mode;
+        dialog.selected = if dialog.is_enabled(self.last_paste_special_mode) {
+            self.last_paste_special_mode
+        } else {
+            crate::app::PasteType::All
+        };
         self.mode = Mode::PasteSpecial;
         cx.notify();
     }
@@ -365,10 +406,11 @@ impl Spreadsheet {
     /// Move selection up in the Paste Special dialog
     pub fn paste_special_up(&mut self, cx: &mut Context<Self>) {
         use crate::app::PasteType;
+        let dialog = &mut self.paste_special_dialog;
         let types = PasteType::all();
-        let current_idx = types.iter().position(|t| *t == self.paste_special_dialog.selected).unwrap_or(0);
-        if current_idx > 0 {
-            self.paste_special_dialog.selected = types[current_idx - 1];
+        let current_idx = types.iter().position(|t| *t == dialog.selected).unwrap_or(0);
+        if let Some(t) = types[..current_idx].iter().rev().find(|t| dialog.is_enabled(**t)) {
+            dialog.selected = *t;
             cx.notify();
         }
     }
@@ -376,10 +418,11 @@ impl Spreadsheet {
     /// Move selection down in the Paste Special dialog
     pub fn paste_special_down(&mut self, cx: &mut Context<Self>) {
         use crate::app::PasteType;
+        let dialog = &mut self.paste_special_dialog;
         let types = PasteType::all();
-        let current_idx = types.iter().position(|t| *t == self.paste_special_dialog.selected).unwrap_or(0);
-        if current_idx < types.len() - 1 {
-            self.paste_special_dialog.selected = types[current_idx + 1];
+        let current_idx = types.iter().position(|t| *t == dialog.selected).unwrap_or(0);
+        if let Some(t) = types[current_idx + 1..].iter().find(|t| dialog.is_enabled(**t)) {
+            dialog.selected = *t;
             cx.notify();
         }
     }
@@ -1983,6 +2026,8 @@ impl Spreadsheet {
             MutationSource::Human
         };
 
+        if self.block_if_table_header(row,col,row,col,"insert a formula",cx) { return; }
+
         // Record change in history with AI source
         let sheet_idx = self.sheet_index(cx);
         self.history.record_change_with_source(sheet_idx, row, col, old_value, formula.clone(), source);
@@ -2658,4 +2703,21 @@ fn call_entry_explanation_ai(
         .to_string();
 
     Ok(content)
+}
+
+#[cfg(test)]
+mod goto_destination_tests {
+    use super::{Spreadsheet, NUM_ROWS};
+
+    #[test]
+    fn accepts_cell_addresses_and_rejects_invalid_or_out_of_bounds_destinations() {
+        assert_eq!(Spreadsheet::parse_goto_destination(" b25 "), Ok((24, 1)));
+        assert_eq!(Spreadsheet::parse_goto_destination("AA100"), Ok((99, 26)));
+        for input in ["", "A", "0", "A0", "A1:B2", "Sheet2!A1", "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ1"] {
+            assert!(Spreadsheet::parse_goto_destination(input).is_err(), "{input}");
+        }
+        assert!(Spreadsheet::parse_goto_destination(&format!("A{}", NUM_ROWS + 1)).is_err());
+        assert!(Spreadsheet::parse_goto_destination("XFE1").is_err());
+        assert_eq!(Spreadsheet::parse_goto_destination(&format!("A{NUM_ROWS}")), Ok((NUM_ROWS - 1, 0)));
+    }
 }

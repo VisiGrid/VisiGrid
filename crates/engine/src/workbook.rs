@@ -4,6 +4,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[path = "workbook_pivot.rs"]
 mod pivot_ops;
 pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot};
+#[path = "workbook_table.rs"]
+mod table_ops;
+#[path = "workbook_table_refs.rs"]
+mod table_refs;
+pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit, TableRowHistory, TableColumnHistory};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
 use crate::cell_id::CellId;
@@ -65,6 +70,8 @@ pub struct Workbook {
     /// Next ID to assign to a new sheet. Monotonically increasing, never reused.
     #[serde(default = "default_next_sheet_id")]
     next_sheet_id: u64,
+    #[serde(default = "default_next_sheet_id")]
+    next_table_id: u64,
     #[serde(default)]
     named_ranges: NamedRangeStore,
 
@@ -154,6 +161,7 @@ impl Workbook {
             sheets: vec![sheet],
             active_sheet: 0,
             next_sheet_id: 2, // Next ID will be 2
+            next_table_id: 1,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: Arc::default(),
@@ -282,9 +290,10 @@ impl Workbook {
     /// Append a complete copy of an existing sheet under a fresh identity.
     /// Cell state, formulas, formatting, validation, conditional formatting,
     /// merges, and other sheet-owned state are preserved. Only identity and
-    /// display name are replaced.
+    /// display name are replaced. Tables currently refuse cloning until
+    /// table identity remapping and structured-reference rewriting are integrated.
     pub fn add_sheet_clone_named(&mut self, source: &Sheet, name: &str) -> Option<usize> {
-        if !is_valid_sheet_name(name) || self.sheet_name_exists(name) {
+        if !is_valid_sheet_name(name) || self.sheet_name_exists(name) || !source.tables().is_empty() {
             return None;
         }
         let mut sheet = source.clone();
@@ -316,7 +325,9 @@ impl Workbook {
             return false;
         }
 
+        if self.has_external_table_references(self.sheets[index].id) { return false; }
         self.sheets.remove(index);
+        self.refresh_table_name_reservations();
 
         // Adjust active sheet if needed
         if self.active_sheet >= self.sheets.len() {
@@ -334,7 +345,9 @@ impl Workbook {
         if self.sheets.len() <= 1 || index >= self.sheets.len() {
             return None;
         }
+        if self.has_external_table_references(self.sheets[index].id) { return None; }
         let sheet = self.sheets.remove(index);
+        self.refresh_table_name_reservations();
         if self.active_sheet >= self.sheets.len() {
             self.active_sheet = self.sheets.len() - 1;
         } else if self.active_sheet > index {
@@ -351,9 +364,13 @@ impl Workbook {
         if self.sheets.iter().any(|s| s.id == sheet.id || s.name_key == sheet.name_key) {
             return false;
         }
+        if sheet.tables().iter().any(|t| self.table(t.id).is_some()
+            || self.table_by_name(&t.name).is_some() || self.get_named_range(&t.name).is_some()) { return false; }
+        self.next_table_id = self.next_table_id.max(sheet.table_id_high_water.saturating_add(1));
         let index = index.min(self.sheets.len());
         self.next_sheet_id = self.next_sheet_id.max(sheet.id.0 + 1);
         self.sheets.insert(index, sheet);
+        self.refresh_table_name_reservations();
         if self.active_sheet >= index && self.sheets.len() > 1 && index <= self.active_sheet {
             // Keep the same sheet active.
             self.active_sheet += 1;
@@ -472,13 +489,17 @@ impl Workbook {
     /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
     pub fn from_sheets(sheets: Vec<Sheet>, active: usize) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
+        let next_table_id = sheets.iter().map(|s| s.table_id_high_water).max().unwrap_or(0).saturating_add(1);
+        let mut named_ranges = NamedRangeStore::new();
+        named_ranges.table_names = sheets.iter().flat_map(|s| s.tables().iter().map(|t| t.name.to_lowercase())).collect();
         // Calculate next_sheet_id as max existing id + 1
         let max_id = sheets.iter().map(|s| s.id.raw()).max().unwrap_or(0);
         Self {
             sheets,
             active_sheet,
             next_sheet_id: max_id + 1,
-            named_ranges: NamedRangeStore::new(),
+            next_table_id,
+            named_ranges,
             style_table: Vec::new(),
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
@@ -499,11 +520,15 @@ impl Workbook {
     /// Call `rebuild_dep_graph()` after loading to populate the dependency graph.
     pub fn from_sheets_with_meta(sheets: Vec<Sheet>, active: usize, next_sheet_id: u64) -> Self {
         let active_sheet = active.min(sheets.len().saturating_sub(1));
+        let next_table_id = sheets.iter().map(|s| s.table_id_high_water).max().unwrap_or(0).saturating_add(1);
+        let mut named_ranges = NamedRangeStore::new();
+        named_ranges.table_names = sheets.iter().flat_map(|s| s.tables().iter().map(|t| t.name.to_lowercase())).collect();
         Self {
             sheets,
             active_sheet,
             next_sheet_id,
-            named_ranges: NamedRangeStore::new(),
+            next_table_id,
+            named_ranges,
             style_table: Vec::new(),
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
@@ -999,9 +1024,14 @@ impl Workbook {
     /// instead of holding an edge per cell, which made a running total
     /// quadratic, and it no longer walks the sheet for each whole-column
     /// reference.
-    fn formula_dependencies(&self, bound: &crate::formula::parser::BoundExpr, sheet_id: SheetId)
+    fn formula_dependencies(&self, bound: &crate::formula::parser::BoundExpr, sheet_id: SheetId, row: usize, col: usize)
         -> (FxHashSet<CellId>, Vec<crate::dep_graph::RangeRef>)
     {
+        let resolved;
+        let bound = if self.tables().next().is_some() {
+            resolved = crate::formula::structured::resolve_tree(bound, &WorkbookLookup::with_cell_context(self, sheet_id, row, col));
+            &resolved
+        } else { bound };
         let (refs, mut ranges) = crate::formula::refs::extract_refs(bound, sheet_id, &self.named_ranges, |idx| self.sheet_id_at_idx(idx));
         ranges.extend(
             crate::formula::whole_range::extract_whole_ranges(bound, sheet_id)
@@ -1028,7 +1058,7 @@ impl Workbook {
                     let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
 
                     // Extract cell references
-                    let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
+                    let (refs, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
 
                     let formula_cell = CellId::new(sheet_id, row, col);
                     if !refs.is_empty() {
@@ -1061,7 +1091,7 @@ impl Workbook {
         if let Some(ast) = ast {
             // Bind and extract references
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
-            let (refs, ranges) = self.formula_dependencies(&bound, sheet_id);
+            let (refs, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
 
             Arc::make_mut(&mut self.dep_graph).replace_edges(cell_id, refs);
             Arc::make_mut(&mut self.dep_graph).set_ranges(cell_id, ranges);
@@ -2077,6 +2107,9 @@ impl Workbook {
             // No such sheet: nothing written, so nothing recalculated.
             None => return Recalculated::Cells(Vec::new()),
         };
+        if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
+            return Recalculated::Cells(Vec::new());
+        }
         self.sheets[sheet_index].set_value(row, col, value);
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
@@ -2091,6 +2124,9 @@ impl Workbook {
             // No such sheet: nothing written, so nothing recalculated.
             None => return Recalculated::Cells(Vec::new()),
         };
+        if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
+            return Recalculated::Cells(Vec::new());
+        }
         self.sheets[sheet_index].clear_cell(row, col);
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
@@ -2212,6 +2248,10 @@ impl Workbook {
         count: usize,
         delete: bool,
     ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        self.structural_edit_with_rules(sheet_index, axis, at, count, delete, true)
+    }
+
+    fn structural_edit_with_rules(&mut self, sheet_index: usize, axis: crate::structural::Axis, at: usize, count: usize, delete: bool, fill_rules: bool) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
         use crate::structural::{adjust_formula_text, Axis, StructuralEdit};
 
         let is_row = axis == Axis::Row;
@@ -2222,34 +2262,13 @@ impl Workbook {
             .name
             .clone();
 
-        // Refuse inserts that would push content off the grid rather than
-        // dropping it (Excel's behavior).
-        if !delete {
-            let sheet = &self.sheets[sheet_index];
-            let limit = if is_row { sheet.rows } else { sheet.cols };
-            let last_used = sheet
-                .cells_iter()
-                .filter(|(_, cell)| !cell.raw_display().is_empty())
-                .map(|((r, c), _)| if is_row { r } else { c })
-                .max();
-            if let Some(last) = last_used {
-                if last >= at && last + count >= limit {
-                    return Err(format!(
-                        "inserting {} {}(s) would push data past the end of the sheet",
-                        count,
-                        if is_row { "row" } else { "column" }
-                    ));
-                }
-            }
-        }
-
-        // Pivot outputs move as a whole or not at all: an edit that would cut
-        // through one is refused before anything changes.
-        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
-            return Err(format!(
-                "this would cut through {name}; move or delete the pivot table first"
-            ));
-        }
+        self.validate_structural_edit(sheet_index, axis, at, count, delete)?;
+        let column_tables = if !is_row {
+            Some((self.sheets[sheet_index].tables().to_vec(), self.sheets[sheet_index].tables_after_column_edit(at, count, delete)?))
+        } else { None };
+        let rule_changes = if let Some((before, after)) = &column_tables {
+            self.column_rule_changes(sheet_index, at, count, delete, before, after)?
+        } else { self.structural_rule_changes(sheet_index, axis, at, count, delete) };
 
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
@@ -2300,8 +2319,12 @@ impl Workbook {
                 if !raw.starts_with('=') {
                     continue;
                 }
-                if let Some(new_raw) = adjust_formula_text(&raw, &edit, &formula_sheet) {
-                    let (pre_row, pre_col) = pre_edit_pos(idx, row, col);
+                let (pre_row, pre_col) = pre_edit_pos(idx, row, col);
+                let source = if let Some((before, after)) = &column_tables {
+                    self.rewrite_column_schema_source(self.sheets[sheet_index].id, before, after, sheet.id, pre_row, pre_col, &raw)?
+                } else { raw.to_string() };
+                let new_raw = adjust_formula_text(&source, &edit, &formula_sheet).unwrap_or(source);
+                if new_raw != raw {
                     rewrites.push((idx, pre_row, pre_col, raw.to_string(), new_raw.clone()));
                     writes.push((idx, row, col, new_raw));
                 }
@@ -2311,10 +2334,56 @@ impl Workbook {
             self.sheets[idx].set_value(row, col, &new_raw);
         }
 
+        self.apply_rule_changes(&rule_changes, false);
+        if fill_rules && is_row && !delete { self.fill_inserted_calculated_rows(sheet_index, at, count); }
         self.rebuild_dep_graph();
         self.recompute_full_ordered();
         self.increment_revision();
         Ok(rewrites)
+    }
+
+    /// Shared mutation-free preflight, also used by guarded Table row history.
+    pub fn validate_structural_edit(&self, sheet_index: usize, axis: crate::structural::Axis, at: usize, count: usize, delete: bool) -> Result<(), String> {
+        let is_row = axis == crate::structural::Axis::Row;
+        let sheet = self.sheets.get(sheet_index).ok_or("Sheet no longer exists.")?;
+        let limit = if is_row { sheet.rows } else { sheet.cols };
+        if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
+            return Err("Structural edit exceeds the sheet boundary.".into());
+        }
+        // Refuse inserts that would push content off the grid rather than
+        // dropping it (Excel's behavior).
+        if !delete {
+            let sheet = &self.sheets[sheet_index];
+            let limit = if is_row { sheet.rows } else { sheet.cols };
+            let last_used = sheet
+                .cells_iter()
+                .filter(|(_, cell)| !cell.raw_display().is_empty())
+                .map(|((r, c), _)| if is_row { r } else { c })
+                .max();
+            if let Some(last) = last_used {
+                if last >= at && last.checked_add(count).is_none_or(|v| v >= limit) {
+                    return Err(format!(
+                        "inserting {} {}(s) would push data past the end of the sheet",
+                        count,
+                        if is_row { "row" } else { "column" }
+                    ));
+                }
+            }
+        }
+
+        // Pivot outputs move as a whole or not at all: an edit that would cut
+        // through one is refused before anything changes.
+        if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
+            return Err(error);
+        }
+        if !is_row { self.sheets[sheet_index].tables_after_column_edit(at, count, delete)?; }
+        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
+            return Err(format!(
+                "this would cut through {name}; move or delete the pivot table first"
+            ));
+        }
+
+        Ok(())
     }
 
     /// Update presentation only, without invalidating formula caches.
@@ -2568,7 +2637,7 @@ impl Workbook {
         let bound = bind_expr(&parsed, |name| self.sheet_id_by_name(name));
 
         // Extract new precedents
-        let (mut new_preds, ranges) = self.formula_dependencies(&bound, sheet_id);
+        let (mut new_preds, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
         // The proposed formula may occupy a previously empty coordinate.
         if ranges.iter().any(|range| range.contains(cell_id)) {
@@ -2898,6 +2967,21 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
                 }
             }
         })
+    }
+
+    fn is_table_name(&self, name: &str) -> bool { self.workbook.table_by_name(name).is_some() }
+
+    fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {
+        use crate::formula::parser::Expr;
+        let target = match &reference.table {
+            Some(name) => self.workbook.table_by_name(name),
+            None => cell.and_then(|(row,col)| self.workbook.sheet_by_id(self.current_sheet_id)
+                .and_then(|s| s.table_at(row,col)).map(|t| (self.current_sheet_id,t))),
+        };
+        match target {
+            Some((sheet, table)) => crate::formula::structured::resolve_region(table, sheet, self.current_sheet_id, cell, reference),
+            None => Expr::ReferenceError(if reference.table.is_some() { "#NAME? Unknown table" } else { "#VALUE! Structured reference requires a table context" }.into()),
+        }
     }
 
     fn current_cell(&self) -> Option<(usize, usize)> {

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Tables compatibility and fixes
+
+- Files with newer Table metadata offer a read-only view and ask you to upgrade VisiGrid. Damaged Table metadata has a separate recovery prompt. Recovery keeps the original file untouched and shows saved formula results, which may be stale; editing, recalculation, Save and Save As are disabled.
+- Scripts reject protected Table-header writes before applying the batch. Replay reports errors for structural edits that would remove a Table header.
+- Inserting or deleting worksheet rows and columns preserves formula parentheses: `=(A1+B1)*2` no longer becomes `=A1+B1*2` when references move.
+- References beyond the last worksheet column, such as `=ABCD1`, now return `#NAME?`.
+- Older VisiGrid releases do not understand Tables: structured formulas show errors, and re-saving a native file there drops its Table definitions without warning. Keep the original file and use a Tables-capable version to edit it.
+
+### Merged cells and Center Across Selection
+
+- **Sorting and AutoFilter no longer refuse because of a merged title.** They used to refuse if any merged cell existed anywhere on the sheet. Now only merges in the rows being sorted or filtered get in the way, as in Excel, and the sorted table is the one around the cursor: a title row above the header is skipped instead of being taken for the header.
+- **A merged cell elsewhere on the sheet no longer blocks Fill Down/Right, the fill handle, Ctrl+Enter fill, AutoSum, Replace All or Transforms.** These used to refuse if any merge existed anywhere on the sheet. Fill and AutoSum now refuse only when a merge overlaps the cells they write (with the same Ctrl+Alt+C offer); Replace All and Transforms edit a merge's visible cell like any other and never write the hidden cells under it.
+- **Merged cells in the way? One key fixes it.** When a sort or filter is blocked by merged cells, the message offers **Ctrl+Alt+C**, which turns them into Center Across Selection: the same look, but the cells stay separate, so sorting, filtering and column selection work. **Format → Convert Merged Cells to Center Across** does the same for a selection or the whole sheet. Centered merges become Center Across; left-aligned ones are simply unmerged, and their text still flows across. One undo step.
+- **Center Across Selection has a shortcut and a menu entry:** **Ctrl+Alt+C** (Cmd+Alt+C on Mac) and **Format → Center Across Selection**, next to Merge Cells. On merged cells, the shortcut converts them.
+- **Center Across titles print and export centered** across their columns, instead of squeezed into the first one, and the automatic print area includes the title's full width.
+- **A short Center Across title no longer disappears** when it's centered over the next column; the cells to its right used to paint over it.
+
+### Paste
+
+- **Ctrl+Shift+V pastes values**, as in Excel and Google Sheets. It used to paste a format copied with Ctrl+Shift+C, and it still does right after Ctrl+Shift+C; at any other time it pastes values.
+- **Paste Special → All now brings the copied formatting**, as the dialog always said it did. Plain Ctrl+V still keeps the destination's formatting: it pastes formulas, comments and merged cells, never the source's fonts, fills or number formats. One undo step for both.
+- **The Paste Special dialog works from the keyboard.** Up/Down choose, Enter pastes, Escape closes, and Excel's letters pick and paste in one key: A, V, F and T. Enter used to move the cursor behind the dialog, and Escape didn't close it. O still picks Formats.
+- **A clearer Paste Special dialog:** it shows what's on the clipboard and where it will land ("3 × 2 cells → G2:H4"), says which options keep your sheet's formatting, and greys out Formats when the clipboard holds text from another app, which has none.
+
 ## 0.41.0
 
 ### Printing

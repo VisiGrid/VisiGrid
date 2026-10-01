@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if this.pending_table_recovery.is_some() {
+        if event.keystroke.key == "escape" { this.pending_table_recovery = None; cx.notify(); }
+        cx.stop_propagation();
+        return;
+    }
     if this.comments_sidebar_visible && this.comment_search.read(cx).focus.is_focused(window) { return; }
     if this.mode.is_navigation() && this.comment_reader.is_some() && !event.keystroke.modifiers.modified() {
         this.comment_reader = None;
@@ -38,6 +43,21 @@ pub(crate) fn handle_key_down(
     // bottom, the one place that wants the platform to deliver, turns it back on.
     if !printable_chars.is_empty() && this.focus_handle.is_focused(window) {
         cx.stop_propagation();
+    }
+
+    // Paste Special: letter accelerators pick a type and paste. Enter, Escape
+    // and Up/Down arrive as actions (see ConfirmEdit, CancelEdit, MoveUp/Down).
+    if this.mode == Mode::PasteSpecial {
+        if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform {
+            if let Some(paste_type) = crate::app::PasteType::from_accelerator(&event.keystroke.key) {
+                if this.paste_special_dialog.is_enabled(paste_type) {
+                    this.paste_special_dialog.selected = paste_type;
+                    this.apply_paste_special(cx);
+                }
+            }
+        }
+        cx.stop_propagation();
+        return;
     }
 
     if this.mode == Mode::ExportPdf {

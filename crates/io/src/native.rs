@@ -31,6 +31,8 @@ pub struct SemanticVerification {
 
 /// Fingerprint format version. Increment on breaking changes to fingerprint computation.
 /// v2: includes iteration settings (enabled, max_iters, tolerance).
+/// Table-bearing workbooks use v3, which also includes their semantic schema.
+/// Table-free workbooks retain v2 for existing verification stamps.
 const FINGERPRINT_VERSION: u32 = 2;
 
 /// Compute semantic fingerprint of a workbook.
@@ -82,9 +84,33 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         }
     }
 
+    // Table membership/column names affect structured formulas even when the
+    // newly included cells are blank. Keep ordinary workbook v2 fingerprints
+    // unchanged; Table-bearing semantics use a distinct fingerprint version.
+    let mut tables: Vec<_> = workbook.tables().collect();
+    tables.sort_by_key(|(_, t)| t.name.to_ascii_lowercase());
+    for (sheet_id, table) in &tables {
+        let schema = serde_json::to_vec(&(
+            workbook.sheet_index_by_id(*sheet_id), &table.name, table.range,
+            table.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        )).expect("table schema contains only finite coordinates and text");
+        hasher.update(b"table:");
+        hasher.update(&schema);
+        hasher.update(b"\n");
+    }
+    for (_, table) in &tables {
+        for column in &table.columns {
+            if let Some(formula) = &column.formula {
+                hasher.update(b"calculated-column:");
+                hasher.update(&serde_json::to_vec(&(&table.name, &column.name, formula, column.formula_origin)).unwrap());
+                hasher.update(b"\n");
+            }
+        }
+    }
+    let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else { 3 };
     let hash = hasher.finalize();
     let hash_hex = &hash.to_hex()[0..16]; // First 16 hex chars (64 bits)
-    format!("v{}:{}:{}", FINGERPRINT_VERSION, op_count, hash_hex)
+    format!("v{}:{}:{}", fingerprint_version, op_count, hash_hex)
 }
 
 const SCHEMA: &str = r#"
@@ -584,6 +610,10 @@ fn write_fresh_db(
 }
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
+    if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
+    if sheet.has_table_history() {
+        return save_workbook(&Workbook::from_sheets(vec![sheet.clone()], 0), path);
+    }
     write_fresh_db(path, |conn| write_sheet(conn, sheet))
 }
 
@@ -733,6 +763,16 @@ fn build_number_format(
 
 pub fn load(path: &Path) -> Result<Sheet, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let has_tables: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'tables')", [], |r| r.get(0))
+        .unwrap_or(false);
+    if has_tables {
+        if conn.prepare("SELECT sheet_idx FROM sheets LIMIT 1").is_err() {
+            return Err("Tables metadata requires the workbook file format.".into());
+        }
+        let wb = load_workbook(path)?;
+        return Ok(wb.active_sheet().clone());
+    }
+
 
     // Run migrations (adds new columns if missing)
     let _ = migrate(&conn); // Ignore errors (read-only DBs)
@@ -901,6 +941,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 
 /// Save a complete workbook including all sheets and named ranges
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
+    workbook.ensure_writable()?;
     write_fresh_db(path, |conn| write_workbook(conn, workbook))
 }
 
@@ -1041,6 +1082,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
 
     save_cond_formats(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
+    save_tables(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1058,6 +1100,7 @@ pub fn save_workbook_with_metadata(
     metadata: &CellMetadata,
     path: &Path,
 ) -> Result<(), String> {
+    workbook.ensure_writable()?;
     write_fresh_db(path, |conn| write_workbook_with_metadata(conn, workbook, metadata))
 }
 
@@ -1213,6 +1256,7 @@ fn write_workbook_with_metadata(
 
     save_cond_formats(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
+    save_tables(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1409,10 +1453,26 @@ fn load_workbook_v2(
 
 /// Load a complete workbook including all sheets and named ranges
 pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    load_workbook_impl(path, false).map(|(wb, _)| wb)
+}
 
-    // Run migrations (adds new columns if missing from older files)
-    let _ = migrate(&conn);
+/// Explicit cells-only recovery for the desktop's review prompt. The returned
+/// workbook rejects saves. The original database is opened without migrations.
+pub fn load_workbook_for_recovery(path: &Path) -> Result<(Workbook, Option<crate::table_recovery::TableLoadIssue>), String> {
+    load_workbook_impl(path, true)
+}
+
+fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<crate::table_recovery::TableLoadIssue>), String> {
+    let read = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+    let has_tables = read.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'tables')", [], |r| r.get::<_, bool>(0)).unwrap_or(false);
+    // Table-bearing files already use the current cell schema. Never migrate
+    // a file whose Table definitions may be unsupported or damaged.
+    let conn = if recovery || has_tables { read } else {
+        drop(read);
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let _ = migrate(&conn);
+        conn
+    };
 
     // Check if this is the new multi-sheet format (v2+)
     let has_sheets_table = conn
@@ -1425,6 +1485,9 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
         // New multi-sheet format
         load_workbook_v2(&conn)?
     } else {
+        if recovery {
+            return Err("Read-only Table recovery requires a readable workbook cell schema.".into());
+        }
         // Legacy single-sheet format - use existing load function
         let sheet = load(path)?;
         (Workbook::from_sheets(vec![sheet], 0), Vec::new())
@@ -1506,6 +1569,15 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     }
     // After cells: a pivot's ownership must not block loading its own output.
     load_pivots(&conn, &mut workbook);
+    let issue = match load_tables(&conn, &mut workbook) {
+        Ok(()) => None,
+        Err(issue) if recovery => Some(issue),
+        Err(issue) => return Err(issue.to_string()),
+    };
+    if let Some(issue) = &issue {
+        crate::table_recovery::finish_recovery(&mut workbook, issue, &cached_formula_values);
+        return Ok((workbook, Some(issue.clone())));
+    }
 
     // Rebuild dependency graph and compute all formulas after loading
     workbook.rebuild_dep_graph();
@@ -1516,7 +1588,7 @@ pub fn load_workbook(path: &Path) -> Result<Workbook, String> {
     // live.
     crate::keep_uncomputable_values(&mut workbook, &cached_formula_values);
 
-    Ok(workbook)
+    Ok((workbook, None))
 }
 
 /// Persist one sheet's conditional formatting rules as a JSON meta blob.
@@ -1668,6 +1740,28 @@ fn load_tab_colors(conn: &Connection, workbook: &mut Workbook) {
             }
         }
     }
+}
+
+fn save_tables(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+    conn.execute("DELETE FROM meta WHERE key = 'tables'", []).map_err(|e| e.to_string())?;
+    if workbook.has_table_history() {
+        let json = serde_json::to_string(&workbook.saved_tables()).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO meta (key, value) VALUES ('tables', ?1)", params![json])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_tables(conn: &Connection, workbook: &mut Workbook) -> Result<(), crate::table_recovery::TableLoadIssue> {
+    use crate::table_recovery::{decode_catalog, TableLoadIssue};
+    use rusqlite::OptionalExtension;
+    let json: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0))
+        .optional().map_err(|e| TableLoadIssue::Corrupt(e.to_string()))?;
+    if let Some(json) = json {
+        let saved = decode_catalog(&json)?;
+        workbook.restore_tables(saved).map_err(TableLoadIssue::Corrupt)?;
+    }
+    Ok(())
 }
 
 /// Pivot tables per sheet, as JSON meta blobs `pivots_{sheet_idx}`. Absent
@@ -2563,6 +2657,7 @@ pub fn save_workbook_full(
     run_records: &[RunRecord],
     path: &Path,
 ) -> Result<(), String> {
+    workbook.ensure_writable()?;
     write_fresh_db(path, |conn| write_workbook_full(conn, workbook, metadata, scripts, run_records))
 }
 
@@ -2699,6 +2794,8 @@ fn write_workbook_full(
     }
 
     save_sheet_defaults(conn, workbook)?;
+
+    save_tables(conn, workbook)?;
 
     // Save scripts
     save_scripts(&conn, scripts).map_err(|e| e.to_string())?;

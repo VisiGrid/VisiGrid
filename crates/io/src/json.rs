@@ -9,6 +9,7 @@ use visigrid_engine::sheet::Sheet;
 /// Export sheet as JSON array of arrays
 /// Each row is an array of cell values (strings)
 pub fn export(sheet: &Sheet, path: &Path) -> Result<(), String> {
+    if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
     let file = File::create(path).map_err(|e| e.to_string())?;
     let writer = BufWriter::new(file);
 
@@ -151,6 +152,8 @@ pub const FULL_JSON_FORMAT: &str = "visigrid-json";
 pub const FULL_JSON_VERSION: u32 = 1;
 /// Version written for workbook-form (multi-sheet) documents.
 pub const FULL_JSON_WORKBOOK_VERSION: u32 = 2;
+/// Table-bearing documents require v3; ordinary exports retain v1/v2.
+pub const FULL_JSON_TABLE_VERSION: u32 = 3;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
 /// the web mapper own it). BTreeMap for deterministic serialization.
@@ -363,6 +366,8 @@ fn keys_to_usize(m: &BTreeMap<String, f32>) -> BTreeMap<usize, f32> {
 
 #[derive(Serialize, Deserialize)]
 struct FullDoc {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table_catalog: Option<serde_json::Value>,
     format: String,
     version: u32,
     /// v1 single-sheet body, flattened at the top level for compatibility.
@@ -573,9 +578,12 @@ pub fn export_full(sheet: &Sheet) -> Result<String, String> {
 
 /// Export a sheet as visigrid-json v1 with presentation state.
 pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<String, String> {
+    if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: FULL_JSON_VERSION,
+        version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
+        table_catalog: sheet.has_table_history().then(||
+            serde_json::to_value(visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()).unwrap()),
         body: sheet_body(sheet, layout),
         sheets: Vec::new(),
         active_sheet: None,
@@ -591,6 +599,7 @@ pub fn export_workbook(
     layouts: &[SheetLayout],
     active_sheet: usize,
 ) -> Result<String, String> {
+    wb.ensure_writable()?;
     let default_layout = SheetLayout::default();
     let sheets: Vec<SheetBody> = wb
         .sheets()
@@ -607,7 +616,8 @@ pub fn export_workbook(
         .collect();
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: FULL_JSON_WORKBOOK_VERSION,
+        version: if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
+        table_catalog: wb.has_table_history().then(|| serde_json::to_value(wb.saved_tables()).unwrap()),
         body: SheetBody::default(),
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
@@ -853,17 +863,27 @@ pub fn import_full_with_layout(content: &str) -> Result<(Sheet, SheetLayout), St
 pub fn import_any(
     content: &str,
 ) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
+    import_any_impl(content, false)
+}
+
+/// Explicit recovery; callers must display the read-only reason and cached-value warning.
+pub fn import_any_for_recovery(content: &str) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
+    import_any_impl(content, true)
+}
+
+fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
     use visigrid_engine::sheet::SheetId;
     use visigrid_engine::workbook::Workbook;
+    use crate::table_recovery::{decode_catalog, TableLoadIssue};
 
     let doc: FullDoc = serde_json::from_str(content).map_err(|e| format!("invalid visigrid-json: {}", e))?;
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
-    if doc.version > FULL_JSON_WORKBOOK_VERSION {
+    if doc.version > FULL_JSON_TABLE_VERSION {
         return Err(format!(
             "visigrid-json version {} is newer than supported ({})",
-            doc.version, FULL_JSON_WORKBOOK_VERSION
+            doc.version, FULL_JSON_TABLE_VERSION
         ));
     }
 
@@ -893,6 +913,18 @@ pub fn import_any(
                 eprintln!("Warning: pivot on sheet {}: {}", i, w);
             }
         }
+    }
+    let tables = if let Some(catalog) = &doc.table_catalog {
+        if doc.version < FULL_JSON_TABLE_VERSION { return Err("Tables require visigrid-json v3.".into()); }
+        decode_catalog(&catalog.to_string()).and_then(|saved| wb.restore_tables(saved).map_err(TableLoadIssue::Corrupt))
+    } else if doc.version == FULL_JSON_TABLE_VERSION {
+        Err(TableLoadIssue::Corrupt("visigrid-json v3 is missing its table catalog".into()))
+    } else { Ok(()) };
+    if let Err(issue) = tables {
+        if !recovery { return Err(issue.to_string()); }
+        let cached = cached_formula_values(&doc, &wb);
+        crate::table_recovery::finish_recovery(&mut wb, &issue, &cached);
+        return Ok((wb, layouts, active));
     }
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();

@@ -67,7 +67,10 @@ Complete reference for keyboard shortcuts.
 | Ctrl+C | Copy |
 | Alt, H, C, P | Copy selected range as a picture (PNG) |
 | Ctrl+X | Cut |
-| Ctrl+V | Paste |
+| Ctrl+V | Paste contents; keeps the destination's formatting |
+| Ctrl+Shift+V | Paste values (right after Ctrl+Shift+C: paste that format) |
+| Ctrl+Alt+V | Paste Special: All (A), Values (V), Formulas (F), Formats (T) |
+| Ctrl+Shift+C | Copy format |
 
 ---
 
@@ -252,7 +255,6 @@ These shortcuts **never change** — they're Excel muscle memory that VisiGrid r
 
 | Shortcut | Action |
 |----------|--------|
-| Ctrl+Shift+V | Paste Special |
 | Ctrl+H | Find and Replace |
 | Ctrl+- | Zoom out |
 | Alt+Enter | Line break in cell |

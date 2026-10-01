@@ -36,6 +36,18 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         if let Some(entry) = self.history.undo() {
+            if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
+                if let Err(error) = self.wb(cx).validate_table_row_history(history, true) {
+                    self.history.redo();
+                    self.status_message = Some(error); cx.notify(); return;
+                }
+            }
+            if let UndoAction::ColsInserted { table_columns: Some(history), .. } | UndoAction::ColsDeleted { table_columns: Some(history), .. } = &entry.action {
+                if let Err(error) = self.wb(cx).validate_table_column_history(history, true) {
+                    self.history.redo();
+                    self.status_message = Some(error); cx.notify(); return;
+                }
+            }
             match entry.action {
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
@@ -140,15 +152,23 @@ impl Spreadsheet {
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
                     self.status_message = Some(format!("Undo: {}", commit.description));
                 }
+                UndoAction::TableCommit { commit, description, .. } => {
+                    if !self.replay_table_commit(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
+                }
                 UndoAction::PivotCommit { commit, created_sheet, description } => {
                     self.pivot_undo(&commit, &created_sheet, cx);
                     self.status_message = Some(format!("Undo: {}", description));
                 }
-                UndoAction::RowsInserted { sheet_index, at_row, count, print_setup_before, formula_rewrites } => {
+                UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, print_setup_before, formula_rewrites } => {
                     // Undo insert by deleting the rows
+                    if let Some(history) = &table_rows {
+                        let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
+                        if let Err(error) = result { self.history.redo(); self.status_message = Some(error); cx.notify(); return; }
+                    }
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.delete_rows(at_row, count);
+                            if table_rows.is_none() { sheet.delete_rows(at_row, count); }
                             sheet.print_setup = print_setup_before.clone();
                         }
                     });
@@ -177,11 +197,15 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
                 }
-                UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
+                UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
                     // Undo delete by re-inserting rows and restoring data
+                    if let Some(history) = &table_rows {
+                        let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
+                        if let Err(error) = result { self.history.redo(); self.status_message = Some(error); cx.notify(); return; }
+                    }
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.insert_rows(at_row, count);
+                            if table_rows.is_none() { sheet.insert_rows(at_row, count); }
                             sheet.print_setup = print_setup_before.clone();
                         }
                         let mut guard = wb.batch_guard();
@@ -230,11 +254,15 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} row(s)", count));
                 }
-                UndoAction::ColsInserted { sheet_index, at_col, count, print_setup_before, formula_rewrites } => {
+                UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, print_setup_before, formula_rewrites } => {
+                    if let Some(history) = &table_columns {
+                        let result = self.workbook.update(cx, |wb, _| wb.apply_table_column_history(history, true));
+                        if let Err(error) = result { self.history.redo(); self.status_message = Some(error); cx.notify(); return; }
+                    }
                     // Undo insert by deleting the columns
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.delete_cols(at_col, count);
+                            if table_columns.is_none() { sheet.delete_cols(at_col, count); }
                             sheet.print_setup = print_setup_before.clone();
                         }
                     });
@@ -263,11 +291,15 @@ impl Spreadsheet {
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} column(s)", count));
                 }
-                UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
+                UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
+                    if let Some(history) = &table_columns {
+                        let result = self.workbook.update(cx, |wb, _| wb.apply_table_column_history(history, true));
+                        if let Err(error) = result { self.history.redo(); self.status_message = Some(error); cx.notify(); return; }
+                    }
                     // Undo delete by re-inserting columns and restoring data
                     self.workbook.update(cx, |wb, _| {
                         if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.insert_cols(at_col, count);
+                            if table_columns.is_none() { sheet.insert_cols(at_col, count); }
                             sheet.print_setup = print_setup_before.clone();
                         }
                         let mut guard = wb.batch_guard();
@@ -587,13 +619,18 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
+            UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, true, cx); }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_undo(&commit, &created_sheet, cx);
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, print_setup_before, formula_rewrites } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, print_setup_before, formula_rewrites } => {
+                if let Some(history) = &table_rows {
+                    let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
+                    if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+                }
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        sheet.delete_rows(at_row, count);
+                        if table_rows.is_none() { sheet.delete_rows(at_row, count); }
                         sheet.print_setup = print_setup_before.clone();
                     }
                 });
@@ -619,10 +656,14 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
+                if let Some(history) = &table_rows {
+                    let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
+                    if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+                }
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        sheet.insert_rows(at_row, count);
+                        if table_rows.is_none() { sheet.insert_rows(at_row, count); }
                         sheet.print_setup = print_setup_before.clone();
                     }
                     let mut guard = wb.batch_guard();
@@ -667,10 +708,14 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count, print_setup_before, formula_rewrites } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, print_setup_before, formula_rewrites } => {
+                if let Some(history) = &table_columns {
+                    let result = self.workbook.update(cx, |wb, _| wb.apply_table_column_history(history, true));
+                    if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+                }
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        sheet.delete_cols(at_col, count);
+                        if table_columns.is_none() { sheet.delete_cols(at_col, count); }
                         sheet.print_setup = print_setup_before.clone();
                     }
                 });
@@ -696,10 +741,14 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsDeleted { sheet_index, at_col, count, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
+            UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
+                if let Some(history) = &table_columns {
+                    let result = self.workbook.update(cx, |wb, _| wb.apply_table_column_history(history, true));
+                    if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+                }
                 self.workbook.update(cx, |wb, _| {
                     if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        sheet.insert_cols(at_col, count);
+                        if table_columns.is_none() { sheet.insert_cols(at_col, count); }
                         sheet.print_setup = print_setup_before.clone();
                     }
                     let mut guard = wb.batch_guard();
@@ -876,7 +925,7 @@ impl Spreadsheet {
     }
 
     /// Apply a single redo action (helper for Group handling)
-    fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
+    fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) -> bool {
         match action {
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
@@ -938,7 +987,7 @@ impl Spreadsheet {
             UndoAction::Group { actions, .. } => {
                 // Recursively redo nested groups
                 for sub_action in actions {
-                    self.apply_redo_action(sub_action, cx);
+                    if !self.apply_redo_action(sub_action, cx) { return false; }
                 }
             }
             UndoAction::PlanCommit {
@@ -965,16 +1014,17 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
+            UndoAction::TableCommit { commit, .. } => { if !self.replay_table_commit(&commit, false, cx) { return false; } }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, formula_rewrites, .. } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, formula_rewrites, .. } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
                 // formulas, validations, and named ranges are re-adjusted.
-                let _ = self.workbook.update(cx, |wb, _| {
-                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false)
-                });
+                if let Err(error) = self.workbook.update(cx, |wb, _| {
+                    if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false) }
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 // Shift row heights down (per-sheet)
                 let sheet_heights = self.sheet_row_heights_for_index_mut(sheet_index, cx);
                 let heights_to_shift: Vec<_> = sheet_heights
@@ -992,10 +1042,10 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
-                let _ = self.workbook.update(cx, |wb, _| {
-                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true)
-                });
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, .. } => {
+                if let Err(error) = self.workbook.update(cx, |wb, _| {
+                    if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true) }
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 self.sheet_mut(sheet_index, cx, |_sheet| {
                     // structural_edit already performed the delete
                 });
@@ -1012,13 +1062,13 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count, formula_rewrites, .. } => {
+            UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, formula_rewrites, .. } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
                 // formulas, validations, and named ranges are re-adjusted.
-                let _ = self.workbook.update(cx, |wb, _| {
-                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false)
-                });
+                if let Err(error) = self.workbook.update(cx, |wb, _| {
+                    if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false) }
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 // Shift column widths right (per-sheet)
                 let sheet_widths = self.sheet_col_widths_for_index_mut(sheet_index, cx);
                 let widths_to_shift: Vec<_> = sheet_widths
@@ -1036,10 +1086,10 @@ impl Spreadsheet {
                 }
                 self.bump_cells_rev();
             }
-            UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
-                let _ = self.workbook.update(cx, |wb, _| {
-                    wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true)
-                });
+            UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, .. } => {
+                if let Err(error) = self.workbook.update(cx, |wb, _| {
+                    if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true) }
+                }) { self.status_message = Some(error); cx.notify(); return false; }
                 self.sheet_mut(sheet_index, cx, |_sheet| {
                     // structural_edit already performed the delete
                 });
@@ -1174,11 +1224,24 @@ impl Spreadsheet {
                 });
             }
         }
+        true
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         if let Some(entry) = self.history.redo() {
+            if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
+                if let Err(error) = self.wb(cx).validate_table_row_history(history, false) {
+                    self.history.undo();
+                    self.status_message = Some(error); cx.notify(); return;
+                }
+            }
+            if let UndoAction::ColsInserted { table_columns: Some(history), .. } | UndoAction::ColsDeleted { table_columns: Some(history), .. } = &entry.action {
+                if let Err(error) = self.wb(cx).validate_table_column_history(history, false) {
+                    self.history.undo();
+                    self.status_message = Some(error); cx.notify(); return;
+                }
+            }
             match entry.action {
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
@@ -1254,7 +1317,7 @@ impl Spreadsheet {
                 UndoAction::Group { actions, description } => {
                     // Redo all actions in order
                     for action in actions {
-                        self.apply_redo_action(action, cx);
+                        if !self.apply_redo_action(action, cx) { self.history.undo(); return; }
                     }
                     self.status_message = Some(format!("Redo: {}", description));
                 }
@@ -1283,6 +1346,10 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
                     self.status_message = Some(format!("Redo: {}", commit.description));
+                }
+                UndoAction::TableCommit { commit, description, .. } => {
+                    if !self.replay_table_commit(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::PivotCommit { commit, created_sheet, description } => {
                     self.pivot_redo(&commit, &created_sheet, cx);
@@ -1315,7 +1382,7 @@ impl Spreadsheet {
                         UndoAction::ColsDeleted { count, .. } => format!("Redo: delete {} column(s)", count),
                         _ => unreachable!("the outer pattern admits only these four"),
                     };
-                    self.apply_redo_action(action, cx);
+                    if !self.apply_redo_action(action, cx) { self.history.undo(); return; }
                     self.status_message = Some(message);
                 }
                 UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {

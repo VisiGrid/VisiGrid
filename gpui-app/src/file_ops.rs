@@ -86,6 +86,25 @@ impl Spreadsheet {
     }
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        self.load_file_with_recovery(path, false, cx);
+    }
+
+    pub(crate) fn confirm_table_recovery(&mut self, cx: &mut Context<Self>) {
+        if let Some((path, _)) = self.pending_table_recovery.take() {
+            self.load_file_with_recovery(&path, true, cx);
+        }
+    }
+
+    pub(crate) fn block_read_only_recovery(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.recovery_warning.is_some() {
+            self.status_message = Some("Read-only recovery: editing, Save, Save As and export are disabled. Close this window to leave recovery.".into());
+            cx.notify();
+            true
+        } else { false }
+    }
+
+    fn load_file_with_recovery(&mut self, path: &PathBuf, recovery: bool, cx: &mut Context<Self>) {
         if self.comment_editor.is_some() {
             self.status_message = Some("Save or cancel the comment before opening another workbook".into());
             cx.notify();
@@ -113,12 +132,29 @@ impl Spreadsheet {
         let load_start = Instant::now();
         let result: Result<Workbook, String> = match ext_lower.as_str() {
             // .vgrid is the advertised native extension; same container.
-            "sheet" | "vgrid" => native::load_workbook(path),
+            "sheet" | "vgrid" => {
+                if recovery {
+                    native::load_workbook_for_recovery(path).map(|(wb, _)| wb)
+                } else {
+                    match native::load_workbook(path) {
+                        Ok(wb) => Ok(wb),
+                        Err(error) => {
+                            if let Ok((_, Some(issue))) = native::load_workbook_for_recovery(path) {
+                                self.pending_table_recovery = Some((path.clone(), issue));
+                                cx.notify();
+                                return;
+                            }
+                            Err(error)
+                        }
+                    }
+                }
+            },
             _ => Err(format!("Unknown file type: {}", extension)),
         };
 
         match result {
             Ok(workbook) => {
+                self.recovery_warning = workbook.read_only_reason().map(str::to_owned);
                 self.wb_mut(cx, |wb| *wb = workbook);
                 // Rebuild dependency graph and recompute all formulas
                 // This ensures formula cells have computed values, not just raw text
@@ -128,8 +164,10 @@ impl Spreadsheet {
                 // somebody pressed F9, and this pass also discarded the values
                 // the loader had kept precisely because they could not be
                 // recomputed.
-                self.wb_mut(cx, |wb| wb.rebuild_dep_graph());
-                self.recompute_with_custom_fns(cx);
+                if self.recovery_warning.is_none() {
+                    self.wb_mut(cx, |wb| wb.rebuild_dep_graph());
+                    self.recompute_with_custom_fns(cx);
+                }
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
                 self.capture_base_workbook(cx); // Capture base state for replay
@@ -161,7 +199,7 @@ impl Spreadsheet {
                 }
 
                 // Wire calculation settings to engine
-                let auto = self.doc_settings.calculation.mode
+                let auto = self.recovery_warning.is_none() && self.doc_settings.calculation.mode
                     .resolve(crate::settings::CalculationMode::Automatic)
                     != crate::settings::CalculationMode::Manual;
                 let iterative = self.doc_settings.calculation.enable_iterative_calc.resolve(false);
@@ -806,6 +844,7 @@ impl Spreadsheet {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
@@ -829,6 +868,7 @@ impl Spreadsheet {
     /// Returns true if file was saved (has existing path), false if Save As dialog is needed.
     /// Used by close-with-save flow to know if window can be closed immediately.
     pub fn save_and_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.block_read_only_recovery(cx) { return false; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
@@ -853,6 +893,7 @@ impl Spreadsheet {
     }
 
     pub fn save_as(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
@@ -932,6 +973,7 @@ impl Spreadsheet {
     }
 
     fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> bool {
+        if self.block_read_only_recovery(cx) { return false; }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
         // Persist pivots' stale flags, so a reopened workbook never claims
@@ -1034,20 +1076,27 @@ impl Spreadsheet {
     }
 
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         self.export_delimited(cx, "csv", csv::export);
     }
 
     pub fn export_tsv(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         self.export_delimited(cx, "tsv", csv::export_tsv);
     }
 
     pub fn export_json(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         self.export_delimited(cx, "json", json::export);
     }
 
     /// Export workbook to Excel (.xlsx) format
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
+        if self.wb(cx).tables().next().is_some() {
+            self.status_message = Some("Excel export does not preserve Tables yet. Save as .sheet, or convert Tables to ranges before exporting.".into()); cx.notify(); return;
+        }
         // Commit any pending edit so it's included in the export
         self.commit_pending_edit(cx);
 
@@ -1075,8 +1124,13 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
+                    if this.block_read_only_recovery(cx) { return; }
                     // Rebuild layouts in case data changed
                     let layouts = this.build_export_layouts(cx);
+
+                    if this.wb(cx).tables().next().is_some() {
+                        this.status_message=Some("Convert Tables to ranges before exporting to Excel.".into()); cx.notify(); return;
+                    }
 
                     match xlsx::export(this.wb(cx), &path, Some(&layouts)) {
                         Ok(result) => {
@@ -1118,6 +1172,7 @@ impl Spreadsheet {
     /// Export history as a deterministic Lua provenance script.
     /// Phase 9A: allows history to be replayed, audited, or shared.
     pub fn export_provenance(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         use crate::provenance::{export_script, ExportOptions};
 
         let directory = self.current_file.as_ref()
@@ -1251,9 +1306,11 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
+                    if this.block_read_only_recovery(cx) { return; }
                     match export_fn(this.sheet(cx), &path) {
                         Ok(()) => {
-                            this.status_message = Some(format!("Exported: {}", path.display()));
+                            let note = if this.sheet(cx).tables().is_empty() { "" } else { " · values only; save .sheet to preserve Tables" };
+                            this.status_message = Some(format!("Exported: {}{}", path.display(), note));
                         }
                         Err(e) => {
                             this.status_message = Some(format!("Error exporting: {}", e));

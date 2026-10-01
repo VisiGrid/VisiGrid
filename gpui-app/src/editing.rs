@@ -267,6 +267,11 @@ impl Spreadsheet {
         }
 
 
+        if self.commit_table_header(row, col, &self.edit_value.clone(), cx).is_some() {
+            self.cancel_edit(cx);
+            return;
+        }
+
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {
             format!("={}", &self.edit_value[1..])
@@ -285,8 +290,14 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value, cx);  // Use helper that updates dep graph
+        match self.commit_calculated_value(row, col, &new_value, cx).or_else(|| self.commit_table_append_value(row, col, &new_value, cx)) {
+            Some(false) => { self.cancel_edit(cx); return; }
+            Some(true) => {}
+            None => {
+                self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+                self.set_cell_value(row, col, &new_value, cx);
+            }
+        }  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
         self.reset_edit_state();
         self.edit_value.clear();
@@ -814,7 +825,7 @@ impl Spreadsheet {
     pub fn confirm_edit_enter(&mut self, cx: &mut Context<Self>) {
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             // Commit the edit if currently editing
-            self.commit_current_edit(cx);
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             // Move to next row at the origin column
             let (row, _) = self.active_view_state().selected;
             let new_row = self.next_visible_row(row, 1);
@@ -841,7 +852,7 @@ impl Spreadsheet {
     /// Shift+Enter key: confirm edit and move up, with tab-chain return.
     pub fn confirm_edit_up_enter(&mut self, cx: &mut Context<Self>) {
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
-            self.commit_current_edit(cx);
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             let (row, _) = self.active_view_state().selected;
             let new_row = self.next_visible_row(row, -1);
             self.close_validation_dropdown(
@@ -893,6 +904,21 @@ impl Spreadsheet {
             self.start_edit(cx);
             return;
         }
+
+        if !self.is_multi_selection() {
+            let (r,c) = self.view_state.selected;
+            let r = self.row_view.view_to_data(r);
+            let range = visigrid_engine::table::TableRange { start_row:r, end_row:r, start_col:c, end_col:c };
+            if (self.edit_value.starts_with('=') && self.sheet(cx).table_at(r,c).is_some()) || matches!(self.wb(cx).table_append_target(self.sheet(cx).id, range), Ok(Some(_))) {
+                self.commit_current_edit(cx); return;
+            }
+        }
+        let (header_view_row, header_col) = self.view_state.selected;
+        if !self.is_multi_selection() && self.sheet(cx).table_header_at(self.row_view.view_to_data(header_view_row), header_col).is_some() {
+            self.commit_current_edit(cx);
+            return;
+        }
+        if self.block_selection_table_headers("fill", cx) { return; }
 
         // Convert leading + to = for formulas (Excel compatibility)
         let mut base_value = if self.edit_value.starts_with('+') {
@@ -1327,7 +1353,7 @@ impl Spreadsheet {
     /// Used by `confirm_edit_and_move` and `confirm_edit_enter`.
     /// If we navigated to another sheet for cross-sheet ref picking,
     /// switch back to the home sheet and restore the edit cell position.
-    fn restore_formula_home_sheet(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restore_formula_home_sheet(&mut self, cx: &mut Context<Self>) {
         if let Some(home_sheet) = self.formula_home_sheet {
             let current = self.wb(cx).active_sheet_index();
             if current != home_sheet {
@@ -1362,6 +1388,13 @@ impl Spreadsheet {
         }
 
 
+        if let Some(success) = self.commit_table_header(row, col, &self.edit_value.clone(), cx) {
+            let tab_origin = self.tab_chain_origin_col;
+            self.cancel_edit(cx);
+            if success { self.tab_chain_origin_col = tab_origin; }
+            return success;
+        }
+
         // Convert leading + to = for formulas (Excel compatibility)
         let mut new_value = if self.edit_value.starts_with('+') {
             format!("={}", &self.edit_value[1..])
@@ -1383,8 +1416,14 @@ impl Spreadsheet {
         // Capture raw edit value before clearing for percent auto-format check
         let raw_edit = self.edit_value.clone();
 
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value, cx);
+        match self.commit_calculated_value(row, col, &new_value, cx).or_else(|| self.commit_table_append_value(row, col, &new_value, cx)) {
+            Some(false) => { self.cancel_edit(cx); return false; }
+            Some(true) => {}
+            None => {
+                self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+                self.set_cell_value(row, col, &new_value, cx);
+            }
+        }
 
         // Auto-apply Percent format when user typed "X%" and cell format is General
         if raw_edit.trim().ends_with('%') {
@@ -1432,7 +1471,7 @@ impl Spreadsheet {
             return;
         }
 
-        self.commit_current_edit(cx);
+        if !self.commit_current_edit(cx) { return; }
 
         // Move after confirming
         self.move_selection(dr, dc, cx);
@@ -1446,8 +1485,12 @@ impl Spreadsheet {
         use crate::history::CellChange;
         use visigrid_engine::provenance::MutationOp;
 
-        if self.block_if_merged("fill selection", cx) { return; }
+        // Only merges inside the selected areas get in the way.
+        for ((r0, c0), (r1, c1)) in self.all_selection_ranges() {
+            if self.block_if_merges_in("fill selection", (r0, c0, r1, c1), cx) { return; }
+        }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
+        if self.block_selection_table_headers("fill", cx) { return; }
 
         let primary_cell = self.view_state.selected;
         let base_value = self.sheet(cx).get_raw(primary_cell.0, primary_cell.1);

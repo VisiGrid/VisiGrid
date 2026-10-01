@@ -52,6 +52,8 @@ mod key_handler;
 mod f1_help;
 mod cf_rules_panel;
 mod pivot_panel;
+mod table_controls;
+mod table_recovery;
 mod problems_panel;
 mod cond_format_dialog;
 mod named_range_dialogs;
@@ -571,6 +573,11 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }, |div| {
             div.child(format_bar::render_format_bar(app, window, cx))
         })
+        .when(app.recovery_warning.is_some(), |d| d.child(div().h(px(56.0)).flex_shrink_0().px_4().flex().flex_col().justify_center().overflow_hidden()
+            .bg(app.token(crate::theme::TokenKey::PanelBg)).text_color(app.token(crate::theme::TokenKey::TextPrimary))
+            .child(div().text_size(px(12.0)).child("READ-ONLY RECOVERY · Table definitions are unavailable"))
+            .child(div().text_size(px(12.0)).child("Saved formula results may be stale or unavailable. Editing, recalculation, Save, Save As and export are disabled."))))
+        .when(app.show_table_controls(cx), |d| d.child(table_controls::render_table_controls(app, cx)))
         .child(headers::render_column_headers(app, cx))
         // Split view: render two grids side-by-side, or single grid
         // Wrapped in flex-row to accommodate optional minimap strip on the right
@@ -750,6 +757,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(app.pivot_panel.is_some(), |d| {
             d.child(pivot_panel::render_pivot_panel(app, cx))
         })
+        .when(app.pending_table_recovery.is_some(), |d| d.child(table_recovery::render(app, cx)))
+        .when(app.table_dialog.is_some(), |d| d.child(table_controls::render_table_dialog(app, cx)))
         // Profiler panel (right-side drawer, mutually exclusive with inspector)
         .when(show_profiler, |d| {
             d.child(
@@ -774,7 +783,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(crate::comments::reader_visible(app, cx), |div| div.child(crate::comments::render_reader(app, window, cx)))
         .when(app.comment_editor.is_some(), |div| div.child(crate::comments::render(app, window, cx)))
         .when(show_goto, |div| {
-            div.child(goto_dialog::render_goto_dialog(app))
+            div.child(goto_dialog::render_goto_dialog(app, cx))
         })
         .when(show_find, |div| {
             div.child(find_dialog::render_find_dialog(app))

@@ -270,6 +270,12 @@ pub(crate) fn bind(
             }
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &CenterAcrossSelection, _, cx| {
+            this.center_across_selection_toggle(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ConvertMergesToCenterAcross, _, cx| {
+            this.convert_merges_to_center_across(cx);
+        }))
         .on_action(cx.listener(|this, _: &FitColumnWidth, window, cx| {
             this.fit_selection_columns(window, cx);
         }))
@@ -421,6 +427,13 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &PasteFormat, _, cx| {
             this.paste_format(cx);
+        }))
+        .on_action(cx.listener(|this, _: &PasteValuesOrFormat, _, cx| {
+            if this.format_painter.is_some() && this.mode != crate::mode::Mode::FormatPainter {
+                this.paste_format(cx);
+            } else {
+                this.paste_values(cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &CancelFormatPainter, _, cx| {
             this.cancel_format_painter(cx);
@@ -631,6 +644,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &AddSheet, _, cx| {
             this.add_sheet(cx);
         }))
+        .on_action(cx.listener(|this, _: &CreateTable, window, cx| { if this.focus_handle.is_focused(window) { this.create_table_dialog(cx); } }))
         .on_action(cx.listener(|this, _: &InsertPivotTable, _, cx| {
             this.insert_pivot_table(cx);
         }))

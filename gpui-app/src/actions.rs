@@ -154,6 +154,8 @@ actions!(view, [
     OpenKeybindings,  // Open keybindings.json for editing
     ToggleProblems,
     FitColumnWidth,
+    CenterAcrossSelection,         // Ctrl/Cmd+Alt+C: center a title without merging (converts merges in the selection)
+    ConvertMergesToCenterAcross,   // Palette / Format menu: unmerge single-row merges, keep the look
     ToggleZenMode,
     ToggleLuaConsole, // Alt+F11 - Lua scripting REPL (matches Excel VBA Editor)
     ToggleTerminal,   // Ctrl+` - PTY terminal panel
@@ -228,7 +230,8 @@ actions!(format, [
     FormatPainter,            // Activate Format Painter mode (single-shot)
     FormatPainterLocked,      // Activate Format Painter in locked mode (stays active)
     CopyFormat,               // Copy format from active cell (Ctrl+Shift+C)
-    PasteFormat,              // Paste format to selection (Ctrl+Shift+V)
+    PasteFormat,              // Paste format to selection
+    PasteValuesOrFormat,      // Ctrl+Shift+V: paste values, or a format copied with Ctrl+Shift+C
     CancelFormatPainter,      // Cancel Format Painter mode
     OpenNumberFormatEditor, // Open number format editor (Ctrl+1 escalation)
     // Background colors
@@ -280,6 +283,8 @@ actions!(sheets, [
     AddSheet,
 ]);
 
+actions!(table, [CreateTable]);
+
 // Pivot tables
 actions!(pivot, [
     InsertPivotTable,   // Insert a pivot table from the selection / current region
@@ -325,6 +330,10 @@ actions!(palette, [
     PaletteExecute,
     PalettePreview,   // Shift+Enter - preview without closing
     PaletteCancel,    // Escape - cancel and restore
+    PalettePageUp,
+    PalettePageDown,
+    PaletteHome,
+    PaletteEnd,
 ]);
 
 // Alt accelerator actions (open Command Palette scoped to menu)

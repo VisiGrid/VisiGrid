@@ -6,6 +6,7 @@ pub mod json;
 pub mod native;
 pub mod parquet;
 pub mod scripting;
+pub mod table_recovery;
 pub mod truth;
 pub mod xlsx;
 mod xlsx_comments;

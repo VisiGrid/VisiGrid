@@ -471,6 +471,10 @@ impl Spreadsheet {
             self.replace_case_insensitive(&raw_value, hit.start, hit.end, &self.replace_input)
         };
 
+        if self.sheet(cx).table_header_at(hit.row,hit.col).is_some() {
+            self.status_message=Some("Edit the Table header directly to rename its column.".into()); cx.notify(); return;
+        }
+
         // Record undo and apply
         let sheet_index = self.sheet_index(cx);
         self.history.record_change(sheet_index, hit.row, hit.col, raw_value, new_value.clone());
@@ -497,11 +501,12 @@ impl Spreadsheet {
             return;
         }
 
-        if self.block_if_merged("replace all", cx) { return; }
-
-        // Filter to replaceable hits only (skip display-only like numbers)
+        // Filter to replaceable hits only (skip display-only like numbers).
+        // Merged cells are fine: a merge's visible cell is edited like any
+        // other; the hidden cells under it are never written.
         let hits: Vec<MatchHit> = self.find_results.iter()
             .filter(|h| h.kind.is_some())
+            .filter(|h| !self.sheet(cx).is_merge_hidden(h.row, h.col))
             .cloned()
             .collect();
 
@@ -521,6 +526,10 @@ impl Spreadsheet {
                 .entry((hit.row, hit.col))
                 .or_default()
                 .push(hit);
+        }
+
+        if cells_to_replace.keys().any(|(r,c)|self.sheet(cx).table_header_at(*r,*c).is_some()) {
+            self.status_message=Some("Replace All includes Table headers. Edit those headers directly first.".into()); cx.notify(); return;
         }
 
         // Collect all changes for batch undo

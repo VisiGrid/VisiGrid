@@ -93,12 +93,20 @@ impl Spreadsheet {
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::InsertRows(count));
         let sheet_index = self.sheet_index(cx);
+        if !self.sheet(cx).tables().is_empty() && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
+            self.status_message = Some("Clear sorting and filters before changing Table rows.".into()); cx.notify(); return;
+        }
+        let table_rows = match self.wb(cx).prepare_table_row_history(sheet_index, at_row, count, false) {
+            Ok(history) => history,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
         let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Perform the insert through the engine's structural entry point so
         // formulas, validations, and named ranges follow the moved cells.
         let rewrites = match self.workbook.update(cx, |wb, _| {
-            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false)
+            if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) }
+            else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, false) }
         }) {
             Ok(r) => r,
             Err(msg) => {
@@ -133,6 +141,7 @@ impl Spreadsheet {
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::RowsInserted {
             sheet_index,
+            table_rows,
             at_row,
             count,
             print_setup_before,
@@ -149,6 +158,13 @@ impl Spreadsheet {
     pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::DeleteRows(count));
         let sheet_index = self.sheet_index(cx);
+        if !self.sheet(cx).tables().is_empty() && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
+            self.status_message = Some("Clear sorting and filters before changing Table rows.".into()); cx.notify(); return;
+        }
+        let table_rows = match self.wb(cx).prepare_table_row_history(sheet_index, at_row, count, true) {
+            Ok(history) => history,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
         let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Capture cells to be deleted for undo
@@ -167,6 +183,19 @@ impl Spreadsheet {
             .map(|(r, h)| (*r, *h))
             .collect();
 
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) }
+            else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true) }
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
+
+        let sheet_heights = self.sheet_row_heights_mut();
         // Remove heights for deleted rows and shift remaining up
         let heights_to_shift: Vec<_> = sheet_heights
             .iter()
@@ -180,17 +209,6 @@ impl Spreadsheet {
             sheet_heights.insert(r - count, h);
         }
 
-        let rewrites = match self.workbook.update(cx, |wb, _| {
-            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true)
-        }) {
-            Ok(r) => r,
-            Err(msg) => {
-                self.status_message = Some(msg);
-                cx.notify();
-                return;
-            }
-        };
-
         // Update row_view to remove deleted data rows (bottom-up to keep indices stable)
         for i in (0..count).rev() {
             self.row_view.delete_row(at_row + i);
@@ -199,6 +217,7 @@ impl Spreadsheet {
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
             sheet_index,
+            table_rows,
             at_row,
             count,
             deleted_cells,
@@ -225,11 +244,16 @@ impl Spreadsheet {
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::InsertCols(count));
         let sheet_index = self.sheet_index(cx);
+        let table_columns = match self.wb(cx).prepare_table_column_history(sheet_index, at_col, count, false) {
+            Ok(history) => history,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
         let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Perform the insert
         let rewrites = match self.workbook.update(cx, |wb, _| {
-            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false)
+            if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) }
+            else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false) }
         }) {
             Ok(r) => r,
             Err(msg) => {
@@ -259,6 +283,7 @@ impl Spreadsheet {
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::ColsInserted {
             sheet_index,
+            table_columns,
             at_col,
             count,
             print_setup_before,
@@ -275,6 +300,10 @@ impl Spreadsheet {
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
         self.set_repeat(RepeatAction::DeleteCols(count));
         let sheet_index = self.sheet_index(cx);
+        let table_columns = match self.wb(cx).prepare_table_column_history(sheet_index, at_col, count, true) {
+            Ok(history) => history,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
         let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Capture cells to be deleted for undo
@@ -291,6 +320,20 @@ impl Spreadsheet {
             .map(|(c, w)| (*c, *w))
             .collect();
 
+        // Perform the delete
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) }
+            else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true) }
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
+
+        let sheet_widths = self.sheet_col_widths_mut();
         // Remove widths for deleted columns and shift remaining left
         let widths_to_shift: Vec<_> = sheet_widths
             .iter()
@@ -304,21 +347,10 @@ impl Spreadsheet {
             sheet_widths.insert(c - count, w);
         }
 
-        // Perform the delete
-        let rewrites = match self.workbook.update(cx, |wb, _| {
-            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true)
-        }) {
-            Ok(r) => r,
-            Err(msg) => {
-                self.status_message = Some(msg);
-                cx.notify();
-                return;
-            }
-        };
-
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {
             sheet_index,
+            table_columns,
             at_col,
             count,
             deleted_cells,

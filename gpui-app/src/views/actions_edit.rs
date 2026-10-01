@@ -310,6 +310,7 @@ pub(crate) fn bind(
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
                 Mode::CloudOpen => this.cloud_open_selected(cx),
                 Mode::ExportPdf => this.confirm_pdf_action(cx),
+                Mode::PasteSpecial => this.apply_paste_special(cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
@@ -407,6 +408,8 @@ pub(crate) fn bind(
                 this.cloud_picker_cancel(cx);
             } else if this.mode == Mode::ExportPdf {
                 this.close_pdf_export(cx);
+            } else if this.mode == Mode::PasteSpecial {
+                this.hide_paste_special(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
             } else if this.mode == Mode::RenameSymbol {
@@ -518,6 +521,7 @@ pub(crate) fn bind(
                 this.update_title_if_needed(window, cx);
                 return;
             }
+            if this.table_tab_append(cx) { this.update_title_if_needed(window, cx); return; }
             if this.mode.is_editing() {
                 this.confirm_edit_and_tab_right(cx);
                 this.update_title_if_needed(window, cx);

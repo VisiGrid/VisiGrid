@@ -115,6 +115,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // (Alt+H,O,I) and Sheets has no chord at all, so there is no
         // convention to honour — this mirrors the header double-click.
         KeyBinding::new(&format!("{}-alt-f", primary_mod(m)), FitColumnWidth, Some("Spreadsheet")),
+        // Center Across Selection has no shortcut in Excel (it's three dialogs
+        // deep); here it's one chord, and on merged cells it converts them.
+        KeyBinding::new(&format!("{}-alt-c", primary_mod(m)), CenterAcrossSelection, Some("Spreadsheet")),
         // Insert date/time (Excel: Ctrl+;, Ctrl+Shift+;)
         KeyBinding::new(&kb(m, ";"), InsertDate, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, ";"), InsertTime, Some("Spreadsheet")),
@@ -251,9 +254,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "i"), ToggleItalic, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "5"), ToggleStrikethrough, Some("Spreadsheet")),  // Excel: Ctrl+5
 
-        // Format Painter (Ctrl+Shift+C = copy format, Ctrl+Shift+V = paste format)
+        // Ctrl+Shift+V pastes values, as in Excel 365 and Google Sheets. Right
+        // after Ctrl+Shift+C (copy format) it pastes that format instead.
         KeyBinding::new(&kb_shift(m, "c"), CopyFormat, Some("Spreadsheet")),
-        KeyBinding::new(&kb_shift(m, "v"), PasteFormat, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "v"), PasteValuesOrFormat, Some("Spreadsheet")),
 
         // Number formats (Mod+Shift+key = format shortcut)
         KeyBinding::new(&kb_shift(m, "4"), FormatCurrency, Some("Spreadsheet")),   // $
@@ -277,6 +281,8 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "pageup"), PrevSheet, Some("Spreadsheet")),
         KeyBinding::new("shift-f11", AddSheet, Some("Spreadsheet")),
 
+        KeyBinding::new(&kb(m, "t"), CreateTable, Some("Spreadsheet")),
+
         // Pivot tables (Excel: Alt+F5 refresh, Ctrl+Alt+F5 refresh all)
         KeyBinding::new("alt-f5", RefreshPivot, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "alt-f5"), RefreshAllPivots, Some("Spreadsheet")),
@@ -291,6 +297,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("enter", PaletteExecute, Some("CommandPalette")),
         KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
+        KeyBinding::new("pageup", PalettePageUp, Some("CommandPalette")),
+        KeyBinding::new("pagedown", PalettePageDown, Some("CommandPalette")),
+        KeyBinding::new("home", PaletteHome, Some("CommandPalette")),
+        KeyBinding::new("end", PaletteEnd, Some("CommandPalette")),
 
         // Lua debugger (in LuaDebug context — active when Debug tab is focused)
         KeyBinding::new("f5", DebugStartOrContinue, Some("LuaDebug")),
