@@ -16,6 +16,10 @@ concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  # Bundled DuckDB compilation is memory intensive.
+  CARGO_BUILD_JOBS: 2
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest

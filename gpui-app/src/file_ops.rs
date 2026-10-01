@@ -8,6 +8,14 @@ use visigrid_io::{csv, json, native, parquet, xlsx};
 use crate::app::{Spreadsheet, DocumentMeta, ext_lower};
 use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
 
+// Finder-launched apps often have `/` as their working directory. Never use
+// that as the default save/export destination for a new workbook.
+fn default_save_directory() -> PathBuf {
+    dirs::document_dir().filter(|p| p.is_dir())
+        .or_else(|| dirs::home_dir().filter(|p| p.is_dir()))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 /// Delay before showing the import overlay (prevents flash for fast imports)
 const OVERLAY_DELAY_MS: u64 = 150;
 
@@ -23,6 +31,7 @@ impl Spreadsheet {
     /// - "New in This Window" menu item (if exposed)
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
+        self.cancel_duckdb_import(cx);
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);
@@ -78,8 +87,14 @@ impl Spreadsheet {
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
+        self.cancel_duckdb_import(cx);
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
+
+        if ext_lower == "duckdb" {
+            self.start_duckdb_import(path, cx);
+            return;
+        }
 
         // Excel files import in the background, for everyone. The
         // synchronous path froze the window for the length of the import and
@@ -524,6 +539,41 @@ impl Spreadsheet {
         .detach();
     }
 
+    /// Install a completed value-only import. Called only after successful
+    /// materialization; previews and cancelled imports never reach this path.
+    pub(crate) fn finish_table_import(&mut self, workbook: Workbook, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.cancel_duckdb_import(cx);
+        self.workbook = cx.new(|_| workbook);
+        self.update_cached_sheet_id(cx);
+        self.debug_assert_sheet_cache_sync(cx);
+        self.capture_base_workbook(cx);
+        self.rewind_preview = crate::app::RewindPreviewState::Off;
+        self.cycle_banner.reset_for_new_file();
+        self.import_result = None;
+        self.import_filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        self.import_source_dir = path.parent().map(|p| p.to_owned());
+        self.doc_settings = DocumentSettings::default();
+        self.col_widths.clear();
+        self.row_heights.clear();
+        self.view_state.selected = (0, 0);
+        self.view_state.active_sheet = 0;
+        self.view_state.selection_end = None;
+        self.view_state.additional_selections.clear();
+        self.view_state.scroll_row = 0;
+        self.view_state.scroll_col = 0;
+        self.view_state.frozen_rows = 0;
+        self.view_state.frozen_cols = 0;
+        self.history.clear();
+        self.bump_cells_rev();
+        self.add_recent_file(&path.to_path_buf());
+        self.finalize_load(path);
+        self.request_title_refresh(cx);
+        self.hub_link = None;
+        self.hub_status = crate::hub::HubStatus::Unlinked;
+        self.cell_metadata.clear();
+        self.update_session_cached(cx);
+    }
+
     pub fn reimport_with_freeze(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let Some(path) = self.current_file.clone() else { return; };
@@ -808,10 +858,7 @@ impl Spreadsheet {
             let ext = ext_lower(path).unwrap_or_default();
             if matches!(ext.as_str(), "sheet" | "vgrid") {
                 // Native format - save synchronously
-                self.save_to_path(path, cx);
-                // Check if save succeeded by looking at is_modified flag
-                // (save_to_path sets is_modified = false on success via finalize_save)
-                !self.is_modified
+                self.save_to_path(path, cx)
             } else {
                 // Non-native format - redirect to Save As
                 self.close_after_save = true;
@@ -831,12 +878,12 @@ impl Spreadsheet {
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
-        // For directory: prefer current file location, then import source, then current dir
+        // For directory: prefer current file location, then import source, then Documents or the home folder
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
             .or_else(|| self.import_source_dir.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(default_save_directory);
 
         // For filename: use current file name but default to .sheet for non-native formats
         let suggested_name = self.current_file.as_ref()
@@ -868,9 +915,9 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let close_result = this.update(cx, |this, cx| {
-                    this.save_to_path(&path, cx);
+                    let saved = this.save_to_path(&path, cx);
                     // Check if we should close after save (from save_and_close flow)
-                    let should_close = this.close_after_save && !this.is_modified;
+                    let should_close = this.close_after_save && saved;
                     this.close_after_save = false;  // Reset flag
                     if should_close {
                         if this.quit_after_close {
@@ -899,13 +946,14 @@ impl Spreadsheet {
                 // User cancelled Save As - reset close_after_save flag
                 let _ = this.update(cx, |this, _cx| {
                     this.close_after_save = false;
+                    this.quit_after_close = false;
                 });
             }
         })
         .detach();
     }
 
-    fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+    fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> bool {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
         // Persist pivots' stale flags, so a reopened workbook never claims
@@ -937,6 +985,7 @@ impl Spreadsheet {
             }
         };
 
+        let saved = result.is_ok();
         match result {
             Ok(()) => {
                 // Save column widths and row heights for .sheet files
@@ -993,9 +1042,17 @@ impl Spreadsheet {
             }
             Err(e) => {
                 self.status_message = Some(format!("Error saving file: {}", e));
+                let detail = format!("{}\n\n{}\n\nYour changes are still open. Use Save As to choose another location.", path.display(), e);
+                let handle = self.window_handle;
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = window.prompt(PromptLevel::Critical, "Could not save workbook", Some(&detail), &["OK"], cx);
+                    });
+                });
             }
         }
         cx.notify();
+        saved
     }
 
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
@@ -1020,7 +1077,7 @@ impl Spreadsheet {
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
             .or_else(|| self.import_source_dir.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(default_save_directory);
 
         let base_name = self.current_file.as_ref()
             .and_then(|p| p.file_stem())
@@ -1088,7 +1145,7 @@ impl Spreadsheet {
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(default_save_directory);
 
         let base_name = self.current_file.as_ref()
             .and_then(|p| p.file_stem())
@@ -1204,7 +1261,7 @@ impl Spreadsheet {
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(default_save_directory);
 
         let base_name = self.current_file.as_ref()
             .and_then(|p| p.file_stem())

@@ -188,3 +188,99 @@ fn convert_csv_writes_timestamps_and_dates_as_iso_8601() {
     assert_eq!(lines[1], "007,2026-09-01 14:02:00,2026-09-03,1234.50,paid");
     assert_eq!(lines[2], "008,2026-09-01 14:07:30.123,2026-09-04,89,pending");
 }
+
+fn export_input(dir: &std::path::Path) -> std::path::PathBuf {
+    let input = dir.join("typed.json");
+    std::fs::write(&input, serde_json::json!({
+        "format": "visigrid-json", "version": 2, "sheets": [{ "name": "Data", "cells": [
+            {"row":0,"col":0,"value":"ID"}, {"row":0,"col":1,"value":"Amount"},
+            {"row":1,"col":0,"value":"007"}, {"row":1,"col":1,"value":1.123456789012345},
+            {"row":2,"col":0,"value":"008"}, {"row":2,"col":1,"value":2}
+        ]}]
+    }).to_string()).unwrap();
+    input
+}
+
+#[test]
+fn export_parquet_keeps_typed_values_and_filters_without_display_rounding() {
+    use visigrid_engine::formula::eval::Value;
+    let dir = tempfile::tempdir().unwrap();
+    let input = export_input(dir.path());
+    let output = dir.path().join("out.parquet");
+    let out = vgrid(&["convert", input.to_str().unwrap(), "-f", "json-full", "-t", "parquet", "--headers", "--select", "Amount,ID", "--where", "Amount<2", "-o", output.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let imported = visigrid_io::parquet::import(&output).unwrap();
+    assert_eq!(imported.total_rows, 1);
+    assert_eq!(imported.sheet.get_computed_value(1,0), Value::Number(1.123456789012345));
+    assert_eq!(imported.sheet.get_computed_value(1,1), Value::Text("007".into()));
+}
+
+#[test]
+fn export_parquet_plan_is_json_and_stdout_is_binary_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = export_input(dir.path());
+    let args = ["convert", input.to_str().unwrap(), "-f", "json-full", "-t", "parquet", "--headers"];
+    let mut plan_args = args.to_vec(); plan_args.push("--parquet-plan");
+    let out = vgrid(&plan_args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["ready"], true);
+    assert_eq!(plan["row_count"], 2);
+    assert_eq!(plan["columns"][0]["data_type"], "string");
+    assert_eq!(plan["columns"][1]["data_type"], "double");
+    let out = vgrid(&args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stdout.starts_with(b"PAR1"));
+    assert!(out.stdout.ends_with(b"PAR1"));
+}
+
+#[test]
+fn export_mixed_column_requires_explicit_text_option_and_preserves_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("mixed.csv");
+    std::fs::write(&input, "Value\n1.123456789\nN/A\n").unwrap();
+    let output = dir.path().join("out.parquet");
+    std::fs::write(&output, "previous contents").unwrap();
+    let args = ["convert", input.to_str().unwrap(), "-t", "parquet", "--headers", "-o", output.to_str().unwrap()];
+    let out = vgrid(&args);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("A3"), "{}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "previous contents");
+    let mut text_args = args.to_vec(); text_args.extend(["--text-column", "Value"]);
+    let out = vgrid(&text_args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let imported = visigrid_io::parquet::import(&output).unwrap();
+    assert_eq!(imported.sheet.get_raw(1,0), "1.123456789");
+}
+
+#[test]
+fn export_rejects_duplicate_headers_and_parquet_options_on_other_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("headers.csv");
+    std::fs::write(&input, "ID,id\n1,2\n").unwrap();
+    let out = vgrid(&["convert", input.to_str().unwrap(), "-t", "parquet", "--headers"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("duplicate header"));
+    let out = vgrid(&["convert", input.to_str().unwrap(), "-t", "csv", "--parquet-plan"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("require -t parquet"));
+}
+
+#[test]
+fn export_json_full_stdin_selects_the_requested_worksheet() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let doc = serde_json::json!({"format":"visigrid-json", "version":2, "sheets":[
+        {"name":"First", "cells":[{"row":0,"col":0,"value":1}]},
+        {"name":"Second", "cells":[{"row":0,"col":0,"value":"007"}]}
+    ]});
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vgrid"))
+        .args(["convert", "-f", "json-full", "-t", "parquet", "--sheet", "Second", "--parquet-plan"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(doc.to_string().as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["row_count"], 1);
+    assert_eq!(plan["columns"][0]["data_type"], "string");
+}

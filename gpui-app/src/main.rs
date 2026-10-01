@@ -29,6 +29,7 @@ mod editing;
 mod file_ops;
 mod pdf_export;
 mod native_print;
+mod duckdb_import;
 mod fill;
 mod find_replace;
 mod formatting;

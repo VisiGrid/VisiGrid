@@ -1,9 +1,11 @@
 // File I/O operations
 
 pub mod csv;
+pub mod duckdb;
 pub mod json;
 pub mod native;
 pub mod parquet;
+pub mod parquet_export;
 pub mod scripting;
 pub mod truth;
 pub mod xlsx;
