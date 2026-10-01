@@ -10,6 +10,7 @@ mod fetch;
 mod fill;
 mod hub;
 mod convert;
+mod csv_args;
 mod serve;
 mod share;
 mod mcp;
@@ -95,6 +96,9 @@ Examples:
         #[arg(long)]
         headers: bool,
 
+        #[command(flatten)]
+        csv: csv_args::CsvImportArgs,
+
         /// Output format for array results (csv or json)
         #[arg(long)]
         spill: Option<SpillFormat>,
@@ -161,6 +165,9 @@ Examples:
         /// Suppress stderr notes (e.g. skipped-row counts)
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        #[command(flatten)]
+        csv: csv_args::CsvImportArgs,
     },
 
     /// List all supported functions
@@ -1848,19 +1855,26 @@ fn main() -> ExitCode {
             select: select_args,
             rename,
             quiet,
-        }) => cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet),
+            csv,
+        }) => {
+            csv.to_options(delimiter).and_then(|csv| {
+                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv)
+            })
+        }
         Some(Commands::Calc {
             formula,
             from,
             into,
             delimiter,
             headers,
+            csv,
             spill,
             json,
         }) => {
             // --json implies --spill json for array results
             let effective_spill = if json && spill.is_none() { Some(SpillFormat::Json) } else { spill };
-            cmd_calc(formula, from, into, delimiter, headers, effective_spill, json)
+            csv.to_options(delimiter)
+                .and_then(|csv| cmd_calc(formula, from, into, delimiter, headers, effective_spill, json, &csv))
         }
         Some(Commands::Open { file }) => cmd_open(file),
         Some(Commands::Replay {
@@ -2343,13 +2357,14 @@ fn cmd_calc(
     headers: bool,
     spill: Option<SpillFormat>,
     json: bool,
+    csv: &visigrid_io::csv::CsvOptions,
 ) -> Result<(), CliError> {
     // Parse --into cell reference
     let (into_row, into_col) = parse_cell_ref(&into)
         .ok_or_else(|| CliError::args(format!("invalid cell reference: {}", into)))?;
 
     // Read stdin with offset
-    let mut sheet = read_stdin(from, delimiter, into_row, into_col)?;
+    let mut sheet = read_stdin(from, delimiter, csv, into_row, into_col)?;
 
     // Get data bounds (relative to where we loaded)
     let (data_rows, data_cols) = get_data_bounds(&sheet);
@@ -2689,25 +2704,31 @@ fn cmd_diff(
             .with_hint("use --stdin-format to specify the format for stdin input"))
     };
 
+    // CSV inputs get the importer's safe defaults; an explicit --delimiter applies.
+    let diff_csv = visigrid_io::csv::CsvOptions {
+        delimiter: (delimiter != ',').then_some(delimiter as u8),
+        ..Default::default()
+    };
+
     // Load both sides
     let (left_sheet, left_label) = if left_is_stdin {
         let fmt = resolve_stdin_format(&right_path)?;
-        (read_stdin(fmt, delimiter, 0, 0)?, "stdin".to_string())
+        (read_stdin(fmt, delimiter, &diff_csv, 0, 0)?, "stdin".to_string())
     } else {
         let p = left_path.as_ref().unwrap();
         let fmt = infer_format(p)?;
         let label = p.display().to_string();
-        (read_file(p, fmt, delimiter, None)?, label)
+        (read_file(p, fmt, &diff_csv, None)?, label)
     };
 
     let (right_sheet, right_label) = if right_is_stdin {
         let fmt = resolve_stdin_format(&left_path)?;
-        (read_stdin(fmt, delimiter, 0, 0)?, "stdin".to_string())
+        (read_stdin(fmt, delimiter, &diff_csv, 0, 0)?, "stdin".to_string())
     } else {
         let p = right_path.as_ref().unwrap();
         let fmt = infer_format(p)?;
         let label = p.display().to_string();
-        (read_file(p, fmt, delimiter, None)?, label)
+        (read_file(p, fmt, &diff_csv, None)?, label)
     };
 
     let (left_bounds_rows, left_bounds_cols) = get_data_bounds(&left_sheet);
