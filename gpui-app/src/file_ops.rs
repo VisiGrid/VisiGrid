@@ -456,14 +456,19 @@ impl Spreadsheet {
                 .spawn(async move {
                     // A Parquet file bigger than a sheet loads what fits;
                     // the note says so rather than letting rows vanish.
+                    // So does a CSV: what it kept as text, and what did not fit.
                     let (sheet, note) = match ext.as_str() {
-                        "tsv" => (csv::import_tsv(&path_for_import)?, None),
                         "parquet" => {
                             let imported = parquet::import(&path_for_import)?;
                             let note = imported.truncation_message();
                             (imported.sheet, note)
                         }
-                        _ => (csv::import(&path_for_import)?, None),
+                        _ => {
+                            let delimiter = (ext == "tsv").then_some(b'\t');
+                            let imported = csv::import_report(&path_for_import, delimiter, csv::CsvOptions::default())?;
+                            let note = imported.message();
+                            (imported.sheet, note)
+                        }
                     };
                     let mut workbook = Workbook::from_sheets(vec![sheet], 0);
                     workbook.rebuild_dep_graph();

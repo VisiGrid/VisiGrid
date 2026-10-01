@@ -115,6 +115,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // (Alt+H,O,I) and Sheets has no chord at all, so there is no
         // convention to honour — this mirrors the header double-click.
         KeyBinding::new(&format!("{}-alt-f", primary_mod(m)), FitColumnWidth, Some("Spreadsheet")),
+        // Center Across Selection has no shortcut in Excel (it's three dialogs
+        // deep); here it's one chord, and on merged cells it converts them.
+        KeyBinding::new(&format!("{}-alt-c", primary_mod(m)), CenterAcrossSelection, Some("Spreadsheet")),
         // Insert date/time (Excel: Ctrl+;, Ctrl+Shift+;)
         KeyBinding::new(&kb(m, ";"), InsertDate, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, ";"), InsertTime, Some("Spreadsheet")),
@@ -293,6 +296,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("enter", PaletteExecute, Some("CommandPalette")),
         KeyBinding::new("shift-enter", PalettePreview, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteCancel, Some("CommandPalette")),
+        KeyBinding::new("pageup", PalettePageUp, Some("CommandPalette")),
+        KeyBinding::new("pagedown", PalettePageDown, Some("CommandPalette")),
+        KeyBinding::new("home", PaletteHome, Some("CommandPalette")),
+        KeyBinding::new("end", PaletteEnd, Some("CommandPalette")),
 
         // Lua debugger (in LuaDebug context — active when Debug tab is focused)
         KeyBinding::new("f5", DebugStartOrContinue, Some("LuaDebug")),

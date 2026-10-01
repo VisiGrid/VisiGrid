@@ -501,11 +501,12 @@ impl Spreadsheet {
             return;
         }
 
-        if self.block_if_merged("replace all", cx) { return; }
-
-        // Filter to replaceable hits only (skip display-only like numbers)
+        // Filter to replaceable hits only (skip display-only like numbers).
+        // Merged cells are fine: a merge's visible cell is edited like any
+        // other; the hidden cells under it are never written.
         let hits: Vec<MatchHit> = self.find_results.iter()
             .filter(|h| h.kind.is_some())
+            .filter(|h| !self.sheet(cx).is_merge_hidden(h.row, h.col))
             .cloned()
             .collect();
 

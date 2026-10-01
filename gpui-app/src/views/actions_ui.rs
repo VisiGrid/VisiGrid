@@ -270,6 +270,12 @@ pub(crate) fn bind(
             }
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &CenterAcrossSelection, _, cx| {
+            this.center_across_selection_toggle(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ConvertMergesToCenterAcross, _, cx| {
+            this.convert_merges_to_center_across(cx);
+        }))
         .on_action(cx.listener(|this, _: &FitColumnWidth, window, cx| {
             this.fit_selection_columns(window, cx);
         }))

@@ -214,7 +214,6 @@ impl Spreadsheet {
         op: TransformOp,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_merged("transform", cx) { return; }
         if self.block_if_previewing(cx) { return; }
         if self.block_selection_table_headers("transform", cx) { return; }
 
@@ -228,6 +227,11 @@ impl Spreadsheet {
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
+                // Hidden cells under a merge are never written; the merge's
+                // visible cell is transformed like any other.
+                if self.sheet(cx).is_merge_hidden(row, col) {
+                    continue;
+                }
                 let old_value = self.sheet(cx).get_raw(row, col);
 
                 if !should_process(&old_value, policy) {
@@ -299,7 +303,6 @@ impl Spreadsheet {
         op: TransformOp,
         cx: &mut Context<Self>,
     ) -> Option<TransformPreview> {
-        if self.block_if_merged("transform", cx) { return None; }
         if self.block_if_previewing(cx) { return None; }
         if self.block_selection_table_headers("transform", cx) { return None; }
 
@@ -310,6 +313,11 @@ impl Spreadsheet {
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
+                // Hidden cells under a merge are never written; the merge's
+                // visible cell is transformed like any other.
+                if self.sheet(cx).is_merge_hidden(row, col) {
+                    continue;
+                }
                 let old_value = self.sheet(cx).get_raw(row, col);
 
                 if !should_process(&old_value, policy) {

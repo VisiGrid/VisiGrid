@@ -165,22 +165,22 @@ impl Spreadsheet {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
 
+        // The table being sorted: the existing filter range, or the table
+        // around the cursor (header = its first row, a title row above skipped).
+        let range = match self.filter_state.filter_range {
+            Some(r) => r,
+            None => match self.table_range_at_cursor(cx) {
+                Some(r) => r,
+                None => {
+                    self.status_message = Some("No data to sort".to_string());
+                    cx.notify();
+                    return;
+                }
+            },
+        };
         // TODO(engine): enforce in engine sort API too once available (UI guard is not sufficient for headless).
-        if self.block_if_merged("sort", cx) { return; }
-
-        // Ensure filter range is set (use current selection if not)
-        if self.filter_state.filter_range.is_none() {
-            // Auto-detect range: from row 0 to last non-empty row in current column
-            let col = self.view_state.selected.1;
-            let max_row = self.find_last_data_row(col, cx);
-            if max_row == 0 {
-                self.status_message = Some("No data to sort".to_string());
-                cx.notify();
-                return;
-            }
-            // Set filter range covering the data extent
-            self.filter_state.filter_range = Some((0, col, max_row, col));
-        }
+        if self.block_if_merges_in_rows("sort", (range.0 + 1, range.2), cx) { return; }
+        self.filter_state.filter_range = Some(range);
 
         let col = self.view_state.selected.1;
 
@@ -246,18 +246,14 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Find the last non-empty row in a column (for auto-detecting sort range)
-    fn find_last_data_row(&self, col: usize, cx: &App) -> usize {
-        let sheet = self.sheet(cx);
-        let mut last_row = 0;
-        // Scan up to a reasonable limit (or could use sheet's actual data extent)
-        for row in 0..10000 {
-            let cell = sheet.get_cell(row, col);
-            if !cell.value.raw_display().is_empty() {
-                last_row = row;
-            }
-        }
-        last_row
+    /// The table around the cursor, as (header_row, first_col, last_row,
+    /// last_col): the contiguous block of data the cursor is in. A top row with
+    /// a single filled cell over a wider table is a title, not the header, and
+    /// is skipped (a merged or centered report title sits there). None if
+    /// there's no header with at least one row of data under it.
+    pub(crate) fn table_range_at_cursor(&self, cx: &App) -> Option<(usize, usize, usize, usize)> {
+        let (row, col) = self.view_state.selected;
+        table_range_around(self.sheet(cx), row, col)
     }
 
     /// Toggle AutoFilter on/off for current selection
@@ -272,26 +268,22 @@ impl Spreadsheet {
             if !self.sheet(cx).tables().is_empty() {
                 self.status_message=Some("Table filters are not available yet. Convert to a range to use worksheet AutoFilter.".into()); cx.notify(); return;
             }
-            // TODO(engine): enforce in engine filter API too once available (UI guard is not sufficient for headless).
-            if self.block_if_merged("enable AutoFilter", cx) { return; }
-
-            // Enable: set filter range based on selection or data region
-            let (row, col) = self.view_state.selected;
-            let max_row = self.find_last_data_row(col, cx);
-            let max_col = self.find_last_data_col(row, cx);
-
-            if max_row == 0 && max_col == 0 {
+            // Enable on the table around the cursor (header = its first row).
+            let Some(range) = self.table_range_at_cursor(cx) else {
                 self.status_message = Some("No data for AutoFilter".to_string());
                 cx.notify();
                 return;
-            }
+            };
+            // TODO(engine): enforce in engine filter API too once available (UI guard is not sufficient for headless).
+            if self.block_if_merges_in_rows("turn on AutoFilter", (range.0 + 1, range.2), cx) { return; }
 
-            // Filter range: row 0 is header, data starts at row 1
-            self.filter_state.filter_range = Some((0, 0, max_row, max_col));
+            self.filter_state.filter_range = Some(range);
             self.status_message = Some(format!(
-                "AutoFilter enabled: A1:{}{}",
-                Self::col_to_letter(max_col),
-                max_row + 1
+                "AutoFilter enabled: {}{}:{}{}",
+                Self::col_to_letter(range.1),
+                range.0 + 1,
+                Self::col_to_letter(range.3),
+                range.2 + 1
             ));
         }
         cx.notify();
@@ -468,19 +460,6 @@ impl Spreadsheet {
             .map_or(false, |f| f.is_active())
     }
 
-    /// Find the last non-empty column in a row
-    fn find_last_data_col(&self, row: usize, cx: &App) -> usize {
-        let sheet = self.sheet(cx);
-        let mut last_col = 0;
-        for col in 0..256 {
-            let cell = sheet.get_cell(row, col);
-            if !cell.value.raw_display().is_empty() {
-                last_col = col;
-            }
-        }
-        last_col
-    }
-
     /// Clear sort (restore original data order)
     pub fn clear_sort(&mut self, cx: &mut Context<Self>) {
         // Only record undo if there's actually a sort to clear
@@ -507,3 +486,97 @@ impl Spreadsheet {
         cx.notify();
     }
 }
+
+/// The table around (row, col) as (header_row, first_col, last_row, last_col).
+/// A top row with a single filled cell over a wider table is a title, not the
+/// header, and is skipped. None without a header and at least one data row.
+pub(crate) fn table_range_around(
+    sheet: &visigrid_engine::sheet::Sheet,
+    row: usize,
+    col: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let (mut r0, c0, r1, c1) = crate::ai::find_current_region(sheet, row, col);
+    let filled = |r: usize| (c0..=c1).filter(|&c| !sheet.get_display(r, c).is_empty()).count();
+    while c1 > c0 && r1 > r0 + 1 && filled(r0) <= 1 {
+        r0 += 1;
+    }
+    (r1 > r0).then_some((r0, c0, r1, c1))
+}
+
+/// Merges overlapping `area` = (r0, c0, r1, c1), inclusive: the ones that
+/// get in the way of an operation writing or moving those cells.
+pub(crate) fn merges_overlapping(
+    sheet: &visigrid_engine::sheet::Sheet,
+    area: (usize, usize, usize, usize),
+) -> Vec<visigrid_engine::sheet::MergedRegion> {
+    let (r0, c0, r1, c1) = area;
+    sheet
+        .merged_regions
+        .iter()
+        .filter(|m| m.start.0 <= r1 && m.end.0 >= r0 && m.start.1 <= c1 && m.end.1 >= c0)
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod table_range_tests {
+    use super::table_range_around;
+    use visigrid_engine::sheet::{Sheet, SheetId};
+
+    fn sheet(rows: &[&[&str]]) -> Sheet {
+        let mut s = Sheet::new(SheetId(1), 100, 10);
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                if !v.is_empty() {
+                    // A standalone test sheet with no workbook or dependents,
+                    // so the untracked write is fine (the tests::no_untracked_
+                    // cell_mutations scan looks for the method-call form).
+                    Sheet::set_value(&mut s, r, c, v);
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn a_title_row_above_the_header_is_skipped() {
+        let s = sheet(&[
+            &["Q3 Sales Report", "", ""],
+            &["Region", "Rep", "Amount"],
+            &["West", "Ann", "10"],
+            &["East", "Bo", "5"],
+        ]);
+        assert_eq!(table_range_around(&s, 2, 1), Some((1, 0, 3, 2)));
+        // From the title cell too.
+        assert_eq!(table_range_around(&s, 0, 0), Some((1, 0, 3, 2)));
+    }
+
+    #[test]
+    fn only_merges_in_the_affected_area_block() {
+        use super::merges_overlapping;
+        use visigrid_engine::sheet::MergedRegion;
+        let mut s = sheet(&[&["Title", "", ""], &["Region", "Amount", ""], &["West", "10", ""]]);
+        s.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap(); // A1:C1 title
+        // Filling B2:B3 or sorting rows 3+ doesn't touch the title.
+        assert!(merges_overlapping(&s, (1, 1, 2, 1)).is_empty());
+        assert!(merges_overlapping(&s, (2, 0, 2, usize::MAX)).is_empty());
+        // Anything that writes row 1 under the title does.
+        assert_eq!(merges_overlapping(&s, (0, 2, 2, 2)).len(), 1);
+        assert_eq!(merges_overlapping(&s, (0, 0, 0, usize::MAX)).len(), 1);
+    }
+
+    #[test]
+    fn a_table_separated_from_its_title_and_a_plain_table() {
+        let s = sheet(&[&["Report", "", ""], &["", "", ""], &["Region", "Rep", "Amount"], &["West", "Ann", "10"]]);
+        assert_eq!(table_range_around(&s, 3, 0), Some((2, 0, 3, 2)));
+        let plain = sheet(&[&["Region", "Amount"], &["West", "10"]]);
+        assert_eq!(table_range_around(&plain, 1, 1), Some((0, 0, 1, 1)));
+        // A single column has no title to skip.
+        let one = sheet(&[&["Names"], &["Ann"], &["Bo"]]);
+        assert_eq!(table_range_around(&one, 1, 0), Some((0, 0, 2, 0)));
+        // A header with no data under it isn't sortable.
+        let header_only = sheet(&[&["Region", "Amount"]]);
+        assert_eq!(table_range_around(&header_only, 0, 0), None);
+    }
+}
+

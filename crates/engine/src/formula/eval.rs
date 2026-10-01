@@ -542,8 +542,11 @@ impl EvalResult {
                     "#NAN".to_string()
                 } else if n.is_infinite() {
                     "#INF".to_string()
-                } else if n.fract() == 0.0 {
+                } else if n.fract() == 0.0 && n.abs() < 1e15 {
                     format!("{}", *n as i64)
+                } else if n.fract() == 0.0 {
+                    // `as i64` saturates: 1.2e19 printed as 9223372036854775807 (#65).
+                    format!("{}", n)
                 } else {
                     format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
                 }
@@ -595,7 +598,8 @@ impl EvalResult {
     pub fn to_text(&self) -> String {
         match self {
             EvalResult::Number(n) => {
-                if n.fract() == 0.0 {
+                // Guarded like Value::to_text: `as i64` saturates above 2^63 (#65).
+                if n.fract() == 0.0 && n.abs() < 1e15 {
                     format!("{}", *n as i64)
                 } else {
                     format!("{}", n)

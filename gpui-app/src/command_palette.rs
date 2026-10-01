@@ -17,9 +17,50 @@ use crate::search::{
     MenuCategory, ReferenceEntry, ReferencesProvider, SearchProvider, SearchQuery,
     SearchAction, SearchItem, SearchKind, CommandId, PrecedentEntry, PrecedentsProvider,
     CellSearchProvider, RecentFilesProvider, NamedRangeSearchProvider, NamedRangeEntry,
+    CommandSearchProvider,
 };
 use crate::user_keybindings;
 use visigrid_engine::named_range::NamedRangeTarget;
+
+/// A heading over a run of palette results.
+#[derive(Clone, Debug)]
+pub struct PaletteSection {
+    /// Index of the first result under this heading.
+    pub start: usize,
+    pub len: usize,
+    /// Empty = a divider with no heading (the "Open from disk" row).
+    pub title: String,
+}
+
+/// A command as a palette row.
+fn command_item(cmd: CommandId) -> SearchItem {
+    let mut item = SearchItem::new(SearchKind::Command, cmd.name(), SearchAction::RunCommand(cmd));
+    if let Some(shortcut) = cmd.shortcut() {
+        item = item.with_subtitle(shortcut);
+    }
+    if let Some(category) = cmd.menu_category() {
+        item = item.with_meta(category.name());
+    }
+    item
+}
+
+/// The last row of Ctrl+K: leave recent files for the file dialog.
+fn open_from_disk_item() -> SearchItem {
+    SearchItem::new(SearchKind::Command, "Open from disk…", SearchAction::RunCommand(CommandId::OpenFile))
+        .with_subtitle("Ctrl+O")
+}
+
+/// Files, functions and settings carry a second line (folder, description);
+/// a command's subtitle is its shortcut, drawn as key caps on the same line.
+pub(crate) fn palette_row_has_second_line(item: &SearchItem) -> bool {
+    item.subtitle.is_some() && item.kind != SearchKind::Command
+}
+
+pub(crate) fn is_open_from_disk(item: &SearchItem) -> bool {
+    item.kind == SearchKind::Command
+        && item.action == SearchAction::RunCommand(CommandId::OpenFile)
+        && item.title == "Open from disk…"
+}
 
 impl Spreadsheet {
     // Command Palette
@@ -156,8 +197,7 @@ impl Spreadsheet {
         self.palette_query = format!("References to {}", source_cell_ref);
         self.palette_selected = 0;
         self.palette_scroll_offset = 0;
-        self.palette_total_results = results.len();
-        self.palette_results = results;
+        self.set_palette_sections(vec![(String::new(), results)]);
         cx.notify();
     }
 
@@ -219,8 +259,7 @@ impl Spreadsheet {
         self.palette_query = format!("Precedents of {}", source_cell_ref);
         self.palette_selected = 0;
         self.palette_scroll_offset = 0;
-        self.palette_total_results = results.len();
-        self.palette_results = results;
+        self.set_palette_sections(vec![(String::new(), results)]);
         cx.notify();
     }
 
@@ -339,8 +378,7 @@ impl Spreadsheet {
         self.palette_query = format!("References to ${}", name);
         self.palette_selected = 0;
         self.palette_scroll_offset = 0;
-        self.palette_total_results = results.len();
-        self.palette_results = results;
+        self.set_palette_sections(vec![(String::new(), results)]);
         cx.notify();
     }
 
@@ -359,6 +397,7 @@ impl Spreadsheet {
         self.palette_scroll_offset = 0;
         self.palette_scope = None;  // Clear scope on close
         self.palette_results.clear();
+        self.palette_sections.clear();
         self.palette_previewing = false;
         cx.notify();
     }
@@ -384,25 +423,98 @@ impl Spreadsheet {
         &self.palette_results
     }
 
-    /// Update palette results based on current query and scope
+    /// Update palette results based on current query and scope.
+    ///
+    /// Results are kept flat (selection and execution index into one list) and
+    /// grouped into sections for display: an empty palette shows Recent, For
+    /// this selection, Recent files and All commands; a search shows Commands,
+    /// Files, Named ranges and so on, each ranked within itself.
     pub(crate) fn update_palette_results(&mut self, cx: &App) {
-        // Clone query string first to avoid borrow conflicts with cache refresh
         let query_str = self.palette_query.clone();
         let query = SearchQuery::parse(&query_str);
 
-        // When scoped (Alt accelerators), search a larger pool before filtering
-        // This prevents false "no matches" when the top 12 happen to be non-scoped commands
-        let search_limit = if self.palette_scope.is_some() { 200 } else { 12 };
-        let mut results = self.search_engine.search(&query_str, search_limit);
+        let sections = match self.palette_scope {
+            Some(PaletteScope::QuickOpen) if query.prefix.is_none() => self.quick_open_sections(&query),
+            None if query.prefix.is_none() && query.needle.is_empty() => self.empty_palette_sections(cx),
+            _ => self.search_sections(&query, cx),
+        };
+        self.set_palette_sections(sections);
+    }
 
-        // Add recent files when there's no prefix (commands + recent files)
+    /// Flatten titled groups into `palette_results` + `palette_sections`.
+    /// Empty groups are dropped; an empty title draws a divider, not a heading.
+    pub(crate) fn set_palette_sections(&mut self, groups: Vec<(String, Vec<SearchItem>)>) {
+        self.palette_results.clear();
+        self.palette_sections.clear();
+        self.palette_total_results = 0;
+        for (title, items) in groups {
+            if items.is_empty() {
+                continue;
+            }
+            self.palette_sections.push(PaletteSection {
+                start: self.palette_results.len(),
+                len: items.len(),
+                title,
+            });
+            self.palette_total_results += items.iter().filter(|i| !is_open_from_disk(i)).count();
+            self.palette_results.extend(items);
+        }
+        if self.palette_selected >= self.palette_results.len() {
+            self.palette_selected = 0;
+            self.palette_scroll_offset = 0;
+        }
+    }
+
+    /// Ctrl+K: recent files, then a way out to the file dialog.
+    fn quick_open_sections(&self, query: &SearchQuery) -> Vec<(String, Vec<SearchItem>)> {
+        let files = RecentFilesProvider::new(self.recent_files.clone()).search(query, 50);
+        let title = if query.needle.is_empty() { "Recent files" } else { "Files" };
+        vec![
+            (title.to_string(), files),
+            (String::new(), vec![open_from_disk_item()]),
+        ]
+    }
+
+    /// The palette before anything is typed.
+    fn empty_palette_sections(&self, cx: &App) -> Vec<(String, Vec<SearchItem>)> {
+        let recent: Vec<CommandId> = self.recent_commands.iter().copied().take(3).collect();
+        let (selection_label, suggested) = self.selection_suggestions(cx);
+        let suggested: Vec<CommandId> =
+            suggested.into_iter().filter(|c| !recent.contains(c)).collect();
+
+        let all: Vec<SearchItem> = {
+            let mut items = CommandSearchProvider.search(&SearchQuery::parse(""), usize::MAX);
+            items.retain(|i| match &i.action {
+                SearchAction::RunCommand(c) => !recent.contains(c) && !suggested.contains(c),
+                _ => true,
+            });
+            items.sort_by(|a, b| a.title.cmp(&b.title));
+            items
+        };
+
+        let files = RecentFilesProvider::new(self.recent_files.iter().take(3).cloned().collect())
+            .search(&SearchQuery::parse(""), 3);
+
+        vec![
+            ("Recent".to_string(), recent.into_iter().map(command_item).collect()),
+            (format!("For this selection · {selection_label}"), suggested.into_iter().map(command_item).collect()),
+            ("Recent files".to_string(), files),
+            ("All commands".to_string(), all),
+        ]
+    }
+
+    /// A typed query, a prefix, or a menu scope.
+    fn search_sections(&mut self, query: &SearchQuery, cx: &App) -> Vec<(String, Vec<SearchItem>)> {
+        const LIMIT: usize = 500;
+        let mut results = self.search_engine.search(query.raw, LIMIT);
+
+        // Recent files join unprefixed search
         if query.prefix.is_none() && !self.recent_files.is_empty() {
             let provider = RecentFilesProvider::new(self.recent_files.clone());
-            let recent_results = provider.search(&query, 10);
-            results.extend(recent_results);
+            results.extend(provider.search(query, 10));
         }
 
-        // Add named ranges when no prefix (Quick Open behavior) or with $ prefix
+        // Named ranges join unprefixed search, or are the whole result with $
         if query.prefix.is_none() || query.prefix == Some('$') {
             let entries: Vec<NamedRangeEntry> = self.wb(cx).list_named_ranges()
                 .into_iter()
@@ -422,55 +534,37 @@ impl Spreadsheet {
                 .collect();
 
             if !entries.is_empty() {
-                let provider = NamedRangeSearchProvider::new(entries);
-                // Limit named ranges in default view to avoid overwhelming commands
-                let limit = if query.prefix == Some('$') { 50 } else { 5 };
-                let named_results = provider.search(&query, limit);
-                results.extend(named_results);
+                let limit = if query.prefix == Some('$') { LIMIT } else { 10 };
+                results.extend(NamedRangeSearchProvider::new(entries).search(query, limit));
             }
         }
 
-        // Add cell search with @ prefix (uses generation-based cache for freshness)
+        // Cell search with @ prefix (uses generation-based cache for freshness)
         if query.prefix == Some('@') {
-            // Ensure cache is fresh (rebuilds only if cells_rev changed)
             self.ensure_cell_search_cache_fresh(cx);
-
-            // Search over cached entries
             let provider = CellSearchProvider::new(self.cell_search_cache.entries.clone());
-            let cell_results = provider.search(&query, 50);
-            results.extend(cell_results);
+            results.extend(provider.search(query, LIMIT));
         }
 
         // Filter by palette scope if set, but prefix overrides scope.
         // Typing ":B5" in QuickOpen routes to GoToCell, not filtered out.
         if query.prefix.is_none() {
-            if let Some(scope) = &self.palette_scope {
-                match scope {
-                    PaletteScope::Menu(category) => {
-                        results.retain(|item| {
-                            if let SearchAction::RunCommand(cmd) = &item.action {
-                                cmd.menu_category() == Some(*category)
-                            } else {
-                                false // Non-command items filtered out in menu scope
-                            }
-                        });
-                    }
-                    PaletteScope::QuickOpen => {
-                        results.retain(|item| item.kind == SearchKind::RecentFile);
-                    }
-                }
+            if let Some(PaletteScope::Menu(category)) = &self.palette_scope {
+                results.retain(|item| match &item.action {
+                    SearchAction::RunCommand(cmd) => cmd.menu_category() == Some(*category),
+                    _ => false,
+                });
             }
         }
 
-        // Apply recency boost to commands (makes the palette feel "adaptive")
+        // Recency boost makes the palette feel adaptive
         for result in &mut results {
             if let SearchAction::RunCommand(cmd) = &result.action {
-                let boost = self.command_recency_score(cmd);
-                result.score += boost;
+                result.score += self.command_recency_score(cmd);
             }
         }
 
-        // Apply unified sorting: score (desc) → kind priority (asc) → title (asc)
+        // score (desc) → kind priority (asc) → title (asc)
         results.sort_by(|a, b| {
             match b.score.partial_cmp(&a.score) {
                 Some(std::cmp::Ordering::Equal) | None => {}
@@ -483,11 +577,69 @@ impl Spreadsheet {
             a.title.cmp(&b.title)
         });
 
-        // Track total before truncation
-        self.palette_total_results = results.len();
-        results.truncate(12);
+        // Group by kind, keeping rank order inside each group. Groups appear
+        // in the order of their best result, so a query that only matches a
+        // file shows Files first.
+        let mut groups: Vec<(SearchKind, Vec<SearchItem>)> = Vec::new();
+        for item in results {
+            match groups.iter_mut().find(|(k, _)| *k == item.kind) {
+                Some((_, items)) => items.push(item),
+                None => groups.push((item.kind, vec![item])),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(kind, items)| (kind.section_title().to_string(), items))
+            .collect()
+    }
 
-        self.palette_results = results;
+    /// Commands that fit what is selected, and the label for their heading.
+    ///
+    /// Deliberately few rules: values → sort and filter; numbers → AutoSum and
+    /// number formats; an empty cell under numbers → AutoSum.
+    fn selection_suggestions(&self, cx: &App) -> (String, Vec<CommandId>) {
+        use visigrid_engine::formula::eval::Value;
+
+        let ((r0, c0), (r1, c1)) = self.selection_range();
+        let label = if (r0, c0) == (r1, c1) {
+            self.cell_ref_at(r0, c0)
+        } else {
+            format!("{}:{}", self.cell_ref_at(r0, c0), self.cell_ref_at(r1, c1))
+        };
+
+        let sheet = self.sheet(cx);
+        if (r0, c0) == (r1, c1) {
+            let empty = matches!(sheet.get_computed_value(r0, c0), Value::Empty);
+            let above_is_number = r0 > 0
+                && matches!(sheet.get_computed_value(r0 - 1, c0), Value::Number(_));
+            let suggested = if empty && above_is_number {
+                vec![CommandId::AutoSum]
+            } else {
+                Vec::new()
+            };
+            return (label, suggested);
+        }
+
+        let (mut numbers, mut texts) = (0usize, 0usize);
+        for ((row, col), _) in sheet.cells_iter() {
+            if row < r0 || row > r1 || col < c0 || col > c1 {
+                continue;
+            }
+            match sheet.get_computed_value(row, col) {
+                Value::Number(_) => numbers += 1,
+                Value::Text(_) | Value::Boolean(_) => texts += 1,
+                _ => {}
+            }
+        }
+
+        let mut suggested = Vec::new();
+        if numbers + texts > 1 {
+            suggested.extend([CommandId::SortAscending, CommandId::SortDescending, CommandId::ToggleAutoFilter]);
+        }
+        if numbers > 0 && numbers >= texts {
+            suggested.extend([CommandId::AutoSum, CommandId::FormatCurrency, CommandId::FormatPercent]);
+        }
+        (label, suggested)
     }
 
     /// Track a command as recently used (for scoring boost)
@@ -515,16 +667,74 @@ impl Spreadsheet {
         }
     }
 
-    /// Rows rendered at once; the window slides to keep the selection visible
-    /// (same pattern as the font picker).
-    pub(crate) const PALETTE_VISIBLE: usize = 6; // panel max_h 380px fits ~6 rows after chrome
+    /// Rows a PageUp/PageDown moves.
+    pub(crate) const PALETTE_VISIBLE: usize = 10;
+    /// Pixel height of the result list; rows and headings fill it from the
+    /// scroll offset down (see `palette_window_end`).
+    pub(crate) const PALETTE_LIST_H: f32 = 444.0;
+    pub(crate) const PALETTE_HEADER_H: f32 = 26.0;
+    pub(crate) const PALETTE_DIVIDER_H: f32 = 9.0;
+    pub(crate) const PALETTE_ROW_H: f32 = 30.0;
+    pub(crate) const PALETTE_ROW2_H: f32 = 42.0;
+
+    /// The heading drawn above row `idx`: the section starting there, or — for
+    /// the first visible row — the section it belongs to, so a scrolled list
+    /// still says what it is showing.
+    pub(crate) fn palette_heading_at(&self, idx: usize, first_visible: bool) -> Option<&PaletteSection> {
+        let section = self.palette_sections.iter().find(|s| idx >= s.start && idx < s.start + s.len)?;
+        if section.start != idx && !first_visible {
+            return None;
+        }
+        // A nameless section at the very top is just the list (References, Precedents)
+        if section.title.is_empty() && (section.start == 0 || section.start != idx) {
+            return None;
+        }
+        Some(section)
+    }
+
+    fn palette_row_height(&self, idx: usize, first_visible: bool) -> f32 {
+        let heading = match self.palette_heading_at(idx, first_visible) {
+            Some(s) if s.title.is_empty() => Self::PALETTE_DIVIDER_H,
+            Some(_) => Self::PALETTE_HEADER_H,
+            None => 0.0,
+        };
+        let row = if self.palette_results.get(idx).is_some_and(palette_row_has_second_line) {
+            Self::PALETTE_ROW2_H
+        } else {
+            Self::PALETTE_ROW_H
+        };
+        heading + row
+    }
+
+    /// One past the last row that fits when the list starts at `offset`.
+    pub(crate) fn palette_window_end(&self, offset: usize) -> usize {
+        let mut used = 0.0;
+        let mut idx = offset;
+        while idx < self.palette_results.len() {
+            used += self.palette_row_height(idx, idx == offset);
+            if used > Self::PALETTE_LIST_H && idx > offset {
+                break;
+            }
+            idx += 1;
+        }
+        idx
+    }
+
+    fn palette_max_offset(&self) -> usize {
+        let len = self.palette_results.len();
+        let mut offset = len.saturating_sub(1);
+        while offset > 0 && self.palette_window_end(offset - 1) >= len {
+            offset -= 1;
+        }
+        offset
+    }
 
     fn palette_follow_selection(&mut self) {
         if self.palette_selected < self.palette_scroll_offset {
             self.palette_scroll_offset = self.palette_selected;
-        } else if self.palette_selected >= self.palette_scroll_offset + Self::PALETTE_VISIBLE {
-            self.palette_scroll_offset =
-                self.palette_selected + 1 - Self::PALETTE_VISIBLE;
+        }
+        while self.palette_selected >= self.palette_window_end(self.palette_scroll_offset) {
+            self.palette_scroll_offset += 1;
         }
     }
 
@@ -541,6 +751,30 @@ impl Spreadsheet {
         if self.palette_selected + 1 < count {
             self.palette_selected += 1;
             self.palette_follow_selection();
+            cx.notify();
+        }
+    }
+
+    /// Move the selection by `delta` rows, clamped (PageUp/PageDown/Home/End).
+    pub fn palette_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.palette_results.len();
+        if count == 0 {
+            return;
+        }
+        let target = (self.palette_selected as isize + delta).clamp(0, count as isize - 1) as usize;
+        if target != self.palette_selected {
+            self.palette_selected = target;
+            self.palette_follow_selection();
+            cx.notify();
+        }
+    }
+
+    /// Mouse wheel: scroll the window without moving the selection.
+    pub fn palette_scroll(&mut self, rows: isize, cx: &mut Context<Self>) {
+        let max = self.palette_max_offset();
+        let target = (self.palette_scroll_offset as isize + rows).clamp(0, max as isize) as usize;
+        if target != self.palette_scroll_offset {
+            self.palette_scroll_offset = target;
             cx.notify();
         }
     }

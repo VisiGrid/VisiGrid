@@ -23,12 +23,12 @@ pub enum MenuAction {
     ExportCsv, ExportTsv, ExportJson, ExportXlsx, ExportPdf, PrintPreview,
     Undo, Redo, Cut, Copy, Paste, PasteValues, Delete, Find, GoTo,
     CommandPalette, Inspector, ZoomIn, ZoomOut, ZoomReset,
-    ShowFormulas, ShowZeros, FormatBar, Minimap,
+    ShowFormulas, ShowZeros, FormatBar, Minimap, Profiler, ApproveModel,
     FreezeTopRow, FreezeFirstCol, FreezePanes, UnfreezePanes,
     Bold, Italic, Underline, Font,
     BgColor(Option<[u8; 4]>),
     BorderAll, BorderOutline, BorderClear,
-    MergeCells, UnmergeCells,
+    MergeCells, UnmergeCells, CenterAcrossSelection, ConvertMergesToCenterAcross,
     Validation, ExcludeValidation, ClearExclusions,
     FillDown, FillRight,
     CircleInvalid, ClearCircles,
@@ -87,6 +87,7 @@ pub fn view_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Command Palette", shortcut: Some("Ctrl+Shift+P"), action: MenuAction::CommandPalette, accel: None },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Inspector", shortcut: Some("Ctrl+Shift+I"), action: MenuAction::Inspector, accel: None },
+        MenuEntry::Item { label: "Profiler", shortcut: Some("Ctrl+Alt+P"), action: MenuAction::Profiler, accel: Some('r') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Zoom In", shortcut: Some("Ctrl+Alt+="), action: MenuAction::ZoomIn, accel: Some('+') },
         MenuEntry::Item { label: "Zoom Out", shortcut: Some("Ctrl+Alt+-"), action: MenuAction::ZoomOut, accel: Some('-') },
@@ -101,6 +102,7 @@ pub fn view_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Freeze First Column", shortcut: None, action: MenuAction::FreezeFirstCol, accel: Some('l') },
         MenuEntry::Item { label: "Freeze Panes", shortcut: None, action: MenuAction::FreezePanes, accel: Some('p') },
         MenuEntry::Item { label: "Unfreeze Panes", shortcut: None, action: MenuAction::UnfreezePanes, accel: None },
+        MenuEntry::Item { label: "Approve Model", shortcut: None, action: MenuAction::ApproveModel, accel: Some('a') },
     ]
 }
 
@@ -148,6 +150,9 @@ pub fn format_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Label("Merge"),
         MenuEntry::Item { label: "Merge Cells", shortcut: Some("Ctrl+Shift+M"), action: MenuAction::MergeCells, accel: Some('m') },
         MenuEntry::Item { label: "Unmerge Cells", shortcut: Some("Ctrl+Shift+U"), action: MenuAction::UnmergeCells, accel: Some('x') },
+        // The merge-free way to center a title, listed beside Merge so it's findable.
+        MenuEntry::Item { label: "Center Across Selection", shortcut: Some("Ctrl+Alt+C"), action: MenuAction::CenterAcrossSelection, accel: Some('q') },
+        MenuEntry::Item { label: "Convert Merged Cells to Center Across", shortcut: None, action: MenuAction::ConvertMergesToCenterAcross, accel: Some('v') },
         MenuEntry::Separator,
         MenuEntry::Disabled("Row Height..."),
         MenuEntry::Disabled("Column Width..."),
@@ -287,6 +292,12 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ManageCondFormats => app.toggle_cf_panel(cx),
         MenuAction::ClearCondFormats => app.clear_cond_formats_in_selection(cx),
         MenuAction::Minimap => { app.minimap_visible = !app.minimap_visible; cx.notify(); }
+        MenuAction::Profiler => {
+            app.profiler_visible = !app.profiler_visible;
+            if app.profiler_visible { app.inspector_visible = false; }
+            cx.notify();
+        }
+        MenuAction::ApproveModel => app.approve_model(None, cx),
         MenuAction::FreezeTopRow => app.freeze_top_row(cx),
         MenuAction::FreezeFirstCol => app.freeze_first_column(cx),
         MenuAction::FreezePanes => app.freeze_panes(cx),
@@ -301,6 +312,8 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::BorderClear => app.apply_borders(BorderApplyMode::Clear, cx),
         MenuAction::MergeCells => app.merge_cells(cx),
         MenuAction::UnmergeCells => app.unmerge_cells(cx),
+        MenuAction::CenterAcrossSelection => app.center_across_selection_toggle(cx),
+        MenuAction::ConvertMergesToCenterAcross => app.convert_merges_to_center_across(cx),
         MenuAction::Validation => app.show_validation_dialog(cx),
         MenuAction::ExcludeValidation => app.exclude_from_validation(cx),
         MenuAction::ClearExclusions => app.clear_validation_exclusions(cx),
@@ -361,3 +374,61 @@ mod tests {
         super::debug_assert_all_accels();
     }
 }
+
+#[cfg(test)]
+mod drift_tests {
+    // Not `super::*`: that brings in gpui's `test` attribute, which shadows the standard one.
+    use super::{menu_entries, Menu, MenuEntry};
+
+    /// The in-window menu bar (Linux, Windows) draws its items by hand in
+    /// views/menu_bar.rs, but keyboard selection runs this model's action at
+    /// the same index and counts its items. When the two lists disagree, Enter
+    /// runs a different command than the one highlighted: "Merge Cells" ran
+    /// All Borders, and "Convert Merged Cells to Center Across" would have run
+    /// Merge Cells. Every menu must list the same items in the same order.
+    #[test]
+    fn in_window_menus_match_the_model_index_for_index() {
+        let source = include_str!("views/menu_bar.rs");
+        for (menu, name) in [
+            (Menu::File, "file"),
+            (Menu::Edit, "edit"),
+            (Menu::View, "view"),
+            (Menu::Insert, "insert"),
+            (Menu::Format, "format"),
+            (Menu::Data, "data"),
+            (Menu::Help, "help"),
+        ] {
+            let start = source.find(&format!("fn render_{name}_menu(")).expect("menu render fn");
+            let body = &source[start..];
+            let body = &body[..body.find("\n}\n").expect("end of fn")];
+            let mut drawn: Vec<(usize, String)> = Vec::new();
+            for call in ["menu_item(\"", "menu_item_with_accel(\"", "color_menu_item(\""] {
+                let mut rest = body;
+                while let Some(at) = rest.find(call) {
+                    // Not the tail of a longer name (menu_item vs color_menu_item).
+                    let preceded = at > 0 && (rest.as_bytes()[at - 1].is_ascii_alphanumeric() || rest.as_bytes()[at - 1] == b'_');
+                    let after = &rest[at + call.len()..];
+                    rest = after;
+                    if preceded {
+                        continue;
+                    }
+                    let label = &after[..after.find('"').expect("label end")];
+                    let h = after.find(", h(").expect("highlight index");
+                    let digits: String = after[h + 4..].chars().take_while(char::is_ascii_digit).collect();
+                    drawn.push((digits.parse().expect("index"), label.to_string()));
+                }
+            }
+            drawn.sort();
+            let model: Vec<(usize, String)> = menu_entries(menu)
+                .iter()
+                .filter_map(|e| match e {
+                    MenuEntry::Item { label, .. } | MenuEntry::Color { label, .. } => Some(label.to_string()),
+                    _ => None,
+                })
+                .enumerate()
+                .collect();
+            assert_eq!(drawn, model, "{name} menu: menu_bar.rs and menu_model.rs disagree");
+        }
+    }
+}
+

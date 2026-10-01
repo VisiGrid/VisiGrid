@@ -1131,6 +1131,24 @@ pub fn parse_finite(s: &str) -> Option<f64> {
     s.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
+/// A number written for another program to read back: the shortest text that
+/// parses to exactly the same f64. Whole numbers below 2^53 print as integers;
+/// very large or very small magnitudes use E notation so a 1e300 does not become
+/// three hundred digits.
+pub fn interchange_number(n: f64) -> String {
+    if !n.is_finite() {
+        return "#NUM!".to_string();
+    }
+    let a = n.abs();
+    if n.fract() == 0.0 && a < 9_007_199_254_740_992.0 {
+        return format!("{}", n as i64);
+    }
+    if a >= 1e21 || (a != 0.0 && a < 1e-6) {
+        return format!("{:E}", n);
+    }
+    format!("{}", n)
+}
+
 impl CellValue {
     pub fn from_input(input: &str) -> Self {
         let trimmed = input.trim();
