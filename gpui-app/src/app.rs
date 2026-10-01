@@ -964,6 +964,11 @@ pub struct Spreadsheet {
 
     // Merge cells confirmation dialog
     pub merge_confirm: MergeConfirmState,
+    /// Set when a sort or filter is refused because merged titles are in the
+    /// way: (merge origins, cursor at refusal, when). Ctrl+Alt+C converts
+    /// exactly those while the cursor hasn't moved, so the refusal's "press
+    /// Ctrl+Alt+C" never reformats an unrelated cell.
+    pub merge_block_offer: Option<(Vec<(usize, usize)>, (usize, usize), std::time::Instant)>,
 
     // Close-window save confirmation dialog
     pub close_confirm_visible: bool,
@@ -1490,6 +1495,7 @@ impl Spreadsheet {
             cycle_banner: CycleBannerState::default(),
 
             merge_confirm: MergeConfirmState::default(),
+            merge_block_offer: None,
             close_confirm_visible: false,
             quit_after_close: false,
             quit_discarded: false,
@@ -2367,6 +2373,7 @@ impl Spreadsheet {
             CommandId::AlignRight => self.set_alignment_selection(visigrid_engine::cell::Alignment::Right, cx),
             CommandId::AlignGeneral => self.set_alignment_selection(visigrid_engine::cell::Alignment::General, cx),
             CommandId::CenterAcrossSelection => self.center_across_selection_toggle(cx),
+            CommandId::ConvertMergesToCenterAcross => self.convert_merges_to_center_across(cx),
             CommandId::ToggleItalic => self.toggle_italic(cx),
             CommandId::ToggleUnderline => self.toggle_underline(cx),
             CommandId::FormatCurrency => self.format_currency(cx),
@@ -4260,6 +4267,48 @@ impl Spreadsheet {
         } else {
             false
         }
+    }
+
+    /// Refuse a sort/filter only when a merge overlaps the rows it would
+    /// move (`rows`, inclusive). Merged titles above or below the table are
+    /// fine, as in Excel. When the blockers are merged titles (single-row),
+    /// the message offers the fix: Ctrl+Alt+C converts them to Center Across.
+    pub fn block_if_merges_in_rows(&mut self, op_name: &str, rows: (usize, usize), cx: &mut Context<Self>) -> bool {
+        let (lo, hi) = rows;
+        let blocking: Vec<visigrid_engine::sheet::MergedRegion> = self
+            .sheet(cx)
+            .merged_regions
+            .iter()
+            .filter(|m| m.start.0 <= hi && m.end.0 >= lo)
+            .cloned()
+            .collect();
+        if blocking.is_empty() {
+            return false;
+        }
+        let addr = |m: &visigrid_engine::sheet::MergedRegion| {
+            format!("{}{}:{}{}", Self::col_letter(m.start.1), m.start.0 + 1, Self::col_letter(m.end.1), m.end.0 + 1)
+        };
+        let what = if blocking.len() == 1 { addr(&blocking[0]) } else { format!("{} and {} more", addr(&blocking[0]), blocking.len() - 1) };
+        let convertible: Vec<(usize, usize)> = blocking
+            .iter()
+            .filter(|m| m.start.0 == m.end.0 && m.end.1 > m.start.1)
+            .map(|m| m.start)
+            .collect();
+        if convertible.len() == blocking.len() {
+            self.merge_block_offer = Some((convertible, self.view_state.selected, std::time::Instant::now()));
+            self.status_message = Some(format!(
+                "Can't {op_name}: {what} {} merged. Press Ctrl+Alt+C to convert to Center Across Selection: same look, and {op_name} works.",
+                if blocking.len() == 1 { "is" } else { "are" }
+            ));
+        } else {
+            self.merge_block_offer = None;
+            self.status_message = Some(format!(
+                "Can't {op_name}: {what} {} merged across rows. Unmerge first.",
+                if blocking.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        cx.notify();
+        true
     }
 }
 

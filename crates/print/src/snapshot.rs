@@ -80,6 +80,21 @@ pub fn capture(
             }
             lo = (lo.0.min(vr), lo.1.min(vc));
             hi = (hi.0.max(vr + 1), hi.1.max(vc + 1));
+            // A Center Across Selection title spans the empty Center Across
+            // cells to its right; print them so the title isn't cut off.
+            if sheet.get_format(r, c).alignment == Alignment::CenterAcrossSelection {
+                let mut next = c + 1;
+                while next < sheet.cols
+                    && sheet.get_format(r, next).alignment == Alignment::CenterAcrossSelection
+                    && sheet.get_formatted_display(r, next).is_empty()
+                    && !sheet.is_merge_hidden(r, next)
+                {
+                    if let Some(&vn) = cols.get(&next) {
+                        hi.1 = hi.1.max(vn + 1);
+                    }
+                    next += 1;
+                }
+            }
         }
         if lo.0 == usize::MAX {
             return Err(

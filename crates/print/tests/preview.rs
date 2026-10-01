@@ -131,3 +131,20 @@ fn preview_renders_shaped_text_and_rejects_invalid_requests() {
     assert!(rasterize(Arc::new(b"not a PDF".to_vec()), 0, 792).is_err());
     assert!(!PageSettings::default().gridlines);
 }
+
+#[test]
+fn center_across_selection_centers_over_the_whole_span() {
+    use visigrid_engine::cell::Alignment;
+    let mut sheet = Sheet::new(SheetId(1), 3, 3);
+    sheet.set_value(0, 0, "Quarterly Revenue");
+    for c in 0..3 {
+        sheet.set_alignment(0, c, Alignment::CenterAcrossSelection);
+    }
+    let snapshot = capture(&sheet, &view(), None, "IBM Plex Sans", 11.0).unwrap();
+    let page = rasterize(Arc::new(pdf::render(&snapshot, &settings(false)).unwrap()), 0, 1584).unwrap();
+    // Columns are 100pt from a 36pt margin: A 72-272px, B 272-472px, C 472-672px.
+    // Row 1 spans 72-152px. Centered over A:C, the text sits around x=372px.
+    let ink = |x0: u32, x1: u32| (x0..x1).any(|x| (80..145).any(|y| pixel(&page, x, y)[0] < 160));
+    assert!(ink(300, 450), "text is drawn over column B, the middle of the span");
+    assert!(!ink(80, 260), "nothing at the left of column A, so it is not centered in A alone");
+}

@@ -323,6 +323,8 @@ fn render_format_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: 
         .child(menu_label("Merge", text_muted))
         .child(menu_item("Merge Cells", Some("Ctrl+Shift+M"), 16, h(16), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.merge_cells(cx); }))
         .child(menu_item("Unmerge Cells", Some("Ctrl+Shift+U"), 17, h(17), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unmerge_cells(cx); }))
+        .child(menu_item("Center Across Selection", Some("Ctrl+Alt+C"), 18, h(18), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.center_across_selection_toggle(cx); }))
+        .child(menu_item("Convert Merged Cells to Center Across", None, 19, h(19), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.convert_merges_to_center_across(cx); }))
         .child(menu_separator(border))
         .child(menu_item_disabled("Row Height...", text_disabled))
         .child(menu_item_disabled("Column Width...", text_disabled))

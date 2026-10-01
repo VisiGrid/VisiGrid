@@ -185,6 +185,31 @@ pub fn render_cancellable(
                     text_rect.width = next_rect.x + next_rect.width - text_rect.x;
                 }
             }
+            // Center Across Selection: center over the run of empty Center
+            // Across cells to the right on this page, as the grid draws it.
+            if f.alignment == Alignment::CenterAcrossSelection
+                && cell.columns.len() == 1
+                && cell.rows.len() == 1
+            {
+                for col in cell.columns.end..band.columns.end {
+                    let Some(next) = cells.get(&(cell.rows.start, col)) else {
+                        break;
+                    };
+                    if !next.text.is_empty()
+                        || next.columns.len() != 1
+                        || next.rows.len() != 1
+                        || next.format.alignment != Alignment::CenterAcrossSelection
+                    {
+                        break;
+                    }
+                    let Some(next_rect) =
+                        plan.rect(page_index, next.rows.clone(), next.columns.clone())
+                    else {
+                        break;
+                    };
+                    text_rect.width = next_rect.x + next_rect.width - text_rect.x;
+                }
+            }
             let requested = f.font_family.as_deref().unwrap_or(&snapshot.default_font);
             let family = if families.contains(&requested.to_lowercase()) {
                 requested
