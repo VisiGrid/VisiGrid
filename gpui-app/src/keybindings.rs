@@ -115,6 +115,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         // (Alt+H,O,I) and Sheets has no chord at all, so there is no
         // convention to honour — this mirrors the header double-click.
         KeyBinding::new(&format!("{}-alt-f", primary_mod(m)), FitColumnWidth, Some("Spreadsheet")),
+        // Center Across Selection has no shortcut in Excel (it's three dialogs
+        // deep); here it's one chord, and on merged cells it converts them.
+        KeyBinding::new(&format!("{}-alt-c", primary_mod(m)), CenterAcrossSelection, Some("Spreadsheet")),
         // Insert date/time (Excel: Ctrl+;, Ctrl+Shift+;)
         KeyBinding::new(&kb(m, ";"), InsertDate, Some("Spreadsheet")),
         KeyBinding::new(&kb_shift(m, ";"), InsertTime, Some("Spreadsheet")),

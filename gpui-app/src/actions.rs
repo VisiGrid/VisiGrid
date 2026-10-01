@@ -154,6 +154,8 @@ actions!(view, [
     OpenKeybindings,  // Open keybindings.json for editing
     ToggleProblems,
     FitColumnWidth,
+    CenterAcrossSelection,         // Ctrl/Cmd+Alt+C: center a title without merging (converts merges in the selection)
+    ConvertMergesToCenterAcross,   // Palette / Format menu: unmerge single-row merges, keep the look
     ToggleZenMode,
     ToggleLuaConsole, // Alt+F11 - Lua scripting REPL (matches Excel VBA Editor)
     ToggleTerminal,   // Ctrl+` - PTY terminal panel

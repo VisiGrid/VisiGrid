@@ -377,6 +377,20 @@ impl Spreadsheet {
     /// and formulas keep working because no cells are actually merged.
     pub fn center_across_selection_toggle(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
+        // On merged titles, the useful answer is the conversion: same look,
+        // and the sheet sorts and filters again.
+        if !self.single_row_merges_in(Some(self.all_selection_ranges()), cx).is_empty() {
+            self.convert_merges_to_center_across(cx);
+            return;
+        }
+        // Right after a sort/filter refused because of merged titles, the
+        // shortcut converts those titles (the refusal says so).
+        if let Some((origins, at, when)) = self.merge_block_offer.take() {
+            if at == self.view_state.selected && when.elapsed() < std::time::Duration::from_secs(30) {
+                self.convert_merges_at(origins, cx);
+                return;
+            }
+        }
         let mut all_cas = true;
         'outer: for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
@@ -390,6 +404,132 @@ impl Spreadsheet {
         }
         let target = if all_cas { Alignment::General } else { Alignment::CenterAcrossSelection };
         self.set_alignment_selection(target, cx);
+    }
+
+    /// Single-row merges (the "merged title" shape) overlapping `ranges`, or
+    /// on the whole sheet when `ranges` is None. Multi-row merges can't be
+    /// expressed as Center Across Selection and are left out.
+    pub(crate) fn single_row_merges_in(
+        &self,
+        ranges: Option<Vec<((usize, usize), (usize, usize))>>,
+        cx: &App,
+    ) -> Vec<visigrid_engine::sheet::MergedRegion> {
+        self.sheet(cx)
+            .merged_regions
+            .iter()
+            .filter(|m| m.start.0 == m.end.0 && m.end.1 > m.start.1)
+            .filter(|m| match &ranges {
+                None => true,
+                Some(rs) => rs.iter().any(|&((r0, c0), (r1, c1))| {
+                    m.start.0 <= r1 && m.end.0 >= r0 && m.start.1 <= c1 && m.end.1 >= c0
+                }),
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Replace merged titles with Center Across Selection: unmerge each
+    /// single-row merge and center its text across the same cells. Looks the
+    /// same, but the cells stay separate, so sort, filter, column selection
+    /// and copy/paste work. Applies to merges in the selection, or to every
+    /// single-row merge on the sheet if the selection has none. One undo step.
+    pub fn convert_merges_to_center_across(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let mut targets = self.single_row_merges_in(Some(self.all_selection_ranges()), cx);
+        if targets.is_empty() {
+            targets = self.single_row_merges_in(None, cx);
+        }
+        self.convert_merge_regions(targets, cx);
+    }
+
+    /// Convert the single-row merges whose origins are given.
+    pub(crate) fn convert_merges_at(&mut self, origins: Vec<(usize, usize)>, cx: &mut Context<Self>) {
+        let targets = self
+            .single_row_merges_in(None, cx)
+            .into_iter()
+            .filter(|m| origins.contains(&m.start))
+            .collect();
+        self.convert_merge_regions(targets, cx);
+    }
+
+    fn convert_merge_regions(&mut self, targets: Vec<visigrid_engine::sheet::MergedRegion>, cx: &mut Context<Self>) {
+        self.merge_block_offer = None;
+        if targets.is_empty() {
+            let multi = self.sheet(cx).merged_regions.len();
+            self.status_message = Some(if multi > 0 {
+                format!("No merged titles to convert: the {multi} merged region{} here span more than one row. Unmerge those instead.", if multi == 1 { "" } else { "s" })
+            } else {
+                "No merged cells on this sheet.".to_string()
+            });
+            cx.notify();
+            return;
+        }
+        let sheet_index = self.sheet_index(cx);
+        let before = self.sheet(cx).merged_regions.clone();
+        for m in &targets {
+            self.active_sheet_mut(cx, |sheet| {
+                sheet.remove_merge(m.start);
+            });
+        }
+        let after = self.sheet(cx).merged_regions.clone();
+        // Only a centered merge becomes Center Across. A left-aligned (or
+        // General) merge just unmerges: its text still flows across the empty
+        // cells to its right, so both keep their look.
+        let mut patches = Vec::new();
+        for m in &targets {
+            let row = m.start.0;
+            let origin_alignment = self.sheet(cx).get_format(row, m.start.1).alignment;
+            if !matches!(origin_alignment, Alignment::Center | Alignment::CenterAcrossSelection) {
+                continue;
+            }
+            for col in m.start.1..=m.end.1 {
+                let before = self.sheet(cx).get_format(row, col);
+                self.active_sheet_mut(cx, |s| s.set_alignment(row, col, Alignment::CenterAcrossSelection));
+                let after = self.sheet(cx).get_format(row, col);
+                if before != after {
+                    patches.push(CellFormatPatch { row, col, before, after });
+                }
+            }
+        }
+        let n = targets.len();
+        let centered = patches.iter().map(|p| (p.row, p.col)).filter(|rc| targets.iter().any(|m| m.start == *rc)).count();
+        let what = if n == 1 {
+            let m = &targets[0];
+            format!("{}{}:{}{}", Self::col_letter(m.start.1), m.start.0 + 1, Self::col_letter(m.end.1), m.end.0 + 1)
+        } else {
+            format!("{n} merged titles")
+        };
+        let description = format!("Convert {what} to Center Across");
+        self.history.record_action_with_provenance(
+            UndoAction::Group {
+                actions: vec![
+                    UndoAction::SetMerges {
+                        sheet_index,
+                        before,
+                        after,
+                        cleared_values: vec![],
+                        description: description.clone(),
+                    },
+                    UndoAction::Format {
+                        sheet_index,
+                        patches,
+                        kind: FormatActionKind::Alignment,
+                        description: description.clone(),
+                    },
+                ],
+                description,
+            },
+            None,
+        );
+        self.is_modified = true;
+        self.status_message = Some(if centered == n {
+            format!("Converted {what} to Center Across Selection: same look, and sorting and filtering work.")
+        } else if centered == 0 {
+            format!("Unmerged {what}; the text still flows across: same look, and sorting and filtering work.")
+        } else {
+            format!("Unmerged {what}; centered ones now use Center Across Selection: same look, and sorting and filtering work.")
+        });
+        cx.notify();
     }
 
     /// Set vertical alignment on all selected cells
