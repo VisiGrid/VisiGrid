@@ -242,18 +242,18 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        if self.wb(cx).tables().any(|(_,t)|t.columns.iter().any(|c|c.formula.is_some())) {
-            self.status_message = Some("Column insertion/deletion is not supported with calculated columns yet. Convert the Tables to ranges first.".into());
-            cx.notify(); return;
-        }
-
         self.set_repeat(RepeatAction::InsertCols(count));
         let sheet_index = self.sheet_index(cx);
+        let table_columns = match self.wb(cx).prepare_table_column_history(sheet_index, at_col, count, false) {
+            Ok(history) => history,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
         let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Perform the insert
         let rewrites = match self.workbook.update(cx, |wb, _| {
-            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false)
+            if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) }
+            else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, false) }
         }) {
             Ok(r) => r,
             Err(msg) => {
@@ -283,6 +283,7 @@ impl Spreadsheet {
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::ColsInserted {
             sheet_index,
+            table_columns,
             at_col,
             count,
             print_setup_before,
@@ -297,13 +298,12 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        if self.wb(cx).tables().any(|(_,t)|t.columns.iter().any(|c|c.formula.is_some())) {
-            self.status_message = Some("Column insertion/deletion is not supported with calculated columns yet. Convert the Tables to ranges first.".into());
-            cx.notify(); return;
-        }
-
         self.set_repeat(RepeatAction::DeleteCols(count));
         let sheet_index = self.sheet_index(cx);
+        let table_columns = match self.wb(cx).prepare_table_column_history(sheet_index, at_col, count, true) {
+            Ok(history) => history,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
         let print_setup_before = self.sheet(cx).print_setup.clone();
 
         // Capture cells to be deleted for undo
@@ -320,6 +320,20 @@ impl Spreadsheet {
             .map(|(c, w)| (*c, *w))
             .collect();
 
+        // Perform the delete
+        let rewrites = match self.workbook.update(cx, |wb, _| {
+            if let Some(history) = &table_columns { wb.apply_table_column_history(history, false) }
+            else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true) }
+        }) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.status_message = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
+
+        let sheet_widths = self.sheet_col_widths_mut();
         // Remove widths for deleted columns and shift remaining left
         let widths_to_shift: Vec<_> = sheet_widths
             .iter()
@@ -333,21 +347,10 @@ impl Spreadsheet {
             sheet_widths.insert(c - count, w);
         }
 
-        // Perform the delete
-        let rewrites = match self.workbook.update(cx, |wb, _| {
-            wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Col, at_col, count, true)
-        }) {
-            Ok(r) => r,
-            Err(msg) => {
-                self.status_message = Some(msg);
-                cx.notify();
-                return;
-            }
-        };
-
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {
             sheet_index,
+            table_columns,
             at_col,
             count,
             deleted_cells,

@@ -702,13 +702,10 @@ impl Sheet {
         for t in self.tables() {
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };
-            if delete && at <= last && end > start && (!is_row || at <= start) {
+            if delete && at <= last && end > start && (if is_row { at <= start } else { at <= start && end > last }) {
                 return Some(format!("This would remove {}'s schema. Resize or remove the Table first.", t.name));
             }
             if !delete {
-                if !is_row && at > start && at <= last {
-                    return Some(format!("Use {}'s Resize operation to change its bounds for now.", t.name));
-                }
                 let limit = if is_row { self.rows } else { self.cols };
                 if at <= last && last.checked_add(count).is_none_or(|v| v >= limit) {
                     return Some(format!("This would push {} past the sheet boundary.", t.name));
@@ -2111,10 +2108,12 @@ impl Sheet {
     /// Insert columns at the specified position, shifting existing columns right
     pub fn insert_cols(&mut self, at_col: usize, count: usize) {
         if self.table_structural_error(false, at_col, count, false).is_some() { return; }
-        self.shift_tables(false, at_col, count, false);
+        let Ok(tables) = self.tables_after_column_edit(at_col, count, false) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(false, at_col, count, false);
         // Shift cells right of the insertion
         self.cells.insert_cols(at_col, count, self.cols);
+        self.sync_table_headers();
 
         // Adjust merged regions (grid-line semantics)
         for m in &mut self.merged_regions {
@@ -2134,7 +2133,8 @@ impl Sheet {
     /// Delete columns at the specified position, shifting remaining columns left
     pub fn delete_cols(&mut self, start_col: usize, count: usize) {
         if self.table_structural_error(false, start_col, count, true).is_some() { return; }
-        self.shift_tables(false, start_col, count, true);
+        let Ok(tables) = self.tables_after_column_edit(start_col, count, true) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(false, start_col, count, true);
         let end_col = start_col + count; // exclusive
 

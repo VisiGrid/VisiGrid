@@ -4,6 +4,9 @@
 
 #[path = "workbook_calculated.rs"]
 mod calculated;
+#[path = "workbook_table_columns.rs"]
+mod columns;
+pub use columns::TableColumnHistory;
 
 use super::table_refs::TableFormulaChange;
 use super::Workbook;

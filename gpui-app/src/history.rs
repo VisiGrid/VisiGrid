@@ -272,6 +272,7 @@ pub enum UndoAction {
     /// Columns inserted (for undo: delete the inserted columns)
     ColsInserted {
         sheet_index: usize,
+        table_columns: Option<visigrid_engine::workbook::TableColumnHistory>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_col: usize,
         count: usize,
@@ -282,6 +283,7 @@ pub enum UndoAction {
     /// Columns deleted (for undo: re-insert columns and restore cell data)
     ColsDeleted {
         sheet_index: usize,
+        table_columns: Option<visigrid_engine::workbook::TableColumnHistory>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_col: usize,
         count: usize,
@@ -1660,24 +1662,26 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::ColsInserted { sheet_index, at_col, count, .. } => {
-                let sheet = workbook.sheet_mut(*sheet_index)
-                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
-                        format!("ColsInserted action references invalid sheet {}", sheet_index)
-                    ))?;
-                sheet.insert_cols(*at_col, *count);
+            UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, .. } => {
+                if let Some(history) = table_columns {
+                    workbook.apply_table_column_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else {
+                    let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
+                    sheet.insert_cols(*at_col, *count);
+                }
                 // Column changes don't invalidate row order, but may affect sort column
                 // For safety, invalidate sort state (column index may have shifted)
                 if let Some(sheet_view) = view_state.per_sheet.get_mut(*sheet_index) {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::ColsDeleted { sheet_index, at_col, count, .. } => {
-                let sheet = workbook.sheet_mut(*sheet_index)
-                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
-                        format!("ColsDeleted action references invalid sheet {}", sheet_index)
-                    ))?;
-                sheet.delete_cols(*at_col, *count);
+            UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, .. } => {
+                if let Some(history) = table_columns {
+                    workbook.apply_table_column_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else {
+                    let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
+                    sheet.delete_cols(*at_col, *count);
+                }
                 // Column changes don't invalidate row order, but may affect sort column
                 if let Some(sheet_view) = view_state.per_sheet.get_mut(*sheet_index) {
                     sheet_view.sort = None;
@@ -2139,6 +2143,46 @@ mod tests {
             }
         }
         assert_eq!(replay.table(id).unwrap().1.range.data_rows(), 0);
+    }
+
+    #[test]
+    fn table_column_rewind_preserves_schema_rules_overrides_and_dependencies() {
+        use visigrid_engine::table::TableRange;
+        let mut workbook = Workbook::new();
+        let id = workbook.create_table(workbook.active_sheet_id(), TableRange {
+            start_row: 0, start_col: 0, end_row: 3, end_col: 2,
+        }, "Sales").unwrap().table_id();
+        workbook.set_cell_value_tracked(0, 1, 0, "2");
+        workbook.set_cell_value_tracked(0, 1, 1, "10");
+        workbook.set_calculated_column(id, 2, 1, "=[@Column1]*B2", true).unwrap();
+        workbook.set_cell_value_tracked(0, 2, 2, "999");
+        workbook.clear_cell_tracked(0, 3, 2);
+        let summary = workbook.add_sheet_named("Summary").unwrap();
+        workbook.set_cell_value_tracked(summary, 0, 0, "=SUM(Sales[Column3])");
+        let mut replay = workbook.clone();
+        let mut view = crate::app::PreviewViewState::default();
+        // Insert internally, remove an input, then remove the calculated field.
+        for (at, delete) in [(1, false), (0, true), (2, true)] {
+            let table_columns = workbook.prepare_table_column_history(0, at, 1, delete).unwrap();
+            let print_setup_before = workbook.sheet(0).unwrap().print_setup.clone();
+            let deleted_cells = workbook.sheet(0).unwrap().occupied_cells_in_cols(at, 1);
+            let rewrites = workbook.apply_table_column_history(table_columns.as_ref().unwrap(), false).unwrap();
+            let formula_rewrites = rewrites.into_iter().map(|(s,r,c,old,_)| (s,r,c,old)).collect();
+            let action = if delete {
+                UndoAction::ColsDeleted { sheet_index: 0, at_col: at, count: 1, table_columns,
+                    print_setup_before, deleted_cells, deleted_comments: vec![], deleted_col_widths: vec![], formula_rewrites }
+            } else {
+                UndoAction::ColsInserted { sheet_index: 0, at_col: at, count: 1, table_columns,
+                    print_setup_before, formula_rewrites }
+            };
+            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
+            for r in 0..4 { for c in 0..5 {
+                assert_eq!(replay.sheet(0).unwrap().get_raw(r,c), workbook.sheet(0).unwrap().get_raw(r,c));
+                assert_eq!(replay.sheet(0).unwrap().get_display(r,c), workbook.sheet(0).unwrap().get_display(r,c));
+            }}
+            assert_eq!(replay.sheet(summary).unwrap().get_raw(0,0), workbook.sheet(summary).unwrap().get_raw(0,0));
+        }
     }
 
     #[test]

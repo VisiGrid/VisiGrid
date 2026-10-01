@@ -318,3 +318,33 @@ fn calculated_rules_and_blank_overrides_roundtrip_and_affect_fingerprint() {
     invalid.version = 1;
     assert!(wb.restore_tables(invalid).is_err());
 }
+
+#[test]
+fn column_edits_roundtrip_rules_overrides_and_allocator_history() {
+    use visigrid_engine::structural::Axis;
+    let mut wb = table_book();
+    let id = wb.table_by_name("Sales").unwrap().1.id;
+    wb.set_calculated_column(id, 1, 1, "=A2*2", true).unwrap();
+    wb.clear_cell_tracked(0, 2, 1);
+    wb.set_cell_value_tracked(0, 3, 1, "99");
+    wb.structural_edit(0, Axis::Col, 1, 1, false).unwrap();
+    let removed = wb.table(id).unwrap().1.columns[1].id;
+    wb.structural_edit(0, Axis::Col, 1, 1, true).unwrap();
+    wb.structural_edit(0, Axis::Col, 1, 1, false).unwrap();
+    let columns = wb.table(id).unwrap().1.columns.clone();
+    assert!(columns[1].id.0 > removed.0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("columns.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let content = json::export_workbook(&wb, &[], 0).unwrap();
+    for mut loaded in [native::load_workbook(&path).unwrap(), json::import_any(&content).unwrap().0] {
+        assert_eq!(loaded.table(id).unwrap().1.columns, columns);
+        assert_eq!(loaded.active_sheet().get_display(1, 2), "34");
+        assert!(loaded.active_sheet().is_calculated_exception(2, 2));
+        assert_eq!(loaded.active_sheet().get_raw(3, 2), "99");
+        loaded.append_table_rows(id, 1, &[(5, 0, "3".into())]).unwrap();
+        assert_eq!(loaded.active_sheet().get_display(5, 2), "6");
+        loaded.structural_edit(0, Axis::Col, 1, 1, false).unwrap();
+        assert!(loaded.table(id).unwrap().1.columns[1].id.0 > columns[1].id.0);
+    }
+}

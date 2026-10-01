@@ -8,7 +8,7 @@ pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot
 mod table_ops;
 #[path = "workbook_table_refs.rs"]
 mod table_refs;
-pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit, TableRowHistory};
+pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit, TableRowHistory, TableColumnHistory};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
 use crate::cell_id::CellId;
@@ -2263,7 +2263,12 @@ impl Workbook {
             .clone();
 
         self.validate_structural_edit(sheet_index, axis, at, count, delete)?;
-        let rule_changes = self.structural_rule_changes(sheet_index, axis, at, count, delete);
+        let column_tables = if !is_row {
+            Some((self.sheets[sheet_index].tables().to_vec(), self.sheets[sheet_index].tables_after_column_edit(at, count, delete)?))
+        } else { None };
+        let rule_changes = if let Some((before, after)) = &column_tables {
+            self.column_rule_changes(sheet_index, at, count, delete, before, after)?
+        } else { self.structural_rule_changes(sheet_index, axis, at, count, delete) };
 
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
@@ -2314,8 +2319,12 @@ impl Workbook {
                 if !raw.starts_with('=') {
                     continue;
                 }
-                if let Some(new_raw) = adjust_formula_text(&raw, &edit, &formula_sheet) {
-                    let (pre_row, pre_col) = pre_edit_pos(idx, row, col);
+                let (pre_row, pre_col) = pre_edit_pos(idx, row, col);
+                let source = if let Some((before, after)) = &column_tables {
+                    self.rewrite_column_schema_source(self.sheets[sheet_index].id, before, after, sheet.id, pre_row, pre_col, &raw)?
+                } else { raw.to_string() };
+                let new_raw = adjust_formula_text(&source, &edit, &formula_sheet).unwrap_or(source);
+                if new_raw != raw {
                     rewrites.push((idx, pre_row, pre_col, raw.to_string(), new_raw.clone()));
                     writes.push((idx, row, col, new_raw));
                 }
@@ -2367,6 +2376,7 @@ impl Workbook {
         if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
             return Err(error);
         }
+        if !is_row { self.sheets[sheet_index].tables_after_column_edit(at, count, delete)?; }
         if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
             return Err(format!(
                 "this would cut through {name}; move or delete the pivot table first"
