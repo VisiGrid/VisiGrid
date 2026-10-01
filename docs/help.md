@@ -263,48 +263,18 @@ When a full row is selected (via `Shift+Space`), these commands affect rows. Whe
 
 ## Paste Special
 
-Press `Ctrl+Alt+V` after copying cells to open the Paste Special dialog.
+Press `Ctrl+Alt+V` after copying cells to open the Paste Special dialog. Its header shows what's on the clipboard and where it will land. Pick a type with the arrow keys and press `Enter`, or press its letter (Excel's letters).
 
-### Paste Types
+| Type | Key | What it pastes |
+|------|-----|----------------|
+| All | `A` | Contents and formatting, exactly as copied |
+| Values | `V` | Results only; keeps this sheet's formatting |
+| Formulas | `F` | Formulas with references adjusted; keeps this sheet's formatting |
+| Formats | `T` | Formatting only; leaves the cells' contents alone |
 
-| Type | Description |
-|------|-------------|
-| All | Paste everything (default) |
-| Values | Paste computed values only (no formulas) |
-| Formulas | Paste formulas only (no formatting) |
-| Formats | Paste formatting only (no data) |
+Plain `Ctrl+V` pastes contents (formulas, comments, merged cells) and keeps the destination's formatting. To bring the copied formatting too, use **All**. `Ctrl+Shift+V` pastes values. Text copied from another app has no formatting, so Formats is unavailable for it.
 
-### Operations
-
-Apply a mathematical operation to existing cell values:
-
-| Operation | Effect |
-|-----------|--------|
-| None | Replace existing values |
-| Add | Add pasted values to existing |
-| Subtract | Subtract pasted values from existing |
-| Multiply | Multiply existing by pasted values |
-| Divide | Divide existing by pasted values |
-
-### Options
-
-| Option | Description |
-|--------|-------------|
-| Transpose | Swap rows and columns |
-| Skip Blanks | Don't overwrite cells with blank source cells |
-
-### Keyboard Shortcuts in Dialog
-
-| Key | Action |
-|-----|--------|
-| `↑/↓` | Navigate options |
-| `Tab` | Switch between sections |
-| `A/V/F/O` | Quick select paste type |
-| `+/-/*/` | Quick select operation |
-| `T` | Toggle transpose |
-| `B` | Toggle skip blanks |
-| `Enter` | Execute paste |
-| `Escape` | Cancel |
+To make `Ctrl+V` paste values instead, set **Preferences → Default paste → Values only**.
 
 ---
 
@@ -853,13 +823,15 @@ Copy formatting from one cell and apply it to others:
 | Action | Shortcut |
 |--------|----------|
 | Copy format | `Ctrl+Shift+C` |
-| Paste format | `Ctrl+Shift+V` |
+| Paste that format | `Ctrl+Shift+V` (right after `Ctrl+Shift+C`) |
 
 **Usage:**
 1. Select a cell with the formatting you want to copy
-2. Press `Ctrl+Shift+C` (status bar confirms "● Format copied from A1")
+2. Press `Ctrl+Shift+C` (status bar confirms "Format copied")
 3. Select one or more destination cells
 4. Press `Ctrl+Shift+V` to apply the format
+
+Otherwise `Ctrl+Shift+V` pastes values, as in Excel and Google Sheets. Copying cells with `Ctrl+C` returns it to pasting values.
 
 All formatting properties are copied: bold, italic, underline, strikethrough, alignment, number format, and text overflow mode.
 
@@ -930,7 +902,7 @@ Access text overflow via the Cell Inspector (`Ctrl+1`).
 | Underline | `Ctrl+U` |
 | Strikethrough | `Ctrl+5` |
 | Copy format | `Ctrl+Shift+C` |
-| Paste format | `Ctrl+Shift+V` |
+| Paste values (or a format copied with `Ctrl+Shift+C`) | `Ctrl+Shift+V` |
 | General format | `Ctrl+Shift+~` |
 | Number format | `Ctrl+Shift+!` |
 | Currency format | `Ctrl+Shift+$` |
@@ -1215,7 +1187,7 @@ Or search settings directly with `#` prefix: `#column` shows column-related sett
 | Underline | `Ctrl+U` |
 | Strikethrough | `Ctrl+5` |
 | Copy format | `Ctrl+Shift+C` |
-| Paste format | `Ctrl+Shift+V` |
+| Paste values (or a format copied with `Ctrl+Shift+C`) | `Ctrl+Shift+V` |
 | Currency format | `Ctrl+Shift+$` |
 | Percent format | `Ctrl+Shift+%` |
 | Format dialog | `Ctrl+1` |
@@ -1266,7 +1238,7 @@ If you're familiar with Vim, enable `editor.vimMode` in settings for hjkl naviga
 Use the Lua console (`Ctrl+Shift+L`) to automate repetitive tasks. Type `examples` to see 7 ready-to-run scripts. Use `sheet:selection()` to process the current selection, or `sheet:range("A1:C10")` for bulk operations. Every script is a single undo.
 
 ### 8. Use Paste Special
-When pasting data, `Ctrl+Alt+V` lets you paste just values (no formulas), apply math operations, or transpose rows/columns.
+`Ctrl+V` keeps your sheet's formatting. `Ctrl+Shift+V` pastes just the values, and `Ctrl+Alt+V` opens Paste Special when you want the copied formatting too (**All**) or only the formatting (**Formats**).
 
 ---
 

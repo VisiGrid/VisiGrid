@@ -871,11 +871,11 @@ impl Spreadsheet {
         let (row, col) = self.view_state.selected;
         let snapshot = self.sheet(cx).get_format(row, col);
         self.format_painter = Some(FormatPaintState { snapshot, locked: false });
-        self.status_message = Some("Format copied \u{00b7} Ctrl+Shift+V to paste".to_string());
+        self.status_message = Some("Format copied \u{00b7} Ctrl+Shift+V to paste it".to_string());
         cx.notify();
     }
 
-    /// Paste previously copied format onto current selection (Ctrl+Shift+V).
+    /// Paste the format copied with Ctrl+Shift+C onto the selection (Ctrl+Shift+V right after it).
     pub fn paste_format(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let snapshot = match &self.format_painter {

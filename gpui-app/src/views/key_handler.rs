@@ -45,6 +45,21 @@ pub(crate) fn handle_key_down(
         cx.stop_propagation();
     }
 
+    // Paste Special: letter accelerators pick a type and paste. Enter, Escape
+    // and Up/Down arrive as actions (see ConfirmEdit, CancelEdit, MoveUp/Down).
+    if this.mode == Mode::PasteSpecial {
+        if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform {
+            if let Some(paste_type) = crate::app::PasteType::from_accelerator(&event.keystroke.key) {
+                if this.paste_special_dialog.is_enabled(paste_type) {
+                    this.paste_special_dialog.selected = paste_type;
+                    this.apply_paste_special(cx);
+                }
+            }
+        }
+        cx.stop_propagation();
+        return;
+    }
+
     if this.mode == Mode::ExportPdf {
         if event.keystroke.key == "space" {
             let option = this.pdf_export.as_ref().map_or(0, |s| s.focus);

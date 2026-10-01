@@ -106,23 +106,35 @@ impl PasteType {
         }
     }
 
-    /// Keyboard accelerator for this paste type
+    /// Keyboard accelerator for this paste type (Excel's letters)
     pub fn accelerator(&self) -> char {
         match self {
             PasteType::All => 'A',
             PasteType::Values => 'V',
             PasteType::Formulas => 'F',
-            PasteType::Formats => 'O', // fOrmats (Excel convention)
+            PasteType::Formats => 'T', // Excel: Ctrl+Alt+V, T
+        }
+    }
+
+    /// The paste type a key picks in the dialog. `o` also picks Formats,
+    /// the letter this dialog used before it matched Excel's `t`.
+    pub fn from_accelerator(key: &str) -> Option<PasteType> {
+        match key {
+            "a" => Some(PasteType::All),
+            "v" => Some(PasteType::Values),
+            "f" => Some(PasteType::Formulas),
+            "t" | "o" => Some(PasteType::Formats),
+            _ => None,
         }
     }
 
     /// Description for UI
     pub fn description(&self) -> &'static str {
         match self {
-            PasteType::All => "Paste everything (formulas, values, and formats)",
-            PasteType::Values => "Paste computed values only (no formulas)",
-            PasteType::Formulas => "Paste formulas with reference adjustment",
-            PasteType::Formats => "Paste cell formatting only (no values)",
+            PasteType::All => "Contents and formatting, exactly as copied",
+            PasteType::Values => "Results only. Keeps this sheet's formatting",
+            PasteType::Formulas => "Formulas, references adjusted. Keeps this sheet's formatting",
+            PasteType::Formats => "Formatting only. Leaves the cells' contents alone",
         }
     }
 }
@@ -132,6 +144,18 @@ impl PasteType {
 pub struct PasteSpecialDialogState {
     /// Currently selected paste type
     pub selected: PasteType,
+    /// Size of what's on the clipboard, read when the dialog opens
+    pub rows: usize,
+    pub cols: usize,
+    /// The clipboard holds cells copied in VisiGrid (so formatting is available)
+    pub from_visigrid: bool,
+}
+
+impl PasteSpecialDialogState {
+    /// Formats need a VisiGrid copy; text from another app carries none.
+    pub fn is_enabled(&self, paste_type: PasteType) -> bool {
+        paste_type != PasteType::Formats || self.from_visigrid
+    }
 }
 
 /// Format type selection in the number format editor
@@ -490,3 +514,32 @@ impl ValidationDialogState {
     }
 }
 
+
+#[cfg(test)]
+mod paste_special_tests {
+    use super::{PasteSpecialDialogState, PasteType};
+
+    #[test]
+    fn accelerators_match_excel_and_keep_the_old_formats_key() {
+        assert_eq!(PasteType::from_accelerator("a"), Some(PasteType::All));
+        assert_eq!(PasteType::from_accelerator("v"), Some(PasteType::Values));
+        assert_eq!(PasteType::from_accelerator("f"), Some(PasteType::Formulas));
+        assert_eq!(PasteType::from_accelerator("t"), Some(PasteType::Formats));
+        assert_eq!(PasteType::from_accelerator("o"), Some(PasteType::Formats));
+        assert_eq!(PasteType::from_accelerator("x"), None);
+        for t in PasteType::all() {
+            let key = t.accelerator().to_ascii_lowercase().to_string();
+            assert_eq!(PasteType::from_accelerator(&key), Some(*t));
+        }
+    }
+
+    #[test]
+    fn formats_need_a_visigrid_copy() {
+        let mut state = PasteSpecialDialogState { from_visigrid: false, ..Default::default() };
+        assert!(!state.is_enabled(PasteType::Formats));
+        assert!(state.is_enabled(PasteType::All));
+        assert!(state.is_enabled(PasteType::Values));
+        state.from_visigrid = true;
+        assert!(state.is_enabled(PasteType::Formats));
+    }
+}

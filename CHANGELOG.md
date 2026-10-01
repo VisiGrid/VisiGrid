@@ -19,6 +19,13 @@
 - **Center Across titles print and export centered** across their columns, instead of squeezed into the first one, and the automatic print area includes the title's full width.
 - **A short Center Across title no longer disappears** when it's centered over the next column; the cells to its right used to paint over it.
 
+### Paste
+
+- **Ctrl+Shift+V pastes values**, as in Excel and Google Sheets. It used to paste a format copied with Ctrl+Shift+C, and it still does right after Ctrl+Shift+C; at any other time it pastes values.
+- **Paste Special → All now brings the copied formatting**, as the dialog always said it did. Plain Ctrl+V still keeps the destination's formatting: it pastes formulas, comments and merged cells, never the source's fonts, fills or number formats. One undo step for both.
+- **The Paste Special dialog works from the keyboard.** Up/Down choose, Enter pastes, Escape closes, and Excel's letters pick and paste in one key: A, V, F and T. Enter used to move the cursor behind the dialog, and Escape didn't close it. O still picks Formats.
+- **A clearer Paste Special dialog:** it shows what's on the clipboard and where it will land ("3 × 2 cells → G2:H4"), says which options keep your sheet's formatting, and greys out Formats when the clipboard holds text from another app, which has none.
+
 ## 0.41.0
 
 ### Printing
