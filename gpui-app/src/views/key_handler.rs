@@ -40,6 +40,17 @@ pub(crate) fn handle_key_down(
         cx.stop_propagation();
     }
 
+    if this.mode.owns_raw_keys() {
+        match this.mode {
+            Mode::ValidationDialog => this.validation_dialog_key(event, cx),
+            Mode::ConvertPicker => this.convert_picker_key(event, window, cx),
+            Mode::TransformPreview => this.transform_preview_key(event, cx),
+            _ => {}
+        }
+        cx.stop_propagation();
+        return;
+    }
+
     // Paste Special: letter accelerators pick a type and paste. Enter, Escape
     // and Up/Down arrive as actions (see ConfirmEdit, CancelEdit, MoveUp/Down).
     if this.mode == Mode::PasteSpecial {

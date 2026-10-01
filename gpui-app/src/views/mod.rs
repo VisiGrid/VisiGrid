@@ -145,7 +145,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             style: Default::default(),
         })
         .relative()
-        .key_context(if app.comment_editor.is_some() { "CommentEditor" } else if app.mode == Mode::Preferences { "Preferences" } else if app.comments_sidebar_visible && app.comment_search.read(cx).focus.is_focused(window) { "CommentSearch" } else { "Spreadsheet" })
+        .key_context(if app.comment_editor.is_some() { "CommentEditor" } else if app.mode == Mode::Preferences { "Preferences" } else if app.mode.owns_raw_keys() { "Dialog" } else if app.comments_sidebar_visible && app.comment_search.read(cx).focus.is_focused(window) { "CommentSearch" } else { "Spreadsheet" })
         .track_focus(&app.focus_handle);
     let el = actions_nav::bind(el, cx);
     let el = actions_edit::bind(el, cx);

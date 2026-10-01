@@ -56,41 +56,6 @@ pub fn render_validation_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
-                // Keyboard handling
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    let key = &event.keystroke.key;
-                    match key.as_str() {
-                        "escape" => {
-                            // Close dropdowns first, then close dialog
-                            if this.validation_dialog.type_dropdown_open || this.validation_dialog.operator_dropdown_open {
-                                this.validation_dialog.type_dropdown_open = false;
-                                this.validation_dialog.operator_dropdown_open = false;
-                                cx.notify();
-                            } else {
-                                this.hide_validation_dialog(cx);
-                            }
-                        }
-                        "enter" => {
-                            if !this.validation_dialog.type_dropdown_open && !this.validation_dialog.operator_dropdown_open {
-                                this.apply_validation_dialog(cx);
-                            }
-                        }
-                        "tab" => {
-                            this.validation_dialog_tab(event.keystroke.modifiers.shift, cx);
-                        }
-                        "backspace" => {
-                            this.validation_dialog_backspace(cx);
-                        }
-                        _ => {
-                            if let Some(c) = event.keystroke.key_char.as_ref().and_then(|s| s.chars().next()) {
-                                if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
-                                    this.validation_dialog_type_char(c, cx);
-                                }
-                            }
-                        }
-                    }
-                    cx.stop_propagation();
-                }))
                 // Header
                 .child(
                     div()
@@ -706,4 +671,63 @@ fn render_button(
             action(this, cx);
         }))
         .child(label)
+}
+
+impl Spreadsheet {
+    /// Keys for the Data Validation dialog, routed from `key_handler` (see
+    /// `convert_picker_key`).
+    pub(crate) fn validation_dialog_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                // Close dropdowns first, then close dialog
+                if self.validation_dialog.type_dropdown_open || self.validation_dialog.operator_dropdown_open {
+                    self.validation_dialog.type_dropdown_open = false;
+                    self.validation_dialog.operator_dropdown_open = false;
+                    cx.notify();
+                } else {
+                    self.hide_validation_dialog(cx);
+                }
+            }
+            "enter" => {
+                if !self.validation_dialog.type_dropdown_open && !self.validation_dialog.operator_dropdown_open {
+                    self.apply_validation_dialog(cx);
+                }
+            }
+            "tab" => {
+                self.validation_dialog_tab(event.keystroke.modifiers.shift, cx);
+            }
+            "backspace" => {
+                self.validation_dialog_backspace(cx);
+            }
+            // Up/Down step through the focused dropdown's options; Tab moves on.
+            "up" | "down" => {
+                let step: isize = if event.keystroke.key == "up" { -1 } else { 1 };
+                fn next<T: Copy + PartialEq>(all: &[T], cur: T, step: isize) -> T {
+                    let i = all.iter().position(|o| *o == cur).unwrap_or(0) as isize;
+                    all[(i + step).clamp(0, all.len() as isize - 1) as usize]
+                }
+                let dialog = &mut self.validation_dialog;
+                match dialog.focus {
+                    ValidationDialogFocus::TypeDropdown => {
+                        dialog.validation_type = next(ValidationTypeOption::ALL, dialog.validation_type, step);
+                    }
+                    ValidationDialogFocus::OperatorDropdown => {
+                        dialog.numeric_operator = next(NumericOperatorOption::ALL, dialog.numeric_operator, step);
+                    }
+                    _ => return,
+                }
+                dialog.type_dropdown_open = false;
+                dialog.operator_dropdown_open = false;
+                dialog.error = None;
+                cx.notify();
+            }
+            _ => {
+                if let Some(c) = event.keystroke.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && !event.keystroke.modifiers.platform {
+                        self.validation_dialog_type_char(c, cx);
+                    }
+                }
+            }
+        }
+    }
 }
