@@ -240,3 +240,28 @@ fn table_shape_is_part_of_semantic_fingerprint() {
     assert_eq!(native::compute_semantic_fingerprint(&wb), before);
     assert!(native::compute_semantic_fingerprint(&Workbook::new()).starts_with("v2:"));
 }
+
+#[test]
+fn appended_records_and_structured_dependencies_survive_native_and_json() {
+    let mut wb = table_book();
+    let id = wb.table_by_name("Sales").unwrap().1.id;
+    let columns = wb.table(id).unwrap().1.columns.clone();
+    wb.set_cell_value_tracked(0, 0, 4, "=SUM(Sales[Column2])");
+    wb.append_table_rows(id, 2, &[(5, 0, "3".into()), (5, 1, "=[@[42]]*10".into())])
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("appended.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let content = json::export_workbook(&wb, &[], 0).unwrap();
+    for mut loaded in [
+        native::load_workbook(&path).unwrap(),
+        json::import_any(&content).unwrap().0,
+    ] {
+        assert_eq!(loaded.table(id).unwrap().1.range.end_row, 6);
+        assert_eq!(loaded.table(id).unwrap().1.columns, columns);
+        assert_eq!(loaded.active_sheet().get_raw(6, 0), "");
+        assert_eq!(loaded.active_sheet().get_display(0, 4), "30");
+        loaded.set_cell_value_tracked(0, 5, 0, "4");
+        assert_eq!(loaded.active_sheet().get_display(0, 4), "40");
+    }
+}

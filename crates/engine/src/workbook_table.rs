@@ -34,6 +34,8 @@ pub struct TableCommit {
     after: TableState,
     formulas: Vec<TableFormulaChange>,
     creation_references: Option<Vec<(crate::cell_id::CellId, String)>>,
+    cells: Vec<(HeaderCell, HeaderCell)>,
+    append_region: Option<TableRange>,
 }
 
 impl TableCommit {
@@ -52,6 +54,19 @@ impl TableCommit {
     pub fn header_cell_count(&self) -> usize {
         self.before.headers.len()
     }
+}
+
+/// Only Table metadata for a whole-row edit; ordinary row history owns the
+/// deleted cells and presentation. Bounds are explicit because undoing a last
+/// body-row deletion inserts at the new bottom edge (normally outside a Table).
+#[derive(Debug, Clone)]
+pub struct TableRowHistory {
+    sheet: SheetId,
+    at: usize,
+    count: usize,
+    delete: bool,
+    before: Vec<DataTable>,
+    after: Vec<DataTable>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +89,111 @@ pub struct SavedTableCatalog {
 }
 
 impl Workbook {
+    pub fn prepare_table_row_history(
+        &self,
+        sheet_index: usize,
+        at: usize,
+        count: usize,
+        delete: bool,
+    ) -> Result<Option<TableRowHistory>, String> {
+        self.validate_structural_edit(
+            sheet_index,
+            crate::structural::Axis::Row,
+            at,
+            count,
+            delete,
+        )?;
+        let sheet = &self.sheets[sheet_index];
+        if sheet.tables().is_empty() {
+            return Ok(None);
+        }
+        let before = sheet.tables().to_vec();
+        let mut after = before.clone();
+        for table in &mut after {
+            let (start, end) = crate::structural::shift_span(
+                table.range.start_row,
+                table.range.end_row,
+                at,
+                count,
+                delete,
+            )
+            .ok_or("Cannot delete a Table header. Convert to a range first.")?;
+            table.range.start_row = start;
+            table.range.end_row = end;
+        }
+        Ok(Some(TableRowHistory {
+            sheet: sheet.id,
+            at,
+            count,
+            delete,
+            before,
+            after,
+        }))
+    }
+
+    pub fn validate_table_row_history(
+        &self,
+        history: &TableRowHistory,
+        undo: bool,
+    ) -> Result<(), String> {
+        let index = self
+            .sheet_index_by_id(history.sheet)
+            .ok_or("Table sheet no longer exists.")?;
+        let expected = if undo {
+            &history.after
+        } else {
+            &history.before
+        };
+        let current = self.sheets[index].tables();
+        if current.len() != expected.len()
+            || expected
+                .iter()
+                .any(|table| !current.iter().any(|t| same_schema(t, table)))
+        {
+            return Err("Tables changed since the row operation was prepared.".into());
+        }
+        self.validate_structural_edit(
+            index,
+            crate::structural::Axis::Row,
+            history.at,
+            history.count,
+            history.delete != undo,
+        )
+    }
+
+    pub fn apply_table_row_history(
+        &mut self,
+        history: &TableRowHistory,
+        undo: bool,
+    ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        self.validate_table_row_history(history, undo)?;
+        let index = self.sheet_index_by_id(history.sheet).unwrap();
+        let rewrites = self.structural_edit(
+            index,
+            crate::structural::Axis::Row,
+            history.at,
+            history.count,
+            history.delete != undo,
+        )?;
+        let target = if undo {
+            &history.before
+        } else {
+            &history.after
+        };
+        // Only bounds change. Preserve allocator high-water marks and all IDs.
+        let mut corrected = false;
+        for table in &mut self.sheets[index].data_tables {
+            let range = target.iter().find(|t| t.id == table.id).unwrap().range;
+            corrected |= table.range != range;
+            table.range = range;
+        }
+        if corrected {
+            self.rebuild_dep_graph();
+            self.recompute_full_ordered();
+        }
+        Ok(rewrites)
+    }
+
     pub fn tables(&self) -> impl Iterator<Item = (SheetId, &DataTable)> {
         self.sheets
             .iter()
@@ -293,7 +413,112 @@ impl Workbook {
         Ok(commit)
     }
 
-    pub fn set_table_style(&mut self, id: TableId, style: TableStyle) -> Result<TableCommit, String> {
+    /// Detect desktop append intent without making ordinary loaders grow Tables.
+    /// A side-crossing paste must be explicitly resized before it can be applied.
+    pub fn table_append_target(
+        &self,
+        sheet_id: SheetId,
+        range: TableRange,
+    ) -> Result<Option<TableId>, String> {
+        let sheet = self
+            .sheet_by_id(sheet_id)
+            .ok_or("Sheet no longer exists.")?;
+        range.validate(sheet.rows, sheet.cols)?;
+        let mut target = None;
+        for table in sheet.tables() {
+            let r = table.range;
+            if range.start_row > r.start_row
+                && range.start_row <= r.end_row.saturating_add(1)
+                && range.end_row > r.end_row
+                && range.start_col <= r.end_col
+                && range.end_col >= r.start_col
+            {
+                if range.start_col < r.start_col || range.end_col > r.end_col || target.is_some() {
+                    return Err("Resize the Table first: this paste crosses its side and bottom boundaries.".into());
+                }
+                target = Some(table.id);
+            }
+        }
+        Ok(target)
+    }
+
+    /// Add empty records, optionally writing a rectangular paste or a typed
+    /// value in the same guarded history commit. Never moves adjacent cells.
+    pub fn append_table_rows(
+        &mut self,
+        id: TableId,
+        count: usize,
+        writes: &[(usize, usize, String)],
+    ) -> Result<TableCommit, String> {
+        if count == 0 {
+            return Err("Append at least one row.".into());
+        }
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        let mut new = old.clone();
+        new.range.end_row = new
+            .range
+            .end_row
+            .checked_add(count)
+            .ok_or("Append exceeds the sheet boundary.")?;
+        self.validate_table_region(sheet_id, new.range, Some(id))?;
+        let region = TableRange {
+            start_row: old.range.end_row + 1,
+            ..new.range
+        };
+        self.validate_empty_table_append(sheet_id, region)?;
+        let mut seen = HashSet::new();
+        let sheet = self.sheet_by_id(sheet_id).unwrap();
+        let mut cells = Vec::with_capacity(writes.len());
+        for (row, col, text) in writes {
+            if *row <= old.range.start_row
+                || !new.range.contains(*row, *col)
+                || !seen.insert((*row, *col))
+            {
+                return Err("Append writes must be unique cells within the Table body.".into());
+            }
+            cells.push((
+                HeaderCell {
+                    row: *row,
+                    col: *col,
+                    value: sheet.get_cell(*row, *col).value,
+                },
+                HeaderCell {
+                    row: *row,
+                    col: *col,
+                    value: CellValue::from_input(text),
+                },
+            ));
+        }
+        let mut commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        commit.cells = cells;
+        commit.append_region = Some(region);
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    fn validate_empty_table_append(
+        &self,
+        sheet_id: SheetId,
+        region: TableRange,
+    ) -> Result<(), String> {
+        let sheet = self
+            .sheet_by_id(sheet_id)
+            .ok_or("Sheet no longer exists.")?;
+        for ((row, col), cell) in sheet.cells_iter() {
+            if region.contains(row, col)
+                && (!matches!(cell.value(), ValueRef::Empty) || cell.comment().is_some())
+            {
+                return Err(format!("Cannot append: {} already contains data. Resize the Table to include existing records.", crate::cell_id::CellId::new(sheet_id, row, col)));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_table_style(
+        &mut self,
+        id: TableId,
+        style: TableStyle,
+    ) -> Result<TableCommit, String> {
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
         let mut new = old.clone();
         new.style = style;
@@ -372,6 +597,8 @@ impl Workbook {
         };
         let formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
         Ok(TableCommit {
+            cells: Vec::new(),
+            append_region: None,
             creation_references,
             formulas,
             sheet_id,
@@ -412,6 +639,34 @@ impl Workbook {
         };
         if !same_schema {
             return Err("Table changed since this operation was prepared.".into());
+        }
+        if let Some(region) = commit.append_region {
+            if undo {
+                let owned: HashSet<_> = commit
+                    .cells
+                    .iter()
+                    .map(|(cell, _)| (cell.row, cell.col))
+                    .collect();
+                for ((row, col), cell) in sheet.cells_iter() {
+                    if region.contains(row, col)
+                        && (cell.comment().is_some()
+                            || (!owned.contains(&(row, col))
+                                && !matches!(cell.value(), ValueRef::Empty)))
+                    {
+                        return Err(
+                            "An appended row changed since this operation was prepared.".into()
+                        );
+                    }
+                }
+            } else {
+                self.validate_empty_table_append(commit.sheet_id, region)?;
+            }
+        }
+        for (before, after) in &commit.cells {
+            let cell = if undo { after } else { before };
+            if !same_value(&sheet.get_cell(cell.row, cell.col).value, &cell.value) {
+                return Err("An appended cell changed since this operation was prepared.".into());
+            }
         }
         for cell in &expected.checks {
             let value = sheet.get_cell(cell.row, cell.col).value;
@@ -488,6 +743,11 @@ impl Workbook {
                     .formulas
                     .iter()
                     .any(|saved| saved.cell == change.cell)
+                    && !commit.cells.iter().any(|(cell, _)| {
+                        change.cell.sheet == commit.sheet_id
+                            && change.cell.row == cell.row
+                            && change.cell.col == cell.col
+                    })
                 {
                     return Err("New dependent formulas require a fresh table operation.".into());
                 }
@@ -524,6 +784,12 @@ impl Workbook {
                 change.cell.col,
                 source,
             );
+        }
+        for (before, after) in &commit.cells {
+            let cell = if undo { before } else { after };
+            self.sheet_by_id_mut(commit.sheet_id)
+                .unwrap()
+                .write_table_header(cell.row, cell.col, cell.value.clone());
         }
         // Membership changes affect symbolic shape dependencies even when no
         // cell was written (including empty -> nonempty bodies).
@@ -655,4 +921,20 @@ impl Workbook {
         self.refresh_table_name_reservations();
         Ok(())
     }
+}
+
+fn same_value(a: &CellValue, b: &CellValue) -> bool {
+    match (a, b) {
+        (CellValue::Empty, CellValue::Empty) => true,
+        (CellValue::Number(a), CellValue::Number(b)) => a.to_bits() == b.to_bits(),
+        (CellValue::Text(a), CellValue::Text(b)) => a == b,
+        (CellValue::Formula { source: a, .. }, CellValue::Formula { source: b, .. }) => a == b,
+        _ => false,
+    }
+}
+
+fn same_schema(a: &DataTable, b: &DataTable) -> bool {
+    let mut a = a.clone();
+    a.next_column_id = b.next_column_id;
+    a == *b
 }

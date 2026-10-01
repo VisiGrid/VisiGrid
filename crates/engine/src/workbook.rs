@@ -8,7 +8,7 @@ pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot
 mod table_ops;
 #[path = "workbook_table_refs.rs"]
 mod table_refs;
-pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit};
+pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit, TableRowHistory};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
 use crate::cell_id::CellId;
@@ -2258,37 +2258,7 @@ impl Workbook {
             .name
             .clone();
 
-        // Refuse inserts that would push content off the grid rather than
-        // dropping it (Excel's behavior).
-        if !delete {
-            let sheet = &self.sheets[sheet_index];
-            let limit = if is_row { sheet.rows } else { sheet.cols };
-            let last_used = sheet
-                .cells_iter()
-                .filter(|(_, cell)| !cell.raw_display().is_empty())
-                .map(|((r, c), _)| if is_row { r } else { c })
-                .max();
-            if let Some(last) = last_used {
-                if last >= at && last.checked_add(count).is_none_or(|v| v >= limit) {
-                    return Err(format!(
-                        "inserting {} {}(s) would push data past the end of the sheet",
-                        count,
-                        if is_row { "row" } else { "column" }
-                    ));
-                }
-            }
-        }
-
-        // Pivot outputs move as a whole or not at all: an edit that would cut
-        // through one is refused before anything changes.
-        if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
-            return Err(error);
-        }
-        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
-            return Err(format!(
-                "this would cut through {name}; move or delete the pivot table first"
-            ));
-        }
+        self.validate_structural_edit(sheet_index, axis, at, count, delete)?;
 
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
@@ -2354,6 +2324,49 @@ impl Workbook {
         self.recompute_full_ordered();
         self.increment_revision();
         Ok(rewrites)
+    }
+
+    /// Shared mutation-free preflight, also used by guarded Table row history.
+    pub fn validate_structural_edit(&self, sheet_index: usize, axis: crate::structural::Axis, at: usize, count: usize, delete: bool) -> Result<(), String> {
+        let is_row = axis == crate::structural::Axis::Row;
+        let sheet = self.sheets.get(sheet_index).ok_or("Sheet no longer exists.")?;
+        let limit = if is_row { sheet.rows } else { sheet.cols };
+        if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
+            return Err("Structural edit exceeds the sheet boundary.".into());
+        }
+        // Refuse inserts that would push content off the grid rather than
+        // dropping it (Excel's behavior).
+        if !delete {
+            let sheet = &self.sheets[sheet_index];
+            let limit = if is_row { sheet.rows } else { sheet.cols };
+            let last_used = sheet
+                .cells_iter()
+                .filter(|(_, cell)| !cell.raw_display().is_empty())
+                .map(|((r, c), _)| if is_row { r } else { c })
+                .max();
+            if let Some(last) = last_used {
+                if last >= at && last.checked_add(count).is_none_or(|v| v >= limit) {
+                    return Err(format!(
+                        "inserting {} {}(s) would push data past the end of the sheet",
+                        count,
+                        if is_row { "row" } else { "column" }
+                    ));
+                }
+            }
+        }
+
+        // Pivot outputs move as a whole or not at all: an edit that would cut
+        // through one is refused before anything changes.
+        if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
+            return Err(error);
+        }
+        if let Some(name) = self.pivot_cut_by_structural(sheet_index, is_row, at, count, delete) {
+            return Err(format!(
+                "this would cut through {name}; move or delete the pivot table first"
+            ));
+        }
+
+        Ok(())
     }
 
     /// Update presentation only, without invalidating formula caches.

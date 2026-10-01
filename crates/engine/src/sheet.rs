@@ -691,11 +691,11 @@ impl Sheet {
         for t in self.tables() {
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };
-            if delete && at <= last && end > start {
+            if delete && at <= last && end > start && (!is_row || at <= start) {
                 return Some(format!("This would remove {}'s schema. Resize or remove the Table first.", t.name));
             }
             if !delete {
-                if at > start && at <= last {
+                if !is_row && at > start && at <= last {
                     return Some(format!("Use {}'s Resize operation to change its bounds for now.", t.name));
                 }
                 let limit = if is_row { self.rows } else { self.cols };

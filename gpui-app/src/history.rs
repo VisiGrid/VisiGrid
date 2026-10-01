@@ -242,6 +242,7 @@ pub enum UndoAction {
     /// Rows inserted (for undo: delete the inserted rows)
     RowsInserted {
         sheet_index: usize,
+        table_rows: Option<visigrid_engine::workbook::TableRowHistory>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
@@ -255,6 +256,7 @@ pub enum UndoAction {
     /// Rows deleted (for undo: re-insert rows and restore cell data)
     RowsDeleted {
         sheet_index: usize,
+        table_rows: Option<visigrid_engine::workbook::TableRowHistory>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
@@ -1631,12 +1633,13 @@ impl History {
                     .apply_pivot_state(&commit.after)
                     .map_err(|e| PreviewBuildError::InvariantViolation(e.to_string()))?;
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, .. } => {
-                let sheet = workbook.sheet_mut(*sheet_index)
-                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
-                        format!("RowsInserted action references invalid sheet {}", sheet_index)
-                    ))?;
-                sheet.insert_rows(*at_row, *count);
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, .. } => {
+                if let Some(history) = table_rows {
+                    workbook.apply_table_row_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else {
+                    let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
+                    sheet.insert_rows(*at_row, *count);
+                }
                 // STRUCTURAL CHANGE: Invalidate sort for this sheet (Option B)
                 // Row structure changed, previous sort order is no longer valid
                 if let Some(sheet_view) = view_state.per_sheet.get_mut(*sheet_index) {
@@ -1644,12 +1647,13 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, .. } => {
-                let sheet = workbook.sheet_mut(*sheet_index)
-                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
-                        format!("RowsDeleted action references invalid sheet {}", sheet_index)
-                    ))?;
-                sheet.delete_rows(*at_row, *count);
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, .. } => {
+                if let Some(history) = table_rows {
+                    workbook.apply_table_row_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else {
+                    let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
+                    sheet.delete_rows(*at_row, *count);
+                }
                 // STRUCTURAL CHANGE: Invalidate sort for this sheet (Option B)
                 if let Some(sheet_view) = view_state.per_sheet.get_mut(*sheet_index) {
                     sheet_view.row_order = None;
@@ -2090,6 +2094,51 @@ mod tests {
         }
         assert_eq!(replay.tables().count(), 0);
         assert_eq!(replay.active_sheet().get_raw(1, 0), "12");
+    }
+
+    #[test]
+    fn table_growth_and_whole_row_history_rewind_matches_live_workbook() {
+        use visigrid_engine::table::TableRange;
+        let mut workbook = Workbook::new();
+        let sheet = workbook.active_sheet_id();
+        let id = workbook.create_table(sheet, TableRange {
+            start_row: 0, start_col: 0, end_row: 0, end_col: 1,
+        }, "Sales").unwrap().table_id();
+        let mut replay = workbook.clone();
+        let mut view = crate::app::PreviewViewState::default();
+        let append = workbook.append_table_rows(id, 2, &[
+            (1, 0, "3".into()), (1, 1, "=[@Column1]*10".into()),
+            (2, 0, "4".into()), (2, 1, "=[@Column1]*10".into()),
+        ]).unwrap();
+        let action = UndoAction::TableCommit {
+            sheet_index: 0, commit: Box::new(append), description: "Append Table rows".into(),
+        };
+        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        for delete in [false, true] {
+            let count = if delete { 3 } else { 1 };
+            let history = workbook.prepare_table_row_history(0, 1, count, delete).unwrap().unwrap();
+            let print_setup_before = workbook.active_sheet().print_setup.clone();
+            workbook.apply_table_row_history(&history, false).unwrap();
+            let action = if delete {
+                UndoAction::RowsDeleted {
+                    sheet_index: 0, at_row: 1, count, table_rows: Some(history),
+                    print_setup_before, formula_rewrites: vec![], deleted_cells: vec![],
+                    deleted_comments: vec![], deleted_row_heights: vec![],
+                }
+            } else {
+                UndoAction::RowsInserted {
+                    sheet_index: 0, at_row: 1, count, table_rows: Some(history),
+                    print_setup_before, formula_rewrites: vec![],
+                }
+            };
+            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
+            for row in 0..5 {
+                assert_eq!(replay.active_sheet().get_raw(row, 0), workbook.active_sheet().get_raw(row, 0));
+                assert_eq!(replay.active_sheet().get_display(row, 1), workbook.active_sheet().get_display(row, 1));
+            }
+        }
+        assert_eq!(replay.table(id).unwrap().1.range.data_rows(), 0);
     }
 
     #[test]

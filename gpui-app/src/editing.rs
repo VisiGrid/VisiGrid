@@ -290,8 +290,14 @@ impl Spreadsheet {
             }
         }
 
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value, cx);  // Use helper that updates dep graph
+        match self.commit_table_append_value(row, col, &new_value, cx) {
+            Some(false) => { self.cancel_edit(cx); return; }
+            Some(true) => {}
+            None => {
+                self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+                self.set_cell_value(row, col, &new_value, cx);
+            }
+        }  // Use helper that updates dep graph
         self.mode = Mode::Navigation;
         self.reset_edit_state();
         self.edit_value.clear();
@@ -899,6 +905,14 @@ impl Spreadsheet {
             return;
         }
 
+        if !self.is_multi_selection() {
+            let (r,c) = self.view_state.selected;
+            let r = self.row_view.view_to_data(r);
+            let range = visigrid_engine::table::TableRange { start_row:r, end_row:r, start_col:c, end_col:c };
+            if matches!(self.wb(cx).table_append_target(self.sheet(cx).id, range), Ok(Some(_))) {
+                self.commit_current_edit(cx); return;
+            }
+        }
         let (header_view_row, header_col) = self.view_state.selected;
         if !self.is_multi_selection() && self.sheet(cx).table_header_at(self.row_view.view_to_data(header_view_row), header_col).is_some() {
             self.commit_current_edit(cx);
@@ -1339,7 +1353,7 @@ impl Spreadsheet {
     /// Used by `confirm_edit_and_move` and `confirm_edit_enter`.
     /// If we navigated to another sheet for cross-sheet ref picking,
     /// switch back to the home sheet and restore the edit cell position.
-    fn restore_formula_home_sheet(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restore_formula_home_sheet(&mut self, cx: &mut Context<Self>) {
         if let Some(home_sheet) = self.formula_home_sheet {
             let current = self.wb(cx).active_sheet_index();
             if current != home_sheet {
@@ -1402,8 +1416,14 @@ impl Spreadsheet {
         // Capture raw edit value before clearing for percent auto-format check
         let raw_edit = self.edit_value.clone();
 
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
-        self.set_cell_value(row, col, &new_value, cx);
+        match self.commit_table_append_value(row, col, &new_value, cx) {
+            Some(false) => { self.cancel_edit(cx); return false; }
+            Some(true) => {}
+            None => {
+                self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+                self.set_cell_value(row, col, &new_value, cx);
+            }
+        }
 
         // Auto-apply Percent format when user typed "X%" and cell format is General
         if raw_edit.trim().ends_with('%') {

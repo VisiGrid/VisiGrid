@@ -75,6 +75,13 @@ pub(crate) fn render_table_controls(
         )
         .child(div().flex_1())
         .child(button(
+            "table-add-row",
+            "Add row",
+            app,
+            move |s, cx| s.add_table_row(id, cx),
+            cx,
+        ))
+        .child(button(
             "table-rename",
             "Rename",
             app,

@@ -173,7 +173,7 @@ fn table_region_excludes_merges_other_tables_and_spills_in_both_directions() {
 }
 
 #[test]
-fn table_structural_edits_move_metadata_and_refuse_partial_edits() {
+fn table_structural_edits_move_and_resize_rows_but_protect_schema() {
     let mut wb = book();
     let id = wb
         .create_table(SheetId(1), range(2, 2, 5, 3), "Sales")
@@ -181,12 +181,14 @@ fn table_structural_edits_move_metadata_and_refuse_partial_edits() {
         .table_id();
     wb.structural_edit(0, Axis::Row, 0, 2, false).unwrap();
     assert_eq!(wb.table(id).unwrap().1.range, range(4, 2, 7, 3));
-    assert!(wb.structural_edit(0, Axis::Row, 6, 2, false).is_err());
-    assert!(wb.structural_edit(0, Axis::Row, 5, 5, true).is_err());
+    wb.structural_edit(0, Axis::Row, 6, 2, false).unwrap();
+    assert_eq!(wb.table(id).unwrap().1.range, range(4, 2, 9, 3));
+    wb.structural_edit(0, Axis::Row, 5, 5, true).unwrap();
+    assert_eq!(wb.table(id).unwrap().1.range, range(4, 2, 4, 3));
     assert!(wb.structural_edit(0, Axis::Row, 4, 1, true).is_err());
     assert!(wb.structural_edit(0, Axis::Col, 3, 1, false).is_err());
     wb.structural_edit(0, Axis::Col, 0, 1, false).unwrap();
-    assert_eq!(wb.table(id).unwrap().1.range, range(4, 3, 7, 4));
+    assert_eq!(wb.table(id).unwrap().1.range, range(4, 3, 4, 4));
     assert_eq!(wb.active_sheet().get_raw(4, 3), "Column1");
 }
 

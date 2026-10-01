@@ -94,6 +94,243 @@ fn header_in_view_rect(
 }
 
 impl Spreadsheet {
+    fn table_growth_blocked(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.block_if_previewing(cx) {
+            return true;
+        }
+        if self.row_view.is_sorted() || self.row_view.is_filtered() {
+            self.status_message =
+                Some("Clear sorting and filters before appending Table rows.".into());
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// None means an ordinary edit; Some is an atomic append attempt.
+    pub(crate) fn commit_table_append_value(
+        &mut self,
+        view_row: usize,
+        col: usize,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        if value.trim().is_empty() {
+            return None;
+        }
+        let row = self.row_view.view_to_data(view_row);
+        let range = TableRange {
+            start_row: row,
+            end_row: row,
+            start_col: col,
+            end_col: col,
+        };
+        let id = match self.wb(cx).table_append_target(self.sheet(cx).id, range) {
+            Ok(Some(id)) => id,
+            Ok(None) => return None,
+            Err(e) => {
+                self.status_message = Some(e);
+                cx.notify();
+                return Some(false);
+            }
+        };
+        if self.table_growth_blocked(cx) {
+            return Some(false);
+        }
+        let result = self.workbook.update(cx, |wb, _| {
+            wb.append_table_rows(id, 1, &[(row, col, value.into())])
+        });
+        Some(match result {
+            Ok(commit) => {
+                self.record_table_commit(commit, "Append Table row".into(), cx);
+                true
+            }
+            Err(e) => {
+                self.status_message = Some(e);
+                cx.notify();
+                false
+            }
+        })
+    }
+
+    pub(crate) fn add_table_row(&mut self, id: TableId, cx: &mut Context<Self>) {
+        if self.mode.is_editing() || self.table_growth_blocked(cx) {
+            return;
+        }
+        self.append_table_row_and_select(id, Vec::new(), cx);
+    }
+
+    fn append_table_row_and_select(
+        &mut self,
+        id: TableId,
+        writes: Vec<(usize, usize, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self
+            .workbook
+            .update(cx, |wb, _| wb.append_table_rows(id, 1, &writes));
+        match result {
+            Ok(commit) => {
+                let range = commit.after_table().unwrap().range;
+                let percent_cell = self
+                    .mode
+                    .is_editing()
+                    .then_some(self.view_state.selected)
+                    .filter(|_| self.edit_value.trim().ends_with('%'));
+                self.cancel_edit(cx);
+                self.record_table_commit(commit, "Append Table row".into(), cx);
+                if let Some((row, col)) = percent_cell {
+                    if matches!(
+                        self.sheet(cx).get_format(row, col).number_format,
+                        visigrid_engine::cell::NumberFormat::General
+                    ) {
+                        self.with_active_sheet_mut(cx, |sheet| {
+                            sheet.set_number_format(
+                                row,
+                                col,
+                                visigrid_engine::cell::NumberFormat::Percent { decimals: 0 },
+                            )
+                        });
+                    }
+                }
+                self.clipboard_visual_range = None;
+                self.maybe_show_cycle_banner(cx);
+                self.surface_incremental_recalc_problems(cx);
+                self.view_state.selected = (range.end_row, range.start_col);
+                self.view_state.selection_end = None;
+                self.view_state.additional_selections.clear();
+                self.tab_chain_origin_col = Some(range.start_col);
+                self.ensure_visible(cx);
+            }
+            Err(e) => {
+                self.status_message = Some(e);
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn table_tab_append(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_multi_selection() || self.mode.is_overlay() {
+            return false;
+        }
+        if self.mode.is_editing() {
+            self.restore_formula_home_sheet(cx);
+        }
+        let Some(table) = self.table_under_cursor(cx) else {
+            return false;
+        };
+        let (r, c) = self.view_state.selected;
+        if table.range.data_rows() == 0
+            || (self.row_view.view_to_data(r), c) != (table.range.end_row, table.range.end_col)
+        {
+            return false;
+        }
+        if self.table_growth_blocked(cx) {
+            return true;
+        }
+        let writes = if self.mode.is_editing() {
+            let mut value = self.edit_value.clone();
+            if value.starts_with('+') {
+                value = format!("={}", &value[1..]);
+            }
+            if value.starts_with('=') {
+                let missing = value
+                    .chars()
+                    .filter(|c| *c == '(')
+                    .count()
+                    .saturating_sub(value.chars().filter(|c| *c == ')').count());
+                value.extend(std::iter::repeat_n(')', missing));
+            }
+            vec![(r, c, value)]
+        } else {
+            Vec::new()
+        };
+        self.append_table_row_and_select(table.id, writes, cx);
+        true
+    }
+
+    /// Growth consumes the paste in one guarded commit. Other pastes retain
+    /// their existing clipboard behavior.
+    pub(crate) fn paste_table_growth(
+        &mut self,
+        row: usize,
+        col: usize,
+        values: &[Vec<String>],
+        incompatible_objects: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let width = values.iter().map(Vec::len).max().unwrap_or(0);
+        if values.is_empty() || width == 0 || self.sheet(cx).tables().is_empty() {
+            return false;
+        }
+        let range = TableRange {
+            start_row: row,
+            start_col: col,
+            end_row: row.saturating_add(values.len() - 1),
+            end_col: col.saturating_add(width - 1),
+        };
+        let id = match self.wb(cx).table_append_target(self.sheet(cx).id, range) {
+            Ok(Some(id)) => id,
+            Ok(None) => return false,
+            Err(e) => {
+                self.status_message = Some(e);
+                cx.notify();
+                return true;
+            }
+        };
+        if self.table_growth_blocked(cx) {
+            return true;
+        }
+        if incompatible_objects {
+            self.status_message = Some("This append includes clipboard merges or comments. Use Paste Values, or resize the Table before pasting.".into());
+            cx.notify();
+            return true;
+        }
+        let count = range.end_row - self.wb(cx).table(id).unwrap().1.range.end_row;
+        let writes: Vec<_> = values
+            .iter()
+            .enumerate()
+            .flat_map(|(r, cells)| {
+                cells
+                    .iter()
+                    .enumerate()
+                    .map(move |(c, value)| (row + r, col + c, value.clone()))
+            })
+            .collect();
+        match self
+            .workbook
+            .update(cx, |wb, _| wb.append_table_rows(id, count, &writes))
+        {
+            Ok(commit) => {
+                self.record_table_commit(
+                    commit,
+                    format!("Paste and append {count} Table row(s)"),
+                    cx,
+                );
+                self.clipboard_visual_range = None;
+                let failures = self.wb(cx).validate_range(
+                    self.sheet_index(cx),
+                    row,
+                    col,
+                    range.end_row,
+                    range.end_col,
+                );
+                if failures.count > 0 {
+                    self.store_validation_failures(&failures);
+                    self.status_message = Some(format!(
+                        "Pasted and appended {count} Table row(s); {} validation failure(s).",
+                        failures.count
+                    ));
+                }
+            }
+            Err(e) => {
+                self.status_message = Some(e);
+                cx.notify();
+            }
+        }
+        true
+    }
+
     pub(crate) fn show_table_controls(&self, cx: &App) -> bool {
         let (row, col) = self.view_state.selected;
         !self.zen_mode
@@ -368,6 +605,12 @@ impl Spreadsheet {
     ) -> bool {
         if rows == 0 || cols == 0 || self.sheet(cx).tables().is_empty() {
             return false;
+        }
+        if rows > 1 && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
+            self.status_message =
+                Some("Clear sorting and filters before pasting multiple Table rows.".into());
+            cx.notify();
+            return true;
         }
         let start = self.row_view.visible_rows().iter().position(|r| *r == row);
         for offset in 0..rows {

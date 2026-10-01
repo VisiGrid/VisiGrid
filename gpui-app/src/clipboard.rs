@@ -935,6 +935,18 @@ impl Spreadsheet {
                 (0, 0)  // External clipboard - no adjustment
             };
 
+            if !self.sheet(cx).tables().is_empty() {
+                let mut values: Vec<Vec<String>> = parsed_grid.clone().unwrap_or_else(|| lines.iter().map(|l| l.split('\t').map(str::to_owned).collect()).collect());
+                if is_internal {
+                    for value in values.iter_mut().flatten() {
+                        if value.starts_with('=') { *value = self.adjust_formula_refs(value, delta_row, delta_col); }
+                    }
+                }
+                let objects = is_internal && (self.internal_clipboard.as_ref().is_some_and(|ic| !ic.merges.is_empty() || ic.comments.iter().flatten().any(Option::is_some))
+                    || self.sheet(cx).comments().any(|((r,c),_)| r >= data_start_row && r <= paste_max_row && c >= start_col && c <= paste_max_col));
+                if self.paste_table_growth(data_start_row, start_col, &values, objects, cx) { return; }
+            }
+
             // For filtered paste: find the starting visible index
             let visible_start_idx = if is_filtered {
                 self.row_view.visible_rows().iter().position(|&vr| vr == start_row)
@@ -1293,6 +1305,15 @@ impl Spreadsheet {
             }
         }
 
+        if !self.sheet(cx).tables().is_empty() {
+            let values: Vec<Vec<String>> = if use_internal_values {
+                self.internal_clipboard.as_ref().map(|ic| ic.values.iter().map(|row| row.iter().map(Self::value_to_canonical_string).collect()).collect()).unwrap_or_default()
+            } else {
+                system_text.as_deref().unwrap_or("").lines().map(|line| line.split('\t').map(|value| Self::value_to_canonical_string(&Self::parse_external_value(value))).collect()).collect()
+            };
+            if self.paste_table_growth(data_start_row, start_col, &values, false, cx) { return; }
+        }
+
         let mut changes = Vec::new();
         let mut values_grid: Vec<Vec<String>> = Vec::new();
         let mut end_data_row = data_start_row;
@@ -1598,7 +1619,7 @@ impl Spreadsheet {
         // Block if paste would split a merged region
         {
             let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.as_str()).unwrap_or("");
-            let lines: Vec<&str> = raw_tsv.lines().collect();
+            let lines = full_paste_lines(raw_tsv, true);
             let paste_rows = lines.len();
             let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
             if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
@@ -1626,6 +1647,13 @@ impl Spreadsheet {
         let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()).unwrap_or_default();
         let src_data_row = self.row_view.view_to_data(src_row);
         let (delta_row, delta_col) = (data_start_row as i32 - src_data_row as i32, start_col as i32 - src_col as i32);
+
+        if !self.sheet(cx).tables().is_empty() {
+            let values: Vec<Vec<String>> = full_paste_lines(&raw_tsv, true).into_iter().map(|line| line.split('\t').map(|value| {
+                if value.starts_with('=') { self.adjust_formula_refs(value, delta_row, delta_col) } else { value.to_owned() }
+            }).collect()).collect();
+            if self.paste_table_growth(data_start_row, start_col, &values, false, cx) { return; }
+        }
 
         // For filtered paste: find the starting visible index
         let visible_start_idx = if is_filtered {

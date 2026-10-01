@@ -1,6 +1,6 @@
-# Tables: engine, structured references, and desktop authoring
+# Tables: engine, structured references, desktop authoring, and row growth
 
-Status: desktop authoring implementation, 2026-10-01. This is the staged implementation contract, not a declaration that the complete Tables release is ready. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
+Status: desktop authoring and safe row growth implementation, 2026-10-01. This is the staged implementation contract, not a declaration that the complete Tables release is ready. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
 
 ## Model
 
@@ -12,7 +12,7 @@ Table ranges cannot overlap another table, a merged region, pivot output, or an 
 
 ## Operations and undo
 
-`Workbook::create_table`, `rename_table`, `rename_table_columns`, `resize_table`, and `remove_table` validate before changing state and return an opaque `TableCommit`. `apply_table_commit(commit, undo)` replays that commit with schema/header and dependent-formula preconditions. A stale commit fails before mutation. No body snapshot is stored; undo retains schema, header preconditions, original typed values of changed headers, and sparse formula-source changes. New dependent formulas that require additional rewrites make replay stale. Creation also captures existing dependent sources so undo restores their originally unbound state.
+`Workbook::create_table`, `rename_table`, `rename_table_columns`, `resize_table`, and `remove_table` validate before changing state and return an opaque `TableCommit`. `apply_table_commit(commit, undo)` replays that commit with schema/header and dependent-formula preconditions. A stale commit fails before mutation. No whole-body snapshot is stored; undo retains schema, header preconditions, original typed values of changed headers, sparse append writes, and sparse formula-source changes. New dependent formulas that require additional rewrites make replay stale. Creation also captures existing dependent sources so undo restores their originally unbound state.
 
 Creation uses an explicit rectangle whose first row is already the header. It converts normalized headers to text, preserving their explicit formatting. The desktop suggests the current region for a single-cell selection; inserting a header row remains future work.
 
@@ -20,7 +20,23 @@ Resize keeps the top-left corner fixed and changes the bottom/right edges. Survi
 
 Headers change through the schema API. Low-level cell setters refuse direct header value writes; tracked workbook setters return no recalculation delta for a refused write. Session batches and operation plans reject header writes during preflight, so they cannot report a successful partial edit. Hosts must use this preflight before other multi-cell editing flows are exposed.
 
-Structural edits entirely before a Table move its bounds with its cells. Edits after it leave its bounds unchanged. Insertions within a Table and deletions intersecting it are temporarily refused. Use explicit resize/remove for schema changes. This keeps the existing structural undo contract intact until table-aware row/column history is integrated. Table-bearing sheet duplication also temporarily refuses instead of duplicating IDs. Sheet removal/restoration updates name reservations and rejects conflicting restoration. Removing a sheet with Table references from other sheets is refused until sheet history can capture those rewrites.
+Structural edits entirely before a Table move its bounds with its cells. Edits after it leave its bounds unchanged. Whole worksheet rows inserted within the body grow the Table; deleted body rows shrink it, including deletion of every record to leave a header-only Table. Generic deletion of headers and column edits intersecting a Table remain refused. `TableRowHistory` stores before/after schema bounds alongside ordinary row history; undo restores exact bounds even when reinserting at the bottom of a now-empty Table. Replay checks the current Table catalog before mutation. The desktop continues to retain deleted cells, comments, row heights, print setup and formula rewrites in the same row history entry. This helper is not a standalone cell snapshot. Table-bearing sheet duplication also temporarily refuses instead of duplicating IDs. Sheet removal/restoration updates name reservations and rejects conflicting restoration. Removing a sheet with Table references from other sheets is refused until sheet history can capture those rewrites.
+
+## Safe append
+
+`Workbook::append_table_rows` accepts an explicit row count and sparse body writes, and returns one guarded `TableCommit`. Ordinary workbook setters and file loading never infer append intent. Appending validates the entire new stripe, including untouched columns: existing values/comments, another Table, merges, spills, pivot output, or the grid boundary refuse the operation before any write. Explicit Resize remains the way to include existing records. Formatting-only empty cells are allowed and retain their formatting. Append changes membership without inserting worksheet rows or shifting adjacent data.
+
+Desktop entry points:
+
+- Nonempty typing immediately below a Table, within its width, appends one row when the new stripe is empty.
+- A rectangular paste starting in the body or immediately below it, contained within its width and extending below the bottom, appends through the pasted last row. Represented blank records count. Existing body writes and new bounds share one undo entry.
+- A paste crossing both side and bottom boundaries refuses with Resize guidance. Writes separated by a blank row or entirely to the right do not imply growth. Single-cell paste broadcast/fill across a selected range retains existing fill behavior.
+- Tab from the last body cell appends one empty row and selects its first column. An in-progress edit in that last cell joins the append commit. A header-only Table uses the **Add row** control; that control is also available for nonempty Tables.
+- Clearing cell values retains membership. Appending and structural row edits refuse active sorting/filtering until cleared.
+
+Normal paste, Paste Values and Paste Formulas share append preflight. An internal normal paste carrying merges/comments (or replacing destination comments) refuses growth with guidance to use Paste Values or resize first; it never silently drops those objects. Calculated-column propagation is not yet implemented, so added rows have only the supplied values/formulas.
+
+Undo/redo checks both schema and typed values owned by the append commit. Redo refuses newly occupied space; undo refuses edits to appended cells or new data/comments in previously untouched appended cells. Rewind replays append and whole-row history through the same engine operations. Grouped arbitrary structural mutations are not exposed as a new API in this slice.
 
 ## Structured formulas
 
@@ -61,17 +77,17 @@ Native semantic fingerprints use v3 for Table-bearing workbooks, including Table
 
 - **Insert → Table**, **Create Table** in the command palette, and platform-primary **T** open a preview. The native macOS menu exposes Create Table under Data. The shortcut only runs with grid focus and does not intercept cell editing.
 - An explicit rectangle is used exactly; a single cell suggests its current region. Additional selections and active sorting/filtering are refused. Name and local A1 range are editable; header normalization and record/column counts are previewed. Cancel changes nothing.
-- This authoring slice treats the first row as headers, including header-only Tables. Inserting a new header row for headerless data remains part of the structural-history slice.
-- Selecting a Table cell shows its name, exact range, record count, Rename, Resize, Banded Rows, and Convert to Range. Convert has a reviewable confirmation. Header tint, alternating body rows, and the active Table outline render only in the viewport; explicit/conditional fills retain precedence, and no per-cell formatting is stamped.
+- This authoring slice treats the first row as headers, including header-only Tables. Inserting a new header row for headerless data remains a follow-up.
+- Selecting a Table cell shows its name, exact range, record count, Add row, Rename, Resize, Banded Rows, and Convert to Range. Convert has a reviewable confirmation. Header tint, alternating body rows, and the active Table outline render only in the viewport; explicit/conditional fills retain precedence, and no per-cell formatting is stamped.
 - Editing a header cell invokes a schema rename and rewrites dependent formulas. Invalid edits leave the original header intact and report the reason. Bulk paste/fill/clear/cut, transforms, and Replace All that include headers are refused before mutation. Fill Down may use a header as its source when all destinations are body cells. Multi-header schema paste remains a follow-up.
 - Creation, rename, resize, banding, conversion, and header edits use sparse `TableCommit` history entries. Rewind can replay them and locate their Table range. Stale top-level undo/redo reports an error and retains its history position.
 - Worksheet sort/AutoFilter refuses Table-bearing sheets pending Table-aware views. Merge refuses Table cells before clearing any values. Desktop Excel export refuses Tables until the user converts them to ranges or saves in `.sheet` format; XLSX Table interchange is still unimplemented.
 
-Automatic growth, calculated-column propagation, Table-backed pivot sources, headerless creation, multi-header paste, and Table-local filters are not part of this desktop slice.
+Calculated-column propagation, Table-backed pivot sources, headerless creation, multi-header paste, and Table-local filters remain outside this slice.
 
 ## Next slices
 
-1. Table-aware append and structural undo, headerless creation, calculated-column rules and visible exceptions.
+1. Calculated-column rules and visible exceptions, followed by headerless creation and remaining column structural history.
 2. Multi-header schema paste and remaining formula editing/interchange integrations.
 3. Table-backed pivot sources with stable field IDs, explicit refresh, and stale-state feedback.
 4. XLSX interoperability subset, required-feature file compatibility, web/cloud preservation, and export-loss messaging.
@@ -81,7 +97,7 @@ Existing PivotTables remain a separate feature.
 
 ## Verification
 
-Behavior tests are in `crates/engine/tests/tables.rs`, `crates/engine/tests/structured_tables.rs`, and `crates/io/tests/tables.rs`; session-host and operation-plan tests cover atomic header rejection. Run:
+Behavior tests are in `crates/engine/tests/tables.rs`, `crates/engine/tests/table_growth.rs`, `crates/engine/tests/structured_tables.rs`, and `crates/io/tests/tables.rs`; session-host and operation-plan tests cover atomic header rejection. Run:
 
 ```sh
 cargo test -p visigrid-engine -p visigrid-io -p visigrid-session-host
@@ -92,3 +108,5 @@ The structured-reference regressions cover syntax/escaping, row context, cross-s
 Verified 2026-10-01: 1,279 tests passed, zero failed, 24 existing tests ignored across these packages. This includes 16 structured-reference integration tests and two new IO regressions, in addition to the foundation's 20 Tables tests.
 
 Desktop validation, 2026-10-01: `cargo test -p visigrid-gpui --bin visigrid` passed 577 tests, zero failures, three existing ignores; `cargo build -p visigrid-gpui --bin visigrid` passed. New tests cover dialog ranges, canonical-row header preflight, schema/formula/style history replay and stale refusal, and structured-selector editor recognition. Linux live checks cover creation preview, controls and pointer geometry, Table/header rename, direct structured formula entry, header rename undo/redo, resize, banding undo, atomic clear refusal, conversion confirmation/cancellation A1 conversion undo, and native save/reopen preserving the Table and structured formula. macOS/Windows UI and XLSX interchange remain untested.
+
+Row growth validation, 2026-10-01: the full engine/IO/session-host run passed 1,287 tests (24 existing ignores), and the additional native/JSON append round-trip test passed. The final desktop suite passed 578 tests (3 existing ignores); the launchable build passed. Eight new engine regressions cover explicit intent, 1,000-row paste with blank records, collisions/stale replay, one-revision append, header-only membership, grid bounds and structural row history. Desktop rewind covers append and whole-row insertion/deletion. Linux live checks confirmed typing growth with undo/redo, Tab with and without an in-progress edit, Add row including header-only Tables, overlapping rectangular paste with one-step undo, deleting all body rows with undo/redo, and occupied-row refusal with unchanged bounds/data. The temporary QA workbook was saved. macOS/Windows UI remain untested.
