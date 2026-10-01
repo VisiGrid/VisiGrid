@@ -66,6 +66,7 @@ pub(crate) fn bind(
                 Mode::FontPicker => this.font_picker_up(cx),
                 Mode::ThemePicker => this.theme_picker_up(cx),
                 Mode::CloudOpen => this.cloud_picker_up(cx),
+                Mode::PasteSpecial => this.paste_special_up(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
                 Mode::Edit => this.confirm_edit_up(cx),
                 // Any other overlay swallows it. The arms above are the
@@ -136,6 +137,7 @@ pub(crate) fn bind(
                 Mode::FontPicker => this.font_picker_down(cx),
                 Mode::ThemePicker => this.theme_picker_down(cx),
                 Mode::CloudOpen => this.cloud_picker_down(cx),
+                Mode::PasteSpecial => this.paste_special_down(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
                 Mode::Edit => this.confirm_edit(cx),
                 // Any other overlay swallows it. The arms above are the

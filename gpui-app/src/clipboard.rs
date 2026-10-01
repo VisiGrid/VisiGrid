@@ -524,6 +524,12 @@ impl Spreadsheet {
         // Generate unique nonce for clipboard matching
         let id: u128 = rand::random();
 
+        // A cell copy supersedes a format copied with Ctrl+Shift+C, so
+        // Ctrl+Shift+V goes back to pasting values.
+        if self.mode != crate::mode::Mode::FormatPainter {
+            self.format_painter = None;
+        }
+
         self.internal_clipboard = Some(InternalClipboard {
             raw_tsv: raw_tsv.clone(),
             values,
@@ -691,11 +697,29 @@ impl Spreadsheet {
             return;
         }
 
-        self.paste_all(cx);
+        // Ctrl+V brings contents (formulas, comments, merges) and leaves the
+        // destination's formatting alone.
+        self.paste_contents(false, cx);
     }
 
-    /// Full paste is explicit and must not inherit the values-only preference.
+    /// Paste Special > All: contents plus the copied cells' formatting.
+    /// Explicit, so it never inherits the values-only preference.
     pub fn paste_all(&mut self, cx: &mut Context<Self>) {
+        self.paste_contents(true, cx);
+    }
+
+    /// Set a pasted cell's format, recording the change for undo.
+    fn set_pasted_format(&mut self, row: usize, col: usize, format: CellFormat, patches: &mut Vec<CellFormatPatch>, cx: &mut Context<Self>) {
+        let before = self.sheet(cx).get_format(row, col).clone();
+        if before != format {
+            self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
+            patches.push(CellFormatPatch { row, col, before, after: format });
+        }
+    }
+
+    /// Full paste. `with_formats` also copies the source formatting, which only
+    /// an internal clipboard carries.
+    fn paste_contents(&mut self, with_formats: bool, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() { self.paste_into_edit(cx); return; }
         // Read clipboard item to get both text and metadata
@@ -732,6 +756,8 @@ impl Spreadsheet {
             let is_filtered = self.row_view.is_filtered();
             let mut changes = Vec::new();
             let mut comment_patches = Vec::new();
+            let mut format_patches = Vec::new();
+            let with_formats = with_formats && is_internal;
 
             // For external pastes without tabs, try CSV-aware parsing (handles commas,
             // semicolons, pipes, and quoted fields). Only use the result if it found
@@ -851,7 +877,11 @@ impl Spreadsheet {
                             comment_patches.push(CommentPatch { row: *data_row, col: *col, before, after });
                         }
                     }
-
+                    if with_formats {
+                        if let Some(format) = self.internal_clipboard.as_ref().and_then(|ic| ic.formats.first()).and_then(|r| r.first()).cloned() {
+                            self.set_pasted_format(*data_row, *col, format, &mut format_patches, cx);
+                        }
+                    }
                 }
                 self.end_batch_and_broadcast(cx);
 
@@ -861,7 +891,7 @@ impl Spreadsheet {
                 }
 
                 // Record with provenance
-                if !changes.is_empty() || !comment_patches.is_empty() {
+                if !changes.is_empty() || !comment_patches.is_empty() || !format_patches.is_empty() {
                     let data_start_row = self.row_view.view_to_data(start_row);
                     let provenance = MutationOp::Paste {
                         sheet: self.sheet(cx).id,
@@ -876,6 +906,9 @@ impl Spreadsheet {
                     if !comment_patches.is_empty() {
                         self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
                         actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Paste comments".into() });
+                    }
+                    if !format_patches.is_empty() {
+                        actions.push(UndoAction::Format { sheet_index, patches: format_patches, kind: FormatActionKind::PasteFormats, description: "Paste formats".into() });
                     }
                     self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                     self.bump_cells_rev();
@@ -1007,6 +1040,11 @@ impl Spreadsheet {
                                 comment_patches.push(CommentPatch { row: target_data_row, col, before, after });
                             }
                         }
+                        if with_formats {
+                            if let Some(format) = self.internal_clipboard.as_ref().and_then(|ic| ic.formats.get(row_offset)).and_then(|r| r.get(col_offset)).cloned() {
+                                self.set_pasted_format(target_data_row, col, format, &mut format_patches, cx);
+                            }
+                        }
 
 
                         // Track paste bounds (in data coordinates)
@@ -1085,7 +1123,7 @@ impl Spreadsheet {
             self.end_batch_and_broadcast(cx);
 
             // Record with provenance (only if changes or merge changes were made)
-            if !changes.is_empty() || merge_action.is_some() || !comment_patches.is_empty() {
+            if !changes.is_empty() || merge_action.is_some() || !comment_patches.is_empty() || !format_patches.is_empty() {
                 let provenance = MutationOp::Paste {
                     sheet: self.sheet(cx).id,
                     dst_row: data_start_row,
@@ -1100,6 +1138,9 @@ impl Spreadsheet {
                 if !comment_patches.is_empty() {
                     self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
                     actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Paste comments".into() });
+                }
+                if !format_patches.is_empty() {
+                    actions.push(UndoAction::Format { sheet_index, patches: format_patches, kind: FormatActionKind::PasteFormats, description: "Paste formats".into() });
                 }
                 self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                 self.bump_cells_rev();
@@ -1212,9 +1253,6 @@ impl Spreadsheet {
         }
     }
 
-    /// Paste Values: paste computed values only (no formulas).
-    /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
-    /// When filtered, pastes to consecutive visible rows only.
     /// Toggle the "Ctrl+V pastes values" default and persist it.
     pub fn toggle_paste_values_default(&mut self, cx: &mut Context<Self>) {
         let new_value = !crate::settings::user_settings(cx)
@@ -1227,11 +1265,14 @@ impl Spreadsheet {
         self.status_message = Some(if new_value {
             "Ctrl+V now pastes values only (full paste: Paste Special > All)".to_string()
         } else {
-            "Ctrl+V now pastes everything (values only: Ctrl+Alt+Shift+V)".to_string()
+            "Ctrl+V now pastes everything (values only: Ctrl+Shift+V)".to_string()
         });
         cx.notify();
     }
 
+    /// Paste Values: paste computed values only (no formulas).
+    /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
+    /// When filtered, pastes to consecutive visible rows only.
     pub fn paste_values(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }

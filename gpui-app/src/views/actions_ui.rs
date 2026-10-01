@@ -428,6 +428,13 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &PasteFormat, _, cx| {
             this.paste_format(cx);
         }))
+        .on_action(cx.listener(|this, _: &PasteValuesOrFormat, _, cx| {
+            if this.format_painter.is_some() && this.mode != crate::mode::Mode::FormatPainter {
+                this.paste_format(cx);
+            } else {
+                this.paste_values(cx);
+            }
+        }))
         .on_action(cx.listener(|this, _: &CancelFormatPainter, _, cx| {
             this.cancel_format_painter(cx);
         }))

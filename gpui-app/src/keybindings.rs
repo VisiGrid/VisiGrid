@@ -254,9 +254,10 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new(&kb(m, "i"), ToggleItalic, Some("Spreadsheet")),
         KeyBinding::new(&kb(m, "5"), ToggleStrikethrough, Some("Spreadsheet")),  // Excel: Ctrl+5
 
-        // Format Painter (Ctrl+Shift+C = copy format, Ctrl+Shift+V = paste format)
+        // Ctrl+Shift+V pastes values, as in Excel 365 and Google Sheets. Right
+        // after Ctrl+Shift+C (copy format) it pastes that format instead.
         KeyBinding::new(&kb_shift(m, "c"), CopyFormat, Some("Spreadsheet")),
-        KeyBinding::new(&kb_shift(m, "v"), PasteFormat, Some("Spreadsheet")),
+        KeyBinding::new(&kb_shift(m, "v"), PasteValuesOrFormat, Some("Spreadsheet")),
 
         // Number formats (Mod+Shift+key = format shortcut)
         KeyBinding::new(&kb_shift(m, "4"), FormatCurrency, Some("Spreadsheet")),   // $

@@ -516,7 +516,7 @@ impl CommandId {
             Self::Copy => Some("Ctrl+C"),
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
-            Self::PasteValues => Some("Ctrl+Alt+Shift+V"),
+            Self::PasteValues => Some("Ctrl+Shift+V"),
             Self::TogglePasteValuesDefault => None,
             Self::ToggleCommentPreviews => None,
             Self::NextComment | Self::PreviousComment => None,
@@ -580,7 +580,7 @@ impl CommandId {
             Self::InsertFormulaAI => Some("Ctrl+Shift+A"),
             Self::AnalyzeAI => Some("Ctrl+Shift+E"),
             Self::CopyFormat => Some("Ctrl+Shift+C"),
-            Self::PasteFormat => Some("Ctrl+Shift+V"),
+            Self::PasteFormat => Some("Ctrl+Shift+C, Ctrl+Shift+V"),
             _ => None,
         }
     }

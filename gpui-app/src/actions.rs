@@ -230,7 +230,8 @@ actions!(format, [
     FormatPainter,            // Activate Format Painter mode (single-shot)
     FormatPainterLocked,      // Activate Format Painter in locked mode (stays active)
     CopyFormat,               // Copy format from active cell (Ctrl+Shift+C)
-    PasteFormat,              // Paste format to selection (Ctrl+Shift+V)
+    PasteFormat,              // Paste format to selection
+    PasteValuesOrFormat,      // Ctrl+Shift+V: paste values, or a format copied with Ctrl+Shift+C
     CancelFormatPainter,      // Cancel Format Painter mode
     OpenNumberFormatEditor, // Open number format editor (Ctrl+1 escalation)
     // Background colors
