@@ -203,7 +203,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let muted = app.token(TokenKey::TextMuted);
     let border = app.token(TokenKey::PanelBorder);
     let accent = app.token(TokenKey::Accent);
-    let mut fields = div().flex().flex_col().gap_3();
+    let creating = d.kind == TableDialogKind::Create;
+    let mut fields = div().flex().gap_3().when(!creating, |s| s.flex_col());
     for (index, label, value) in [(0, "Table name", &d.name), (1, "Range", &d.range)] {
         let label = if matches!(d.kind, TableDialogKind::ColumnFormula(..)) {
             "Column formula"
@@ -224,8 +225,9 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             div()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .child(div().text_size(px(12.0)).text_color(muted).child(label))
+                .flex_1().min_w_0()
+                .gap_2()
+                .child(div().text_size(px(12.0)).text_color(muted).child(if creating && index == 1 { "Source range" } else { label }))
                 .child(
                     div()
                         .id(("table-field", index))
@@ -235,7 +237,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                         .px_3()
                         .py_2()
                         .text_color(text)
-                        .min_h(px(34.0))
+                        .min_h(px(38.0))
+                        .bg(app.token(TokenKey::EditorBg))
                         .cursor_text()
                         .on_mouse_down(
                             MouseButton::Left,
@@ -249,7 +252,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                             }),
                         )
                         .child(
-                            div()
+                            div().overflow_hidden().text_ellipsis()
                                 .when(active && d.select_all, |s| {
                                     s.bg(app.token(TokenKey::SelectionBg))
                                 })
@@ -259,9 +262,10 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         );
     }
     if d.kind == TableDialogKind::Create {
-        fields = fields.child(div()
+        fields = div().flex().flex_col().gap_4().child(fields).child(div()
             .id("table-has-headers")
-            .flex().items_center().gap_2().px_2().py_1().rounded_sm().border_1()
+            .flex().items_center().gap_3().p_3().rounded_md().border_1()
+            .bg(app.token(TokenKey::EditorBg))
             .border_color(if d.field == 2 { accent } else { border })
             .cursor_pointer().text_color(text)
             .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
@@ -277,7 +281,11 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 .border_1().rounded_sm().border_color(if d.has_headers { accent } else { border })
                 .text_size(px(11.0)).text_color(accent)
                 .child(if d.has_headers { "✓" } else { "" }))
-            .child("My data has headers"));
+            .child(div().flex().flex_col().gap_1()
+                .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).child("My data has headers"))
+                .child(div().text_size(px(12.0)).text_color(muted).child(if d.has_headers {
+                    "Use the first row as column names."
+                } else { "Keep every selected row as data." }))));
     }
     let mut preview = div()
         .flex()
@@ -287,21 +295,59 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .text_color(muted);
     match d.kind {
         TableDialogKind::Create => {
-            preview = preview.child(if d.has_headers {
-                "The first row supplies the column headers. Your data stays in place."
-            } else {
-                "Insert a whole worksheet row above the data. All cells on this sheet at or below that row move down; every selected row stays as data."
-            });
-            match parse_range(&d.range).and_then(|r|app.wb(cx).preview_table_creation(d.sheet,r,d.has_headers)) {
-                Ok((range,headers)) => {
-                    preview = preview.child(format!("{} · {} records · {} columns",range_label(range),range.data_rows(),headers.len()));
-                    for (offset,name) in headers.iter().enumerate().take(6) {
-                        let old=app.wb(cx).sheet_by_id(d.sheet).map(|s|s.get_display(range.start_row,range.start_col+offset)).unwrap_or_default();
-                        preview=preview.child(if !d.has_headers || old==*name {name.clone()} else {format!("{} → {name}",if old.is_empty(){"(blank)"}else{&old})});
+            match parse_range(&d.range).and_then(|r| app.wb(cx)
+                .preview_table_creation(d.sheet, r, d.has_headers).map(|(result, headers)| (r, result, headers))) {
+                Ok((source, range, headers)) => {
+                    let record_count = range.data_rows();
+                    let shown_columns = headers.len().min(3);
+                    let sheet = app.wb(cx).sheet_by_id(d.sheet).unwrap();
+                    let cell = |value: String, header: bool| div()
+                        .flex_1().min_w_0().px_3().py_2()
+                        .overflow_hidden().text_ellipsis()
+                        .text_color(if header { text } else { muted })
+                        .when(header, |s| s.font_weight(FontWeight::MEDIUM))
+                        .child(value);
+                    let mut grid = div().rounded_md().border_1().border_color(border)
+                        .overflow_hidden().bg(app.token(TokenKey::EditorBg))
+                        .child(div().flex().bg(accent.opacity(0.10))
+                            .children(headers.iter().take(shown_columns).map(|name| cell(name.clone(), true))));
+                    for offset in 0..record_count.min(2) {
+                        let row = source.start_row + usize::from(d.has_headers) + offset;
+                        grid = grid.child(div().flex().border_t_1().border_color(border)
+                            .children((0..shown_columns).map(|col| cell(sheet.get_display(row, source.start_col + col), false))));
                     }
-                    if headers.len()>6 {preview=preview.child(format!("…and {} more columns",headers.len()-6));}
+                    if record_count == 0 {
+                        grid = grid.child(div().px_3().py_2().border_t_1().border_color(border)
+                            .child("No records yet. Add rows after creating the Table."));
+                    }
+                    preview = preview.gap_3()
+                        .child(div().flex().items_center().justify_between()
+                            .child(div().text_color(text).font_weight(FontWeight::MEDIUM).child("Preview"))
+                            .child(format!("{} {} · {} {}", record_count, if record_count == 1 { "record" } else { "records" },
+                                headers.len(), if headers.len() == 1 { "column" } else { "columns" })))
+                        .child(grid)
+                        .child(div().flex().flex_wrap().gap_2().justify_between()
+                            .child(format!("Table range  {}", range_label(range)))
+                            .when(headers.len() > shown_columns || record_count > 2, |s| s.child(format!(
+                                "Preview: {} columns · {} records", shown_columns, record_count.min(2)))));
+                    let changed: Vec<String> = headers.iter().enumerate().filter_map(|(offset, name)| {
+                        let old = sheet.get_display(source.start_row, source.start_col + offset);
+                        (d.has_headers && old != *name).then(|| format!("{} → {name}", if old.is_empty() { "(blank)" } else { &old }))
+                    }).collect();
+                    if !changed.is_empty() {
+                        preview = preview.child(div().overflow_hidden().text_ellipsis().child(format!("Column names adjusted: {}{}", changed.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+                            if changed.len() > 3 { " …" } else { "" })));
+                    }
+                    if !d.has_headers {
+                        preview = preview.child(div().p_3().rounded_md().bg(accent.opacity(0.06))
+                            .border_1().border_color(border).flex().flex_col().gap_1()
+                            .child(div().text_color(text).font_weight(FontWeight::MEDIUM).child(format!("Insert a header row at row {}", source.start_row + 1)))
+                            .child("All cells on this worksheet at or below that row move down, including data outside the Table. Column names are generated automatically."));
+                    }
                 }
-                Err(e)=>preview=preview.child(div().text_color(app.token(TokenKey::Error)).child(e)),
+                Err(e) => preview = preview.child(div().p_3().rounded_md().border_1()
+                    .border_color(app.token(TokenKey::Error).opacity(0.4))
+                    .text_color(app.token(TokenKey::Error)).child(e)),
             }
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
@@ -320,13 +366,14 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding disappears; explicit formatting is kept. You can undo this change.",d.name,d.range)),
     }
     let content = div()
-        .w(px(470.0))
-        .max_h(px(620.0))
+        .w(px(if creating { 560.0 } else { 470.0 }))
+        .max_h(px(720.0))
         .bg(app.token(TokenKey::PanelBg))
         .border_1()
         .border_color(border)
         .rounded_md()
-        .p_5()
+        .p_6()
+        .shadow_lg()
         .flex()
         .flex_col()
         .gap_4()
@@ -337,6 +384,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 .text_color(text)
                 .child(title),
         )
+        .when(creating, |s| s.child(div().mt(px(-8.0)).text_size(px(13.0)).text_color(muted)
+            .child("Organize your data with named columns and room to grow.")))
         .child(fields)
         .child(preview)
         .when_some(d.error.clone(), |s, e| {
@@ -348,36 +397,22 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             )
         })
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .justify_end()
-                .child(button(
-                    "table-dialog-cancel",
-                    "Cancel",
-                    app,
-                    |s, cx| {
+            div().flex().flex_wrap().gap_3().items_center().justify_between().pt_4().border_t_1().border_color(border)
+                .child(div().text_size(px(11.0)).text_color(muted).child("Enter to apply · Esc to cancel"))
+                .child(div().flex().items_center().gap_2()
+                    .child(button("table-dialog-cancel", "Cancel", app, |s, cx| {
                         s.table_dialog = None;
                         cx.notify();
-                    },
-                    cx,
-                ))
-                .child(button(
-                    "table-dialog-submit",
-                    title,
-                    app,
-                    |s, cx| s.submit_table_dialog(cx),
-                    cx,
-                )),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(muted)
-                .child(if d.kind == TableDialogKind::Create {
-                    "Tab to switch fields · Space to toggle headers · Enter to apply · Esc to cancel"
-                } else { "Tab to switch fields · Enter to apply · Esc to cancel" }),
+                    }, cx))
+                    .child(div().id("table-dialog-submit").px_4().py_2().rounded_md()
+                        .bg(accent).text_color(app.token(TokenKey::TextInverse))
+                        .text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).cursor_pointer()
+                        .hover(|s| s.bg(accent.opacity(0.85)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                            cx.stop_propagation();
+                            s.submit_table_dialog(cx);
+                        }))
+                        .child(title))),
         );
     crate::ui::modal_overlay(
         "table-dialog",
