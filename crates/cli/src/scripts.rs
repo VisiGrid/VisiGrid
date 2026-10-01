@@ -282,27 +282,7 @@ pub fn cmd_scripts_run(
     drop(borrowed);
 
     let active_sheet_index = workbook.active_sheet_index();
-    let mut changes = Vec::new();
-
-    for op in &ops_vec {
-        match op {
-            CliOp::SetValue { row, col, value } => {
-                let old = workbook.active_sheet().get_raw(*row, *col).to_string();
-                workbook.active_sheet_mut().set_value(*row, *col, value);
-                changes.push((*row, *col, old, value.clone()));
-            }
-            CliOp::SetFormula { row, col, formula } => {
-                let old = workbook.active_sheet().get_raw(*row, *col).to_string();
-                workbook.active_sheet_mut().set_value(*row, *col, formula);
-                changes.push((*row, *col, old, formula.clone()));
-            }
-            CliOp::Clear { row, col } => {
-                let old = workbook.active_sheet().get_raw(*row, *col).to_string();
-                workbook.active_sheet_mut().set_value(*row, *col, "");
-                changes.push((*row, *col, old, String::new()));
-            }
-        }
-    }
+    let changes = apply_cli_ops(&mut workbook, &ops_vec).map_err(CliError::io)?;
 
     // Recompute after changes
     workbook.rebuild_dep_graph();
@@ -1431,5 +1411,59 @@ mod tests {
         assert!(result.script_hash_ok, "script_hash should still be ok");
         assert!(!result.run_fingerprint_ok, "tampered fingerprint must fail");
         assert!(!result.is_ok());
+    }
+}
+
+
+/// Preflight the entire journal before changing any cell or recording success.
+fn apply_cli_ops(workbook: &mut visigrid_engine::workbook::Workbook, ops_vec: &[CliOp]) -> Result<Vec<(usize, usize, String, String)>, String> {
+    workbook.ensure_writable()?;
+    for (index, op) in ops_vec.iter().enumerate() {
+        let (CliOp::SetValue { row, col, .. } | CliOp::SetFormula { row, col, .. } | CliOp::Clear { row, col }) = op;
+        if let Some(error) = workbook.active_sheet().table_value_write_error(*row, *col) {
+            return Err(format!("Script operation {}: {error}", index + 1));
+        }
+    }
+    let mut changes = Vec::new();
+
+    for op in ops_vec {
+        match op {
+            CliOp::SetValue { row, col, value } => {
+                let old = workbook.active_sheet().get_raw(*row, *col).to_string();
+                workbook.active_sheet_mut().set_value(*row, *col, value);
+                changes.push((*row, *col, old, value.clone()));
+            }
+            CliOp::SetFormula { row, col, formula } => {
+                let old = workbook.active_sheet().get_raw(*row, *col).to_string();
+                workbook.active_sheet_mut().set_value(*row, *col, formula);
+                changes.push((*row, *col, old, formula.clone()));
+            }
+            CliOp::Clear { row, col } => {
+                let old = workbook.active_sheet().get_raw(*row, *col).to_string();
+                workbook.active_sheet_mut().set_value(*row, *col, "");
+                changes.push((*row, *col, old, String::new()));
+            }
+        }
+    }
+
+    Ok(changes)
+}
+
+#[cfg(test)]
+mod table_batch_tests {
+    use super::{apply_cli_ops, CliOp};
+    use visigrid_engine::{workbook::Workbook, table::TableRange};
+    #[test]
+    fn header_write_in_middle_rejects_entire_script_batch() {
+        let mut wb = Workbook::new();
+        let id = wb.active_sheet_id();
+        wb.create_table(id, TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 1 }, "Sales").unwrap();
+        let revision = wb.revision();
+        let ops = vec![CliOp::SetValue { row: 1, col: 0, value: "before".into() }, CliOp::SetValue { row: 0, col: 0, value: "bad header".into() }, CliOp::SetValue { row: 2, col: 0, value: "after".into() }];
+        assert!(apply_cli_ops(&mut wb, &ops).unwrap_err().contains("operation 2"));
+        assert_eq!(wb.active_sheet().get_raw(1, 0), "");
+        assert_eq!(wb.active_sheet().get_raw(2, 0), "");
+        assert_eq!(wb.active_sheet().get_raw(0, 0), "Column1");
+        assert_eq!(wb.revision(), revision);
     }
 }

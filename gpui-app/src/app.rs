@@ -463,6 +463,8 @@ pub struct Spreadsheet {
     pub comment_search: Entity<crate::comment_sidebar::CommentSearch>,
     pub comment_list_scroll: gpui::ScrollHandle,
     pub goto_input: String,
+    pub recovery_warning: Option<String>,
+    pub pending_table_recovery: Option<(std::path::PathBuf, visigrid_io::table_recovery::TableLoadIssue)>,
     pub find_input: String,
     pub find_results: Vec<MatchHit>,
     pub find_index: usize,
@@ -1176,6 +1178,8 @@ impl Spreadsheet {
             comment_search,
             comment_list_scroll: gpui::ScrollHandle::new(),
             goto_input: String::new(),
+            recovery_warning: None,
+            pending_table_recovery: None,
             find_input: String::new(),
             find_results: Vec::new(),
             find_index: 0,
@@ -3868,9 +3872,10 @@ impl Spreadsheet {
     ///
     /// This is the single source of truth for grid_body_origin.y and visible_rows().
     pub fn top_chrome_height(&self, cx: &App) -> f32 {
+        let recovery_h = if self.recovery_warning.is_some() { 56.0 } else { 0.0 };
         if self.zen_mode {
-            // Zen hides menu, formula bar, format bar — only column headers remain
-            return self.metrics.header_h;
+            // Recovery remains visible even when normal chrome is hidden.
+            return self.metrics.header_h + recovery_h;
         }
         let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
         let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
@@ -3883,7 +3888,7 @@ impl Spreadsheet {
             }
         };
         let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
-        titlebar_h + menu_h + formula_h + format_h + table_h + self.metrics.header_h
+        titlebar_h + menu_h + formula_h + format_h + table_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {
@@ -4259,7 +4264,7 @@ impl Spreadsheet {
 
     /// Check if editing is allowed (blocked during preview)
     pub fn can_edit(&self) -> bool {
-        !self.is_previewing() && self.review_mode.is_none()
+        self.recovery_warning.is_none() && !self.is_previewing() && self.review_mode.is_none()
     }
 
 

@@ -54,6 +54,7 @@ impl Spreadsheet {
     /// Returns true if blocked (command should return early).
     /// Sets status message with consistent preview warning.
     pub fn block_if_previewing(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.block_read_only_recovery(cx) { return true; }
         if self.review_mode.is_some() {
             self.status_message =
                 Some("Apply or dismiss Review Mode before editing the workbook.".to_string());
@@ -70,6 +71,7 @@ impl Spreadsheet {
     }
     /// Enter preview mode for the currently selected history entry
     pub fn enter_preview(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        self.wb(cx).ensure_writable()?;
         if self.review_mode.is_some() {
             self.block_if_previewing(cx);
             return Err("Review Mode is active".to_string());

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Tables compatibility and fixes
+
+- Files with newer Table metadata offer a read-only view and ask you to upgrade VisiGrid. Damaged Table metadata has a separate recovery prompt. Recovery keeps the original file untouched and shows saved formula results, which may be stale; editing, recalculation, Save and Save As are disabled.
+- Scripts reject protected Table-header writes before applying the batch. Replay reports errors for structural edits that would remove a Table header.
+- Inserting or deleting worksheet rows and columns preserves formula parentheses: `=(A1+B1)*2` no longer becomes `=A1+B1*2` when references move.
+- References beyond the last worksheet column, such as `=ABCD1`, now return `#NAME?`.
+- Older VisiGrid releases do not understand Tables: structured formulas show errors, and re-saving a native file there drops its Table definitions without warning. Keep the original file and use a Tables-capable version to edit it.
+
 ### Merged cells and Center Across Selection
 
 - **Sorting and AutoFilter no longer refuse because of a merged title.** They used to refuse if any merged cell existed anywhere on the sheet. Now only merges in the rows being sorted or filtered get in the way, as in Excel, and the sorted table is the one around the cursor: a title row above the header is skipped instead of being taken for the header.
