@@ -366,8 +366,34 @@ impl Spreadsheet {
         );
         self.lua_console.visible = false;
 
+        // Read the clipboard once, so the dialog can say what it's pasting.
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(|i| i.text().map(|s| s.to_string()));
+        let metadata = item.as_ref().and_then(|i| i.metadata().cloned());
+        let from_visigrid = Self::is_internal_paste(self.internal_clipboard.as_ref(), text.as_deref(), metadata.as_deref());
+        let (rows, cols) = match (&self.internal_clipboard, from_visigrid) {
+            (Some(ic), true) => (ic.values.len(), ic.values.first().map_or(0, |r| r.len())),
+            _ => text.as_deref().map_or((0, 0), |t| {
+                let lines: Vec<&str> = t.lines().collect();
+                (lines.len(), lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(0))
+            }),
+        };
+        if rows == 0 || cols == 0 {
+            self.status_message = Some("Nothing to paste \u{00b7} copy some cells first".to_string());
+            cx.notify();
+            return;
+        }
+
+        let dialog = &mut self.paste_special_dialog;
+        dialog.rows = rows;
+        dialog.cols = cols;
+        dialog.from_visigrid = from_visigrid;
         // Initialize with last selected mode (session memory)
-        self.paste_special_dialog.selected = self.last_paste_special_mode;
+        dialog.selected = if dialog.is_enabled(self.last_paste_special_mode) {
+            self.last_paste_special_mode
+        } else {
+            crate::app::PasteType::All
+        };
         self.mode = Mode::PasteSpecial;
         cx.notify();
     }
@@ -380,10 +406,11 @@ impl Spreadsheet {
     /// Move selection up in the Paste Special dialog
     pub fn paste_special_up(&mut self, cx: &mut Context<Self>) {
         use crate::app::PasteType;
+        let dialog = &mut self.paste_special_dialog;
         let types = PasteType::all();
-        let current_idx = types.iter().position(|t| *t == self.paste_special_dialog.selected).unwrap_or(0);
-        if current_idx > 0 {
-            self.paste_special_dialog.selected = types[current_idx - 1];
+        let current_idx = types.iter().position(|t| *t == dialog.selected).unwrap_or(0);
+        if let Some(t) = types[..current_idx].iter().rev().find(|t| dialog.is_enabled(**t)) {
+            dialog.selected = *t;
             cx.notify();
         }
     }
@@ -391,10 +418,11 @@ impl Spreadsheet {
     /// Move selection down in the Paste Special dialog
     pub fn paste_special_down(&mut self, cx: &mut Context<Self>) {
         use crate::app::PasteType;
+        let dialog = &mut self.paste_special_dialog;
         let types = PasteType::all();
-        let current_idx = types.iter().position(|t| *t == self.paste_special_dialog.selected).unwrap_or(0);
-        if current_idx < types.len() - 1 {
-            self.paste_special_dialog.selected = types[current_idx + 1];
+        let current_idx = types.iter().position(|t| *t == dialog.selected).unwrap_or(0);
+        if let Some(t) = types[current_idx + 1..].iter().find(|t| dialog.is_enabled(**t)) {
+            dialog.selected = *t;
             cx.notify();
         }
     }

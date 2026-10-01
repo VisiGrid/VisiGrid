@@ -906,7 +906,7 @@ fn enter_option(
 /// Default-paste option button.
 ///
 /// Whichever way this is set, the other paste is always one shortcut away:
-/// Ctrl+Alt+Shift+V pastes values, and Paste Special (Ctrl+Alt+V) offers All,
+/// Ctrl+Shift+V pastes values, and Paste Special (Ctrl+Alt+V) offers All,
 /// Values, Formulas and Formats. The preference only decides which one the
 /// bare Ctrl+V reaches for.
 fn paste_default_option(
