@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Pivot tables
+
+- **A pivot's styling follows its layout.** The header band, totals row and totals column used to stay where they were first drawn, so rearranging fields or a refresh that added groups left a header band on a data row and an unstyled totals row. They now move with the layout. Formatting you applied yourself stays where you put it, and changing the fields refits the pivot's columns (in the same undo step); a plain refresh still never changes widths.
+- **Refresh keeps number formats you set.** Reformatting a pivot's values (whole dollars instead of cents, say) used to be undone by the next refresh. Cells you've reformatted keep your format; the rest follow their value field.
+- **"Out of date" is always visible.** With the cursor in a pivot whose source has changed, or whose refresh failed, the status bar shows that ahead of any earlier message, which used to hide it.
+
 ## 0.41.0
 
 ### Printing
