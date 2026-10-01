@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Under the hood
+
+- **Built on Zed v1.22's GPUI**, up from v1.12, and on upstream Zed directly instead of VisiGrid's fork. The fork existed only to remove private macOS blur APIs that the Mac App Store rejects; Zed removed them too. Building from source now needs Rust 1.98.1.
+
 ## 0.42.0
 
 ### Tables
