@@ -356,6 +356,35 @@ pub fn preview(path: &Path, options: &CsvOptions, max_rows: usize) -> Result<Csv
     import_str(&content, encoding, options, max_rows)
 }
 
+/// Preview from bytes already read (the import dialog reads the start of a file
+/// once and re-previews from it on every change). A trailing partial record is
+/// harmless: only the first `max_rows` records are used.
+pub fn preview_bytes(bytes: &[u8], options: &CsvOptions, max_rows: usize) -> Result<CsvImport, String> {
+    let (content, encoding) = decode(bytes, options.encoding);
+    import_str(&content, encoding, options, max_rows)
+}
+
+/// The first `limit` bytes of a file, cut back to the last line break so a
+/// multi-byte character is never split (which would make UTF-8 look invalid).
+pub fn read_head(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::with_capacity(limit.min(1 << 20));
+    file.by_ref().take(limit as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() == limit {
+        if let Some(end) = bytes.iter().rposition(|&b| b == b'\n') {
+            let utf16 = bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]);
+            // UTF-16 LE puts the newline's zero byte after it
+            let keep = if utf16 && bytes.starts_with(&[0xFF, 0xFE]) { end + 2 } else { end + 1 };
+            bytes.truncate(keep.min(bytes.len()));
+            if utf16 && bytes.len() % 2 == 1 {
+                bytes.pop();
+            }
+        }
+    }
+    Ok(bytes)
+}
+
 /// Decode bytes: an explicit encoding, else a byte-order mark, else UTF-8, else
 /// Windows-1252 (Excel's "CSV" on Western Windows). A UTF-8 byte-order mark is
 /// removed rather than left on the first header name.

@@ -5,7 +5,7 @@ use std::path::Path;
 use visigrid_engine::sheet::Sheet;
 
 pub use crate::csv_import::{
-    import_report, import_text, preview, ColumnDecision, ColumnRule, CsvImport, CsvOptions, DateOrder, Encoding, Resolved,
+    import_report, import_text, preview, preview_bytes, read_head, ColumnDecision, ColumnRule, CsvImport, CsvOptions, DateOrder, Encoding, Resolved,
 };
 
 pub fn import(path: &Path) -> Result<Sheet, String> {

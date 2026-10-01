@@ -30,6 +30,7 @@ mod diff_actions;
 mod diff_view;
 mod editing;
 mod file_ops;
+mod csv_import_ui;
 mod pdf_export;
 mod native_print;
 mod fill;

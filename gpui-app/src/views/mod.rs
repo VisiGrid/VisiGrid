@@ -5,6 +5,7 @@ mod color_picker;
 pub mod command_palette;
 pub(crate) mod context_menu;
 mod cycle_banner;
+mod csv_import_view;
 mod hub_dialogs;
 mod pairing_dialog;
 mod export_report_dialog;
@@ -113,6 +114,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_rewind_success = app.rewind_success.visible;
     let show_pairing_prompt = app.pairing_prompt.is_some();
     let show_cycle_banner = app.cycle_banner.visible;
+    // The cycle banner wins the same spot; a CSV import rarely has cycles
+    let show_csv_banner = !show_cycle_banner
+        && app.mode != Mode::CsvImport
+        && app.current_csv().is_some_and(|c| c.banner_visible);
     let show_merge_confirm = app.merge_confirm.visible;
     let show_close_confirm = app.close_confirm_visible;
     let show_approval_confirm = app.approval_confirm_visible;
@@ -876,6 +881,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_cycle_banner, |div| {
             div.child(cycle_banner::render_cycle_banner(app, cx))
         })
+        .when(show_csv_banner, |div| {
+            div.child(csv_import_view::render_csv_banner(app, cx))
+        })
         .when(show_hub_paste_token, |div| {
             div.child(hub_dialogs::render_paste_token_dialog(app, cx))
         })
@@ -890,6 +898,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(app.mode == Mode::ExportPdf, |div| {
             div.child(pdf_export_dialog::render(app, cx))
+        })
+        .when(app.mode == Mode::CsvImport, |div| {
+            div.child(csv_import_view::render_csv_import_dialog(app, cx))
         })
         .when(show_export_report, |div| {
             div.child(export_report_dialog::render_export_report_dialog(app, cx))
