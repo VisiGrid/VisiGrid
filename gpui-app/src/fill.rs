@@ -38,10 +38,12 @@ impl Spreadsheet {
     pub fn fill_down(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
-        if self.block_if_merged("fill down", cx) { return; }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        // Source row (the row above, for a single row) through the last target row.
+        let from_row = if max_row <= min_row { min_row.saturating_sub(1) } else { min_row };
+        if self.block_if_merges_in("fill down", (from_row, min_col, max_row, max_col), cx) { return; }
 
         // Single row selected: source is the row above the selection
         let src_row = if max_row <= min_row {
@@ -133,10 +135,12 @@ impl Spreadsheet {
     pub fn fill_right(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
-        if self.block_if_merged("fill right", cx) { return; }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
 
         let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
+        // Source column (the one to the left, for a single column) through the last target column.
+        let from_col = if max_col <= min_col { min_col.saturating_sub(1) } else { min_col };
+        if self.block_if_merges_in("fill right", (min_row, from_col, max_row, max_col), cx) { return; }
 
         // Single column selected: source is the column to the left of the selection
         // (Excel-style Ctrl+R on a single cell/column)
@@ -335,7 +339,9 @@ impl Spreadsheet {
     /// Cells with nothing to total are left alone. One undo step.
     fn autosum_strip(&mut self, fixed: usize, from: usize, to: usize, horizontal: bool, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
-        if self.block_if_merged("AutoSum", cx) { return; }
+        // Only the strip of total cells is written.
+        let strip = if horizontal { (fixed, from, fixed, to) } else { (from, fixed, to, fixed) };
+        if self.block_if_merges_in("AutoSum", strip, cx) { return; }
 
         let mut writes = Vec::new();
         for i in from..=to {
@@ -683,10 +689,10 @@ impl Spreadsheet {
         ctrl_held: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_merged("fill", cx) { return; }
         {
             let (r0, r1) = (anchor.0.min(source_end.0).min(end.0), anchor.0.max(source_end.0).max(end.0));
             let (c0, c1) = (anchor.1.min(source_end.1), anchor.1.max(source_end.1).max(end.1));
+            if self.block_if_merges_in("fill", (r0, c0, r1, c1), cx) { return; }
             if self.block_if_pivot(r0, c0, r1, c1, "fill", cx) { return; }
         }
 
@@ -856,10 +862,10 @@ impl Spreadsheet {
         ctrl_held: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_merged("fill", cx) { return; }
         {
             let (c0, c1) = (anchor.1.min(source_end.1).min(end.1), anchor.1.max(source_end.1).max(end.1));
             let (r0, r1) = (anchor.0.min(source_end.0), anchor.0.max(source_end.0).max(end.0));
+            if self.block_if_merges_in("fill", (r0, c0, r1, c1), cx) { return; }
             if self.block_if_pivot(r0, c0, r1, c1, "fill", cx) { return; }
         }
 

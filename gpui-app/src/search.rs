@@ -123,6 +123,7 @@ pub enum CommandId {
     AlignRight,
     AlignGeneral,
     CenterAcrossSelection,
+    ConvertMergesToCenterAcross,
     ToggleItalic,
     ToggleUnderline,
     FormatCurrency,
@@ -350,6 +351,7 @@ impl CommandId {
             Self::AlignRight => "Align Right",
             Self::AlignGeneral => "Align General (Default)",
             Self::CenterAcrossSelection => "Center Across Selection",
+            Self::ConvertMergesToCenterAcross => "Convert Merged Cells to Center Across",
             Self::ToggleItalic => "Toggle Italic",
             Self::ToggleUnderline => "Toggle Underline",
             Self::FormatCurrency => "Format as Currency",
@@ -531,7 +533,8 @@ impl CommandId {
             Self::AlignCenter => None,
             Self::AlignRight => None,
             Self::AlignGeneral => None,
-            Self::CenterAcrossSelection => None,
+            Self::CenterAcrossSelection => Some("Ctrl+Alt+C"),
+            Self::ConvertMergesToCenterAcross => None,
             Self::ToggleItalic => Some("Ctrl+I"),
             Self::ToggleUnderline => Some("Ctrl+U"),
             Self::FormatCurrency => Some("Ctrl+Shift+$"),
@@ -632,6 +635,7 @@ impl CommandId {
             Self::AlignRight => "format alignment horizontal",
             Self::AlignGeneral => "format alignment horizontal default reset",
             Self::CenterAcrossSelection => "format alignment title header across columns without merge merging cells",
+            Self::ConvertMergesToCenterAcross => "unmerge merged cells title center across selection sort filter fix merge",
             Self::ToggleItalic => "format style",
             Self::ToggleUnderline => "format style",
             Self::FormatCurrency => "format number money dollar",
@@ -823,6 +827,7 @@ impl CommandId {
             Self::AlignRight,
             Self::AlignGeneral,
             Self::CenterAcrossSelection,
+            Self::ConvertMergesToCenterAcross,
             Self::ToggleItalic,
             Self::ToggleUnderline,
             Self::FormatCurrency,
@@ -1061,6 +1066,7 @@ impl CommandId {
             | Self::AlignRight
             | Self::AlignGeneral
             | Self::CenterAcrossSelection
+            | Self::ConvertMergesToCenterAcross
             | Self::ToggleItalic
             | Self::ToggleUnderline
             | Self::FormatCurrency
