@@ -78,6 +78,7 @@ impl Sheet {
             table.range.start_col = start;
             table.range.end_col = end;
         }
+        self.validate_table_view_schema(&tables)?;
         Ok(tables)
     }
 
@@ -245,6 +246,8 @@ impl Workbook {
             &history.before
         };
         let current = self.sheets[index].tables();
+        let target = if undo { &history.before } else { &history.after };
+        self.sheets[index].validate_table_view_schema(target)?;
         if current.len() != expected.len()
             || expected
                 .iter()

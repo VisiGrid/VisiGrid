@@ -611,6 +611,7 @@ fn write_fresh_db(
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
     if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
+    sheet.validate_table_view_spec()?;
     if sheet.has_table_history() {
         return save_workbook(&Workbook::from_sheets(vec![sheet.clone()], 0), path);
     }
@@ -942,6 +943,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 /// Save a complete workbook including all sheets and named ranges
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     workbook.ensure_writable()?;
+    workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook(conn, workbook))
 }
 
@@ -1101,6 +1103,7 @@ pub fn save_workbook_with_metadata(
     path: &Path,
 ) -> Result<(), String> {
     workbook.ensure_writable()?;
+    workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook_with_metadata(conn, workbook, metadata))
 }
 
@@ -2658,6 +2661,7 @@ pub fn save_workbook_full(
     path: &Path,
 ) -> Result<(), String> {
     workbook.ensure_writable()?;
+    workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook_full(conn, workbook, metadata, scripts, run_records))
 }
 

@@ -360,6 +360,10 @@ pub struct Sheet {
     /// Editable Tables. Mutation goes through workbook-level schema commits.
     #[serde(default)]
     pub(crate) data_tables: Vec<crate::table::DataTable>,
+    /// Saved Table view intent. Hosts rebuild projections after calculation;
+    /// storing this does not install a display mapping or mutation guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) table_view_spec: Option<crate::table_view::TableViewSpec>,
     /// Cells recovered without their Table definitions. Never save this view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
@@ -564,6 +568,7 @@ impl Sheet {
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             data_tables: Vec::new(),
+            table_view_spec: None,
             read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
@@ -598,6 +603,7 @@ impl Sheet {
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             data_tables: Vec::new(),
+            table_view_spec: None,
             read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),

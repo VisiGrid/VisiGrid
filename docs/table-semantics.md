@@ -1,6 +1,6 @@
 # Tables: engine, structured references, desktop authoring, row growth, and calculated columns
 
-Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 starts with the engine foundation for Table views, 2026-10-01; desktop sort/filter integration remains pending. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
+Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 has the Table view engine, persisted criteria and guarded engine history, 2026-10-01; desktop sort/filter integration remains pending. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
 
 ## Model
 
@@ -66,7 +66,7 @@ Rules follow Table/column renames, conversion, removed-column references and who
 
 Rule creation rejects malformed formulas and formulas that evaluate to arrays at preflight. Later inputs can still make a formula return an array; the existing Table spill barrier reports `#SPILL!` without writing outside the cell. Cycles retain the engine's existing behavior. Schema/rule commits check the cells they will overwrite before replay, so stale undo cannot silently erase later overrides.
 
-Native/JSON catalogs containing rules use Tables metadata version 2, which the previous Table reader rejects. Version 1 remains valid for workbooks without rules. Formula source/origin are persisted and included in semantic fingerprints, even for header-only Tables; overridden cell values remain ordinary persisted cells. The broader minimum-native-reader release gate still applies.
+Native/JSON catalogs containing rules use Tables metadata version 2 or later, which the first Table reader rejects. Version 1 remains valid for workbooks without rules or saved views. Formula source/origin are persisted and included in semantic fingerprints, even for header-only Tables; overridden cell values remain ordinary persisted cells. The broader minimum-native-reader release gate still applies.
 
 ## Structured formulas
 
@@ -124,15 +124,27 @@ Table-backed pivot sources, multi-header paste, and Table-local filters remain o
 
 `TableViewSpec` binds one sort and per-column filters to stable Table/column IDs. Renames and column insertions retain those bindings; a removed ID is rejected even if its name is reused. Multiple column filters combine with AND and use the existing typed-key normalization: text is trimmed and case-insensitive; numbers, text, booleans, errors and blanks remain distinct. Sort groups are numbers, text, booleans, errors, then blanks in both directions. Direction reverses values within a group; equal keys retain canonical record order so a rebuild or criteria-only restore is deterministic. This Table policy does not change existing worksheet sorting.
 
-The builder checks the supplied current owner: another Table or worksheet-range view must be cleared explicitly first. Hiding filter buttons preserves all criteria. Clearing sort and clearing filters are separate changes to the spec. The DTO can serialize criteria, but **is not yet included in native/JSON workbook persistence or undo history**.
+The builder checks the supplied current owner: another Table or worksheet-range view must be cleared explicitly first. Hiding filter buttons preserves all criteria. Clearing sort and clearing filters are separate changes to the spec.
 
 Whole-row projection is eligible only when the Table's body row band has no meaningful neighboring content. A sparse layout check refuses adjacent values (including formulas displaying blank), comments, explicit/inherited formats, styles, frozen-formula metadata, validation and conditional-format ranges. Merges, spills, other Tables and pivot output intersecting body rows also refuse activation. Titles and notes above/below are allowed. The same check runs on rebuild and mutation preflight, so later neighboring content is detected too.
 
 `validate_mutation_ranges` preflights a batch of canonical rectangles, rejecting adjacent body-row targets or changed Table bounds before a caller applies writes. It is an opt-in check, not an installed guard on Sheet setters, and does not replace header/pivot protections. `visible_body_rows` plans paste destinations once, skips hidden records and rejects overflow beyond the visible body. `focus_record` preserves the canonical record after rebuild, or selects the nearest visible row and reports that the record was filtered out. Hosts must rebuild after edits and recalculation, including cross-sheet precedent changes; these snapshots do not update themselves.
 
+### Persisted criteria and engine history
+
+Each Sheet owns at most one saved `TableViewSpec`. `Workbook::set_table_view_spec` validates bindings and layout, refuses owner switches until cleared, and returns a sparse `TableViewCommit`. `apply_table_view_commit` supports undo/redo with an exact current-criteria precondition and fresh validation of the target. Failure leaves the document and revision unchanged. A real view change increments the workbook revision once, without recalculating cells or bumping the sheet's data generation; a no-op does not dirty the document. Recovery workbooks refuse these changes too. The desktop history stack is not wired to this API yet.
+
+Native save variants and full JSON preserve the criteria in **Tables catalog version 3**, alongside each sheet's Table definitions. Table and field IDs survive saved-sheet ID remapping. Versions 1 and 2 remain readable and are still emitted when there are no saved views (depending on calculated rules). Clearing the last view therefore does not force a newer format forever. VisiGrid 0.42's version-2 reader treats view-bearing files as future-format files and offers read-only recovery. The outer full-JSON version remains 3.
+
+Only intent is persisted: never cached row order, visibility masks or computed filter menus. `Sheet::build_saved_table_view` resolves current bounds/IDs and builds from current computed values after loading/calculation. View criteria do not affect semantic fingerprints or aggregate membership. Unknown view fields, missing IDs, duplicate criteria, nonfinite numeric criteria, invalid schema bounds, version mismatches and two competing JSON view owners are refused. Restore validates the entire catalog before replacing any Table/view metadata; current-format corruption and future versions retain their distinct recovery paths. Save entry points validate bindings before writing.
+
+Renaming/moving Tables and inserting fields preserve saved criteria. Removing a referenced field, shrinking it out of the Table, converting its Table to a range, or replaying a schema change that would remove its binding requires clearing the affected criteria/view first. Those refusals happen before changing cells. Removing all body records retains valid intent but suspends projection until records return.
+
+Saved intent is distinct from an active display view. Later neighboring content may make activation unsafe without making the saved criteria corrupt: save/reopen preserves that intent, and projection rebuilding reports the layout error. The host must display the suspension and enforce active-view mutation guards when desktop integration lands. Merely loading this metadata does not activate a view or install those guards.
+
 ### Remaining integration before enabling desktop Table views
 
-1. Store one owner per sheet, persist criteria with reader-version/recovery handling, and add undo/redo for view changes.
+1. Bind the desktop's current owner and history stack to the saved criteria/engine commits. Restore or explicitly suspend the projection on open and sheet switch, and cover history rewind.
 2. Route rendering, selection, copy/paste/fill, comments and all editing paths through the same current projection. Preflight complete batches, rebuild after calculation, preserve record focus and reject stale asynchronous results. Include desktop-only row/column metadata in layout checks.
 3. Add exact-bound header filter menus, clear-sort/clear-filter actions and button visibility; keep append/structural changes gated until view transitions are safe.
 4. Exercise save/reopen, undo/redo, session/script mutations, filtered editing and large datasets in desktop QA. Existing worksheet Table sort/filter refusal stays in place until these are complete.
@@ -149,6 +161,8 @@ Totals rows and saved views come later. Web/cloud preservation is deferred.
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+Phase 2 saved criteria/history, 2026-10-01: the full engine/I/O suite passed 1,281 tests, zero failures, with 24 existing ignores. A final focused run passed all 37 view/state/recovery checks, including 10 new engine tests and 7 new I/O tests. Coverage includes independent criteria undo/redo, stale replay, schema preflight, empty-body suspension, atomic catalog restore, typed criteria, every native save variant, single/multi-sheet JSON, ID remapping, unchanged fingerprints/aggregates, and future/corrupt metadata recovery. Engine/I/O Clippy (`--all-targets`) passed with existing warnings and none in the added code. Formatting and diff checks passed. Desktop activation and its history stack remain pending.
 
 Phase 2 view foundation, 2026-10-01: `cargo test -p visigrid-engine` passed 953 tests with zero failures and 15 existing ignores. The 17 regressions in `crates/engine/tests/table_views.rs` cover bounded/stable sorting, typed combined filters, stable IDs, criterion serialization, owner/layout refusal, canonical mutation footprints, visible-record paste planning, edit/recalculation focus, and all 20,000 records of a larger Table. The final focused rerun also passed. Engine Clippy (`--all-targets`) passed with existing warnings and none in the new module/tests; rustfmt and diff checks passed. Desktop integration and workbook view persistence are not enabled or validated by this slice.
 

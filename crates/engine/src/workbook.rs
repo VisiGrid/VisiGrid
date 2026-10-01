@@ -8,6 +8,9 @@ pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot
 mod table_ops;
 #[path = "workbook_table_refs.rs"]
 mod table_refs;
+#[path = "workbook_table_view.rs"]
+mod table_view_ops;
+pub use table_view_ops::TableViewCommit;
 pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit, TableRowHistory, TableColumnHistory};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;

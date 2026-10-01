@@ -1,7 +1,7 @@
 //! Bounded Table sort/filter projections. Cells and formula coordinates never move.
 //!
-//! This is the Phase 2 engine foundation, not an installed sheet view. Hosts must
-//! retain one owner per sheet, persist the spec, rebuild after calculation, and
+//! This is the Phase 2 engine foundation, not an installed desktop view. Hosts must
+//! retain one owner per sheet, use the workbook's saved spec, rebuild after calculation, and
 //! preflight every mutation before exposing this through editing UI. The desktop
 //! Table sort/filter refusal remains until that integration is complete.
 
@@ -36,8 +36,8 @@ pub struct TableFilter {
     pub criteria: ColumnFilter,
 }
 
-/// Persist intent, never column offsets or a cached permutation. This DTO is not
-/// yet part of the native/JSON workbook format. IDs are resolved on every build.
+/// Persist intent, never column offsets or a cached permutation. IDs are
+/// resolved on every build; the Table catalog stores this in format version 3.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableViewSpec {
@@ -62,6 +62,18 @@ impl TableViewSpec {
     }
     pub fn clear_filters(&mut self) {
         self.filters.clear();
+    }
+
+    /// Validate saved identities without evaluating cells or activating a view.
+    /// Empty bodies retain intent until records are added again.
+    pub(crate) fn validate_schema(&self, table: &DataTable) -> Result<(), String> {
+        // Catalogs are untrusted. Check bounds/width before resolving offsets,
+        // including a catalog restored into an existing workbook.
+        table.validate(crate::sheet::NUM_ROWS, crate::sheet::NUM_COLS)?;
+        if self.table != table.id {
+            return Err("Table view refers to a different Table.".into());
+        }
+        self.resolve(table).map(|_| ())
     }
 
     fn resolve(&self, table: &DataTable) -> Result<FilterState, String> {
@@ -98,6 +110,15 @@ impl TableViewSpec {
         for filter in &self.filters {
             if !seen.insert(filter.column) {
                 return Err("A Table column can have only one filter criterion.".into());
+            }
+            if filter.criteria.selected.as_ref().is_some_and(|keys| {
+                keys.iter().any(|key| {
+                matches!(key, crate::filter::NormalizedFilterKey::Number(n) if !n.0.is_finite())
+            })
+            }) {
+                return Err(
+                    "Table filter numbers must be finite to save and reopen reliably.".into(),
+                );
             }
             state
                 .column_filters
