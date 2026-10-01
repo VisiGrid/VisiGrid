@@ -86,6 +86,7 @@ impl Spreadsheet {
     }
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.load_file_with_recovery(path, false, cx);
     }
 
