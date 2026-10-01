@@ -480,6 +480,10 @@ pub struct Spreadsheet {
     pub(crate) palette_results: Vec<SearchItem>,
     /// Headings over runs of `palette_results` (empty = no headings).
     pub(crate) palette_sections: Vec<crate::command_palette::PaletteSection>,
+    /// Recent files with folder and age, read once when the palette opens.
+    pub(crate) palette_recent_files: Vec<crate::search::RecentFile>,
+    /// Wheel movement not yet worth a whole row (trackpads send small deltas).
+    pub(crate) palette_wheel_px: f32,
     pub palette_total_results: usize,  // Matches counted for the footer
     // Pre-palette state for preview/restore
     pub(crate) palette_pre_selection: (usize, usize),
@@ -559,6 +563,7 @@ pub struct Spreadsheet {
     pub font_picker_query: String,         // Filter query
     pub font_picker_selected: usize,       // Selected item index
     pub font_picker_scroll_offset: usize,  // First visible item in list
+    pub(crate) font_picker_wheel_px: f32,  // Wheel movement not yet a whole row
     pub font_picker_focus: FocusHandle,    // Focus handle for the picker dialog
 
     // Transient UI state (not serialized — see UiState doc)
@@ -1189,6 +1194,8 @@ impl Spreadsheet {
             search_engine: Self::create_search_engine(),
             palette_results: Vec::new(),
             palette_sections: Vec::new(),
+            palette_recent_files: Vec::new(),
+            palette_wheel_px: 0.0,
             palette_total_results: 0,
             palette_pre_selection: (0, 0),
             palette_pre_selection_end: None,
@@ -1246,6 +1253,7 @@ impl Spreadsheet {
             font_picker_query: String::new(),
             font_picker_selected: 0,
             font_picker_scroll_offset: 0,
+            font_picker_wheel_px: 0.0,
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,

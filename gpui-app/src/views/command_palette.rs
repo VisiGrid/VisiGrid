@@ -13,7 +13,7 @@ use crate::actions::{
     PalettePageUp, PalettePageDown, PaletteHome, PaletteEnd,
 };
 use crate::app::{Spreadsheet, PaletteScope};
-use crate::command_palette::{is_open_from_disk, palette_row_has_second_line};
+use crate::command_palette::{is_open_from_disk, palette_row_has_second_line, wheel_rows};
 use crate::search::{SearchAction, SearchItem, SearchKind, SearchQuery};
 use crate::theme::TokenKey;
 
@@ -308,9 +308,8 @@ fn render_results(app: &Spreadsheet, c: &Palette, cx: &mut Context<Spreadsheet>)
         .flex_col()
         .py(px(4.0))
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-            let delta = event.delta.pixel_delta(px(30.0));
-            let dy: f32 = delta.y.into();
-            let rows = (dy / -30.0).round() as isize;
+            let dy: f32 = event.delta.pixel_delta(px(Spreadsheet::PALETTE_ROW_H)).y.into();
+            let rows = wheel_rows(&mut this.palette_wheel_px, dy, Spreadsheet::PALETTE_ROW_H);
             if rows != 0 {
                 this.palette_scroll(rows, cx);
             }
