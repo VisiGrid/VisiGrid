@@ -12,7 +12,7 @@ pub fn render_filter_button(
     cx: &mut Context<Spreadsheet>,
 ) -> Option<impl IntoElement> {
     // Only show if AutoFilter is enabled and column is in filter range
-    if !app.filter_state.is_enabled() || !app.filter_state.contains_column(col) {
+    if !(!app.table_view_installed && app.filter_state.is_enabled()) || !app.filter_state.contains_column(col) {
         return None;
     }
 
@@ -170,7 +170,7 @@ fn render_column_header(
         });
 
     // Reserve right padding when filter button is shown to prevent text/icon overlap
-    let has_filter_button = app.filter_state.is_enabled() && app.filter_state.contains_column(col);
+    let has_filter_button = (!app.table_view_installed && app.filter_state.is_enabled()) && app.filter_state.contains_column(col);
 
     div()
         .id(ElementId::NamedInteger("col-header".into(), col as u64))
@@ -307,7 +307,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     let selection_bg = app.token(TokenKey::SelectionBg);
     let is_selected = app.is_row_header_selected(row);
     let is_filtered = app.row_view.is_filtered();
-    let data_row = if is_filtered { app.row_view.view_to_data(row) } else { row };
+    let data_row = if is_filtered || app.table_view_installed { app.view_to_data(row, cx) } else { row };
     let review_focus_selected = app.review_mode.as_ref().is_some_and(|state| {
         state.focused_cell() == Some((data_row, app.view_state.selected.1))
             && app.view_state.selected.0 == row

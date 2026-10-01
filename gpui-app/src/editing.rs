@@ -1243,6 +1243,7 @@ impl Spreadsheet {
     }
 
     pub fn insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if self.block_table_view_edit(cx) { return; }
         if self.mode.is_editing() {
             // In Formula mode, typing an operator finalizes the current reference
             if self.mode.is_formula() && self.formula_ref_cell.is_some() {

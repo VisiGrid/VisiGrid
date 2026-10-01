@@ -54,6 +54,10 @@ impl Spreadsheet {
     /// Returns true if blocked (command should return early).
     /// Sets status message with consistent preview warning.
     pub fn block_if_previewing(&mut self, cx: &mut Context<Self>) -> bool {
+        self.block_if_previewing_only(cx) || self.block_table_view_edit(cx)
+    }
+
+    pub(crate) fn block_if_previewing_only(&mut self, cx: &mut Context<Self>) -> bool {
         if self.block_read_only_recovery(cx) { return true; }
         if self.review_mode.is_some() {
             self.status_message =

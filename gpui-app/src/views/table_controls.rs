@@ -39,6 +39,7 @@ pub(crate) fn render_table_controls(
         return div().into_any_element();
     };
     let id = table.id;
+    let view_only = crate::table_filter_ui::has_table_criteria(app.wb(cx));
     div()
         .id("table-controls")
         .h(px(crate::table_ui::TABLE_CONTROLS_HEIGHT))
@@ -67,11 +68,11 @@ pub(crate) fn render_table_controls(
                 .overflow_hidden()
                 .text_ellipsis()
                 .text_color(app.token(TokenKey::TextMuted))
-                .child(format!(
-                    "{} · {} records",
-                    range_label(table.range),
-                    table.range.data_rows()
-                )),
+                .child(if let Some((visible,total)) = app.table_view_record_counts(cx).filter(|_| app.sheet(cx).table_view_spec().is_some_and(|s| s.table == id)) {
+                    format!("{} · {} of {} records", range_label(table.range), visible, total)
+                } else {
+                    format!("{} · {} records", range_label(table.range), table.range.data_rows())
+                }),
         )
         .child(div().flex_1())
         .children({
@@ -79,7 +80,18 @@ pub(crate) fn render_table_controls(
             let row = app.row_view.view_to_data(row);
             let column = &table.columns[col - table.range.start_col];
             let mut controls: Vec<AnyElement> = Vec::new();
-            if column.formula.is_some() {
+            if app.sheet(cx).table_view_spec().is_some() {
+                controls.push(button("table-clear-view", "Clear view", app, |s,cx| { s.change_table_view(None,"Clear Table view — editing enabled",cx); },cx).into_any_element());
+                if app.sheet(cx).table_view_spec().is_some_and(|s| !s.show_filter_buttons) {
+                    controls.push(button("table-show-filters", "Show filters", app, |s,cx| {
+                        if let Some(mut spec) = s.sheet(cx).table_view_spec().cloned() { spec.show_filter_buttons=true; s.change_table_view(Some(spec),"Show Table filter buttons",cx); }
+                    },cx).into_any_element());
+                }
+            }
+            if view_only {
+                controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Table view active · clear criteria to edit").into_any_element());
+            }
+            if !view_only && column.formula.is_some() {
                 let exception = app.sheet(cx).is_calculated_exception(row, col);
                 controls.push(
                     div()
@@ -127,7 +139,7 @@ pub(crate) fn render_table_controls(
                     )
                     .into_any_element(),
                 );
-            } else if row > table.range.start_row
+            } else if !view_only && row > table.range.start_row
                 && app.sheet(cx).get_raw(row, col).starts_with('=')
             {
                 controls.push(
@@ -145,7 +157,7 @@ pub(crate) fn render_table_controls(
             }
             controls
         })
-        .child(button(
+        .when(!view_only, |d| d.child(button(
             "table-add-row",
             "Add row",
             app,
@@ -184,6 +196,7 @@ pub(crate) fn render_table_controls(
             move |s, cx| s.open_table_dialog(TableDialogKind::Convert(id), cx),
             cx,
         ))
+        )
         .into_any_element()
 }
 

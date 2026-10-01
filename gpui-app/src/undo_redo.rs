@@ -34,8 +34,11 @@ impl Spreadsheet {
 
     // Undo/Redo
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
+            if !matches!(&entry.action, UndoAction::TableViewChanged { .. }) && self.block_table_view_edit(cx) {
+                self.history.redo(); return;
+            }
             if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
                 if let Err(error) = self.wb(cx).validate_table_row_history(history, true) {
                     self.history.redo();
@@ -151,6 +154,10 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
                     self.status_message = Some(format!("Undo: {}", commit.description));
+                }
+                UndoAction::TableViewChanged { commit, description, .. } => {
+                    if !self.replay_table_view(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
                 }
                 UndoAction::TableCommit { commit, description, .. } => {
                     if !self.replay_table_commit(&commit, true, cx) { self.history.redo(); return; }
@@ -619,6 +626,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
+            UndoAction::TableViewChanged { commit, .. } => { self.replay_table_view(&commit, true, cx); }
             UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, true, cx); }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_undo(&commit, &created_sheet, cx);
@@ -1014,6 +1022,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
+            UndoAction::TableViewChanged { commit, .. } => { if !self.replay_table_view(&commit, false, cx) { return false; } }
             UndoAction::TableCommit { commit, .. } => { if !self.replay_table_commit(&commit, false, cx) { return false; } }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
@@ -1228,8 +1237,11 @@ impl Spreadsheet {
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
+            if !matches!(&entry.action, UndoAction::TableViewChanged { .. }) && self.block_table_view_edit(cx) {
+                self.history.undo(); return;
+            }
             if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
                 if let Err(error) = self.wb(cx).validate_table_row_history(history, false) {
                     self.history.undo();
@@ -1346,6 +1358,10 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
                     self.status_message = Some(format!("Redo: {}", commit.description));
+                }
+                UndoAction::TableViewChanged { commit, description, .. } => {
+                    if !self.replay_table_view(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::TableCommit { commit, description, .. } => {
                     if !self.replay_table_commit(&commit, false, cx) { self.history.undo(); return; }

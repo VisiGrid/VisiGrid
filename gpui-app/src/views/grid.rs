@@ -1512,6 +1512,28 @@ fn render_cell(
         }
     }
 
+    if let Some(table_id) = app.table_header_button(display_data_row, col, cx) {
+        let spec = display_sheet.table_view_spec().filter(|s| s.table == table_id);
+        let field = display_sheet.table_header_at(display_data_row, col).and_then(|t| t.columns.get(col - t.range.start_col)).map(|c| c.id);
+        let sort = spec.and_then(|s| s.sort.as_ref()).filter(|s| Some(s.column) == field);
+        let filtered = spec.is_some_and(|s| s.filters.iter().any(|f| Some(f.column) == field));
+        let glyph = if let Some(sort) = sort {
+            if sort.direction == visigrid_engine::filter::SortDirection::Ascending {
+                if filtered { "↑•" } else { "↑" }
+            } else if filtered { "↓•" } else { "↓" }
+        } else if filtered { "•▾" } else { "▾" };
+        let tint = app.token(TokenKey::Accent);
+        cell = cell.pr(px(24.0)).child(div().id(ElementId::Name(format!("table-header-menu-{}-{}",table_id.0,col).into()))
+            .absolute().right_0().top_0().bottom_0().w(px(22.0)).flex().items_center().justify_center()
+            .cursor_pointer().text_size(px(12.0)).text_color(if filtered || sort.is_some() { tint } else { app.token(TokenKey::TextMuted) })
+            .bg(app.token(TokenKey::PanelBg)).hover(move |s| s.bg(tint.opacity(0.2)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |s, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                s.focus_handle.focus(window, cx);
+                s.open_table_filter(table_id, col, (event.position.x.into(), f32::from(event.position.y) + 12.0), cx);
+            })).child(glyph));
+    }
+
     // Check if this cell is in fill preview range
     let is_fill_preview = app.is_fill_preview_cell(view_row, col);
 
@@ -1591,7 +1613,7 @@ fn render_cell(
                 this.confirm_sheet_rename(cx);
             }
             // Don't handle clicks if modal/overlay is visible
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // Don't handle clicks if we're resizing
@@ -1678,7 +1700,7 @@ fn render_cell(
         }))
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle right-clicks if modal/overlay is visible
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // If right-clicking outside current selection, move active cell there
@@ -1693,7 +1715,7 @@ fn render_cell(
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
             // Don't handle if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // Continue fill handle drag if active (priority over selection drag)
@@ -1712,7 +1734,7 @@ fn render_cell(
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
             // Don't handle if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // End fill handle drag if active (commits the fill)
@@ -2674,7 +2696,7 @@ fn render_merge_div(
             if this.renaming_sheet.is_some() {
                 this.confirm_sheet_rename(cx);
             }
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
@@ -2736,7 +2758,7 @@ fn render_merge_div(
             }
         }))
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() { return; }
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) { return; }
             this.activate_pane(pane_side, cx);
             this.end_drag_selection(cx);
             this.select_cell(origin_row, origin_col, false, cx);
@@ -2745,7 +2767,7 @@ fn render_merge_div(
             cx.stop_propagation();
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.is_fill_dragging() {
@@ -2761,7 +2783,7 @@ fn render_merge_div(
             }
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.is_fill_dragging() {

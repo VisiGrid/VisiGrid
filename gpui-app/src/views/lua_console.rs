@@ -1161,6 +1161,9 @@ pub(crate) fn apply_captured_lua_ops(
     }
 
     workbook.ensure_writable()?;
+    if crate::table_filter_ui::has_table_criteria(workbook) {
+        return Err(crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into());
+    }
     let sheet = workbook.sheet(sheet_index).ok_or("Script sheet no longer exists")?;
     for (index, op) in ops.iter().enumerate() {
         match op {

@@ -473,6 +473,7 @@ impl Spreadsheet {
             }
             let Some(this) = this.upgrade() else { return };
             let handled = this.update(cx, |this, cx| {
+                if this.table_filter_key(&event.keystroke, cx) { return true; }
                 if this.table_dialog_key(&event.keystroke, cx) { return true; }
                 if this.pivot_panel.is_none()
                     || this.open_menu.is_some()

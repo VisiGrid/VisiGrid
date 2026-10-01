@@ -1347,6 +1347,7 @@ sheet:cols()
     }
     /// Apply the pending Lua preview to a new sheet.
     pub fn apply_lua_to_new_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_table_view_edit(cx) { return; }
         use crate::terminal::state::PendingResult;
 
         let preview = match self.terminal.pending_result.take() {
@@ -1429,6 +1430,7 @@ sheet:cols()
     }
     /// Apply the pending Lua preview to the current (source) sheet.
     pub fn apply_lua_to_current_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_table_view_edit(cx) { return; }
         use crate::terminal::state::PendingResult;
 
         let preview = match self.terminal.pending_result.take() {

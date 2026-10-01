@@ -79,6 +79,7 @@ mod settings;
 mod structured_results;
 mod sheet_ops;
 mod sort_filter;
+mod table_filter_ui;
 mod split_view;
 mod theme;
 mod trace;

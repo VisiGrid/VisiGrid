@@ -40,6 +40,15 @@ fn review_blocked_apply_response(
     }
 }
 
+fn table_view_blocked_apply_response(req: &crate::session_server::ApplyOpsRequest, revision: u64) -> crate::session_server::ApplyOpsResponse {
+    let mut response = review_blocked_apply_response(req, revision);
+    response.error = Some(crate::session_server::ApplyOpsError::OpFailed(visigrid_protocol::OpError {
+        code: "table_view_active".into(), message: crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into(),
+        op_index: 0, suggestion: Some("Clear Table sorting and filters before retrying".into()),
+    }));
+    response
+}
+
 impl Spreadsheet {
     /// Create a bridge handle for the session server.
     /// The handle can be cloned and passed to the TCP server.
@@ -141,6 +150,9 @@ impl Spreadsheet {
         client: String,
         cx: &mut Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            return plan_error("table_view_active", crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE, false);
+        }
         use crate::plan_manager::{McpPlanRecord, McpPlanState};
         use crate::terminal::state::{LuaPreviewData, PendingResult};
         use visigrid_engine::operation_plan::{PlanId, PlanProducer};
@@ -501,6 +513,9 @@ impl Spreadsheet {
         req: &visigrid_protocol::ApplyPlanMessage,
         cx: &Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            return plan_error("table_view_active", crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE, false);
+        }
         use crate::plan_manager::McpPlanState;
         let Some(record) = self.mcp_plans.record(&req.plan_id) else {
             return plan_error("plan_not_found", "plan is unknown or expired", false);
@@ -768,6 +783,9 @@ impl Spreadsheet {
     ) -> crate::session_server::ApplyOpsResponse {
         use crate::history::{CellChange, CellFormatPatch, FormatActionKind, MutationSource};
 
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            return table_view_blocked_apply_response(req, self.wb(cx).revision());
+        }
         if self.review_mode.is_some() {
             return review_blocked_apply_response(req, self.workbook.read(cx).revision());
         }
@@ -856,6 +874,10 @@ impl Spreadsheet {
             ..Default::default()
         };
 
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            out.error = Some(("table_view_active".into(), crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into()));
+            return out;
+        }
         if self.review_mode.is_some() {
             out.error = Some(plan_under_review_error());
             return out;
@@ -1041,6 +1063,10 @@ impl Spreadsheet {
             ..Default::default()
         };
 
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            out.error = Some(("table_view_active".into(), crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into()));
+            return out;
+        }
         if self.review_mode.is_some() {
             out.error = Some(plan_under_review_error());
             return out;
@@ -1337,6 +1363,33 @@ mod review_block_tests {
             Some(crate::session_server::ApplyOpsError::OpFailed(
                 visigrid_protocol::OpError { ref code, .. }
             )) if code == "plan_under_review"
+        ));
+    }
+
+    #[test]
+    fn table_view_batch_rejection_is_explicit_and_non_mutating() {
+        let request = crate::session_server::ApplyOpsRequest {
+            request_id: "request-1".into(),
+            batch_name: "Agent edit".into(),
+            atomic: true,
+            expected_revision: Some(7),
+            ops: vec![visigrid_protocol::Op::SetCellValue {
+                sheet: 0,
+                row: 0,
+                col: 0,
+                value: "blocked".into(),
+            }],
+            client: Some("Test agent".into()),
+        };
+        let response = super::table_view_blocked_apply_response(&request, 7);
+        assert_eq!(response.applied, 0);
+        assert_eq!(response.total, 1);
+        assert_eq!(response.current_revision, 7);
+        assert!(matches!(
+            response.error,
+            Some(crate::session_server::ApplyOpsError::OpFailed(
+                visigrid_protocol::OpError { ref code, .. }
+            )) if code == "table_view_active"
         ));
     }
 

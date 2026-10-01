@@ -132,7 +132,7 @@ Whole-row projection is eligible only when the Table's body row band has no mean
 
 ### Persisted criteria and engine history
 
-Each Sheet owns at most one saved `TableViewSpec`. `Workbook::set_table_view_spec` validates bindings and layout, refuses owner switches until cleared, and returns a sparse `TableViewCommit`. `apply_table_view_commit` supports undo/redo with an exact current-criteria precondition and fresh validation of the target. Failure leaves the document and revision unchanged. A real view change increments the workbook revision once, without recalculating cells or bumping the sheet's data generation; a no-op does not dirty the document. Recovery workbooks refuse these changes too. The desktop history stack is not wired to this API yet.
+Each Sheet owns at most one saved `TableViewSpec`. `Workbook::set_table_view_spec` validates bindings and layout, refuses owner switches until cleared, and returns a sparse `TableViewCommit`. `apply_table_view_commit` supports undo/redo with an exact current-criteria precondition and fresh validation of the target. Failure leaves the document and revision unchanged. A real view change increments the workbook revision once, without recalculating cells or bumping the sheet's data generation; a no-op does not dirty the document. Recovery workbooks refuse these changes too. The desktop history stack records these criteria commits for undo/redo.
 
 Native save variants and full JSON preserve the criteria in **Tables catalog version 3**, alongside each sheet's Table definitions. Table and field IDs survive saved-sheet ID remapping. Versions 1 and 2 remain readable and are still emitted when there are no saved views (depending on calculated rules). Clearing the last view therefore does not force a newer format forever. VisiGrid 0.42's version-2 reader treats view-bearing files as future-format files and offers read-only recovery. The outer full-JSON version remains 3.
 
@@ -140,14 +140,17 @@ Only intent is persisted: never cached row order, visibility masks or computed f
 
 Renaming/moving Tables and inserting fields preserve saved criteria. Removing a referenced field, shrinking it out of the Table, converting its Table to a range, or replaying a schema change that would remove its binding requires clearing the affected criteria/view first. Those refusals happen before changing cells. Removing all body records retains valid intent but suspends projection until records return.
 
-Saved intent is distinct from an active display view. Later neighboring content may make activation unsafe without making the saved criteria corrupt: save/reopen preserves that intent, and projection rebuilding reports the layout error. The host must display the suspension and enforce active-view mutation guards when desktop integration lands. Merely loading this metadata does not activate a view or install those guards.
+Saved intent is distinct from an active display view. Later neighboring content may make activation unsafe without making the saved criteria corrupt: save/reopen preserves that intent, and projection rebuilding reports the layout error. The desktop rebuilds on open, sheet switch and workbook revision changes, displaying a suspension message if activation is unsafe. Saved intent is retained until the user clears it.
 
-### Remaining integration before enabling desktop Table views
+### Desktop header dropdowns (first UI slice)
 
-1. Bind the desktop's current owner and history stack to the saved criteria/engine commits. Restore or explicitly suspend the projection on open and sheet switch, and cover history rewind.
-2. Route rendering, selection, copy/paste/fill, comments and all editing paths through the same current projection. Preflight complete batches, rebuild after calculation, preserve record focus and reject stale asynchronous results. Include desktop-only row/column metadata in layout checks.
-3. Add exact-bound header filter menus, clear-sort/clear-filter actions and button visibility; keep append/structural changes gated until view transitions are safe.
-4. Exercise save/reopen, undo/redo, session/script mutations, filtered editing and large datasets in desktop QA. Existing worksheet Table sort/filter refusal stays in place until these are complete.
+Table header cells expose sort and value-filter menus, with active sort/filter indicators. Click the arrow or press Alt+Down on a header. Typing searches the value list; select/deselect operates on matching values without discarding other selections. Enter applies and Escape, Cancel or an outside click dismisses without changing the workbook. Unique-value counts scan the exact Table body; lists over 500 distinct typed values explicitly disable value filtering rather than applying a truncated selection. Sort remains available. Empty-body Tables explain that records are required.
+
+Clear sort, Clear all Table filters and Clear view are independent commands. The first two preserve the other criteria; Clear view releases ownership and restores canonical order and visibility. AutoFilter toggles header-button visibility without clearing criteria, and Table controls expose Show filters and Clear view even when arrows are hidden. Existing worksheet header arrows are suppressed for Table-owned views. Save/native reopen retains criteria; JSON export does not duplicate the Table projection as a competing worksheet AutoFilter.
+
+Activation checks the engine's neighboring-content rules plus desktop body-row heights, manually hidden rows and freeze boundaries. Worksheet and Table view owners cannot silently replace one another. Undo/redo revalidates the target criteria and restores focus by canonical record, falling back to a visible row if needed. Rewind preview explicitly refuses Table view history until it can represent filtered visibility correctly.
+
+This UI slice supports browsing, sorting, filtering, copying and saving. **While any sheet has saved Table sort/filter criteria, workbook edits are gated**, including scripts, session batches, row/column changes and non-view undo/redo. Clear the criteria/views before editing; hiding buttons does not lift this gate. Buttons alone do not block edits. This temporary workbook-wide restriction also prevents cross-sheet edits from invalidating formula-dependent filter membership. Full mapped editing, paste/fill, batch preflight and recalculation-driven focus remain the next integration step.
 
 ## Next Phase 2 slices
 
@@ -161,6 +164,8 @@ Totals rows and saved views come later. Web/cloud preservation is deferred.
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+Phase 2 header dropdowns, 2026-10-01: the desktop suite passed 598 tests with zero failures and 3 existing ignores; the launchable build passed. New checks cover workbook-wide criteria gating (including hidden arrows and other sheets), desktop layout metadata, atomic Lua rejection, explicit session-batch errors and Table-view history. Linux live QA verified header clicks, Alt+Down, search/cancel, sort and value filtering, independent clear actions, button visibility, undo/redo, save/reopen and editing after Clear view. Saved SQLite inspection confirmed that canonical record order and the total formula stayed unchanged, criteria persisted, and clearing the last view returned to the older catalog version. Record counts show the Table body (3 of 6 in the fixture), not the full worksheet. macOS/Windows UI and full mapped editing remain untested/pending.
 
 Phase 2 saved criteria/history, 2026-10-01: the full engine/I/O suite passed 1,281 tests, zero failures, with 24 existing ignores. A final focused run passed all 37 view/state/recovery checks, including 10 new engine tests and 7 new I/O tests. Coverage includes independent criteria undo/redo, stale replay, schema preflight, empty-body suspension, atomic catalog restore, typed criteria, every native save variant, single/multi-sheet JSON, ID remapping, unchanged fingerprints/aggregates, and future/corrupt metadata recovery. Engine/I/O Clippy (`--all-targets`) passed with existing warnings and none in the added code. Formatting and diff checks passed. Desktop activation and its history stack remain pending.
 

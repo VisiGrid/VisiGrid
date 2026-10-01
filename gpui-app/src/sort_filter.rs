@@ -158,8 +158,15 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         use visigrid_engine::filter::{sort_by_column, SortState};
+        if let Some(table) = self.table_under_cursor(cx) {
+            let col = self.view_state.selected.1;
+            let mut spec = self.sheet(cx).table_view_spec().filter(|s| s.table == table.id).cloned()
+                .unwrap_or_else(|| visigrid_engine::table_view::TableViewSpec::new(table.id));
+            spec.sort = Some(visigrid_engine::table_view::TableSort { column: table.columns[col - table.range.start_col].id, direction });
+            self.change_table_view(Some(spec), "Sort Table", cx); return;
+        }
         if !self.sheet(cx).tables().is_empty() {
-            self.status_message=Some("Sorting sheets with Tables is not available yet. Convert to a range to use worksheet sorting.".into()); cx.notify(); return;
+            self.status_message=Some("Select a Table column to sort its records. Worksheet sorting is unavailable on sheets with Tables.".into()); cx.notify(); return;
         }
 
         // Block during preview mode
@@ -258,6 +265,16 @@ impl Spreadsheet {
 
     /// Toggle AutoFilter on/off for current selection
     pub fn toggle_auto_filter(&mut self, cx: &mut Context<Self>) {
+        if let Some(spec) = self.sheet(cx).table_view_spec().cloned() {
+            let mut spec = spec; spec.show_filter_buttons = !spec.show_filter_buttons;
+            self.change_table_view(Some(spec), "Toggle Table filter buttons", cx); return;
+        }
+        if let Some(table) = self.table_under_cursor(cx) {
+            let mut spec = visigrid_engine::table_view::TableViewSpec::new(table.id);
+            spec.show_filter_buttons = false; // New Tables show header buttons by default.
+            self.change_table_view(Some(spec), "Hide Table filter buttons", cx); return;
+        }
+        if self.block_if_previewing(cx) { return; }
         if self.filter_state.is_enabled() {
             // Disable: restore original order, clear filters
             self.row_view.clear_sort();
@@ -266,7 +283,7 @@ impl Spreadsheet {
             self.status_message = Some("AutoFilter disabled".to_string());
         } else {
             if !self.sheet(cx).tables().is_empty() {
-                self.status_message=Some("Table filters are not available yet. Convert to a range to use worksheet AutoFilter.".into()); cx.notify(); return;
+                self.status_message=Some("Open a Table header dropdown to filter its records. Worksheet AutoFilter is unavailable on sheets with Tables.".into()); cx.notify(); return;
             }
             // Enable on the table around the cursor (header = its first row).
             let Some(range) = self.table_range_at_cursor(cx) else {
@@ -291,6 +308,7 @@ impl Spreadsheet {
 
     /// Open the filter dropdown for a column
     pub fn open_filter_dropdown(&mut self, col: usize, cx: &mut Context<Self>) {
+        if self.table_view_installed { return; }
         if !self.filter_state.is_enabled() {
             return;
         }
@@ -371,6 +389,7 @@ impl Spreadsheet {
 
     /// Apply the current filter dropdown selection
     pub fn apply_filter_dropdown(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let Some(col) = self.filter_dropdown_col else { return };
         let Some(unique_vals) = self.filter_state.get_unique_values(col) else {
             self.close_filter_dropdown(cx);
@@ -462,6 +481,10 @@ impl Spreadsheet {
 
     /// Clear sort (restore original data order)
     pub fn clear_sort(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut spec) = self.sheet(cx).table_view_spec().cloned() {
+            spec.clear_sort(); self.change_table_view(Some(spec), "Clear Table sort", cx); return;
+        }
+        if self.block_if_previewing(cx) { return; }
         // Only record undo if there's actually a sort to clear
         if let Some(sort_state) = &self.filter_state.sort {
             // Capture previous state for undo

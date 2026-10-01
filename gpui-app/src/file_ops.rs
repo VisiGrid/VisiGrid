@@ -30,7 +30,7 @@ impl Spreadsheet {
     /// - Internal use (e.g., after explicit user confirmation)
     /// - "New in This Window" menu item (if exposed)
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         if self.comment_editor.is_some() { self.close_comment(cx); }
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
@@ -86,7 +86,7 @@ impl Spreadsheet {
     }
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         self.load_file_with_recovery(path, false, cx);
     }
 
@@ -110,7 +110,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
 
@@ -323,7 +323,7 @@ impl Spreadsheet {
 
     /// Start background Excel import with delayed overlay
     fn start_excel_import(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
@@ -377,7 +377,7 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, mut result)) => {
-                        if this.block_if_previewing(cx) { return; }
+                        if this.block_if_previewing_only(cx) { return; }
                         // Atomic swap: replace entire workbook (wrap in Entity)
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
@@ -456,7 +456,7 @@ impl Spreadsheet {
 
     /// Start background CSV/TSV/Parquet import with delayed overlay
     fn start_csv_import(&mut self, path: &PathBuf, ext: &str, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
@@ -526,7 +526,7 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, note)) => {
-                        if this.block_if_previewing(cx) { return; }
+                        if this.block_if_previewing_only(cx) { return; }
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
@@ -582,7 +582,7 @@ impl Spreadsheet {
     }
 
     pub fn reimport_with_freeze(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let Some(path) = self.current_file.clone() else { return; };
         let current_sheet = self.wb(cx).active_sheet_index();
         self.import_result = None; // hide dialog
@@ -638,7 +638,7 @@ impl Spreadsheet {
         restore_sheet: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
@@ -687,7 +687,7 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, mut result)) => {
-                        if this.block_if_previewing(cx) { return; }
+                        if this.block_if_previewing_only(cx) { return; }
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
@@ -1267,7 +1267,7 @@ impl Spreadsheet {
             }
 
             // AutoFilter state (only on active sheet — per-sheet filter persistence not yet implemented)
-            if sheet_idx == wb.active_sheet_index() && self.filter_state.is_enabled() {
+            if sheet_idx == wb.active_sheet_index() && !self.table_view_installed && self.filter_state.is_enabled() {
                 layout.autofilter_range = self.filter_state.filter_range;
 
                 let mask = self.row_view.visible_mask();

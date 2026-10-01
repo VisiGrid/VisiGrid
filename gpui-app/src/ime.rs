@@ -209,6 +209,7 @@ impl Spreadsheet {
             || self.lua_console.visible
             || self.close_confirm_visible
             || self.filter_dropdown_col.is_some()
+            || self.table_filter_dropdown.is_some()
             || self.is_validation_dropdown_open()
             || self.renaming_sheet.is_some()
         {

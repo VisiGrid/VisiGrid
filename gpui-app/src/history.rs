@@ -224,6 +224,11 @@ pub enum UndoAction {
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    TableViewChanged {
+        sheet_index: usize,
+        commit: Box<visigrid_engine::workbook::TableViewCommit>,
+        description: String,
+    },
     TableCommit {
         sheet_index: usize,
         commit: Box<visigrid_engine::workbook::TableCommit>,
@@ -474,6 +479,7 @@ impl UndoAction {
             }
             UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
+            UndoAction::TableViewChanged { description, .. } => description.clone(),
             UndoAction::TableCommit { description, .. } => description.clone(),
             UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
@@ -1179,6 +1185,7 @@ impl History {
     /// Extract sheet index, affected cells, and bounding range from an action.
     fn extract_action_details(action: &UndoAction) -> (Option<usize>, Vec<(usize, usize, String, String)>, Option<(usize, usize, usize, usize)>) {
         match action {
+            UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
                 (Some(*sheet_index),vec![],range)
@@ -1622,6 +1629,9 @@ impl History {
                     }
                 }
             }
+            UndoAction::TableViewChanged { .. } => {
+                return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::TableViewChanged));
+            }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
                 if commit.inserted_header_row().is_some() {
@@ -1798,6 +1808,7 @@ pub enum UndoActionKind {
     WorkbookSnapshot,
     PivotCommit,
     TableCommit,
+    TableViewChanged,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1838,6 +1849,7 @@ impl UndoActionKind {
             UndoActionKind::Comments => true,
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::TableCommit => true,
+            UndoActionKind::TableViewChanged => false,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
@@ -1885,6 +1897,7 @@ impl UndoActionKind {
             UndoActionKind::Comments => "Comment",
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::TableCommit => "Table",
+            UndoActionKind::TableViewChanged => "Table view",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
@@ -1925,6 +1938,7 @@ impl UndoActionKind {
             UndoActionKind::Comments => 0x1E,
             UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::TableCommit => 0x1F,
+            UndoActionKind::TableViewChanged => 0x20,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
@@ -1965,6 +1979,7 @@ impl UndoAction {
             UndoAction::Comments { .. } => UndoActionKind::Comments,
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::TableCommit { .. } => UndoActionKind::TableCommit,
+            UndoAction::TableViewChanged { .. } => UndoActionKind::TableViewChanged,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
@@ -2512,6 +2527,7 @@ mod tests {
             UndoActionKind::PrintSetupChanged,
             UndoActionKind::WorkbookSnapshot,
             UndoActionKind::TableCommit,
+            UndoActionKind::TableViewChanged,
             UndoActionKind::PivotCommit,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,

@@ -532,6 +532,7 @@ impl Spreadsheet {
         &mut self,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
+        if self.block_table_view_edit(cx) { return true; }
         if !self.import_in_progress && self.hub_activity.is_none() {
             return false;
         }

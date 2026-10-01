@@ -401,6 +401,9 @@ pub struct Spreadsheet {
     // Maps view rows to data rows, handles visibility
     pub row_view: RowView,
     pub filter_state: FilterState,
+    pub(crate) table_filter_dropdown: Option<crate::table_filter_ui::TableFilterDropdown>,
+    pub(crate) table_view_sync_key: Option<(SheetId, u64)>,
+    pub(crate) table_view_installed: bool,
     /// Which column's filter dropdown is currently open (None = closed)
     pub filter_dropdown_col: Option<usize>,
     /// Search text in the filter dropdown
@@ -1144,6 +1147,9 @@ impl Spreadsheet {
             role_style_map: crate::role_styles::RoleStyleMap::new(),
             row_view: RowView::new(NUM_ROWS),  // Identity mapping, all visible
             filter_state: FilterState::default(),
+            table_filter_dropdown: None,
+            table_view_sync_key: None,
+            table_view_installed: false,
             filter_dropdown_col: None,
             filter_search_text: String::new(),
             filter_checked_items: std::collections::HashSet::new(),
@@ -3313,6 +3319,8 @@ impl Spreadsheet {
     /// Update cached sheet ID from the workbook.
     /// Call this after switching sheets.
     pub fn update_cached_sheet_id(&mut self, cx: &mut Context<Self>) {
+        self.table_filter_dropdown = None;
+        self.table_view_sync_key = None;
         let sheet = self.workbook.read(cx).active_sheet();
         self.cached_sheet_id = sheet.id;
         let (rows, cols) = sheet.frozen_panes;
@@ -4328,6 +4336,7 @@ impl Spreadsheet {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_table_view(cx);
         // Drain pending session server requests (TCP → GUI bridge)
         self.drain_session_requests(cx);
 
