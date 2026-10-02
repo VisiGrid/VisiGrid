@@ -258,6 +258,11 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         "transform.titlecase" | "transform.title" => Some(KeyBinding::new(key, TransformTitleCase, context)),
         "transform.sentencecase" | "transform.sentence" => Some(KeyBinding::new(key, TransformSentenceCase, context)),
 
+        "view.compacttoolbar" => Some(KeyBinding::new(key, UseCompactToolbar, context)),
+        "view.ribbontoolbar" => Some(KeyBinding::new(key, UseRibbonToolbar, context)),
+        "view.collapseribbon" => Some(KeyBinding::new(key, ToggleRibbonCollapsed, context)),
+        "view.toolbar" => Some(KeyBinding::new(key, ToggleFormatBar, context)),
+
         // Selection
         "selection.all" | "select.all" => Some(KeyBinding::new(key, SelectAll, context)),
         "selection.blanks" | "select.blanks" => Some(KeyBinding::new(key, SelectBlanks, context)),
@@ -341,6 +346,7 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
 /// Get all available action names (for documentation/autocomplete)
 pub fn available_actions() -> Vec<&'static str> {
     vec![
+        "view.compacttoolbar", "view.ribbontoolbar", "view.collapseribbon", "view.toolbar",
         // Navigation
         "navigation.up", "navigation.down", "navigation.left", "navigation.right",
         "navigation.jumpup", "navigation.jumpdown", "navigation.jumpleft", "navigation.jumpright",

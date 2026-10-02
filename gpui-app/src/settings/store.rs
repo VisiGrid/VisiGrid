@@ -39,6 +39,10 @@ impl SettingsStore {
         &mut self.user_settings
     }
 
+    pub fn try_save(&self) -> std::io::Result<()> {
+        super::persistence::try_save_user_settings(&self.user_settings)
+    }
+
     /// Save the current settings to disk.
     pub fn save(&self) {
         save_user_settings(&self.user_settings);

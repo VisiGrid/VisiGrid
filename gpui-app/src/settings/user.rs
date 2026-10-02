@@ -41,6 +41,10 @@ pub struct UserSettings {
 /// Visual appearance preferences
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceSettings {
+    /// Personal command surface; malformed fields resolve independently.
+    #[serde(default)]
+    pub toolbar: super::ToolbarSettings,
+
     /// Color theme ID
     #[serde(default, skip_serializing_if = "Setting::is_inherit")]
     pub theme_id: Setting<String>,
@@ -81,6 +85,7 @@ fn default_show_format_bar() -> Setting<bool> {
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
+            toolbar: Default::default(),
             theme_id: Setting::Inherit, // Use app default theme
             default_column_width: Setting::Inherit,
             default_row_height: Setting::Inherit,

@@ -160,6 +160,9 @@ actions!(view, [
     ToggleLuaConsole, // Alt+F11 - Lua scripting REPL (matches Excel VBA Editor)
     ToggleTerminal,   // Ctrl+` - PTY terminal panel
     ToggleFormatBar,
+    UseCompactToolbar,
+    UseRibbonToolbar,
+    ToggleRibbonCollapsed,
     ToggleFormulaView,
     ToggleGridlines,  // Alt+W, V, G - Excel ribbon sequence
     ToggleMinimap,
