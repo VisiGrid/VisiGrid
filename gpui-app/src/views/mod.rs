@@ -11,6 +11,7 @@ mod export_report_dialog;
 mod pdf_export_dialog;
 mod filter_dropdown;
 mod table_filter_dropdown;
+mod table_header_button;
 mod find_dialog;
 mod font_picker;
 pub(crate) mod format_bar;

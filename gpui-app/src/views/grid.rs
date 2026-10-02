@@ -1517,21 +1517,11 @@ fn render_cell(
         let field = display_sheet.table_header_at(display_data_row, col).and_then(|t| t.columns.get(col - t.range.start_col)).map(|c| c.id);
         let sort = spec.and_then(|s| s.sort.as_ref()).filter(|s| Some(s.column) == field);
         let filtered = spec.is_some_and(|s| s.filters.iter().any(|f| Some(f.column) == field));
-        let glyph = if let Some(sort) = sort {
-            if sort.direction == visigrid_engine::filter::SortDirection::Ascending {
-                if filtered { "↑•" } else { "↑" }
-            } else if filtered { "↓•" } else { "↓" }
-        } else if filtered { "•▾" } else { "▾" };
-        let tint = app.token(TokenKey::Accent);
-        cell = cell.pr(px(24.0)).child(div().id(ElementId::Name(format!("table-header-menu-{}-{}",table_id.0,col).into()))
-            .absolute().right_0().top_0().bottom_0().w(px(22.0)).flex().items_center().justify_center()
-            .cursor_pointer().text_size(px(12.0)).text_color(if filtered || sort.is_some() { tint } else { app.token(TokenKey::TextMuted) })
-            .bg(app.token(TokenKey::PanelBg)).hover(move |s| s.bg(tint.opacity(0.2)))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |s, event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                s.focus_handle.focus(window, cx);
-                s.open_table_filter(table_id, col, (event.position.x.into(), f32::from(event.position.y) + 12.0), cx);
-            })).child(glyph));
+        let direction = sort.map(|s| s.direction);
+        let label = display_sheet.get_raw(display_data_row,col);
+        let control_width = super::table_header_button::width(direction,filtered,app.metrics.zoom);
+        cell = cell.pr(px(control_width + 6.0 * app.metrics.zoom))
+            .child(super::table_header_button::render(app,super::table_header_button::HeaderControl {table:table_id,col,field,label,sort:direction,filtered},cx));
     }
 
     // Check if this cell is in fill preview range
