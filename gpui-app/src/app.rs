@@ -928,6 +928,8 @@ pub struct Spreadsheet {
 
     // Hub auth/link dialog state
     pub hub_token_input: String,
+    /// Set while the paste dialog is collecting a Grid device code: the Grid it is for.
+    pub grid_sign_in_base: Option<String>,
     pub hub_repos: Vec<crate::hub::RepoInfo>,
     pub hub_selected_repo: Option<usize>,
     pub hub_datasets: Vec<crate::hub::DatasetInfo>,
@@ -1479,6 +1481,7 @@ impl Spreadsheet {
             hub_check_in_progress: false,
 
             hub_token_input: String::new(),
+            grid_sign_in_base: None,
             hub_repos: Vec::new(),
             hub_selected_repo: None,
             hub_datasets: Vec::new(),
@@ -2585,6 +2588,8 @@ impl Spreadsheet {
             CommandId::HubDiagnostics => self.hub_diagnostics(cx),
             CommandId::HubSignIn => self.hub_sign_in(cx),
             CommandId::HubSignOut => self.hub_sign_out(cx),
+            CommandId::GridSignIn => self.grid_sign_in(cx),
+            CommandId::GridSignOut => self.grid_sign_out(cx),
             CommandId::CloudOverwrite => self.cloud_overwrite_cloud_copy(cx),
             CommandId::HubLinkDialog => self.hub_show_link_dialog(cx),
 

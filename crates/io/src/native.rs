@@ -2102,6 +2102,9 @@ pub struct CloudIdentity {
     /// on upload so the server refuses to overwrite edits made elsewhere.
     /// None for files linked before conflict checks existed.
     pub last_synced_revision: Option<i64>,
+    /// The sheet's Grid (Loco) pid, when this file syncs with Grid rather
+    /// than the Rails sheets API. `last_synced_revision` is then Grid's.
+    pub grid_pid: Option<String>,
 }
 
 /// Load cloud_identity from a .sheet file (if present)
@@ -2121,14 +2124,18 @@ pub fn load_cloud_identity(path: &Path) -> Result<Option<CloudIdentity>, String>
     let has_revision = conn
         .prepare("SELECT last_synced_revision FROM cloud_identity LIMIT 1")
         .is_ok();
-    let sql = if has_revision {
-        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, last_synced_revision FROM cloud_identity WHERE id = 1"
-    } else {
-        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, NULL FROM cloud_identity WHERE id = 1"
-    };
+    // Files written before Grid have no grid_pid column.
+    let has_grid = conn
+        .prepare("SELECT grid_pid FROM cloud_identity LIMIT 1")
+        .is_ok();
+    let sql = format!(
+        "SELECT sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, {}, {} FROM cloud_identity WHERE id = 1",
+        if has_revision { "last_synced_revision" } else { "NULL" },
+        if has_grid { "grid_pid" } else { "NULL" },
+    );
 
     let result = conn.query_row(
-        sql,
+        &sql,
         [],
         |row| {
             Ok(CloudIdentity {
@@ -2139,6 +2146,7 @@ pub fn load_cloud_identity(path: &Path) -> Result<Option<CloudIdentity>, String>
                 last_synced_hash: row.get(4)?,
                 last_synced_at: row.get(5)?,
                 last_synced_revision: row.get(6)?,
+                grid_pid: row.get(7)?,
             })
         },
     );
@@ -2164,7 +2172,8 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
             api_base TEXT DEFAULT 'https://api.visiapi.com',
             last_synced_hash TEXT,
             last_synced_at TEXT,
-            last_synced_revision INTEGER
+            last_synced_revision INTEGER,
+            grid_pid TEXT
         )",
         [],
     ).map_err(|e| e.to_string())?;
@@ -2177,11 +2186,19 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
         conn.execute("ALTER TABLE cloud_identity ADD COLUMN last_synced_revision INTEGER", [])
             .map_err(|e| e.to_string())?;
     }
+    // Tables created before Grid lack the pid column.
+    let has_grid = conn
+        .prepare("SELECT grid_pid FROM cloud_identity LIMIT 1")
+        .is_ok();
+    if !has_grid {
+        conn.execute("ALTER TABLE cloud_identity ADD COLUMN grid_pid TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
 
     // Upsert the singleton row
     conn.execute(
-        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, last_synced_revision)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR REPLACE INTO cloud_identity (id, sheet_id, public_id, sheet_name, api_base, last_synced_hash, last_synced_at, last_synced_revision, grid_pid)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             &identity.sheet_id,
             &identity.public_id,
@@ -2190,6 +2207,7 @@ pub fn save_cloud_identity(path: &Path, identity: &CloudIdentity) -> Result<(), 
             &identity.last_synced_hash,
             &identity.last_synced_at,
             &identity.last_synced_revision,
+            &identity.grid_pid,
         ],
     ).map_err(|e| e.to_string())?;
 
@@ -3132,7 +3150,44 @@ mod tests {
             last_synced_hash: Some("abc".to_string()),
             last_synced_at: Some("1700000000".to_string()),
             last_synced_revision: revision,
+            grid_pid: None,
         }
+    }
+
+    /// A Grid-linked file keeps its pid, and a file from before Grid (no
+    /// grid_pid column) loads as Rails-linked and gains the column on save.
+    #[test]
+    fn test_cloud_identity_round_trips_the_grid_pid_and_migrates_older_tables() {
+        let temp_file = NamedTempFile::with_suffix(".sheet").unwrap();
+        save_workbook(&Workbook::new(), temp_file.path()).unwrap();
+        {
+            let conn = Connection::open(temp_file.path()).unwrap();
+            conn.execute(
+                "CREATE TABLE cloud_identity (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    sheet_id INTEGER NOT NULL,
+                    public_id TEXT NOT NULL DEFAULT '',
+                    sheet_name TEXT NOT NULL,
+                    api_base TEXT DEFAULT 'https://api.visiapi.com',
+                    last_synced_hash TEXT,
+                    last_synced_at TEXT,
+                    last_synced_revision INTEGER
+                )",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO cloud_identity VALUES (1, 7, 'pub7', 'Budget', 'https://api.example.test', 'abc', '1700000000', 4)",
+                [],
+            ).unwrap();
+        }
+        assert_eq!(load_cloud_identity(temp_file.path()).unwrap().unwrap(), cloud_identity_at(Some(4)));
+
+        let grid = CloudIdentity {
+            grid_pid: Some("10000000-0000-4000-8000-000000000001".to_string()),
+            ..cloud_identity_at(Some(9))
+        };
+        save_cloud_identity(temp_file.path(), &grid).unwrap();
+        assert_eq!(load_cloud_identity(temp_file.path()).unwrap().unwrap(), grid);
     }
 
     /// The revision is what the desktop sends as expected_revision; losing it
