@@ -502,8 +502,8 @@ impl Spreadsheet {
                             (imported.sheet, note)
                         }
                         _ => {
-                            let delimiter = (ext == "tsv").then_some(b'\t');
-                            let imported = csv::import_report(&path_for_import, delimiter, csv::CsvOptions::default())?;
+                            let options = csv::CsvOptions { delimiter: (ext == "tsv").then_some(b'\t'), ..Default::default() };
+                            let imported = csv::import_report(&path_for_import, &options)?;
                             let note = imported.message();
                             (imported.sheet, note)
                         }
