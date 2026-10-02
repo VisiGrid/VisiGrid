@@ -24,6 +24,7 @@ mod cond_format_ui;
 mod default_app;
 mod default_app_prompt;
 mod dialogs;
+mod drag_autoscroll;
 mod docs_links;
 mod diff;
 mod diff_actions;

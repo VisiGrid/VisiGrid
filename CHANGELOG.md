@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Selection
+
+- **Dragging past the edge of the grid scrolls the sheet**, as in Excel. Drag a selection, the fill handle, a formula reference or row/column headers below, above or beside the grid and hold: the sheet keeps scrolling and the drag keeps extending, faster the further out the pointer is. Previously the drag stopped at the last visible row or column.
+- **Releasing the mouse off the grid now finishes the drag.** Letting go over the status bar or outside the window ends the selection, commits a fill-handle drag and applies Format Painter; before, only a release over a cell did.
+
+### Under the hood
+
+- **Built on Zed v1.22's GPUI**, up from v1.12, and on upstream Zed directly instead of VisiGrid's fork. The fork existed only to remove private macOS blur APIs that the Mac App Store rejects; Zed removed them too. Building from source now needs Rust 1.98.1.
+
+## 0.42.0
+
+### Tables
+
+- **Tables.** **Insert → Table** (Ctrl+T / Cmd+T) turns a range into a named Table with its own column names. If the selection has no header row, VisiGrid inserts one with generated names, so no record is lost, all as one undoable step. A preview shows the result before you create it. Tables can be renamed, resized, banded and converted back to ordinary cells, and you can edit a header directly. ([#71](https://github.com/VisiGrid/VisiGrid/pull/71))
+- **Structured references** such as `=SUM(Sales[Amount])` and `=[@Price]*[@Qty]`. They follow the Table when it's renamed, resized, or has rows and columns inserted or deleted around it. ([#71](https://github.com/VisiGrid/VisiGrid/pull/71))
+- **Tables grow as you work.** Typing, pasting or pressing Tab just below a Table adds a row, and so does **Add row**. A formula entered in a column fills the whole column as a calculated column; a cell you change by hand stays as you set it, and the column's rule can be edited or restored. ([#71](https://github.com/VisiGrid/VisiGrid/pull/71))
+- **Undo, redo and history rewind** cover every Table change, including inserting and deleting rows and columns through a Table. ([#71](https://github.com/VisiGrid/VisiGrid/pull/71))
+- **Go To** shows the current cell, checks the address as you type and keeps a wrong one editable. ([#71](https://github.com/VisiGrid/VisiGrid/pull/71))
+- **Not yet:** sorting and AutoFilter are turned off on a sheet that has a Table, and a workbook with Tables can't be exported to Excel until they're converted to ranges. PivotTables can't use a Table as their source yet, and Tables are not yet kept by .xlsx files, the web app or cloud sync.
+
 ### Tables compatibility and fixes
 
 - Files with newer Table metadata offer a read-only view and ask you to upgrade VisiGrid. Damaged Table metadata has a separate recovery prompt. Recovery keeps the original file untouched and shows saved formula results, which may be stale; editing, recalculation, Save and Save As are disabled.
@@ -25,6 +45,19 @@
 - **Paste Special → All now brings the copied formatting**, as the dialog always said it did. Plain Ctrl+V still keeps the destination's formatting: it pastes formulas, comments and merged cells, never the source's fonts, fills or number formats. One undo step for both.
 - **The Paste Special dialog works from the keyboard.** Up/Down choose, Enter pastes, Escape closes, and Excel's letters pick and paste in one key: A, V, F and T. Enter used to move the cursor behind the dialog, and Escape didn't close it. O still picks Formats.
 - **A clearer Paste Special dialog:** it shows what's on the clipboard and where it will land ("3 × 2 cells → G2:H4"), says which options keep your sheet's formatting, and greys out Formats when the clipboard holds text from another app, which has none.
+
+### Command palette
+
+- **A redesigned command palette.** Opened with nothing typed, it suggests commands for what you've selected (Sort, AutoFilter, AutoSum, number formats), then shows recent commands, recent files and every command. Results are grouped by kind (Commands, Files, Functions, Named ranges), with each command's icon, menu and shortcut. Page Up/Down, Home, End and the mouse wheel scroll the list, and chips at the top show the search prefixes (`>` `:` `$` `=` `@` `#`). ([#70](https://github.com/VisiGrid/VisiGrid/pull/70))
+- **Ctrl+K** lists recent files with their folder and age, plus **Open from disk…**. ([#70](https://github.com/VisiGrid/VisiGrid/pull/70))
+- **Fixed:** typing `>` showed nothing; it now lists every command. The best match could be cut off by earlier partial matches, so an exact command or function name sometimes didn't appear; results are now ranked before they're shortened, and the list scrolls. ([#70](https://github.com/VisiGrid/VisiGrid/pull/70))
+
+### CSV import and export
+
+- **IDs stay exact.** Values like `007` and `00501`, long numbers such as card numbers, and codes that look like exponents (`12E4`) now import as text, as written, instead of losing their leading zeros or being rounded. Ordinary numbers, percentages and currency still import as numbers, and nothing is turned into a date. ([#67](https://github.com/VisiGrid/VisiGrid/pull/67))
+- **Formulas in a CSV import as text.** A field starting with `=` is no longer run as a live formula, which protects against CSV formula injection. ([#67](https://github.com/VisiGrid/VisiGrid/pull/67))
+- **After opening a CSV, a note says what was kept as text** and in which columns, and rows beyond the grid's 1,048,576 are counted and reported instead of silently dropped. ([#67](https://github.com/VisiGrid/VisiGrid/pull/67))
+- **CSV export keeps full precision.** Numbers in General format used to be rounded to two decimals (`1.234` → `1.23`); they now export exactly, so `1234.5` exports as `1234.5` rather than `1234.50`. Cells with an explicit number format still export as shown, as in Excel. Very large whole numbers no longer print as `9223372036854775807`. ([#65](https://github.com/VisiGrid/VisiGrid/issues/65), [#67](https://github.com/VisiGrid/VisiGrid/pull/67))
 
 ## 0.41.0
 
