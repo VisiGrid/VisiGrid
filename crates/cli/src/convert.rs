@@ -517,7 +517,13 @@ pub(crate) fn read_parquet_whole(path: &std::path::Path) -> Result<visigrid_engi
 
 pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::CsvOptions, sheet_arg: Option<&str>) -> Result<visigrid_engine::sheet::Sheet, CliError> {
     match format {
-        Format::Csv => visigrid_io::csv::import_report(path, csv).map(|r| r.sheet).map_err(CliError::parse),
+        // A file's delimiter is sniffed. `--delimiter` sets the OUTPUT (and
+        // piped input, see read_stdin), so `convert in.csv -t csv
+        // --delimiter ';'` turns a comma file into a semicolon file.
+        Format::Csv => {
+            let csv = visigrid_io::csv::CsvOptions { delimiter: None, ..csv.clone() };
+            visigrid_io::csv::import_report(path, &csv).map(|r| r.sheet).map_err(CliError::parse)
+        }
         Format::Tsv => {
             let tsv = visigrid_io::csv::CsvOptions { delimiter: Some(b'\t'), ..csv.clone() };
             visigrid_io::csv::import_report(path, &tsv).map(|r| r.sheet).map_err(CliError::parse)
