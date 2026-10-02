@@ -1,6 +1,6 @@
 # Tables: engine, structured references, desktop authoring, row growth, and calculated columns
 
-Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 has persisted Table views, desktop header dropdowns, and atomic editing/pasting through visible Table records, 2026-10-01. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
+Status: Phase 1 desktop authoring, row growth, calculated columns and release hardening are implemented. Phase 2 has persisted Table views, desktop header dropdowns, sparse cell history, and atomic editing, pasting, filling and cutting through visible Table records, 2026-10-01. The product plan lives in the Obsidian notes “VisiGrid Tables Spec” and “VisiGrid Tables Research”.
 
 ## Model
 
@@ -166,11 +166,17 @@ The fill handle supports copy and series in all four directions, across every se
 
 All sources and destinations must be in the active Table body. No fill grows the Table, reads a hidden source, overwrites hidden records, or updates a calculated-column rule. Plans are resolved completely before any writes, including edits to filter/sort keys. Out-of-bounds, protected-source/layout, oversized and post-recalculation failures reject the whole operation. Successful changes use one sparse guarded undo/redo step. Destination formatting and comments are retained.
 
-**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, edits outside an active Table body, structural changes, cut, scripts, session batches and unrelated history actions remain gated. Clear the criteria before those operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths and cross-sheet edits from invalidating formula-dependent filters.
+### Cutting visible records
+
+Cut (Ctrl+X / Cmd+X) captures the primary selection in display order and immediately clears its visible records, following the ordinary cut contract. Additional selections are ignored. Contents and comments are cleared; source formatting is retained. Headers, adjacent cells and selections extending beyond the Table body are refused. The 100,000-cell limit and all Table edit layout/recalculation guards apply before anything is published, including the clipboard. A refused cut preserves the previous clipboard and document.
+
+The clipboard retains canonical source rows, formulas, typed values, formatting, comments and exact cell boundaries, including embedded tabs/newlines and blank trailing cells. Paste is a separate operation and undo step; it uses the existing visible-record paste rules and canonical formula rebasing. Cutting sort/filter fields can move or hide records, so selection uses the same visible-area trimming and safe fallback as fill. No stale source outline is shown after cut. Undo/redo restores cleared records and filter membership using sparse guarded cell history.
+
+**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, edits outside an active Table body, structural changes, scripts, session batches and unrelated history actions remain gated. Clear the criteria before those operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths and cross-sheet edits from invalidating formula-dependent filters.
 
 ## Next Phase 2 slices
 
-1. Extend mapped mutation support to cut, other editing surfaces and scripts; add rewind support for Table views and sparse cell history.
+1. Extend mapped mutation support to other editing surfaces and scripts; add rewind support for Table views and sparse cell history.
 2. Table-backed pivot sources with stable field IDs, explicit refresh, and stale-state feedback.
 3. XLSX Table interoperability subset and export-loss messaging.
 4. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
@@ -212,3 +218,5 @@ Column-history validation, 2026-10-01: the engine/IO/session-host suite passed 1
 Headerless-creation validation, 2026-10-01: the engine/IO/session-host suite passed 1,318 tests (24 existing ignores), and the desktop suite passed 581 tests (3 existing ignores), with zero failures. The launchable build passed. Seven regressions in `crates/engine/tests/headerless_tables.rs` cover generated headers, preserved records/formats/comments, cross-sheet references, neighboring calculated Tables, blank records, bottom-edge and protected-region refusal, late-spill rollback, stale replay and formerly unbound structured references. Native/JSON round trips and desktop rewind preserve all records. Linux live checks confirmed default-on preview, keyboard toggling, cancellation, creation and single-step undo/redo. Saved-file inspection verified the same Table/column identities on redo, adjusted formulas, adjacent-cell movement and restored row height. macOS/Windows UI remain untested.
 
 Release-hardening validation, 2026-10-01: I/O and session-host tests passed 393 tests (9 existing ignores); desktop tests passed 591 tests (3 existing ignores); CLI script/replay regressions passed 34 tests. Workspace Clippy and the launchable desktop build passed. Linux live checks verified distinct future-version/corruption prompts, cancellation, read-only navigation and pointer geometry, rejection of typing/Delete/Save/Save As, and a stored structured-formula result retained after F9. Recovery fixtures stayed byte-identical. The existing scripting debugger instruction-limit test timed out after 10 seconds locally; the same timeout reproduces with the pre-hardening test binary. macOS/Windows live UI remains untested.
+
+Cut through Table views, 2026-10-01: desktop suite passed 621 tests with zero failures and 3 existing ignores; native debug build passed. New regressions cover display-order capture, hidden-record preservation, content/comment clearing with retained formatting, filter-key disappearance, sparse undo/redo, invalid bounds and post-recalculation rejection, multiline clipboard cells, and canonical formula rebasing across separate cut/paste history steps. Linux native QA confirmed visible-only cut/paste against saved canonical cells, separate undo steps, empty-view focus, filter-key undo/redo, header refusal with unchanged clipboard, and cancelling a text cut in the cell editor. macOS/Windows native UI was not exercised.

@@ -81,6 +81,8 @@ fn push_svg_border(svg: &mut String, border: CellBorder, x1: f32, y1: f32, x2: f
 pub struct InternalClipboard {
     /// Tab-separated raw values (formulas/text) for normal paste + system clipboard
     pub raw_tsv: String,
+    /// Exact cell boundaries; text may itself contain tabs or newlines.
+    pub raw_cells: Vec<Vec<String>>,
     /// Typed computed values for Paste Values (2D grid aligned to copied rectangle)
     pub values: Vec<Vec<Value>>,
     /// Cell formats for Paste Formats (2D grid with same dimensions as values)
@@ -462,6 +464,7 @@ impl Spreadsheet {
         // Build tab-separated raw values (formulas) for system clipboard and normal paste
         // When filtered, only include visible rows
         let mut raw_tsv = String::new();
+        let mut raw_cells = Vec::new();
         let mut values = Vec::new();
         let mut formats = Vec::new();
         let mut comments = Vec::new();
@@ -486,6 +489,7 @@ impl Spreadsheet {
                 raw_tsv.push('\n');
             }
 
+            let mut row_raw = Vec::new();
             let mut row_values = Vec::new();
             let mut row_formats = Vec::new();
             let mut row_comments = Vec::new();
@@ -493,7 +497,9 @@ impl Spreadsheet {
                 if col > min_col {
                     raw_tsv.push('\t');
                 }
-                raw_tsv.push_str(&self.sheet(cx).get_raw(data_row, col));
+                let raw = self.sheet(cx).get_raw(data_row, col);
+                raw_tsv.push_str(&raw);
+                row_raw.push(raw);
                 row_values.push(self.sheet(cx).get_computed_value(data_row, col));
                 // Capture format for every cell position (rectangular, not sparse)
                 row_formats.push(self.sheet(cx).get_format(data_row, col).clone());
@@ -501,6 +507,7 @@ impl Spreadsheet {
             }
             source_formulas.push((min_col..=max_col).map(|c| self.sheet(cx).get_cell_opt(data_row,c).is_some_and(|cell| cell.value().is_formula())).collect());
             source_rows.push(data_row);
+            raw_cells.push(row_raw);
             values.push(row_values);
             formats.push(row_formats);
             comments.push(row_comments);
@@ -539,6 +546,7 @@ impl Spreadsheet {
 
         self.internal_clipboard = Some(InternalClipboard {
             raw_tsv: raw_tsv.clone(),
+            raw_cells,
             values,
             formats,
             comments,
@@ -568,6 +576,20 @@ impl Spreadsheet {
     }
 
     pub fn cut(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
+        if self.mode.is_editing() {
+            self.copy(cx);
+            if self.edit_selection_range().is_none() {
+                self.edit_selection_anchor = Some(0);
+                self.edit_cursor = self.edit_value.len();
+            }
+            self.backspace(cx);
+            return;
+        }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.cut_table_view(cx);
+            return;
+        }
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("cut", cx) { return; }
@@ -781,7 +803,9 @@ impl Spreadsheet {
             // Guard: if the sniffed delimiter is comma, check whether every line is
             // actually a formatted number (e.g. "6,601.43"). Commas inside numbers
             // are thousands separators, not field delimiters.
-            let parsed_grid: Option<Vec<Vec<String>>> = if !is_internal && !text.contains('\t') {
+            let parsed_grid: Option<Vec<Vec<String>>> = if is_internal {
+                self.internal_clipboard.as_ref().map(|ic| ic.raw_cells.clone())
+            } else if !text.contains('\t') {
                 let sniffed = csv_io::sniff_delimiter(&text);
                 let grid = csv_io::parse_delimited_text(&text);
                 let has_multi_col = grid.iter().any(|row| row.len() > 1);
@@ -806,14 +830,18 @@ impl Spreadsheet {
             // Internal TSV includes its full rectangle, even blank trailing rows
             // and a single empty cell carrying only a comment.
             let lines: Vec<&str> = full_paste_lines(&text, is_internal);
-            let is_single_cell = parsed_grid.is_none()
-                && lines.len() == 1 && !lines[0].contains('\t');
+            let is_single_cell = parsed_grid.as_ref().map_or_else(
+                || lines.len() == 1 && !lines[0].contains('\t'),
+                |grid| grid.len() == 1 && grid[0].len() == 1,
+            );
 
             // If single cell and multi-selection, broadcast to all selected cells
             if is_single_cell && self.is_multi_selection() {
                 if self.block_if_selection_in_pivot("paste", cx) { return; }
                 if self.block_selection_table_headers("paste", cx) { return; }
-                let single_value = lines[0].to_string();
+                let single_value = parsed_grid.as_ref().map_or_else(
+                    || lines[0].to_string(), |grid| grid[0][0].clone(),
+                );
                 let primary_cell = self.view_state.selected;
                 let primary_data_row = self.row_view.view_to_data(primary_cell.0);
 
@@ -1667,12 +1695,11 @@ impl Spreadsheet {
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
 
+        let raw_cells = self.internal_clipboard.as_ref().map(|ic| ic.raw_cells.clone()).unwrap_or_default();
         // Block if paste would split a merged region
         {
-            let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.as_str()).unwrap_or("");
-            let lines = full_paste_lines(raw_tsv, true);
-            let paste_rows = lines.len();
-            let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+            let paste_rows = raw_cells.len();
+            let paste_cols = raw_cells.iter().map(Vec::len).max().unwrap_or(1);
             if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
             if paste_rows > 0 && paste_cols > 0 {
                 let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
@@ -1693,11 +1720,8 @@ impl Spreadsheet {
         let mut end_data_row = data_start_row;
         let mut end_col = start_col;
 
-        // Get source position and raw_tsv from internal clipboard
-        let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()).unwrap_or_default();
-
         if !self.sheet(cx).tables().is_empty() {
-            let values: Vec<Vec<String>> = full_paste_lines(&raw_tsv, true).into_iter().enumerate().map(|(ri,line)| line.split('\t').enumerate().map(|(ci,value)| {
+            let values: Vec<Vec<String>> = raw_cells.iter().enumerate().map(|(ri,row)| row.iter().enumerate().map(|(ci,value)| {
                 if value.starts_with('=') { self.adjust_copied_formula(value, ri, ci, data_start_row + ri, start_col + ci) } else { value.to_owned() }
             }).collect()).collect();
             if self.paste_table_growth(data_start_row, start_col, &values, false, cx) { return; }
@@ -1711,7 +1735,7 @@ impl Spreadsheet {
         };
 
         self.wb_mut(cx, |wb| wb.begin_batch());
-        for (row_offset, line) in raw_tsv.lines().enumerate() {
+        for (row_offset, row) in raw_cells.iter().enumerate() {
             // Determine target view row for this clipboard row
             let target_data_row = if is_filtered {
                 if let Some(start_idx) = visible_start_idx {
@@ -1730,7 +1754,7 @@ impl Spreadsheet {
             };
 
             let mut row_values: Vec<String> = Vec::new();
-            for (col_offset, value) in line.split('\t').enumerate() {
+            for (col_offset, value) in row.iter().enumerate() {
                 let col = start_col + col_offset;
                 if target_data_row < NUM_ROWS && col < NUM_COLS {
                     let old_value = self.sheet(cx).get_raw(target_data_row, col);
@@ -2049,7 +2073,7 @@ impl Spreadsheet {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TablePasteKind {
+pub(crate) enum TablePasteKind {
     Contents,
     All,
     Values,
@@ -2136,8 +2160,9 @@ impl Spreadsheet {
             .map(|ic| ic.raw_tsv.as_str())
             .or(text.as_deref())
             .ok_or("The clipboard is empty.")?;
-        let grid: Vec<Vec<String>> = if !internal
-            && !text.contains('\t')
+        let grid: Vec<Vec<String>> = if let Some(ic) = ic {
+            ic.raw_cells.clone()
+        } else if !text.contains('\t')
             && !text
                 .lines()
                 .all(|line| visigrid_engine::cell::try_parse_number(line.trim()).is_some())
@@ -2196,7 +2221,7 @@ impl Spreadsheet {
     }
 }
 
-fn table_paste_writes(
+pub(crate) fn table_paste_writes(
     grid: &[Vec<String>],
     ic: Option<&InternalClipboard>,
     kind: TablePasteKind,
@@ -2263,6 +2288,7 @@ mod table_paste_tests {
     fn clipboard() -> InternalClipboard {
         InternalClipboard {
             raw_tsv: "=A9\n=A4".into(),
+            raw_cells: vec![vec!["=A9".into()], vec!["=A4".into()]],
             values: vec![vec![Value::Number(9.0)], vec![Value::Number(4.0)]],
             formats: vec![vec![CellFormat::default()]; 2],
             comments: vec![vec![None]; 2],

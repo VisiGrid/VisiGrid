@@ -324,7 +324,7 @@ impl Spreadsheet {
             )
     }
 
-    fn finish_table_fill(
+    pub(crate) fn finish_table_selection_write(
         &mut self,
         result: Result<Vec<TableCellWrite>, String>,
         description: &str,
@@ -395,7 +395,7 @@ impl Spreadsheet {
         let result = self
             .fill_table_view(cx)
             .and_then(|view| plan_direction(self.sheet(cx), &view, self.selection_range(), down));
-        self.finish_table_fill(
+        self.finish_table_selection_write(
             result,
             if down {
                 "Filled down through visible Table records"
@@ -448,7 +448,9 @@ impl Spreadsheet {
                 editing.then_some(self.edit_value.as_str()),
             )
         });
-        if self.finish_table_fill(result, "Filled visible Table selection", None, cx) && editing {
+        if self.finish_table_selection_write(result, "Filled visible Table selection", None, cx)
+            && editing
+        {
             self.formula_edit_cell = None;
             self.cancel_edit(cx);
             self.maybe_show_cycle_banner(cx);
@@ -503,7 +505,12 @@ impl Spreadsheet {
                 (source.1 .0, source.1 .1.max(end.1)),
             )
         };
-        self.finish_table_fill(result, "Filled visible Table records", Some(selection), cx);
+        self.finish_table_selection_write(
+            result,
+            "Filled visible Table records",
+            Some(selection),
+            cx,
+        );
     }
 }
 

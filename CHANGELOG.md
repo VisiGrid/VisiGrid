@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Cut through Table views** clears only visible records in the primary selection, preserving hidden records and source formatting. Contents and comments are captured before sort/filter keys change. Cut and paste remain separate undoable steps; invalid cuts leave the document and previous clipboard intact. Internal paste also preserves cell boundaries for text containing tabs or newlines.
+
 - **Table header dropdowns** sort records and filter by searchable values within the Table’s exact bounds. Clear sort and filters independently, or use **Clear view** to restore the original order. Click a header arrow or press Alt+Down on a header. Criteria survive native/full-JSON save and reopen, and support desktop undo/redo.
 - **Edit and paste through Table filters.** Cell edits, Delete and Paste Special write only to visible records, then rebuild the sort/filter view. Pasting past the visible body or Table columns rejects the whole paste. Each batch has one undo/redo step; calculated-column edits affect only the selected record. Copied formulas retain their original record coordinates across sort/filter changes, and Paste Values preserves literal text and leading-zero IDs. The name box, Go To and formula point-picking use the records’ actual cell addresses.
 - **Fill through Table filters.** Fill Down/Right, Ctrl+Enter and fill-handle copy/series touch only visible records. Formulas use the records’ actual addresses, series skip hidden records, and fills that cross Table boundaries are refused as a whole. Each fill has one undo/redo step. Selection totals use visible records and actual numeric values, including formatted numbers.
