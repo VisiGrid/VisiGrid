@@ -5,7 +5,48 @@ use crate::mode::Mode;
 use crate::theme::TokenKey;
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, NumberFormat};
 
-pub const FORMAT_BAR_HEIGHT: f32 = 44.0;
+pub const FORMAT_BAR_HEIGHT: f32 = crate::toolbar::COMPACT_HEIGHT;
+
+/// The Home ribbon uses the same font picker, validated input and tri-state
+/// controls as Compact. Only their arrangement changes.
+pub(super) fn render_ribbon_font_controls(app: &mut Spreadsheet, state: &crate::app::SelectionFormatState, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    if app.ui.format_bar.size_editing && !app.ui.format_bar.size_focus.is_focused(window) {
+        commit_font_size(app, cx);
+    }
+    let text = app.token(TokenKey::TextPrimary);
+    let muted = app.token(TokenKey::TextMuted);
+    let border = app.token(TokenKey::PanelBorder);
+    let accent = app.token(TokenKey::Accent);
+    let font: SharedString = match &state.font_family {
+        TriState::Uniform(Some(f)) => f.clone().into(),
+        TriState::Mixed => "—".into(),
+        _ => app.cell_font.family.clone().into(),
+    };
+    let missing = !state.font_family.is_mixed() && app.font_catalog.is_missing(font.as_ref());
+    let tooltip = if missing { format!("{} is unavailable. The workbook font is preserved.", font) } else { format!("{} — Font", font) };
+    let size: SharedString = if app.ui.format_bar.size_editing {
+        if app.ui.format_bar.size_replace_next { app.ui.format_bar.size_input.clone().into() }
+        else { format!("{}|", app.ui.format_bar.size_input).into() }
+    } else {
+        match state.font_size {
+            TriState::Uniform(Some(s)) => s.to_string().into(),
+            TriState::Mixed => "—".into(),
+            _ => app.cell_font.size.to_string().into(),
+        }
+    };
+    let mut row = div().flex().gap_1();
+    for (label, value) in [("B", &state.bold), ("I", &state.italic), ("U", &state.underline)] {
+        row = row.child(render_style_btn(label, matches!(value, TriState::Uniform(true)), value.is_mixed(), text, muted, accent, border, cx));
+    }
+    row = row.child(render_fill_color_btn(rgba_to_hsla(&state.background_color), border, cx))
+        .child(render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, cx));
+    div().flex().flex_col().gap_1()
+        .child(div().flex().gap_1()
+            .child(render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, cx))
+            .child(render_font_size_input(app, size, state.font_size.is_mixed(), app.ui.format_bar.size_editing,
+                app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), cx)))
+        .child(row)
+}
 
 /// Common font sizes for the dropdown.
 const FONT_SIZES: &[u32] = &[8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 36, 48, 72];
@@ -409,8 +450,7 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     // Vertical offset from root div top to below the format bar.
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
 
     // Anchor at the clicked control, clamped to the window.
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
@@ -621,8 +661,7 @@ pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let align_cas = matches!(state.alignment, TriState::Uniform(Alignment::CenterAcrossSelection));
 
     // Position below format bar, roughly under Format button
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
 
     div()
@@ -1253,8 +1292,7 @@ pub fn render_number_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreads
     let text_muted = app.token(TokenKey::TextMuted);
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
 
     // Anchor at the clicked control, clamped to the window.
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
@@ -1378,8 +1416,7 @@ pub fn render_cell_style_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let text_muted = app.token(TokenKey::TextMuted);
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
 
     // Anchor at the clicked control, clamped to the window.
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));

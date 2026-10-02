@@ -31,7 +31,7 @@
 //! rather than the platform's are tested here; the live keyboard is reserved for
 //! confirming that the platform calls into this handler at all.
 
-use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window};
+use gpui::{App, Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window};
 use std::ops::Range;
 
 use crate::app::Spreadsheet;
@@ -201,8 +201,9 @@ impl Spreadsheet {
     /// handler in those states, so the handler has to make the same call and decline.
     /// This guards both `replace_*` entry points, which is what protects Linux, where
     /// `accepts_text_input` is not consulted.
-    fn cell_owns_text_input(&self, window: &Window) -> bool {
-        if self.terminal_has_focus(window)
+    fn cell_owns_text_input(&self, window: &Window, cx: &App) -> bool {
+        if self.ui.ribbon.contains_focus(window, cx)
+            || self.terminal_has_focus(window)
             || self.ui.format_bar.is_active(window)
             || self.keytips_active
             || self.open_menu.is_some()
@@ -284,7 +285,7 @@ impl EntityInputHandler for Spreadsheet {
         // the Names inspector filter, and Space with a history entry selected (hold to
         // peek). Those keys still reach the cell handler when they fall through, so
         // digits and operators in vim mode keep starting an edit.
-        if !self.cell_owns_text_input(window) {
+        if !self.cell_owns_text_input(window, cx) {
             return false;
         }
         if self.mode.is_navigation() {
@@ -380,7 +381,7 @@ impl EntityInputHandler for Spreadsheet {
             cx.notify();
             return;
         }
-        if !self.cell_owns_text_input(window) {
+        if !self.cell_owns_text_input(window, cx) {
             return;
         }
 
@@ -434,7 +435,7 @@ impl EntityInputHandler for Spreadsheet {
             cx.notify();
             return;
         }
-        if !self.cell_owns_text_input(window) {
+        if !self.cell_owns_text_input(window, cx) {
             return;
         }
         // An empty preedit while not editing is a composition being abandoned before

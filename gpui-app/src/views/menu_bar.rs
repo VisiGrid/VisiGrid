@@ -266,7 +266,7 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_separator(border))
         .child(menu_item("Show Formulas", Some("Ctrl+`"), 6, h(6), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_formulas(cx); }))
         .child(menu_item("Show Zeros", None, 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_zeros(cx); }))
-        .child(menu_item("Format Bar", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_format_bar(cx); }))
+        .child(menu_item("Show Toolbar", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.toggle_toolbar_visibility(window, cx); }))
         .child(menu_item("Minimap", None, 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.minimap_visible = !this.minimap_visible; cx.notify(); }))
         .child(menu_separator(border))
         .child(menu_item("Freeze Top Row", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_top_row(cx); }))
@@ -275,6 +275,10 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Unfreeze Panes", None, 13, h(13), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unfreeze_panes(cx); }))
         .child(menu_separator(border))
         .child(menu_item("Approve Model", None, 14, h(14), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.approve_model(None, cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Toolbar: Compact", None, 15, h(15), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx); }))
+        .child(menu_item("Toolbar: Ribbon", None, 16, h(16), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx); }))
+        .child(menu_item("Collapse/Expand Ribbon", None, 17, h(17), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.toggle_ribbon_collapsed(window, cx); }))
 }
 
 // Item indices here must follow menu_model's order of selectable entries:

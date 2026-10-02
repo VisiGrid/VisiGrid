@@ -14,6 +14,7 @@ mod filter_dropdown;
 mod find_dialog;
 mod font_picker;
 pub(crate) mod format_bar;
+mod ribbon;
 mod formula_bar;
 mod goto_dialog;
 mod grid;
@@ -68,6 +69,7 @@ use crate::mode::Mode;
 use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    app.sync_toolbar_preferences(window, cx);
     // Check if validation dropdown source has changed (fingerprint mismatch)
     app.check_dropdown_staleness(cx);
 
@@ -574,17 +576,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(!cfg!(target_os = "macos") && !zen_mode, |d| {
             d.child(menu_bar::render_menu_bar(app, cx))
         })
-        .when(!zen_mode, |div| {
-            div.child(formula_bar::render_formula_bar(app, window, cx))
+        .when(app.toolbar_visible(cx) && app.toolbar_layout(cx) == crate::settings::ToolbarLayout::Ribbon, |d| {
+            d.child(ribbon::render_ribbon(app, window, cx))
         })
-        .when(!zen_mode && {
-            use crate::settings::{Setting, user_settings};
-            match &user_settings(cx).appearance.show_format_bar {
-                Setting::Value(v) => *v,
-                Setting::Inherit => true,
-            }
-        }, |div| {
-            div.child(format_bar::render_format_bar(app, window, cx))
+        .when(!zen_mode, |d| d.child(formula_bar::render_formula_bar(app, window, cx)))
+        .when(app.toolbar_visible(cx) && app.toolbar_layout(cx) == crate::settings::ToolbarLayout::Compact, |d| {
+            d.child(format_bar::render_format_bar(app, window, cx))
         })
         .when(app.recovery_warning.is_some(), |d| d.child(div().h(px(56.0)).flex_shrink_0().px_4().flex().flex_col().justify_center().overflow_hidden()
             .bg(app.token(crate::theme::TokenKey::PanelBg)).text_color(app.token(crate::theme::TokenKey::TextPrimary))
@@ -697,6 +694,12 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         // Font size dropdown overlay — rendered at root level so it paints above
         // column headers and grid cells. Only visible when dropdown is open.
+        .when(app.toolbar_visible(cx) && app.ui.ribbon.temporary && app.ribbon_collapsed(cx), |d| {
+            d.child(ribbon::render_temporary(app, window, cx))
+        })
+        .when(app.toolbar_visible(cx) && app.ui.ribbon.group_menu.is_some(), |d| {
+            d.child(ribbon::render_group_menu(app, window, cx))
+        })
         .when(app.ui.format_bar.size_dropdown, |d| {
             d.child(format_bar::render_font_size_dropdown(app, cx))
         })
@@ -973,7 +976,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             let text_primary = app.token(TokenKey::TextPrimary);
             let text_muted = app.token(TokenKey::TextMuted);
             let accent = app.token(TokenKey::Accent);
-            div.child(formula_bar::render_hover_docs(func, panel_bg, panel_border, text_primary, text_muted, accent))
+            div.child(formula_bar::render_hover_docs(app.toolbar_geometry(cx).formula_top + app.formula_bar_height(), func, panel_bg, panel_border, text_primary, text_muted, accent))
         })
         // F1 hold-to-peek context help overlay
         .when_some(

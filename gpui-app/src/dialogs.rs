@@ -188,6 +188,9 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn show_preferences(&mut self, cx: &mut Context<Self>) {
+        if self.mode != Mode::Preferences {
+            self.ui.preferences_edit_mode = self.mode.is_editing().then_some(self.mode);
+        }
         self.lua_console.visible = false;
         self.mode = Mode::Preferences;
         self.ui.cell_size_input = Default::default();
@@ -196,7 +199,7 @@ impl Spreadsheet {
 
     pub fn hide_preferences(&mut self, cx: &mut Context<Self>) {
         self.ui.cell_size_input = Default::default();
-        self.mode = Mode::Navigation;
+        self.mode = self.ui.preferences_edit_mode.take().unwrap_or(Mode::Navigation);
         cx.notify();
     }
 

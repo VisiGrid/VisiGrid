@@ -176,6 +176,11 @@ pub enum CommandId {
     ExportTsv,
     ExportJson,
 
+    UseCompactToolbar,
+    UseRibbonToolbar,
+    ToggleRibbonCollapsed,
+    ToggleToolbar,
+
     // Appearance
     SelectTheme,
     SelectFont,
@@ -306,6 +311,10 @@ impl CommandId {
     /// Human-readable name for the command
     pub fn name(&self) -> &'static str {
         match self {
+            Self::UseCompactToolbar => "Use Compact Toolbar",
+            Self::UseRibbonToolbar => "Use Ribbon Toolbar",
+            Self::ToggleRibbonCollapsed => "Collapse/Expand Ribbon",
+            Self::ToggleToolbar => "Show/Hide Toolbar",
             Self::GoToCell => "Go to Cell",
             Self::FindInCells => "Find in Cells",
             Self::GoToStart => "Go to Start (A1)",
@@ -497,6 +506,7 @@ impl CommandId {
     /// Keyboard shortcut display string (if any)
     pub fn shortcut(&self) -> Option<&'static str> {
         match self {
+            Self::UseCompactToolbar | Self::UseRibbonToolbar | Self::ToggleRibbonCollapsed | Self::ToggleToolbar => None,
             Self::GoToCell => Some("Ctrl+G"),
             Self::FindInCells => Some("Ctrl+F"),
             Self::GoToStart => Some("Ctrl+Home"),
@@ -593,6 +603,7 @@ impl CommandId {
     /// Search keywords (additional terms that match this command)
     pub fn keywords(&self) -> &'static str {
         match self {
+            Self::UseCompactToolbar | Self::UseRibbonToolbar | Self::ToggleRibbonCollapsed | Self::ToggleToolbar => "toolbar ribbon compact appearance layout collapse expand show hide",
             Self::GoToCell => "goto jump navigate",
             Self::FindInCells => "search",
             Self::GoToStart => "home beginning",
@@ -881,6 +892,10 @@ impl CommandId {
             Self::PrintPreview,
             Self::ExportTsv,
             Self::ExportJson,
+            Self::UseCompactToolbar,
+            Self::UseRibbonToolbar,
+            Self::ToggleRibbonCollapsed,
+            Self::ToggleToolbar,
             Self::SelectTheme,
             Self::SelectFont,
             Self::ToggleInspector,
@@ -1022,6 +1037,8 @@ impl CommandId {
             | Self::FindInCells
             | Self::GoToCell => Some(MenuCategory::Edit),
             Self::AddEditComment => Some(MenuCategory::Edit),
+
+            Self::UseCompactToolbar | Self::UseRibbonToolbar | Self::ToggleRibbonCollapsed | Self::ToggleToolbar => Some(MenuCategory::View),
 
             // View menu
             Self::ToggleInspector
