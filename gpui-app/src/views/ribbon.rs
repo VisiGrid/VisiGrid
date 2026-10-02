@@ -5,11 +5,13 @@ use crate::theme::TokenKey;
 use crate::toolbar::{RibbonTab, RIBBON_BODY_HEIGHT, RIBBON_TABS_HEIGHT};
 use gpui::{prelude::FluentBuilder, *};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Item {
     Command(CommandId, &'static str),
     NumberFormat,
     Styles,
+    FontSize,
+    TextColor,
     InsertRows,
     InsertCols,
 }
@@ -53,6 +55,8 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
                     C(ToggleItalic, "Italic"),
                     C(ToggleUnderline, "Underline"),
                     C(FillColor, "Fill color"),
+                    Item::FontSize,
+                    Item::TextColor,
                 ],
                 font: true,
             },
@@ -202,6 +206,8 @@ fn item_label(item: Item) -> &'static str {
         Item::Command(_, label) => label,
         Item::NumberFormat => "Number format ▾",
         Item::Styles => "Cell styles ▾",
+        Item::FontSize => "Font size",
+        Item::TextColor => "Text color",
         Item::InsertRows => "Insert rows",
         Item::InsertCols => "Insert columns",
     }
@@ -260,11 +266,14 @@ fn invoke(
         cx.notify();
         return;
     }
+    app.ui.desktop_keytips.clear();
     window.focus(&app.focus_handle, cx);
-    app.ui.ribbon.group_menu = None;
+    if item != Item::FontSize {
+        app.ui.ribbon.group_menu = None;
+    }
     // The picker is rendered at root level and must remain anchored after the
     // temporary ribbon closes. Its vertical anchor is geometry, not a row index.
-    app.ui.ribbon.temporary = false;
+    app.ui.ribbon.temporary = item == Item::FontSize && app.ribbon_collapsed(cx);
     app.ui.format_bar.popup_x = x;
     match item {
         Item::Command(command, _) => app.dispatch_command(command, window, cx),
@@ -273,6 +282,10 @@ fn invoke(
         }
         Item::Styles => {
             app.ui.format_bar.cell_style_menu_open = true;
+        }
+        Item::FontSize => super::format_bar::begin_font_size_edit(app, window, cx),
+        Item::TextColor => {
+            app.show_color_picker(crate::color_palette::ColorTarget::Text, window, cx)
         }
         Item::InsertRows | Item::InsertCols => app.insert_rows_or_cols(cx),
     }
@@ -323,6 +336,9 @@ fn command_button(
         .into();
     div()
         .id(SharedString::from(id))
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .h(px(21.))
         .px_1()
         .rounded_sm()
@@ -347,7 +363,133 @@ fn command_button(
             }),
         )
         .tooltip(move |_, cx| cx.new(|_| RibbonTooltip(tooltip.clone())).into())
-        .child(item_label(item))
+        .flex()
+        .items_center()
+        .gap_1()
+        .when(app.ui.desktop_keytips.ribbon(app.ui.ribbon.tab), |d| {
+            let code = keytip_for(app.ui.ribbon.tab, item);
+            d.when(
+                code.to_ascii_lowercase()
+                    .starts_with(&app.ui.desktop_keytips.prefix),
+                |d| d.child(keytip_badge(app, code).flex_shrink_0()),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(item_label(item)),
+        )
+}
+
+/// Group prefixes are stable, unique within each tab, and separate from root letters.
+fn group_prefix(label: &str) -> char {
+    match label {
+        "Clipboard" | "Calculate" | "Clean & validate" => 'C',
+        "Font" | "Freeze" => 'F',
+        "Alignment" | "Analysis" | "Appearance" => 'A',
+        "Number" | "Names" => 'N',
+        "Styles" | "Sort & filter" => 'S',
+        "Editing" => 'E',
+        "Worksheet" => 'W',
+        "Inspect" => 'I',
+        "Pivot tables" | "Panels" => 'P',
+        "Zoom" => 'Z',
+        _ => unreachable!("Every ribbon group needs a KeyTip prefix"),
+    }
+}
+
+fn keytip_for(tab: RibbonTab, item: Item) -> String {
+    for group in groups(tab) {
+        if let Some(index) = group.items.iter().position(|i| *i == item) {
+            return format!("{}{}", group_prefix(group.label), index + 1);
+        }
+    }
+    unreachable!("KeyTip command must belong to the visible tab")
+}
+
+pub(super) fn keytip_badge(app: &Spreadsheet, code: String) -> Div {
+    div()
+        .px(px(3.))
+        .h(px(15.))
+        .text_size(px(10.))
+        .line_height(px(15.))
+        .rounded_sm()
+        .border_1()
+        .border_color(app.token(TokenKey::Accent))
+        .bg(app.token(TokenKey::PanelBg))
+        .text_color(app.token(TokenKey::TextPrimary))
+        .child(code)
+}
+
+pub(super) fn font_keytip(app: &Spreadsheet, code: &str, control: impl IntoElement) -> AnyElement {
+    if !app.ui.desktop_keytips.ribbon(RibbonTab::Home)
+        || !code
+            .to_ascii_lowercase()
+            .starts_with(&app.ui.desktop_keytips.prefix)
+    {
+        return control.into_any_element();
+    }
+    div()
+        .relative()
+        .child(control)
+        .child(
+            keytip_badge(app, code.into())
+                .absolute()
+                .right_0()
+                .top(px(-8.)),
+        )
+        .into_any_element()
+}
+
+/// KeyTips reach commands even when their group has collapsed. Typing the group
+/// letter opens its existing overflow panel so the remaining digit is discoverable.
+pub(crate) fn handle_keytip(
+    app: &mut Spreadsheet,
+    tab: RibbonTab,
+    input: &str,
+    window: &mut Window,
+    cx: &mut Context<Spreadsheet>,
+) {
+    if input.len() != 1 || !input.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return;
+    }
+    let candidate = format!("{}{}", app.ui.desktop_keytips.prefix, input);
+    let entries = groups(tab);
+    for (index, group) in entries.iter().enumerate() {
+        for (row, item) in group.items.iter().enumerate() {
+            let code = format!(
+                "{}{}",
+                group_prefix(group.label).to_ascii_lowercase(),
+                row + 1
+            );
+            if candidate == code {
+                invoke(app, *item, app.ui.ribbon.group_menu_x, window, cx);
+                // Disabled commands retain hints, allowing another choice.
+                app.ui.desktop_keytips.prefix.clear();
+                cx.notify();
+                return;
+            }
+        }
+        if candidate == group_prefix(group.label).to_ascii_lowercase().to_string() {
+            app.ui.desktop_keytips.prefix = candidate;
+            let widths = group_widths(
+                &entries.iter().map(|g| g.width).collect::<Vec<_>>(),
+                f32::from(app.window_size.width) - 16.,
+            );
+            if widths[index] < group.width {
+                app.ui.ribbon.group_menu = Some(index);
+                app.ui.ribbon.group_menu_x = 8. + widths[..index].iter().sum::<f32>();
+            }
+            cx.notify();
+            return;
+        }
+    }
+    // An invalid digit resets the prefix; never replay it into the cell editor.
+    app.ui.desktop_keytips.prefix.clear();
+    cx.notify();
 }
 
 /// Collapse whole groups from right to left, keeping the user's spatial order.
@@ -426,7 +568,21 @@ pub fn render_ribbon(
                         }
                     }),
                 )
-                .child(tab.label()),
+                .child(tab.label())
+                .relative()
+                .when(app.ui.desktop_keytips.root(), |d| {
+                    let key = crate::desktop_keytips::TAB_KEYS
+                        .iter()
+                        .find(|(_, t)| *t == tab)
+                        .unwrap()
+                        .0;
+                    d.child(
+                        keytip_badge(app, key.to_ascii_uppercase().to_string())
+                            .absolute()
+                            .right_0()
+                            .bottom_0(),
+                    )
+                }),
         );
     }
     tabs = tabs.child(div().flex_1()).child(
@@ -529,7 +685,16 @@ fn render_body(
                         cx.notify();
                     }))
                     .child(group.label)
-                    .child("▾"),
+                    .child("▾")
+                    .relative()
+                    .when(app.ui.desktop_keytips.ribbon(tab), |d| {
+                        d.child(
+                            keytip_badge(app, group_prefix(group.label).to_string())
+                                .absolute()
+                                .right_0()
+                                .top_0(),
+                        )
+                    }),
             );
         } else {
             if group.font && disabled_reason(app, group.items[0]).is_none() {
@@ -539,7 +704,7 @@ fn render_body(
             } else {
                 let mut columns = div().flex().gap_1();
                 for (column, items) in group.items.chunks(3).enumerate() {
-                    let mut col = div().flex().flex_col().flex_1();
+                    let mut col = div().flex().flex_col().flex_1().min_w_0();
                     for (row, item) in items.iter().enumerate() {
                         col = col.child(command_button(
                             app,
@@ -675,7 +840,41 @@ impl Render for RibbonTooltip {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_widths, groups, RibbonTab};
+    use super::{group_prefix, group_widths, groups, keytip_for, Item, RibbonTab};
+    #[test]
+    fn command_keytips_are_unique_and_have_no_ambiguous_prefixes() {
+        for tab in RibbonTab::ALL {
+            let mut codes = Vec::new();
+            let mut prefixes = std::collections::HashSet::new();
+            for group in groups(tab) {
+                assert!(prefixes.insert(group_prefix(group.label)));
+                assert!(group.items.len() <= 9);
+                for item in group.items {
+                    let code = keytip_for(tab, *item);
+                    assert!(codes
+                        .iter()
+                        .all(|old: &String| !old.starts_with(&code) && !code.starts_with(old)));
+                    codes.push(code);
+                }
+            }
+        }
+    }
+    #[test]
+    fn font_badges_match_the_shared_controls() {
+        use crate::search::CommandId::*;
+        for (item, code) in [
+            (Item::Command(SelectFont, "Font…"), "F1"),
+            (Item::Command(ToggleBold, "Bold"), "F2"),
+            (Item::Command(ToggleItalic, "Italic"), "F3"),
+            (Item::Command(ToggleUnderline, "Underline"), "F4"),
+            (Item::Command(FillColor, "Fill color"), "F5"),
+            (Item::FontSize, "F6"),
+            (Item::TextColor, "F7"),
+        ] {
+            assert_eq!(keytip_for(RibbonTab::Home, item), code);
+        }
+    }
+
     #[test]
     fn whole_groups_collapse_without_reordering_or_growing_the_ribbon() {
         for tab in RibbonTab::ALL {

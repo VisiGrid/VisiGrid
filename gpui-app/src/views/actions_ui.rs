@@ -544,8 +544,11 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ShowColorPicker, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
         }))
-        .on_action(cx.listener(|this, _: &ShowKeyTips, _, cx| {
+        .on_action(cx.listener(|this, _: &ShowKeyTips, window, cx| {
+            #[cfg(target_os = "macos")]
             this.toggle_keytips(cx);
+            #[cfg(not(target_os = "macos"))]
+            this.toggle_desktop_keytips(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ShowPreferences, _, cx| {
             this.show_preferences(cx);

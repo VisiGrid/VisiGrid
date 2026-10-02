@@ -206,6 +206,7 @@ impl Spreadsheet {
             || self.terminal_has_focus(window)
             || self.ui.format_bar.is_active(window)
             || self.keytips_active
+            || self.ui.desktop_keytips.active()
             || self.open_menu.is_some()
             || self.lua_console.visible
             || self.close_confirm_visible

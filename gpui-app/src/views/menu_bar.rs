@@ -11,6 +11,7 @@ const DROPDOWN_WIDTH: f32 = 260.0;
 /// Render the modern menu bar - compact chrome, not content
 pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let open_menu = app.open_menu;
+    let keytips = app.ui.desktop_keytips.root();
     let header_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -34,19 +35,19 @@ pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl
         .font_weight(FontWeight::NORMAL)  // Light weight for chrome
         .text_color(menu_text)
         // Group 1: File, Edit, View
-        .child(menu_header("File", 'F', Menu::File, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("Edit", 'E', Menu::Edit, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("View", 'V', Menu::View, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("File", 'F', Menu::File, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Edit", 'E', Menu::Edit, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("View", 'V', Menu::View, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
         // Visual separator - extra space before Insert
         .child(div().w(px(8.0)))
         // Group 2: Insert, Format
-        .child(menu_header("Insert", 'I', Menu::Insert, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("Format", 'O', Menu::Format, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Insert", 'I', Menu::Insert, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Format", 'O', Menu::Format, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
         // Visual separator - extra space before Data
         .child(div().w(px(8.0)))
         // Group 3: Data, Help
-        .child(menu_header("Data", 'D', Menu::Data, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("Help", 'H', Menu::Help, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Data", 'D', Menu::Data, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Help", 'H', Menu::Help, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
 }
 
 /// Render the dropdown menu overlay (should be rendered at root level).
@@ -104,6 +105,8 @@ fn menu_header(
     accel: char,
     menu: Menu,
     open_menu: Option<Menu>,
+    keytips: bool,
+    app: &Spreadsheet,
     text_full: Hsla,  // Full opacity text for hover/active states
     selection_bg: Hsla,
     hover_bg: Hsla,
@@ -121,6 +124,8 @@ fn menu_header(
         .w(px(menu_width(menu)))
         .justify_center()
         .h_full()
+        .relative()
+        .when(keytips, |d| d.child(super::ribbon::keytip_badge(app, accel.to_string()).absolute().right_0().bottom_0()))
         .cursor_pointer()
         .when(is_open, move |d: Stateful<Div>| d.bg(selection_bg).text_color(text_full))
         .hover(move |style: StyleRefinement| {

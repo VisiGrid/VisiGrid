@@ -35,16 +35,16 @@ pub(super) fn render_ribbon_font_controls(app: &mut Spreadsheet, state: &crate::
         }
     };
     let mut row = div().flex().gap_1();
-    for (label, value) in [("B", &state.bold), ("I", &state.italic), ("U", &state.underline)] {
-        row = row.child(render_style_btn(label, matches!(value, TriState::Uniform(true)), value.is_mixed(), text, muted, accent, border, cx));
+    for (label, value, tip) in [("B", &state.bold, "F2"), ("I", &state.italic, "F3"), ("U", &state.underline, "F4")] {
+        row = row.child(super::ribbon::font_keytip(app, tip, render_style_btn(label, matches!(value, TriState::Uniform(true)), value.is_mixed(), text, muted, accent, border, cx)));
     }
-    row = row.child(render_fill_color_btn(rgba_to_hsla(&state.background_color), border, cx))
-        .child(render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, cx));
+    row = row.child(super::ribbon::font_keytip(app, "F5", render_fill_color_btn(rgba_to_hsla(&state.background_color), border, cx)))
+        .child(super::ribbon::font_keytip(app, "F7", render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, cx)));
     div().flex().flex_col().gap_1()
         .child(div().flex().gap_1()
-            .child(render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, cx))
-            .child(render_font_size_input(app, size, state.font_size.is_mixed(), app.ui.format_bar.size_editing,
-                app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), cx)))
+            .child(super::ribbon::font_keytip(app, "F1", render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, cx)))
+            .child(super::ribbon::font_keytip(app, "F6", render_font_size_input(app, size, state.font_size.is_mixed(), app.ui.format_bar.size_editing,
+                app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), cx))))
         .child(row)
 }
 
@@ -299,6 +299,23 @@ fn render_font_family_btn(
 }
 
 /// Font size editable input with dropdown arrow.
+pub(super) fn begin_font_size_edit(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) {
+    if !app.ui.format_bar.size_editing {
+        // Enter editing mode: populate buffer with current display value
+        let state = app.selection_format_state(cx);
+        app.ui.format_bar.size_input = match &state.font_size {
+            TriState::Uniform(Some(s)) => format!("{}", s),
+            TriState::Uniform(None) | TriState::Empty => app.cell_font.size.to_string(),
+            TriState::Mixed => String::new(),
+        };
+        app.ui.format_bar.size_editing = true;
+        app.ui.format_bar.size_dropdown = false;
+        app.ui.format_bar.size_replace_next = true;
+        window.focus(&app.ui.format_bar.size_focus, cx);
+        cx.notify();
+    }
+}
+
 fn render_font_size_input(
     app: &Spreadsheet,
     display: SharedString,
@@ -342,20 +359,7 @@ fn render_font_size_input(
                 .hover(|s| s.bg(panel_border.opacity(0.3)))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
-                    if !this.ui.format_bar.size_editing {
-                        // Enter editing mode: populate buffer with current display value
-                        let state = this.selection_format_state(cx);
-                        this.ui.format_bar.size_input = match &state.font_size {
-                            TriState::Uniform(Some(s)) => format!("{}", s),
-                            TriState::Uniform(None) | TriState::Empty => this.cell_font.size.to_string(),
-                            TriState::Mixed => String::new(),
-                        };
-                        this.ui.format_bar.size_editing = true;
-                        this.ui.format_bar.size_dropdown = false;
-                        this.ui.format_bar.size_replace_next = true;
-                        window.focus(&this.ui.format_bar.size_focus, cx);
-                        cx.notify();
-                    }
+                    begin_font_size_edit(this, window, cx);
                 }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                     if !this.ui.format_bar.size_editing {

@@ -341,6 +341,7 @@ pub struct UiState {
     pub preferences_edit_mode: Option<Mode>,
     pub palette_edit_mode: Option<Mode>,
     pub ribbon: crate::toolbar::RibbonState,
+    pub desktop_keytips: crate::desktop_keytips::DesktopKeyTips,
     pub cell_size_input: crate::ui::cell_size_input::CellSizeInput,
     pub color_picker: crate::color_palette::ColorPickerState,
     pub format_bar: FormatBarState,
@@ -1088,6 +1089,7 @@ impl Spreadsheet {
             preferences_edit_mode: None,
             palette_edit_mode: None,
             ribbon: crate::toolbar::RibbonState::new(cx),
+            desktop_keytips: Default::default(),
             cell_size_input: Default::default(),
             color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
             format_bar: FormatBarState {
@@ -1143,6 +1145,17 @@ impl Spreadsheet {
             }
         });
 
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::intercept_desktop_keytips(window, cx).detach();
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.ui.desktop_keytips.suppress_alt_tap = true;
+                    this.ui.desktop_keytips.alt_down = false;
+                    this.dismiss_desktop_keytips(cx);
+                }
+            }).detach();
+        }
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
 
         // Session server channel: requests from TCP server → GUI thread

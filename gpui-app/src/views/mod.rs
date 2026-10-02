@@ -14,7 +14,7 @@ mod filter_dropdown;
 mod find_dialog;
 mod font_picker;
 pub(crate) mod format_bar;
-mod ribbon;
+pub(crate) mod ribbon;
 mod formula_bar;
 mod goto_dialog;
 mod grid;
@@ -70,6 +70,9 @@ use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     app.sync_toolbar_preferences(window, cx);
+    if app.ui.desktop_keytips.active() && !app.desktop_keytips_available(window, cx) {
+        app.dismiss_desktop_keytips(cx);
+    }
     // Check if validation dropdown source has changed (fingerprint mismatch)
     app.check_dropdown_staleness(cx);
 
@@ -160,6 +163,20 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let el = actions_ui::bind(el, cx);
 
     el
+        .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, _| {
+            if event.modifiers.alt && !this.ui.desktop_keytips.alt_down {
+                this.ui.desktop_keytips.suppress_alt_tap = false;
+            }
+            this.ui.desktop_keytips.alt_down = event.modifiers.alt;
+        }))
+        .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+            if window.modifiers().alt { this.ui.desktop_keytips.suppress_alt_tap = true; }
+            // Keep a temporary panel alive until its clicked control receives the event.
+            if this.ui.desktop_keytips.active() {
+                this.ui.desktop_keytips.clear();
+                cx.notify();
+            }
+        }))
         // Character input (handles editing, goto, find, and command modes)
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             key_handler::handle_key_down(this, event, window, cx);

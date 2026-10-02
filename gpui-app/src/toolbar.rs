@@ -179,6 +179,7 @@ impl Spreadsheet {
                 // without ever committing or discarding the cell editor buffer.
                 crate::views::format_bar::commit_font_size(self, cx);
             }
+            self.dismiss_desktop_keytips(cx);
             self.close_toolbar_popups();
             if had_focus {
                 window.focus(&self.focus_handle, cx);
