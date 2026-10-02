@@ -2384,8 +2384,9 @@ fn render_clipboard_border(app: &Spreadsheet, cx: &mut Context<Spreadsheet>, pan
         move |canvas_bounds, (), window, _cx| {
             let ox: f32 = canvas_bounds.origin.x.into();
             let oy: f32 = canvas_bounds.origin.y.into();
+            // Redraws come from Spreadsheet::start_marching_ants' timer, not
+            // animation frames, so a pending copy doesn't repaint at 60-120 Hz.
             paint_marching_ants(window, ox + x, oy + y, width, height, ant, base);
-            window.request_animation_frame();
         },
     )
     .absolute()
@@ -2405,7 +2406,8 @@ fn paint_marching_ants(window: &mut Window, x: f32, y: f32, w: f32, h: f32, ant:
     const TH: f32 = 2.0;
     const DASH: f32 = 5.0;
     const PERIOD: f32 = 10.0;
-    let phase = (ants_epoch().elapsed().as_secs_f32() * 24.0) % PERIOD;
+    // 24px/s in 2px steps, matching the ~12 Hz redraw timer.
+    let phase = ((ants_epoch().elapsed().as_secs_f32() * 12.0).floor() * 2.0) % PERIOD;
     let rect = |rx: f32, ry: f32, rw: f32, rh: f32| Bounds {
         origin: Point::new(px(rx), px(ry)),
         size: Size { width: px(rw), height: px(rh) },

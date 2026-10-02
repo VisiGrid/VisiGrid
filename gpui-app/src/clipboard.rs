@@ -550,6 +550,7 @@ impl Spreadsheet {
         // Set visual range for dashed border overlay
         self.clipboard_visual_range = Some((min_row, min_col, max_row, max_col));
         self.clipboard_visual_sheet = Some(self.sheet(cx).id);
+        self.start_marching_ants(cx);
 
         if is_filtered {
             self.status_message = Some("Copied visible rows to clipboard".to_string());
