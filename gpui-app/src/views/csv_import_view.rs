@@ -68,7 +68,7 @@ struct Finding {
     mark: &'static str,
     title: String,
     body: String,
-    actions: Vec<(&'static str, &'static str, FindingAction)>,
+    actions: Vec<(&'static str, String, FindingAction)>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,6 +76,8 @@ enum FindingAction {
     ShowCells,
     ReviewFormulas,
     Settings,
+    ReimportChanged,
+    SaveAs,
 }
 
 /// "zip, sku and card"
@@ -88,31 +90,63 @@ fn name_list(names: &[String]) -> String {
     }
 }
 
-fn findings(doc: &crate::csv_import_ui::CsvDocState, c: &Colors) -> Vec<Finding> {
+fn findings(doc: &crate::csv_import_ui::CsvDocState, dirty: bool, c: &Colors) -> Vec<Finding> {
     let mut out = Vec::new();
+    if let Some(change) = &doc.disk_change {
+        let mut body = change.describe(!doc.options.no_header);
+        if dirty {
+            body.push_str(" Re-importing replaces your unsaved edits.");
+        }
+        out.push(Finding {
+            tone: c.accent,
+            mark: "!",
+            title: format!("{} changed on disk", doc.file_name()),
+            body,
+            actions: vec![
+                ("csv-reimport-changed", if dirty { "Discard edits and re-import".into() } else { "Re-import with the same settings".into() }, FindingAction::ReimportChanged),
+                ("csv-review-settings", "Review settings…".into(), FindingAction::Settings),
+            ],
+        });
+    }
     if doc.truncated() {
         out.push(Finding {
             tone: c.error,
             mark: "!",
-            title: format!("Only the first {} of {} rows fit", thousands(doc.rows_loaded), thousands(doc.rows_in_file)),
+            // Data rows, like the header line (the header row is not one)
+            title: format!(
+                "Only the first {} of {} rows fit",
+                thousands(doc.rows_loaded - (doc.rows_in_file - doc.data_rows())),
+                thousands(doc.data_rows())
+            ),
             body: format!(
-                "A sheet holds {} rows. The other {} are still in the file; saving over it would lose them.",
+                "A sheet holds {} rows. The other {} are still in the file, so VisiGrid will not write over it.",
                 thousands(doc.rows_loaded),
                 thousands(doc.rows_in_file - doc.rows_loaded)
             ),
-            actions: Vec::new(),
+            actions: vec![("csv-save-as", "Save as a new file…".into(), FindingAction::SaveAs)],
         });
     }
     let formulas = doc.formula_cells.len();
-    if formulas > 0 {
+    if formulas > 0 && doc.formulas_changed {
+        out.push(Finding {
+            tone: c.warn,
+            mark: "!",
+            title: format!("The formulas in {} changed since you approved them", doc.file_name()),
+            body: format!("{formulas} cell{} starting with = {} left as text. Review them before evaluating again.", plural(formulas), if formulas == 1 { "was" } else { "were" }),
+            actions: vec![
+                ("csv-show-cells", "Show cells".into(), FindingAction::ShowCells),
+                ("csv-review", "Review and evaluate…".into(), FindingAction::ReviewFormulas),
+            ],
+        });
+    } else if formulas > 0 {
         out.push(Finding {
             tone: c.warn,
             mark: "!",
             title: format!("{formulas} cell{} start{} with = and {} left as text", plural(formulas), if formulas == 1 { "s" } else { "" }, if formulas == 1 { "was" } else { "were" }),
             body: "Formulas in a CSV can send your data elsewhere. Evaluate them only if you trust where the file came from.".into(),
             actions: vec![
-                ("csv-show-cells", "Show cells", FindingAction::ShowCells),
-                ("csv-review", "Review and evaluate…", FindingAction::ReviewFormulas),
+                ("csv-show-cells", "Show cells".into(), FindingAction::ShowCells),
+                ("csv-review", "Review and evaluate…".into(), FindingAction::ReviewFormulas),
             ],
         });
     }
@@ -122,7 +156,7 @@ fn findings(doc: &crate::csv_import_ui::CsvDocState, c: &Colors) -> Vec<Finding>
             mark: "!",
             title: format!("{} value{} did not fit the chosen type", thousands(doc.unreadable), plural(doc.unreadable)),
             body: format!("In {}. They stayed as text.", name_list(&doc.unreadable_columns)),
-            actions: vec![("csv-types-2", "Change column types…", FindingAction::Settings)],
+            actions: vec![("csv-types-2", "Change column types…".into(), FindingAction::Settings)],
         });
     }
     if doc.kept_as_text > 0 {
@@ -131,7 +165,7 @@ fn findings(doc: &crate::csv_import_ui::CsvDocState, c: &Colors) -> Vec<Finding>
             mark: "i",
             title: format!("{} value{} kept as text", thousands(doc.kept_as_text), plural(doc.kept_as_text)),
             body: format!("So leading zeros and long IDs stay exact in {}.", name_list(&doc.text_columns)),
-            actions: vec![("csv-types", "Change column types…", FindingAction::Settings)],
+            actions: vec![("csv-types", "Change column types…".into(), FindingAction::Settings)],
         });
     }
     if doc.used_saved_settings {
@@ -140,7 +174,7 @@ fn findings(doc: &crate::csv_import_ui::CsvDocState, c: &Colors) -> Vec<Finding>
             mark: "i",
             title: "Opened with your saved settings".into(),
             body: "You chose these for files with the same column names.".into(),
-            actions: vec![("csv-saved", "Import settings…", FindingAction::Settings)],
+            actions: vec![("csv-saved", "Import settings…".into(), FindingAction::Settings)],
         });
     }
     out
@@ -169,7 +203,7 @@ pub(crate) fn render_csv_banner(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
     let card = if doc.reviewing_formulas {
         render_formula_review(app, doc, &c, card, cx)
     } else {
-        render_findings(doc, &c, card, cx)
+        render_findings(doc, app.is_dirty(), &c, card, cx)
     };
 
     div()
@@ -184,15 +218,28 @@ pub(crate) fn render_csv_banner(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
         .into_any_element()
 }
 
+/// Esc key cap plus ✕: closes the banner (or, in the review step, goes back).
 fn dismiss_button(id: &'static str, c: &Colors, cx: &mut Context<Spreadsheet>, close_review: bool) -> impl IntoElement {
-    let (muted, text) = (c.muted, c.text);
+    let (muted, text, border) = (c.muted, c.text, c.border);
     div()
         .id(id)
-        .px_2()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .pl_2()
         .text_size(px(13.0))
         .text_color(muted)
         .cursor_pointer()
         .hover(move |s| s.text_color(text))
+        .child(
+            div()
+                .px(px(5.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(border)
+                .text_size(px(10.0))
+                .child("Esc"),
+        )
         .child("✕")
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             if close_review {
@@ -206,11 +253,12 @@ fn dismiss_button(id: &'static str, c: &Colors, cx: &mut Context<Spreadsheet>, c
 
 fn render_findings(
     doc: &crate::csv_import_ui::CsvDocState,
+    dirty: bool,
     c: &Colors,
     card: Stateful<Div>,
     cx: &mut Context<Spreadsheet>,
 ) -> Stateful<Div> {
-    let list = findings(doc, c);
+    let list = findings(doc, dirty, c);
     let checks = list.iter().filter(|f| f.mark == "!").count();
     let detail = match checks {
         0 => format!("{} rows", thousands(doc.data_rows())),
@@ -232,6 +280,17 @@ fn render_findings(
             .child(dismiss_button("csv-banner-dismiss", c, cx, false)),
     );
 
+    if list.is_empty() {
+        // Reopened from the palette after a clean import
+        card = card.child(
+            div()
+                .px(px(14.0))
+                .py(px(10.0))
+                .text_size(px(12.0))
+                .text_color(c.muted)
+                .child(format!("Nothing to note: every value came in as it was in the file. {}.", doc.summary)),
+        );
+    }
     for f in list {
         let warning = f.mark == "!";
         let has_actions = !f.actions.is_empty();
@@ -251,6 +310,8 @@ fn render_findings(
                             FindingAction::ShowCells => this.csv_show_formula_cells(cx),
                             FindingAction::ReviewFormulas => this.csv_review_formulas(true, cx),
                             FindingAction::Settings => this.show_csv_import_dialog(cx),
+                            FindingAction::ReimportChanged => this.csv_reimport_changed(cx),
+                            FindingAction::SaveAs => this.save_as(cx),
                         }
                         cx.stop_propagation();
                     })),

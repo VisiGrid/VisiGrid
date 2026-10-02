@@ -39,13 +39,123 @@ pub struct CsvDocState {
     pub banner_visible: bool,
     /// The banner shows the formulas before "Evaluate" runs them.
     pub reviewing_formulas: bool,
+    /// Column names as read (letters without a header row).
+    pub column_names: Vec<String>,
+    /// The file as imported, to notice it changing on disk.
+    pub fingerprint: Option<FileFingerprint>,
+    /// `CsvImport::formulas_digest` of this import.
+    pub formulas_digest: u64,
+    /// The formulas the user approved for evaluation, if evaluated.
+    pub approved_formulas: Option<u64>,
+    /// Evaluation was asked for, but the formulas were not the ones approved
+    /// (the file changed): they were left as text.
+    pub formulas_changed: bool,
+    /// The file changed on disk since this import.
+    pub disk_change: Option<DiskChange>,
+}
+
+/// Enough of a file to tell whether it changed: modified time and size, and
+/// a hash of its first and last 64 KB. The hash catches a rewrite within the
+/// same second at the same size, which time and size alone miss.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileFingerprint {
+    pub modified: Option<std::time::SystemTime>,
+    pub size: u64,
+    pub quick_hash: [u8; 32],
+}
+
+impl FileFingerprint {
+    pub fn read(path: &Path) -> Option<Self> {
+        use std::io::{Read, Seek, SeekFrom};
+        const EDGE: u64 = 64 * 1024;
+        let meta = std::fs::metadata(path).ok()?;
+        let size = meta.len();
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&size.to_le_bytes());
+        let mut buf = Vec::with_capacity(EDGE as usize);
+        file.by_ref().take(EDGE).read_to_end(&mut buf).ok()?;
+        hasher.update(&buf);
+        if size > EDGE {
+            buf.clear();
+            file.seek(SeekFrom::Start(size.saturating_sub(EDGE).max(EDGE))).ok()?;
+            file.take(EDGE).read_to_end(&mut buf).ok()?;
+            hasher.update(&buf);
+        }
+        Some(Self { modified: meta.modified().ok(), size, quick_hash: *hasher.finalize().as_bytes() })
+    }
+
+    /// Equal only if time, size and the quick hash all match.
+    pub fn same_file_contents(&self, now: &FileFingerprint) -> bool {
+        self.modified == now.modified && self.size == now.size && self.quick_hash == now.quick_hash
+    }
+}
+
+/// How a CSV changed on disk, for the banner.
+#[derive(Clone, Debug)]
+pub struct DiskChange {
+    pub rows_before: usize,
+    pub rows_after: usize,
+    /// By name with a header row; empty without one.
+    pub new_columns: Vec<String>,
+    pub removed_columns: Vec<String>,
+    /// Without a header row columns match by position: the count before and after.
+    pub columns_before: usize,
+    pub columns_after: usize,
+    /// The file as seen when this was worked out.
+    pub seen: FileFingerprint,
+}
+
+impl DiskChange {
+    /// "312 rows were added. One new column, region, will come in as Auto."
+    pub fn describe(&self, has_header: bool) -> String {
+        let mut parts = Vec::new();
+        let (b, a) = (self.rows_before, self.rows_after);
+        parts.push(match a.cmp(&b) {
+            std::cmp::Ordering::Greater => format!("{} row{} added.", a - b, if a - b == 1 { " was" } else { "s were" }),
+            std::cmp::Ordering::Less => format!("{} row{} removed.", b - a, if b - a == 1 { " was" } else { "s were" }),
+            std::cmp::Ordering::Equal => "Same number of rows; values may have changed.".into(),
+        });
+        if has_header {
+            match self.new_columns.len() {
+                0 => {}
+                1 => parts.push(format!("One new column, {}, will come in as Auto.", self.new_columns[0])),
+                n => parts.push(format!("{n} new columns ({}) will come in as Auto.", self.new_columns.join(", "))),
+            }
+            if !self.removed_columns.is_empty() {
+                parts.push(format!("No longer in the file: {}.", self.removed_columns.join(", ")));
+            }
+            if self.new_columns.is_empty() && self.removed_columns.is_empty() {
+                parts.push("Columns match by name.".into());
+            }
+        } else if self.columns_after != self.columns_before {
+            parts.push(format!(
+                "It now has {} columns (was {}); without a header row they match by position.",
+                self.columns_after, self.columns_before
+            ));
+        }
+        parts.join(" ")
+    }
 }
 
 impl CsvDocState {
-    pub fn new(path: PathBuf, options: CsvOptions, import: &CsvImport, used_saved_settings: bool) -> Self {
+    pub fn new(
+        path: PathBuf,
+        options: CsvOptions,
+        import: &CsvImport,
+        used_saved_settings: bool,
+        approved_formulas: Option<u64>,
+        formulas_changed: bool,
+    ) -> Self {
         Self {
+            column_names: import.columns.iter().map(|c| c.name.clone()).collect(),
+            fingerprint: FileFingerprint::read(&path),
+            formulas_digest: import.formulas_digest,
+            approved_formulas: if options.evaluate_formulas { approved_formulas } else { None },
+            formulas_changed,
+            disk_change: None,
             // A clean import (nothing kept, cut or left as text) shows no banner
-            banner_visible: import.message().is_some() || used_saved_settings,
+            banner_visible: import.message().is_some() || used_saved_settings || formulas_changed,
             path,
             options,
             formula_cells: import.formula_cells.clone(),
@@ -352,6 +462,38 @@ impl Spreadsheet {
         self.csv_doc.as_ref().filter(|c| self.current_file.as_ref() == Some(&c.path))
     }
 
+    /// Esc with the CSV banner showing: leave the review step ("Keep as
+    /// text"), else close the banner. False when there is no banner.
+    pub fn csv_banner_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.cycle_banner.visible {
+            return false; // the cycle banner has the spot; the CSV one is hidden
+        }
+        let Some(doc) = self.csv_doc.as_mut().filter(|d| d.banner_visible) else { return false };
+        if self.current_file.as_ref() != Some(&doc.path) {
+            return false;
+        }
+        if doc.reviewing_formulas {
+            doc.reviewing_formulas = false;
+        } else {
+            doc.banner_visible = false;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Bring the import banner back after it was closed (palette command).
+    pub fn show_csv_banner(&mut self, cx: &mut Context<Self>) {
+        let current = self.current_file.clone();
+        match self.csv_doc.as_mut().filter(|d| current.as_ref() == Some(&d.path)) {
+            Some(doc) => {
+                doc.banner_visible = true;
+                doc.reviewing_formulas = false;
+            }
+            None => self.status_message = Some("Import notes are for an open CSV file".into()),
+        }
+        cx.notify();
+    }
+
     pub fn dismiss_csv_banner(&mut self, cx: &mut Context<Self>) {
         if let Some(doc) = self.csv_doc.as_mut() {
             doc.banner_visible = false;
@@ -461,7 +603,10 @@ impl Spreadsheet {
         if let Err(e) = save_options_for(&state.path, &state.options, state.remember) {
             self.status_message = Some(format!("Could not save import settings: {e}"));
         }
-        self.start_csv_import_with(&state.path, Some(state.options), cx);
+        // Choosing "Evaluate" in the dialog approves the formulas of the file
+        // as it was imported; if it has changed since, they stay text
+        let approved = state.options.evaluate_formulas.then(|| self.current_csv().map(|c| c.formulas_digest)).flatten();
+        self.start_csv_import_with(&state.path, Some(state.options), approved, cx);
     }
 
     /// "Review and evaluate…": show the formulas in the banner first.
@@ -482,7 +627,9 @@ impl Spreadsheet {
         let path = doc.path.clone();
         let mut options = doc.options.clone();
         options.evaluate_formulas = true;
-        self.start_csv_import_with(&path, Some(options), cx);
+        // Approves exactly the formulas the review showed
+        let approved = Some(doc.formulas_digest);
+        self.start_csv_import_with(&path, Some(options), approved, cx);
     }
 
     /// The banner's "Show which cells": select the first formula left as
@@ -500,6 +647,90 @@ impl Spreadsheet {
         }
         self.status_message = Some(format!("Formulas left as text: {}", refs.join(", ")));
         cx.notify();
+    }
+
+    /// On window focus: has the open CSV changed on disk? Time and size are
+    /// read first; the quick hash only when they match. A change is described
+    /// in the background (record count, header) and shown in the banner.
+    pub fn check_csv_on_disk(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.current_csv() else { return };
+        let Some(before) = doc.fingerprint.clone() else { return };
+        let path = doc.path.clone();
+        let Some(now) = FileFingerprint::read(&path) else { return };
+        if before.same_file_contents(&now) {
+            return;
+        }
+        if doc.disk_change.as_ref().is_some_and(|c| c.seen.same_file_contents(&now)) {
+            return; // already reported this version
+        }
+        let options = doc.options.clone();
+        let (rows_before, names_before) = (doc.rows_in_file, doc.column_names.clone());
+        cx.spawn(async move |this, cx| {
+            let counted = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { csv::count_records(&path, &options) }
+                })
+                .await;
+            let Ok((rows_after, first)) = counted else { return };
+            let _ = this.update(cx, |this, cx| {
+                let Some(doc) = this.csv_doc.as_mut().filter(|d| d.path == path) else { return };
+                let has_header = !doc.options.no_header;
+                let lower = |v: &[String]| v.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>();
+                let (before_l, after_l) = (lower(&names_before), lower(&first));
+                doc.disk_change = Some(DiskChange {
+                    rows_before,
+                    rows_after,
+                    new_columns: if has_header { first.iter().filter(|n| !before_l.contains(&n.to_lowercase())).cloned().collect() } else { Vec::new() },
+                    removed_columns: if has_header { names_before.iter().filter(|n| !after_l.contains(&n.to_lowercase())).cloned().collect() } else { Vec::new() },
+                    columns_before: names_before.len(),
+                    columns_after: first.len(),
+                    seen: now,
+                });
+                doc.banner_visible = true;
+                doc.reviewing_formulas = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Re-import with the same settings". Column rules are keyed by name with
+    /// a header row and by letter without one, so they follow the columns.
+    /// Formulas are evaluated again only if they are the ones approved.
+    pub fn csv_reimport_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.current_csv() else { return };
+        let (path, options, approved) = (doc.path.clone(), doc.options.clone(), doc.approved_formulas);
+        self.start_csv_import_with(&path, Some(options), approved, cx);
+    }
+
+    /// Writing over a CSV whose rows did not all fit would delete those rows.
+    /// Checked where files are written, so every route (Save As, save on
+    /// close, Export CSV/TSV) is covered — CSV never saves in place anyway.
+    pub fn csv_overwrite_refusal(&self, target: &Path) -> Option<String> {
+        let (source, lost) = self.csv_protected_source.as_ref()?;
+        same_path(target, source).then(|| {
+            format!(
+                "Not saved: {} has {} more rows than fit in a sheet; writing over it would delete them. Choose another name.",
+                source.file_name().and_then(|n| n.to_str()).unwrap_or("the file"),
+                lost
+            )
+        })
+    }
+}
+
+/// The same file, whether or not the target exists yet.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| {
+        std::fs::canonicalize(p).ok().or_else(|| {
+            let parent = std::fs::canonicalize(p.parent()?).ok()?;
+            Some(parent.join(p.file_name()?))
+        })
+    };
+    match (canon(a), canon(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -631,5 +862,75 @@ mod outside_tests {
         assert!(reaches_outside("=cmd|' /C calc'!A0"), "DDE");
         assert!(!reaches_outside("=1+1"));
         assert!(!reaches_outside("=SUM(A1:A3)"));
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::{same_path, DiskChange, FileFingerprint};
+    use std::fs::{self, File};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vg-csv-safety-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_same_size_same_second_rewrite_is_still_a_change() {
+        let dir = temp_dir("fp");
+        let path = dir.join("orders.csv");
+        fs::write(&path, "id,note\n1,=1+1\n").unwrap();
+        let before = FileFingerprint::read(&path).unwrap();
+        let stamp = fs::metadata(&path).unwrap().modified().unwrap();
+
+        // Same length, different formula, and the old modified time put back
+        fs::write(&path, "id,note\n1,=9+9\n").unwrap();
+        File::options().write(true).open(&path).unwrap().set_modified(stamp).unwrap();
+        let after = FileFingerprint::read(&path).unwrap();
+
+        assert_eq!((before.modified, before.size), (after.modified, after.size), "time and size alone miss it");
+        assert!(!before.same_file_contents(&after), "the content hash catches it");
+        assert!(before.same_file_contents(&FileFingerprint { ..before.clone() }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn change(before: usize, after: usize, new: &[&str], removed: &[&str], cols: (usize, usize)) -> DiskChange {
+        DiskChange {
+            rows_before: before,
+            rows_after: after,
+            new_columns: new.iter().map(|s| s.to_string()).collect(),
+            removed_columns: removed.iter().map(|s| s.to_string()).collect(),
+            columns_before: cols.0,
+            columns_after: cols.1,
+            seen: FileFingerprint { modified: None, size: 0, quick_hash: [0; 32] },
+        }
+    }
+
+    #[test]
+    fn disk_change_matches_by_name_with_a_header_and_by_position_without() {
+        assert_eq!(
+            change(100, 412, &["region"], &[], (6, 7)).describe(true),
+            "312 rows were added. One new column, region, will come in as Auto."
+        );
+        assert_eq!(
+            change(10, 9, &[], &["notes"], (6, 5)).describe(true),
+            "1 row was removed. No longer in the file: notes."
+        );
+        assert_eq!(change(5, 5, &[], &[], (3, 3)).describe(true), "Same number of rows; values may have changed. Columns match by name.");
+        assert_eq!(
+            change(5, 6, &[], &[], (3, 4)).describe(false),
+            "1 row was added. It now has 4 columns (was 3); without a header row they match by position."
+        );
+    }
+
+    #[test]
+    fn same_path_sees_through_relative_paths_and_missing_targets() {
+        let dir = temp_dir("same");
+        let source = dir.join("events.csv");
+        fs::write(&source, "a\n").unwrap();
+        assert!(same_path(&dir.join(".").join("events.csv"), &source));
+        assert!(!same_path(&dir.join("events.sheet"), &source), "a target that does not exist yet");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -402,6 +402,10 @@ pub(crate) fn bind(
                 this.dismiss_import_overlay(cx);
                 return;
             }
+            // CSV banner: Esc backs out of the review step, then closes it
+            if this.open_menu.is_none() && this.mode == Mode::Navigation && this.csv_banner_escape(cx) {
+                return;
+            }
             if this.open_menu.is_some() {
                 this.close_menu(cx);
             } else if this.mode == Mode::Command {

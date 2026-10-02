@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.43.0
+
+### CSV import
+
+- **After opening a CSV, a banner says what was decided**, one row per finding, warnings first: formulas left as text, values kept as text and in which columns, rows that did not fit, values a chosen type could not read. A clean import shows nothing. Esc closes it; **Show CSV Import Notes** in the command palette brings it back. ([#76](https://github.com/VisiGrid/VisiGrid/pull/76), [#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+- **Formulas are reviewed before they run.** **Review and evaluate…** lists every formula with its cell and flags any that reach outside the sheet (links, web requests, imports). If the file's formulas change after you approve them, they come back as text and you are asked again. ([#76](https://github.com/VisiGrid/VisiGrid/pull/76), [#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+- **Import settings.** Click the CSV line in the status bar or run **CSV Import Settings…**: delimiter, encoding, header row, decimal comma, and a type for each column (Auto, Text, Number, Date in YMD/DMY/MDY, Skip), with a live preview that marks the values a choice would change. **Remember for files with these column names** reopens matching files the same way; it never remembers "evaluate formulas". The dialog also shows the equivalent `vgrid` command. ([#76](https://github.com/VisiGrid/VisiGrid/pull/76))
+- **`vgrid` has the same options:** `--text`, `--number`, `--date col=dmy`, `--skip`, `--decimal-comma`, `--encoding`, `--no-header` and `--formulas`. Piped CSV now honours `--encoding`, and CSV piped into `vgrid calc` or `vgrid convert` gets the same safe defaults as a file: `007` and `=…` stay text. `--delimiter` sets the output delimiter (and how piped input is read); a file's own delimiter is detected. ([#69](https://github.com/VisiGrid/VisiGrid/pull/69))
+- **A CSV with more rows than a sheet holds is never overwritten.** Saving or exporting over that file is refused, with the number of rows that would be lost. ([#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+- **A CSV that changes on disk is noticed** when you return to the window. The banner says how it changed (rows added or removed, columns new or gone) and offers to re-import with the same settings. ([#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+
+### Command palette
+
+- **Every engine function is in autocomplete and the palette's `=` search**, including XLOOKUP, XMATCH, XIRR, XNPV, SUMIFS, COUNTIFS and TEXTJOIN; 39 were missing. Trackpad scrolling now moves the command palette and font picker. ([#74](https://github.com/VisiGrid/VisiGrid/pull/74))
 
 ### Selection
 

@@ -269,6 +269,11 @@ pub struct CsvImport {
     pub rows_loaded: usize,
     /// The first records as read, for a preview.
     pub sample: Vec<Vec<String>>,
+    /// Fingerprint of every field starting with `=` (position and text),
+    /// evaluated or not. Evaluating needs the user to have approved exactly
+    /// these formulas: a file that changes after review is asked about again.
+    /// Comparable within one process only.
+    pub formulas_digest: u64,
 }
 
 impl CsvImport {
@@ -590,6 +595,7 @@ pub(crate) fn import_str(content: &str, encoding: Encoding, options: &CsvOptions
 
     let mut header: Vec<String> = Vec::new();
     let (orow, ocol) = options.origin;
+    let mut formulas = std::collections::hash_map::DefaultHasher::new();
     for (row_idx, result) in reader.records().enumerate() {
         if row_idx >= max_rows {
             break;
@@ -610,6 +616,12 @@ pub(crate) fn import_str(content: &str, encoding: Encoding, options: &CsvOptions
             ensure(&mut decisions, &mut seen, &mut dest_of, record.len() - 1, &header);
         }
         for (col_idx, field) in record.iter().enumerate() {
+            // The same test keep_as_text uses (trimmed), so a formula with
+            // leading spaces is fingerprinted like any other
+            if field.trim().starts_with('=') {
+                use std::hash::Hash;
+                (row_idx, col_idx, field).hash(&mut formulas);
+            }
             let Some(dest) = dest_of[col_idx] else { continue };
             if field.is_empty() {
                 continue;
@@ -750,7 +762,31 @@ pub(crate) fn import_str(content: &str, encoding: Encoding, options: &CsvOptions
         rows_in_file,
         rows_loaded,
         sample,
+        formulas_digest: std::hash::Hasher::finish(&formulas),
     })
+}
+
+/// Records in a file and its first record, without typing any values: what
+/// "file changed on disk" needs to say how it changed.
+pub fn count_records(path: &Path, options: &CsvOptions) -> Result<(usize, Vec<String>), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let (content, _) = decode(&bytes, options.encoding);
+    let delimiter = options.delimiter.unwrap_or_else(|| sniff_delimiter(&content));
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(content.as_bytes());
+    let mut first = Vec::new();
+    let mut count = 0usize;
+    let mut record = csv::StringRecord::new();
+    while reader.read_record(&mut record).map_err(|e| e.to_string())? {
+        if count == 0 {
+            first = record.iter().map(|f| f.trim().to_string()).collect();
+        }
+        count += 1;
+    }
+    Ok((count, first))
 }
 
 /// Column letters for a 0-based index (0 -> A, 26 -> AA).
@@ -778,6 +814,38 @@ mod tests {
     fn cell(r: &CsvImport, row: usize, col: usize) -> (String, bool) {
         let v = r.sheet.get_computed_value(row, col);
         (r.sheet.get_display(row, col), matches!(v, Value::Text(_)))
+    }
+
+    #[test]
+    fn formulas_digest_follows_the_formulas_not_the_evaluate_flag() {
+        let a = "id,note\n1,=1+1\n2,=HYPERLINK(\"http://x\",\"y\")\n";
+        let text = run(a, &CsvOptions::default());
+        let evaluated = run(a, &CsvOptions { evaluate_formulas: true, ..Default::default() });
+        assert_eq!(text.formulas_digest, evaluated.formulas_digest);
+        // Same values elsewhere, one formula edited: a different digest
+        let b = "id,note\n1,=1+1\n2,=HYPERLINK(\"http://evil\",\"y\")\n";
+        assert_ne!(text.formulas_digest, run(b, &CsvOptions::default()).formulas_digest);
+        // A formula moved to another row: different too
+        let c = "id,note\n1,=HYPERLINK(\"http://x\",\"y\")\n2,=1+1\n";
+        assert_ne!(text.formulas_digest, run(c, &CsvOptions::default()).formulas_digest);
+        // Non-formula changes do not matter
+        let d = "id,note\n9,=1+1\n8,=HYPERLINK(\"http://x\",\"y\")\n";
+        assert_eq!(text.formulas_digest, run(d, &CsvOptions::default()).formulas_digest);
+        // A formula behind leading spaces is still a formula: adding one changes it
+        let e = "id,note\n1,=1+1\n2,=HYPERLINK(\"http://x\",\"y\")\n3, =HYPERLINK(\"http://evil\",\"y\")\n";
+        assert_ne!(text.formulas_digest, run(e, &CsvOptions::default()).formulas_digest);
+    }
+
+    #[test]
+    fn count_records_reads_quoted_newlines_as_one_record() {
+        let dir = std::env::temp_dir().join(format!("vg-count-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.csv");
+        std::fs::write(&path, "a;b\n1;\"two\nlines\"\n3;4\n").unwrap();
+        let (n, header) = count_records(&path, &CsvOptions::default()).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(header, vec!["a", "b"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
