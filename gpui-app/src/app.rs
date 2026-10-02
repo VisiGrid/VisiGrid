@@ -834,6 +834,11 @@ pub struct Spreadsheet {
     pub csv_doc: Option<crate::csv_import_ui::CsvDocState>,
     /// The CSV import settings dialog, while open.
     pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
+    /// A CSV whose rows did not all fit, and how many were left out: no save
+    /// or export may write over it. Kept after Save As, cleared on the next load.
+    pub csv_protected_source: Option<(PathBuf, usize)>,
+    /// Re-checks the open CSV on disk when the window is focused.
+    csv_activation_subscription: Option<gpui::Subscription>,
     pub import_report_details_expanded: bool,
     pub import_filename: Option<String>,         // Original filename for display
     pub import_source_dir: Option<PathBuf>,      // Original directory for Save As default
@@ -1139,6 +1144,13 @@ impl Spreadsheet {
 
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
 
+        // Coming back to the window: has the open CSV changed on disk?
+        let csv_activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.check_csv_on_disk(cx);
+            }
+        });
+
         // Session server channel: requests from TCP server → GUI thread
         let (session_tx, session_rx) = std::sync::mpsc::channel();
         let session_server = crate::session_server::SessionServer::new();
@@ -1396,6 +1408,8 @@ impl Spreadsheet {
             import_result: None,
             csv_doc: None,
             csv_dialog: None,
+            csv_protected_source: None,
+            csv_activation_subscription: Some(csv_activation_subscription),
             import_report_details_expanded: false,
             import_filename: None,
             import_source_dir: None,
@@ -2455,6 +2469,7 @@ impl Spreadsheet {
             CommandId::ExportCsv => self.export_csv(cx),
             CommandId::ExportPdf => self.show_pdf_export(cx),
             CommandId::CsvImportSettings => self.show_csv_import_dialog(cx),
+            CommandId::CsvImportNotes => self.show_csv_banner(cx),
             CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),

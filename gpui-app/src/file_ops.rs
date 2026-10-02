@@ -456,18 +456,23 @@ impl Spreadsheet {
 
     /// Start background CSV/TSV/Parquet import with delayed overlay
     fn start_csv_import(&mut self, path: &PathBuf, ext: &str, cx: &mut Context<Self>) {
-        self.start_delimited_import(path, ext, None, cx);
+        self.start_delimited_import(path, ext, None, None, cx);
     }
 
     /// Re-import a CSV/TSV with explicit settings (the import dialog, the
     /// banner's "Evaluate formulas"). None: saved settings for its columns,
     /// else the defaults.
-    pub fn start_csv_import_with(&mut self, path: &PathBuf, options: Option<csv::CsvOptions>, cx: &mut Context<Self>) {
+    ///
+    /// `approved_formulas`: the formulas the user approved (a
+    /// `CsvImport::formulas_digest`). Formulas are evaluated only when the
+    /// file's formulas are exactly those; otherwise they stay text and the
+    /// banner asks again.
+    pub fn start_csv_import_with(&mut self, path: &PathBuf, options: Option<csv::CsvOptions>, approved_formulas: Option<u64>, cx: &mut Context<Self>) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv").to_lowercase();
-        self.start_delimited_import(path, &ext, options, cx);
+        self.start_delimited_import(path, &ext, options, approved_formulas, cx);
     }
 
-    fn start_delimited_import(&mut self, path: &PathBuf, ext: &str, explicit: Option<csv::CsvOptions>, cx: &mut Context<Self>) {
+    fn start_delimited_import(&mut self, path: &PathBuf, ext: &str, explicit: Option<csv::CsvOptions>, approved_formulas: Option<u64>, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
@@ -523,8 +528,19 @@ impl Spreadsheet {
                                     None => (csv::CsvOptions { delimiter: (ext == "tsv").then_some(b'\t'), ..Default::default() }, false),
                                 },
                             };
-                            let imported = csv::import_report(&path_for_import, &options)?;
-                            let doc = crate::csv_import_ui::CsvDocState::new(path_for_import.clone(), options, &imported, saved);
+                            let mut options = options;
+                            let mut imported = csv::import_report(&path_for_import, &options)?;
+                            // Evaluate only the formulas the user approved. If the
+                            // file now holds others, read it again with them as text.
+                            let formulas_changed = options.evaluate_formulas
+                                && approved_formulas != Some(imported.formulas_digest);
+                            if formulas_changed {
+                                options.evaluate_formulas = false;
+                                imported = csv::import_report(&path_for_import, &options)?;
+                            }
+                            let doc = crate::csv_import_ui::CsvDocState::new(
+                                path_for_import.clone(), options, &imported, saved, approved_formulas, formulas_changed,
+                            );
                             // The banner carries the details; the status bar the summary
                             let note = Some(doc.summary.clone());
                             (imported.sheet, note, Some(doc))
@@ -572,6 +588,10 @@ impl Spreadsheet {
 
                         this.finalize_load(&path_for_recent);
                         this.request_title_refresh(cx);
+                        // A CSV whose rows did not all fit must never be written over
+                        if let Some(doc) = this.csv_doc.as_ref().filter(|d| d.truncated()) {
+                            this.csv_protected_source = Some((doc.path.clone(), doc.rows_in_file - doc.rows_loaded));
+                        }
 
                         // Clear hub link (CSV/Parquet have no hub metadata)
                         this.hub_link = None;
@@ -999,6 +1019,11 @@ impl Spreadsheet {
 
     fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> bool {
         if self.block_read_only_recovery(cx) { return false; }
+        if let Some(refusal) = self.csv_overwrite_refusal(path) {
+            self.status_message = Some(refusal);
+            cx.notify();
+            return false;
+        }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
         // Persist pivots' stale flags, so a reopened workbook never claims
@@ -1332,6 +1357,11 @@ impl Spreadsheet {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
                     if this.block_read_only_recovery(cx) { return; }
+                    if let Some(refusal) = this.csv_overwrite_refusal(&path) {
+                        this.status_message = Some(refusal);
+                        cx.notify();
+                        return;
+                    }
                     match export_fn(this.sheet(cx), &path) {
                         Ok(()) => {
                             let note = if this.sheet(cx).tables().is_empty() { "" } else { " · values only; save .sheet to preserve Tables" };
