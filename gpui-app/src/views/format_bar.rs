@@ -35,16 +35,22 @@ pub(super) fn render_ribbon_font_controls(app: &mut Spreadsheet, state: &crate::
         }
     };
     let mut row = div().flex().gap_1();
-    for (label, value, tip) in [("B", &state.bold, "F2"), ("I", &state.italic, "F3"), ("U", &state.underline, "F4")] {
-        row = row.child(super::ribbon::font_keytip(app, tip, render_style_btn(label, matches!(value, TriState::Uniform(true)), value.is_mixed(), text, muted, accent, border, cx)));
+    for (label, value, code) in [("B", &state.bold, "F2"), ("I", &state.italic, "F3"), ("U", &state.underline, "F4")] {
+        let tip = super::ribbon::font_control_tooltip(app, code, window, None);
+        let control = render_style_btn(label, matches!(value, TriState::Uniform(true)), value.is_mixed(), text, muted, accent, border, Some(tip), cx);
+        row = row.child(super::ribbon::font_keytip(app, code, control));
     }
-    row = row.child(super::ribbon::font_keytip(app, "F5", render_fill_color_btn(rgba_to_hsla(&state.background_color), border, cx)))
-        .child(super::ribbon::font_keytip(app, "F7", render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, cx)));
+    let fill_tip = super::ribbon::font_control_tooltip(app, "F5", window, None);
+    let color_tip = super::ribbon::font_control_tooltip(app, "F7", window, None);
+    row = row.child(super::ribbon::font_keytip(app, "F5", render_fill_color_btn(rgba_to_hsla(&state.background_color), border, Some(fill_tip), cx)))
+        .child(super::ribbon::font_keytip(app, "F7", render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, Some(color_tip), cx)));
+    let family_tip = super::ribbon::font_control_tooltip(app, "F1", window, Some(&tooltip));
+    let size_tip = super::ribbon::font_control_tooltip(app, "F6", window, None);
     div().flex().flex_col().gap_1()
         .child(div().flex().gap_1()
-            .child(super::ribbon::font_keytip(app, "F1", render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, cx).w(px(200.))))
+            .child(super::ribbon::font_keytip(app, "F1", render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, Some(family_tip), cx).w(px(200.))))
             .child(super::ribbon::font_keytip(app, "F6", render_font_size_input(app, size, state.font_size.is_mixed(), app.ui.format_bar.size_editing,
-                app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), cx))))
+                app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), Some(size_tip), cx))))
         .child(row)
 }
 
@@ -146,11 +152,11 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         .gap_1()
         // Font family button
         .child(render_font_family_btn(
-            font_display, font_is_mixed, font_missing, font_tooltip, text_primary, text_muted, panel_border, cx,
+            font_display, font_is_mixed, font_missing, font_tooltip, text_primary, text_muted, panel_border, None, cx,
         ))
         // Font size input
         .child(render_font_size_input(
-            app, size_display, size_is_mixed, size_editing, size_replace_next, text_primary, text_muted, panel_border, size_focus, cx,
+            app, size_display, size_is_mixed, size_editing, size_replace_next, text_primary, text_muted, panel_border, size_focus, None, cx,
         ))
         // Separator
         .child(toolbar_separator(panel_border))
@@ -167,9 +173,9 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         // Separator
         .child(toolbar_separator(panel_border))
         // Fill color button
-        .child(render_fill_color_btn(fill_chip_color, panel_border, cx))
+        .child(render_fill_color_btn(fill_chip_color, panel_border, None, cx))
         // Text color button
-        .child(render_text_color_btn(text_color_hsla, text_color_is_mixed, text_primary, text_muted, panel_border, cx))
+        .child(render_text_color_btn(text_color_hsla, text_color_is_mixed, text_primary, text_muted, panel_border, None, cx))
         // Separator
         .child(toolbar_separator(panel_border))
         // Alignment buttons
@@ -267,6 +273,7 @@ fn render_font_family_btn(
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
 ) -> Stateful<Div> {
     let text_color = if is_mixed { text_muted } else { text_primary };
@@ -292,7 +299,11 @@ fn render_font_family_btn(
             this.show_font_picker(window, cx);
         }))
         .tooltip(move |_window, cx| {
-            cx.new(|_| FontTooltip(tooltip.clone())).into()
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FontTooltip(tooltip.clone())).into()
+            }
         })
         .child(div().flex_1().overflow_hidden().text_ellipsis().child(display))
         .when(is_missing, |d| d.child(div().ml_1().text_size(px(10.0)).text_color(text_muted).child("Substituted")))
@@ -326,6 +337,7 @@ fn render_font_size_input(
     text_muted: Hsla,
     panel_border: Hsla,
     focus_handle: FocusHandle,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let text_color = if is_editing && is_selected_all { text_primary } else if is_mixed { text_muted } else { text_primary };
@@ -397,8 +409,12 @@ fn render_font_size_input(
                         }
                     }
                 }))
-                .tooltip(|_window, cx: &mut App| {
-                    cx.new(|_| FormatBarTooltip("Font Size (points)")).into()
+                .tooltip(move |_window, cx: &mut App| {
+                    if let Some(tip) = &ribbon_tooltip {
+                        cx.new(|_| tip.clone()).into()
+                    } else {
+                        cx.new(|_| FormatBarTooltip("Font Size (points)")).into()
+                    }
                 })
                 .when(is_editing && is_selected_all, |d| {
                     // "Select all" visual: accent background on the text to show it will be replaced
@@ -814,8 +830,9 @@ fn render_style_btn(
     text_muted: Hsla,
     accent: Hsla,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let mut btn = div()
         .w(px(30.0))
         .h(px(30.0))
@@ -889,7 +906,11 @@ fn render_style_btn(
             }
         }))
         .tooltip(move |_window, cx| {
-            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+            }
         })
 }
 
@@ -897,8 +918,9 @@ fn render_style_btn(
 fn render_fill_color_btn(
     chip_color: Option<Hsla>,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let chip = render_color_chip(chip_color, panel_border, 16.0, 7.0);
 
     div()
@@ -917,8 +939,12 @@ fn render_fill_color_btn(
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
         }))
-        .tooltip(|_window, cx| {
-            cx.new(|_| FormatBarTooltip("Fill Color")).into()
+        .tooltip(move |_window, cx| {
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FormatBarTooltip("Fill Color")).into()
+            }
         })
         .child(chip)
 }
@@ -930,8 +956,9 @@ fn render_text_color_btn(
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     // Underbar color: use the actual font color, or text_primary for Automatic/None
     let underbar_color = color.unwrap_or(text_primary);
 
@@ -952,8 +979,12 @@ fn render_text_color_btn(
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Text, window, cx);
         }))
-        .tooltip(|_window, cx| {
-            cx.new(|_| FormatBarTooltip("Text Color")).into()
+        .tooltip(move |_window, cx| {
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FormatBarTooltip("Text Color")).into()
+            }
         })
         // "A" letter
         .child(

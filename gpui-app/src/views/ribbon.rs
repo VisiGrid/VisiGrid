@@ -5,6 +5,9 @@ use crate::theme::TokenKey;
 use crate::toolbar::{RibbonTab, RIBBON_BODY_HEIGHT, RIBBON_TABS_HEIGHT};
 use gpui::{prelude::FluentBuilder, *};
 
+mod tooltip;
+pub(super) use tooltip::RibbonTooltip;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Item {
     Command(CommandId, &'static str),
@@ -108,7 +111,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             group(
                 "Names",
                 200.,
-                &[C(ExtractNamedRange, "Create named range…")],
+                &[C(ExtractNamedRange, "Extract named range…")],
             ),
         ],
         RibbonTab::Formulas => vec![
@@ -120,7 +123,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             group(
                 "Names",
                 210.,
-                &[C(ExtractNamedRange, "Create named range…")],
+                &[C(ExtractNamedRange, "Extract named range…")],
             ),
             group(
                 "Inspect",
@@ -307,7 +310,11 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
     if let Some(glyph) = glyph {
         // Multi-character glyphs ("123", "1:1") are set smaller so they fit the
         // same box as a single letter instead of clipping.
-        let text_size = if glyph.chars().count() > 1 { size * 0.55 } else { size };
+        let text_size = if glyph.chars().count() > 1 {
+            size * 0.55
+        } else {
+            size
+        };
         return div()
             .size(px(size))
             .flex()
@@ -638,7 +645,14 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
         ],
         // Named range: a name tag over the cells it names.
         C(ExtractNamedRange, _) => &[
-            &[(3., 7.), (14., 7.), (21., 12.), (14., 17.), (3., 17.), (3., 7.)],
+            &[
+                (3., 7.),
+                (14., 7.),
+                (21., 12.),
+                (14., 17.),
+                (3., 17.),
+                (3., 7.),
+            ],
             &[(6., 11.), (8., 11.), (8., 13.), (6., 13.), (6., 11.)],
         ],
         // Anything else shares the cell grid.
@@ -678,6 +692,7 @@ fn command_button(
     id: String,
     state: &SelectionFormatState,
     prominent: bool,
+    window: &Window,
     cx: &mut Context<Spreadsheet>,
 ) -> Stateful<Div> {
     let reason = disabled_reason(app, item);
@@ -708,15 +723,7 @@ fn command_button(
         TokenKey::TextPrimary
     });
     let hover = app.token(TokenKey::ToolbarButtonHoverBg);
-    let tooltip: SharedString = reason
-        .map(str::to_owned)
-        .unwrap_or_else(|| match item {
-            Item::Command(command, _) => command.name().to_string(),
-            Item::InsertRows => "Insert rows above the selection".to_string(),
-            Item::InsertCols => "Insert columns left of the selection".to_string(),
-            _ => item_label(item).to_string(),
-        })
-        .into();
+    let tooltip = RibbonTooltip::item(app, item, window);
     div()
         .id(SharedString::from(id))
         .w_full()
@@ -746,7 +753,7 @@ fn command_button(
                 invoke(this, item, 8., window, cx);
             }),
         )
-        .tooltip(move |_, cx| cx.new(|_| RibbonTooltip(tooltip.clone())).into())
+        .tooltip(move |_, cx| cx.new(|_| tooltip.clone()).into())
         .flex()
         .items_center()
         .gap_1()
@@ -786,13 +793,20 @@ fn command_button(
 /// explains why. Swapping them for a text list made the group jump and
 /// truncate its labels.
 fn font_group(
+    app: &Spreadsheet,
     controls: impl IntoElement,
     reason: Option<&'static str>,
     cx: &mut Context<Spreadsheet>,
 ) -> Div {
     let mut wrap = div().relative().child(controls);
     if let Some(reason) = reason {
-        let tooltip: SharedString = reason.into();
+        let tooltip = RibbonTooltip::new(
+            app,
+            "Font formatting",
+            "Choose a font, size, and colors for the selected cells.",
+            None,
+            Some(reason),
+        );
         wrap = wrap.opacity(0.45).child(
             div()
                 .id("ribbon-font-cover")
@@ -801,7 +815,7 @@ fn font_group(
                 .cursor_default()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                .tooltip(move |_, cx| cx.new(|_| RibbonTooltip(tooltip.clone())).into()),
+                .tooltip(move |_, cx| cx.new(|_| tooltip.clone()).into()),
         );
     }
     wrap
@@ -845,6 +859,28 @@ pub(super) fn keytip_badge(app: &Spreadsheet, code: String) -> Div {
         .bg(app.token(TokenKey::PanelBg))
         .text_color(app.token(TokenKey::TextPrimary))
         .child(code)
+}
+
+pub(super) fn font_control_tooltip(
+    app: &Spreadsheet,
+    code: &str,
+    window: &Window,
+    detail: Option<&str>,
+) -> RibbonTooltip {
+    let font = groups(RibbonTab::Home)
+        .into_iter()
+        .find(|g| g.font)
+        .unwrap();
+    let index = code
+        .strip_prefix('F')
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap()
+        - 1;
+    let mut tip = RibbonTooltip::item(app, font.items[index], window);
+    if let Some(detail) = detail {
+        tip.description = format!("{} {}", tip.description, detail).into();
+    }
+    tip
 }
 
 pub(super) fn font_keytip(app: &Spreadsheet, code: &str, control: impl IntoElement) -> AnyElement {
@@ -1009,50 +1045,99 @@ pub fn render_ribbon(
                 }),
         );
     }
-    tabs = tabs.child(div().flex_1()).child(
-        div()
-            .id("ribbon-collapse")
-            .tab_index(6)
-            .role(Role::Button)
-            .aria_label("Collapse or expand ribbon")
-            .aria_expanded(!collapsed)
-            .px_2()
-            .h(px(24.))
-            .rounded_sm()
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .text_color(app.token(TokenKey::TextMuted))
-            .text_size(px(11.))
-            .hover(|s| s.bg(border.opacity(0.3)))
-            .gap_1()
-            .child(if collapsed { "Expand" } else { "Collapse" })
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        let mut path = PathBuilder::stroke(px(1.4));
-                        let (edge, middle) = if collapsed { (4., 8.) } else { (8., 4.) };
-                        path.move_to(bounds.origin + point(px(2.), px(edge)));
-                        path.line_to(bounds.origin + point(px(6.), px(middle)));
-                        path.line_to(bounds.origin + point(px(10.), px(edge)));
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, text);
-                        }
-                    },
-                )
-                .size(px(12.)),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.toggle_ribbon_collapsed(window, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &crate::actions::ConfirmEdit, window, cx| {
-                    this.toggle_ribbon_collapsed(window, cx)
-                }),
-            ),
+    let palette_enabled = app.toolbar_palette_available();
+    let palette_tip = RibbonTooltip::new(
+        app,
+        "Command palette",
+        "Search and run commands without hunting through tabs.",
+        tooltip::shortcut(window, &crate::actions::ToggleCommandPalette),
+        (!palette_enabled).then_some("Close the current dialog first."),
     );
+    tabs = tabs
+        .child(div().flex_1())
+        .child(
+            div()
+                .id("ribbon-command-palette")
+                .tab_index(5)
+                .role(Role::Button)
+                .aria_label("Open command palette")
+                .h(px(24.))
+                .px_2()
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_size(px(12.))
+                .text_color(app.token(if palette_enabled {
+                    TokenKey::TextPrimary
+                } else {
+                    TokenKey::TextDisabled
+                }))
+                .focus(|s| s.bg(accent.opacity(0.2)))
+                .when(palette_enabled, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(border.opacity(0.3)))
+                })
+                .child(command_icon(
+                    Item::Command(CommandId::FindInCells, "Find"),
+                    14.,
+                    app.token(TokenKey::TextMuted),
+                ))
+                .child("Search commands…")
+                .tooltip(move |_, cx| cx.new(|_| palette_tip.clone()).into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.show_toolbar_palette(window, cx);
+                }))
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::ConfirmEdit, window, cx| {
+                        this.show_toolbar_palette(window, cx);
+                    }),
+                ),
+        )
+        .child(
+            div()
+                .id("ribbon-collapse")
+                .tab_index(6)
+                .role(Role::Button)
+                .aria_label("Collapse or expand ribbon")
+                .aria_expanded(!collapsed)
+                .px_2()
+                .h(px(24.))
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_color(app.token(TokenKey::TextMuted))
+                .text_size(px(11.))
+                .hover(|s| s.bg(border.opacity(0.3)))
+                .gap_1()
+                .child(if collapsed { "Expand" } else { "Collapse" })
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let mut path = PathBuilder::stroke(px(1.4));
+                            let (edge, middle) = if collapsed { (4., 8.) } else { (8., 4.) };
+                            path.move_to(bounds.origin + point(px(2.), px(edge)));
+                            path.line_to(bounds.origin + point(px(6.), px(middle)));
+                            path.line_to(bounds.origin + point(px(10.), px(edge)));
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, text);
+                            }
+                        },
+                    )
+                    .size(px(12.)),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_ribbon_collapsed(window, cx);
+                }))
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::ConfirmEdit, window, cx| {
+                        this.toggle_ribbon_collapsed(window, cx)
+                    }),
+                ),
+        );
     keyboard_container(div().track_focus(&app.ui.ribbon.focus), cx)
         .flex()
         .flex_col()
@@ -1150,10 +1235,9 @@ fn render_body(
         } else {
             if group.font {
                 let reason = disabled_reason(app, group.items[0]);
-                let controls = super::format_bar::render_ribbon_font_controls(
-                    app, &state, window, cx,
-                );
-                el = el.child(font_group(controls, reason, cx));
+                let controls =
+                    super::format_bar::render_ribbon_font_controls(app, &state, window, cx);
+                el = el.child(font_group(app, controls, reason, cx));
             } else {
                 let prominent = group.label == "Clipboard";
                 let mut columns = div().flex().gap_1().h(px(66.));
@@ -1165,6 +1249,7 @@ fn render_body(
                             format!("ribbon-{index}-primary"),
                             &state,
                             true,
+                            window,
                             cx,
                         )));
                 }
@@ -1190,6 +1275,7 @@ fn render_body(
                             format!("ribbon-{index}-{column}-{row}"),
                             &state,
                             false,
+                            window,
                             cx,
                         ));
                     }
@@ -1284,10 +1370,8 @@ pub fn render_group_menu(
         );
         if group.font {
             let reason = disabled_reason(app, group.items[0]);
-            let controls = super::format_bar::render_ribbon_font_controls(
-                app, &state, window, cx,
-            );
-            return panel.child(font_group(controls, reason, cx));
+            let controls = super::format_bar::render_ribbon_font_controls(app, &state, window, cx);
+            return panel.child(font_group(app, controls, reason, cx));
         }
         for (i, item) in group.items.iter().enumerate() {
             panel = panel.child(command_button(
@@ -1296,6 +1380,7 @@ pub fn render_group_menu(
                 format!("ribbon-overflow-{i}"),
                 &state,
                 false,
+                window,
                 cx,
             ));
         }
@@ -1322,13 +1407,6 @@ fn keyboard_container(el: Div, cx: &mut Context<Spreadsheet>) -> Div {
             }),
         )
         .on_key_down(|_, _, cx| cx.stop_propagation())
-}
-
-struct RibbonTooltip(SharedString);
-impl Render for RibbonTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().px_2().py_1().text_size(px(12.)).child(self.0.clone())
-    }
 }
 
 #[cfg(test)]

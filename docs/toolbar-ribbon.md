@@ -13,6 +13,9 @@ It is an opt-in native UI implementation, not a release of the complete spec.
 - Collapse keeps the tabs visible. Selecting a tab opens a temporary panel;
   Escape or clicking outside dismisses it. Double-clicking a tab toggles collapse.
 - Reduced widths collapse groups into menus without adding rows of chrome.
+- **Search commands…** in the tab strip opens the existing command palette,
+  including while the ribbon is collapsed. Opening it preserves a cell-edit
+  draft; Escape returns to that draft.
 - Compact remains the default. An existing hidden format bar remains hidden;
   choosing Ribbon does not implicitly turn it on.
 
@@ -35,12 +38,25 @@ narrow windows collapse whole groups earlier instead of shrinking their text.
 Overflow controls include an icon, group name, and chevron, and their popovers
 repeat the group name as a heading.
 
+Command tooltips explain the action, show its effective shortcut from the live
+keymap (including user overrides), and explain why it is disabled. Commands
+without a matching shortcut omit that label. Shared font controls use the same
+rich help in Ribbon; Compact retains its existing tooltips.
+
+At the 1000-pixel minimum width, with test shortcut overrides:
+
+![Search commands in Ledger Dark](images/ribbon/search-dark.png)
+
+![Bold shortcut and description in Ledger Light](images/ribbon/shortcut-light.png)
+
 ## Alt KeyTips (Linux and Windows)
 
-Tap and release **Alt** by itself to show hints. Existing menu letters stay
+With the visible Ribbon selected and the sheet in navigation mode, tap and
+release **Alt** by itself to show hints. Existing menu letters stay
 **F** File, **E** Edit, **V** View, **I** Insert, **O** Format, **D** Data,
 **H** Help. In Ribbon, the tab hints are **B** Home, **N** Insert,
-**M** Formulas, **A** Data, **W** View. Compact shows the menu hints.
+**M** Formulas, **A** Data, **W** View. Alt-tap hints are disabled in Compact,
+while editing cells or formulas, and when the toolbar is hidden (including Zen).
 
 After selecting a ribbon tab, type the group letter and command number shown
 on the control. For example, **Alt, B, F, 2** toggles Bold; **Alt, B, F, 6**
@@ -54,9 +70,8 @@ then dismisses them. Alt again dismisses them. Hints do not expire on a timer.
 A mouse click or window deactivation dismisses hints. A chord using Alt does
 not activate hints when Alt is released; existing Alt shortcuts still use the
 normal keymap. Hints do not take over dialogs, terminal/script input, IME
-composition, or toolbar text fields. Opening/dismissing hints preserves the
-cell editor's draft, caret and selection; cell-changing ribbon commands remain
-disabled during editing.
+composition, or toolbar text fields. An Alt tap during typing leaves subsequent
+letters in the editor; cell-changing ribbon commands remain disabled during editing.
 
 **macOS is deferred:** its existing Option+Space/category behavior is unchanged.
 The new Alt-tap binding and key interceptor are excluded from macOS builds.
@@ -97,6 +112,8 @@ Future schemas are preserved and are not overwritten by the layout controls.
 `appearance.show_format_bar` remains the visibility flag for compatibility.
 Toolbar changes use the shared settings store and report save failures; user
 settings saves now write a temporary file and rename it over the destination.
+Existing settings-file symlinks are followed so the target is updated atomically
+and the link survives. Broken links report a save error without replacing the link.
 
 No keyboard shortcuts are reassigned. The new actions can be bound through
 `view.compacttoolbar`, `view.ribbontoolbar`, `view.collapseribbon`, and
@@ -108,8 +125,9 @@ No keyboard shortcuts are reassigned. The new actions can be bound through
   IME input, mixed formatting, dropdown handoff, multiple windows, and scaling.
 - Validate keyboard entry into the ribbon and the complete focus order. Match
   the specified tab-strip arrow behavior and every picker's keyboard support.
-- Consolidate toolbar command metadata and effective shortcut labels; finish
-  context-specific availability for commands such as pivot refresh.
+- Consolidate toolbar command metadata across surfaces; finish context-specific
+  availability for commands such as pivot refresh. Ribbon tooltip shortcuts now
+  resolve from the live keymap; other command surfaces are a separate follow-up.
 - Convert the flat View entries to the specified checked Toolbar submenu.
 - Replace Compact's existing horizontal scrolling with group overflow.
 - Anchor every popup to measured control bounds, including controls opened
@@ -123,7 +141,7 @@ phases. This branch does not expose placeholder customization controls.
 ## Validation
 
 On Linux, `cargo check` and the desktop build pass. The desktop unit suite passes
-with **625 passed, 0 failed, 3 ignored**. It caught and fixed a duplicate View
+with **628 passed, 0 failed, 3 ignored**. It caught and fixed a duplicate View
 accelerator and a default preference serialization regression.
 
 Linux/Wayland smoke checks at 1920×1200, scale 1: Home/Data tab rendering,
@@ -131,9 +149,8 @@ collapse and temporary expansion, palette switching in both directions,
 preservation of an active cell draft when switching to Ribbon, cancelling that
 draft, and the reused Bold control. These are targeted checks, not the full
 acceptance matrix above. Additional Linux KeyTips checks cover Alt tap, root/tab command hints, H → Help,
-Bold dispatch, disabled formatting during a cell edit, Escape preserving that
-draft, the collapsed font-size editor, held Alt+F without stray hints, and
-Compact showing menu-only hints, and a 941-pixel tiled window revealing the
+Bold dispatch, the collapsed font-size editor, held Alt+F without stray hints,
+and a 941-pixel tiled window revealing the
 Editing overflow group and opening Find through its KeyTip. Windows runtime and the separate macOS keyboard design remain open.
 A screenshot is saved alongside the workspace concept
 at `work/visigrid-toolbar/native-ribbon.png` (outside this repository).
@@ -158,8 +175,22 @@ PR #81 follow-up at `45c4cfa`:
   and the 1000-pixel Editing overflow menu invoking Find through its KeyTip.
   These checks supplement, rather than complete, the acceptance matrix above.
 
+Final Linux polish checks at 2560×1440, scale 1, with a 1000×900 window:
+
+- Search opens the palette in expanded and collapsed Ribbon. Searching and
+  running a layout/theme command works; Escape restores an unfinished cell edit.
+- Alt-tap leaves the next letter intact in Compact, cell edits, and formula
+  edits. Ribbon navigation still shows Home command hints and dispatches Bold.
+- Rich help is readable in Ledger Light and Ledger Dark. Palette, Bold, and
+  Paste Values tooltips show configured shortcut overrides; the shadowed Bold
+  default is not shown. Disabled Paste Special explains the active-edit guard.
+- The desktop build and all 628 tests pass. These final controls still need a
+  fresh Mac/Windows native check; the earlier Mac review predates this polish.
+
 Settings tests cover legacy defaults, hidden-toolbar migration, malformed
-fields, round trips, future-schema retention, atomic save, and write failure.
+fields, round trips, future-schema retention, atomic save, symlink preservation,
+and write failure. KeyTip scope tests cover navigation, cell/formula editing,
+dialogs, Compact, and hidden Ribbon.
 Geometry tests cover both platform chrome heights, expanded formula bars,
 Compact, expanded/collapsed Ribbon, hidden toolbar, and Zen. Group-layout tests
 cover fixed-height overflow. Existing menu model tests validate mouse and

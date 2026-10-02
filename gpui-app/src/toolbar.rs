@@ -207,6 +207,22 @@ impl Spreadsheet {
         true
     }
 
+    pub fn toolbar_palette_available(&self) -> bool {
+        self.mode.is_navigation()
+            || self.mode.is_editing()
+            || self.mode == crate::mode::Mode::FormatPainter
+    }
+
+    /// Use the same palette path as the keyboard shortcut, preserving cell drafts.
+    pub fn show_toolbar_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.toolbar_palette_available() || !self.prepare_toolbar_change(window, cx) {
+            return;
+        }
+        self.dismiss_desktop_keytips(cx);
+        window.focus(&self.focus_handle, cx);
+        self.show_palette(cx);
+    }
+
     pub fn set_toolbar_layout(
         &mut self,
         layout: ToolbarLayout,
