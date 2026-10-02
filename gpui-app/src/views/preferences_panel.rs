@@ -364,7 +364,7 @@ pub fn render_preferences_panel(
                                     .gap_1()
                                     .child(paste_default_option(
                                         app,
-                                        "Everything",
+                                        "Contents",
                                         false,
                                         paste_values_by_default,
                                         accent,

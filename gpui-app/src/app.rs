@@ -502,6 +502,12 @@ pub struct Spreadsheet {
     /// Visual range for copy/cut dashed border overlay (r1, c1, r2, c2).
     /// Set on Copy/Cut, cleared on Paste/Escape/edit start/confirm/delete.
     pub clipboard_visual_range: Option<(usize, usize, usize, usize)>,
+    /// Sheet the copy border belongs to; it's drawn only there.
+    pub clipboard_visual_sheet: Option<SheetId>,
+    /// Redraws the copy border's marching ants ~12 times a second while one
+    /// shows and the window is active; ends itself otherwise.
+    marching_ants_task: Option<gpui::Task<()>>,
+    window_active: bool,
 
     // File state
     /// Unique ID for session matching (assigned at startup).
@@ -1066,6 +1072,31 @@ impl Default for NamedRangeUsageCache {
 }
 
 impl Spreadsheet {
+    /// Start the copy border's animation timer if a border shows and the
+    /// window is active. About 12 redraws a second; the dashes move in 2px
+    /// steps (see `paint_marching_ants`), so it looks the same as redrawing
+    /// every frame at a tenth of the cost.
+    pub(crate) fn start_marching_ants(&mut self, cx: &mut Context<Self>) {
+        if self.marching_ants_task.is_some() || self.clipboard_visual_range.is_none() || !self.window_active {
+            return;
+        }
+        self.marching_ants_task = Some(cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_millis(83)).await;
+            let running = this.update(cx, |this, cx| {
+                if this.clipboard_visual_range.is_none() || !this.window_active {
+                    this.marching_ants_task = None;
+                    false
+                } else {
+                    cx.notify();
+                    true
+                }
+            }).unwrap_or(false);
+            if !running {
+                break;
+            }
+        }));
+    }
+
     /// Record the current workbook as the state rewind preview replays from.
     /// A clone shares its cells, pools and dependency graph with the live
     /// workbook until one of them is edited (#18 phase 3), so it costs about
@@ -1169,9 +1200,12 @@ impl Spreadsheet {
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
 
         // Coming back to the window: has the open CSV changed on disk?
+        // Also pauses the copy border's animation while the window is inactive.
         let csv_activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
                 this.check_csv_on_disk(cx);
+                this.start_marching_ants(cx);
             }
         });
 
@@ -1246,6 +1280,9 @@ impl Spreadsheet {
             palette_previewing: false,
             internal_clipboard: None,
             clipboard_visual_range: None,
+            clipboard_visual_sheet: None,
+            marching_ants_task: None,
+            window_active: true,
             session_window_id: WINDOW_ID_UNSET,
             current_file: None,
             is_modified: false,
