@@ -97,6 +97,7 @@ impl Spreadsheet {
 
         // Save pre-palette state for restore on Esc (only if not already in palette)
         if self.mode != Mode::Command {
+            self.ui.palette_edit_mode = self.mode.is_editing().then_some(self.mode);
             self.palette_pre_selection = self.view_state.selected;
             self.palette_pre_selection_end = self.view_state.selection_end;
             self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
@@ -406,7 +407,7 @@ impl Spreadsheet {
             self.view_state.scroll_col = self.palette_pre_scroll.1;
         }
 
-        self.mode = Mode::Navigation;
+        self.mode = self.ui.palette_edit_mode.take().unwrap_or(Mode::Navigation);
         self.palette_query.clear();
         self.palette_selected = 0;
         self.palette_scroll_offset = 0;
@@ -856,6 +857,17 @@ impl Spreadsheet {
 
     pub fn palette_execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
+            // Layout actions change personal chrome, not the suspended editor.
+            if matches!(item.action, SearchAction::RunCommand(CommandId::UseCompactToolbar
+                | CommandId::UseRibbonToolbar | CommandId::ToggleRibbonCollapsed | CommandId::ToggleToolbar)) {
+                self.view_state.selected = self.palette_pre_selection;
+                self.view_state.selection_end = self.palette_pre_selection_end;
+                self.view_state.scroll_row = self.palette_pre_scroll.0;
+                self.view_state.scroll_col = self.palette_pre_scroll.1;
+                self.mode = self.ui.palette_edit_mode.take().unwrap_or(Mode::Navigation);
+            } else {
+                self.ui.palette_edit_mode = None;
+            }
             // Clear palette state - don't restore since we're executing
             self.palette_query.clear();
             self.palette_selected = 0;
@@ -878,6 +890,7 @@ impl Spreadsheet {
     pub fn palette_execute_secondary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
             if let Some(secondary) = item.secondary_action {
+                self.ui.palette_edit_mode = None;
                 // Clear palette state
                 self.palette_query.clear();
                 self.palette_selected = 0;

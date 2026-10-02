@@ -363,6 +363,15 @@ pub(crate) fn bind(
                 cx.notify();
                 return;
             }
+            if this.ui.ribbon.group_menu.take().is_some() {
+                cx.notify();
+                return;
+            }
+            if this.ui.ribbon.temporary {
+                this.close_toolbar_popups();
+                cx.notify();
+                return;
+            }
             // Name box (cell selector) editing
             if this.name_box_editing {
                 this.cancel_name_box_edit(cx);

@@ -11,6 +11,7 @@ const DROPDOWN_WIDTH: f32 = 260.0;
 /// Render the modern menu bar - compact chrome, not content
 pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let open_menu = app.open_menu;
+    let keytips = app.ui.desktop_keytips.root();
     let header_bg = app.token(TokenKey::PanelBg);
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
@@ -34,19 +35,19 @@ pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl
         .font_weight(FontWeight::NORMAL)  // Light weight for chrome
         .text_color(menu_text)
         // Group 1: File, Edit, View
-        .child(menu_header("File", 'F', Menu::File, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("Edit", 'E', Menu::Edit, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("View", 'V', Menu::View, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("File", 'F', Menu::File, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Edit", 'E', Menu::Edit, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("View", 'V', Menu::View, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
         // Visual separator - extra space before Insert
         .child(div().w(px(8.0)))
         // Group 2: Insert, Format
-        .child(menu_header("Insert", 'I', Menu::Insert, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("Format", 'O', Menu::Format, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Insert", 'I', Menu::Insert, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Format", 'O', Menu::Format, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
         // Visual separator - extra space before Data
         .child(div().w(px(8.0)))
         // Group 3: Data, Help
-        .child(menu_header("Data", 'D', Menu::Data, open_menu, text_primary, selection_bg, toolbar_hover, cx))
-        .child(menu_header("Help", 'H', Menu::Help, open_menu, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Data", 'D', Menu::Data, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
+        .child(menu_header("Help", 'H', Menu::Help, open_menu, keytips, app, text_primary, selection_bg, toolbar_hover, cx))
 }
 
 /// Render the dropdown menu overlay (should be rendered at root level).
@@ -104,6 +105,8 @@ fn menu_header(
     accel: char,
     menu: Menu,
     open_menu: Option<Menu>,
+    keytips: bool,
+    app: &Spreadsheet,
     text_full: Hsla,  // Full opacity text for hover/active states
     selection_bg: Hsla,
     hover_bg: Hsla,
@@ -121,6 +124,8 @@ fn menu_header(
         .w(px(menu_width(menu)))
         .justify_center()
         .h_full()
+        .relative()
+        .when(keytips, |d| d.child(super::ribbon::keytip_badge(app, accel.to_string()).absolute().right_0().bottom_0()))
         .cursor_pointer()
         .when(is_open, move |d: Stateful<Div>| d.bg(selection_bg).text_color(text_full))
         .hover(move |style: StyleRefinement| {
@@ -266,7 +271,7 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_separator(border))
         .child(menu_item("Show Formulas", Some("Ctrl+`"), 6, h(6), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_formulas(cx); }))
         .child(menu_item("Show Zeros", None, 7, h(7), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_show_zeros(cx); }))
-        .child(menu_item("Format Bar", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_format_bar(cx); }))
+        .child(menu_item("Show Toolbar", None, 8, h(8), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.toggle_toolbar_visibility(window, cx); }))
         .child(menu_item("Minimap", None, 9, h(9), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.minimap_visible = !this.minimap_visible; cx.notify(); }))
         .child(menu_separator(border))
         .child(menu_item("Freeze Top Row", None, 10, h(10), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.freeze_top_row(cx); }))
@@ -275,6 +280,10 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Unfreeze Panes", None, 13, h(13), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.unfreeze_panes(cx); }))
         .child(menu_separator(border))
         .child(menu_item("Approve Model", None, 14, h(14), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.approve_model(None, cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Toolbar: Compact", None, 15, h(15), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx); }))
+        .child(menu_item("Toolbar: Ribbon", None, 16, h(16), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx); }))
+        .child(menu_item("Collapse/Expand Ribbon", None, 17, h(17), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.toggle_ribbon_collapsed(window, cx); }))
 }
 
 // Item indices here must follow menu_model's order of selectable entries:

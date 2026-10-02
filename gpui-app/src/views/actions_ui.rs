@@ -158,8 +158,17 @@ pub(crate) fn bind(
             this.profiler_hotspots = Vec::new();
             cx.notify();
         }))
-        .on_action(cx.listener(|this, _: &ToggleFormatBar, _, cx| {
-            this.toggle_format_bar(cx);
+        .on_action(cx.listener(|this, _: &UseCompactToolbar, window, cx| {
+            this.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &UseRibbonToolbar, window, cx| {
+            this.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleRibbonCollapsed, window, cx| {
+            this.toggle_ribbon_collapsed(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleFormatBar, window, cx| {
+            this.toggle_toolbar_visibility(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ToggleMinimap, _, cx| {
             this.minimap_visible = !this.minimap_visible;
@@ -535,8 +544,11 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ShowColorPicker, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
         }))
-        .on_action(cx.listener(|this, _: &ShowKeyTips, _, cx| {
+        .on_action(cx.listener(|this, _: &ShowKeyTips, window, cx| {
+            #[cfg(target_os = "macos")]
             this.toggle_keytips(cx);
+            #[cfg(not(target_os = "macos"))]
+            this.toggle_desktop_keytips(window, cx);
         }))
         .on_action(cx.listener(|this, _: &ShowPreferences, _, cx| {
             this.show_preferences(cx);

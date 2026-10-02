@@ -338,6 +338,10 @@ impl CellRect {
 /// goto/find dialogs, command palette, etc. should migrate here
 /// incrementally (opportunistic, not a scheduled refactor).
 pub struct UiState {
+    pub preferences_edit_mode: Option<Mode>,
+    pub palette_edit_mode: Option<Mode>,
+    pub ribbon: crate::toolbar::RibbonState,
+    pub desktop_keytips: crate::desktop_keytips::DesktopKeyTips,
     pub cell_size_input: crate::ui::cell_size_input::CellSizeInput,
     pub color_picker: crate::color_palette::ColorPickerState,
     pub format_bar: FormatBarState,
@@ -1123,6 +1127,10 @@ impl Spreadsheet {
         let script_view_focus_handle = cx.focus_handle();
         let font_picker_focus = cx.focus_handle();
         let ui = UiState {
+            preferences_edit_mode: None,
+            palette_edit_mode: None,
+            ribbon: crate::toolbar::RibbonState::new(cx),
+            desktop_keytips: Default::default(),
             cell_size_input: Default::default(),
             color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
             format_bar: FormatBarState {
@@ -1178,6 +1186,17 @@ impl Spreadsheet {
             }
         });
 
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::intercept_desktop_keytips(window, cx).detach();
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.ui.desktop_keytips.suppress_alt_tap = true;
+                    this.ui.desktop_keytips.alt_down = false;
+                    this.dismiss_desktop_keytips(cx);
+                }
+            }).detach();
+        }
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
 
         // Coming back to the window: has the open CSV changed on disk?
@@ -2143,19 +2162,6 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Toggle the format bar visibility (user setting, persisted)
-    pub fn toggle_format_bar(&mut self, cx: &mut Context<Self>) {
-        use crate::settings::Setting;
-        let current = match &user_settings(cx).appearance.show_format_bar {
-            Setting::Value(v) => *v,
-            Setting::Inherit => true,
-        };
-        update_user_settings(cx, |s| {
-            s.appearance.show_format_bar = Setting::Value(!current);
-        });
-        cx.notify();
-    }
-
     // =========================================================================
     // Zoom
     // =========================================================================
@@ -2392,6 +2398,10 @@ impl Spreadsheet {
         self.add_recent_command(cmd.clone());
 
         match cmd {
+            CommandId::UseCompactToolbar => self.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx),
+            CommandId::UseRibbonToolbar => self.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx),
+            CommandId::ToggleRibbonCollapsed => self.toggle_ribbon_collapsed(window, cx),
+            CommandId::ToggleToolbar => self.toggle_toolbar_visibility(window, cx),
             // Navigation
             CommandId::GoToCell => self.show_goto(cx),
             CommandId::FindInCells => self.show_find(cx),
@@ -3939,8 +3949,7 @@ impl Spreadsheet {
     /// Must match the actual rendered layout in views/mod.rs (top to bottom):
     ///   macOS titlebar (MACOS_TITLEBAR_HEIGHT, macOS only)
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
-    ///   Formula bar    (FORMULA_BAR_HEIGHT, hidden in zen mode)
-    ///   Format bar     (FORMAT_BAR_HEIGHT, hidden in zen mode or when disabled)
+    ///   Formula / command surface (order and height from toolbar_geometry)
     ///   Table controls (TABLE_CONTROLS_HEIGHT, when the active cell is in a Table)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
@@ -3951,18 +3960,8 @@ impl Spreadsheet {
             // Recovery remains visible even when normal chrome is hidden.
             return self.metrics.header_h + recovery_h;
         }
-        let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
-        let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
-        let formula_h = self.formula_bar_height();
-        let format_h = {
-            use crate::settings::Setting;
-            match &user_settings(cx).appearance.show_format_bar {
-                Setting::Value(v) => if *v { crate::views::format_bar::FORMAT_BAR_HEIGHT } else { 0.0 },
-                Setting::Inherit => crate::views::format_bar::FORMAT_BAR_HEIGHT,
-            }
-        };
         let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
-        titlebar_h + menu_h + formula_h + format_h + table_h + recovery_h + self.metrics.header_h
+        self.toolbar_geometry(cx).bottom + table_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {
@@ -4545,14 +4544,7 @@ impl Render for Spreadsheet {
         // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
         let formula_bar_input_left = FORMULA_BAR_TEXT_LEFT - FORMULA_BAR_PADDING;
         let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - 28.0).max(0.0);
-        // Formula bar sits directly below the menu bar (Linux) or titlebar (macOS)
-        let formula_bar_y = if cfg!(target_os = "macos") {
-            MACOS_TITLEBAR_HEIGHT
-        } else if self.zen_mode {
-            0.0
-        } else {
-            MENU_BAR_HEIGHT
-        };
+        let formula_bar_y = self.toolbar_geometry(cx).formula_top;
         self.formula_bar_text_rect = gpui::Bounds {
             origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(formula_bar_y)),
             size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(self.formula_bar_height())),

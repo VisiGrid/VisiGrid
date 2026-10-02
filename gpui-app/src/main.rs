@@ -2,6 +2,8 @@
 #![windows_subsystem = "windows"]
 
 mod actions;
+mod toolbar;
+mod desktop_keytips;
 mod pivot_ui;
 mod table_ui;
 mod ai;
