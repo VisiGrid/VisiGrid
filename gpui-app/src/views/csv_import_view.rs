@@ -218,15 +218,28 @@ pub(crate) fn render_csv_banner(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
         .into_any_element()
 }
 
+/// Esc key cap plus ✕: closes the banner (or, in the review step, goes back).
 fn dismiss_button(id: &'static str, c: &Colors, cx: &mut Context<Spreadsheet>, close_review: bool) -> impl IntoElement {
-    let (muted, text) = (c.muted, c.text);
+    let (muted, text, border) = (c.muted, c.text, c.border);
     div()
         .id(id)
-        .px_2()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .pl_2()
         .text_size(px(13.0))
         .text_color(muted)
         .cursor_pointer()
         .hover(move |s| s.text_color(text))
+        .child(
+            div()
+                .px(px(5.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(border)
+                .text_size(px(10.0))
+                .child("Esc"),
+        )
         .child("✕")
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             if close_review {

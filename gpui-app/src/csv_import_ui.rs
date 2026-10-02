@@ -462,6 +462,25 @@ impl Spreadsheet {
         self.csv_doc.as_ref().filter(|c| self.current_file.as_ref() == Some(&c.path))
     }
 
+    /// Esc with the CSV banner showing: leave the review step ("Keep as
+    /// text"), else close the banner. False when there is no banner.
+    pub fn csv_banner_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.cycle_banner.visible {
+            return false; // the cycle banner has the spot; the CSV one is hidden
+        }
+        let Some(doc) = self.csv_doc.as_mut().filter(|d| d.banner_visible) else { return false };
+        if self.current_file.as_ref() != Some(&doc.path) {
+            return false;
+        }
+        if doc.reviewing_formulas {
+            doc.reviewing_formulas = false;
+        } else {
+            doc.banner_visible = false;
+        }
+        cx.notify();
+        true
+    }
+
     pub fn dismiss_csv_banner(&mut self, cx: &mut Context<Self>) {
         if let Some(doc) = self.csv_doc.as_mut() {
             doc.banner_visible = false;
