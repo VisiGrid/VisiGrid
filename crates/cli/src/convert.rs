@@ -143,6 +143,7 @@ pub(crate) fn cmd_convert(
     select_args: Vec<String>,
     rename: Option<String>,
     quiet: bool,
+    csv: &visigrid_io::csv::CsvOptions,
 ) -> Result<(), CliError> {
 
     // Validate --where requires --headers
@@ -261,8 +262,8 @@ pub(crate) fn cmd_convert(
 
     // Read input into sheet (convert always starts at A1)
     let mut sheet = match &input {
-        Some(path) => read_file(path, input_format, delimiter, sheet_arg.as_deref())?,
-        None => read_stdin(input_format, delimiter, 0, 0)?,
+        Some(path) => read_file(path, input_format, csv, sheet_arg.as_deref())?,
+        None => read_stdin(input_format, delimiter, csv, 0, 0)?,
     };
 
     let (bounds_rows, bounds_cols) = get_data_bounds(&sheet);
@@ -514,16 +515,18 @@ pub(crate) fn read_parquet_whole(path: &std::path::Path) -> Result<visigrid_engi
     Ok(imported.sheet)
 }
 
-pub(crate) fn read_file(path: &PathBuf, format: Format, _delimiter: char, sheet_arg: Option<&str>) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    // TODO: Use custom delimiter when io crate supports it
+pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::CsvOptions, sheet_arg: Option<&str>) -> Result<visigrid_engine::sheet::Sheet, CliError> {
     match format {
+        // A file's delimiter is sniffed. `--delimiter` sets the OUTPUT (and
+        // piped input, see read_stdin), so `convert in.csv -t csv
+        // --delimiter ';'` turns a comma file into a semicolon file.
         Format::Csv => {
-            visigrid_io::csv::import(path)
-                .map_err(CliError::parse)
+            let csv = visigrid_io::csv::CsvOptions { delimiter: None, ..csv.clone() };
+            visigrid_io::csv::import_report(path, &csv).map(|r| r.sheet).map_err(CliError::parse)
         }
         Format::Tsv => {
-            visigrid_io::csv::import_tsv(path)
-                .map_err(CliError::parse)
+            let tsv = visigrid_io::csv::CsvOptions { delimiter: Some(b'\t'), ..csv.clone() };
+            visigrid_io::csv::import_report(path, &tsv).map(|r| r.sheet).map_err(CliError::parse)
         }
         Format::Parquet => read_parquet_whole(path),
         Format::Xlsx => {
@@ -677,11 +680,17 @@ fn sheet_layout_to_export(
     }
 }
 
-pub(crate) fn read_stdin(format: Format, delimiter: char, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    let mut input = String::new();
+pub(crate) fn read_stdin(format: Format, delimiter: char, csv: &visigrid_io::csv::CsvOptions, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
+    let mut bytes = Vec::new();
     io::stdin()
-        .read_to_string(&mut input)
+        .read_to_end(&mut bytes)
         .map_err(|e| CliError::io(e.to_string()))?;
+    // CSV decodes like a file does: --encoding if given, else a byte-order
+    // mark, else UTF-8, else Windows-1252. Other formats must be UTF-8.
+    let input = match format {
+        Format::Csv | Format::Tsv => visigrid_io::csv_import::decode(&bytes, csv.encoding).0,
+        _ => String::from_utf8(bytes).map_err(|_| CliError::parse("stdin is not valid UTF-8"))?,
+    };
 
     if input.is_empty() {
         return Err(CliError::parse("no input received on stdin")
@@ -689,8 +698,16 @@ pub(crate) fn read_stdin(format: Format, delimiter: char, into_row: usize, into_
     }
 
     match format {
-        Format::Csv => parse_csv(&input, delimiter as u8, into_row, into_col),
-        Format::Tsv => parse_csv(&input, b'\t', into_row, into_col),
+        // Through the importer, so piped CSV gets the same safe defaults as a
+        // file: 007 stays 007 and = cells stay text unless --formulas.
+        Format::Csv | Format::Tsv => {
+            let delimiter = match format {
+                Format::Tsv => Some(b'\t'),
+                _ => csv.delimiter.or(Some(delimiter as u8)),
+            };
+            let options = visigrid_io::csv::CsvOptions { delimiter, origin: (into_row, into_col), ..csv.clone() };
+            visigrid_io::csv::import_text(&input, &options).map(|r| r.sheet).map_err(CliError::parse)
+        }
         Format::Json => parse_json(&input, into_row, into_col),
         Format::JsonFull => visigrid_io::json::import_full(&input).map_err(CliError::io),
         Format::Lines => parse_lines(&input, into_row, into_col),
@@ -698,28 +715,6 @@ pub(crate) fn read_stdin(format: Format, delimiter: char, into_row: usize, into_
             Err(CliError::args("xlsx, sheet and parquet formats require file input"))
         }
     }
-}
-
-pub(crate) fn parse_csv(content: &str, delimiter: u8, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    use visigrid_engine::sheet::{Sheet, SheetId, NUM_COLS, NUM_ROWS};
-
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(false)
-        .from_reader(content.as_bytes());
-
-    let mut sheet = Sheet::new(SheetId(1), NUM_ROWS, NUM_COLS);
-
-    for (row_idx, result) in reader.records().enumerate() {
-        let record = result.map_err(|e| CliError::parse(format!("line {}: {}", row_idx + 1, e)))?;
-        for (col_idx, field) in record.iter().enumerate() {
-            if !field.is_empty() {
-                sheet.set_value(into_row + row_idx, into_col + col_idx, field);
-            }
-        }
-    }
-
-    Ok(sheet)
 }
 
 pub(crate) fn parse_json(content: &str, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {

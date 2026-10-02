@@ -338,6 +338,10 @@ impl CellRect {
 /// goto/find dialogs, command palette, etc. should migrate here
 /// incrementally (opportunistic, not a scheduled refactor).
 pub struct UiState {
+    pub preferences_edit_mode: Option<Mode>,
+    pub palette_edit_mode: Option<Mode>,
+    pub ribbon: crate::toolbar::RibbonState,
+    pub desktop_keytips: crate::desktop_keytips::DesktopKeyTips,
     pub cell_size_input: crate::ui::cell_size_input::CellSizeInput,
     pub color_picker: crate::color_palette::ColorPickerState,
     pub format_bar: FormatBarState,
@@ -485,6 +489,10 @@ pub struct Spreadsheet {
     pub(crate) palette_results: Vec<SearchItem>,
     /// Headings over runs of `palette_results` (empty = no headings).
     pub(crate) palette_sections: Vec<crate::command_palette::PaletteSection>,
+    /// Recent files with folder and age, read once when the palette opens.
+    pub(crate) palette_recent_files: Vec<crate::search::RecentFile>,
+    /// Wheel movement not yet worth a whole row (trackpads send small deltas).
+    pub(crate) palette_wheel_px: f32,
     pub palette_total_results: usize,  // Matches counted for the footer
     // Pre-palette state for preview/restore
     pub(crate) palette_pre_selection: (usize, usize),
@@ -497,6 +505,12 @@ pub struct Spreadsheet {
     /// Visual range for copy/cut dashed border overlay (r1, c1, r2, c2).
     /// Set on Copy/Cut, cleared on Paste/Escape/edit start/confirm/delete.
     pub clipboard_visual_range: Option<(usize, usize, usize, usize)>,
+    /// Sheet the copy border belongs to; it's drawn only there.
+    pub clipboard_visual_sheet: Option<SheetId>,
+    /// Redraws the copy border's marching ants ~12 times a second while one
+    /// shows and the window is active; ends itself otherwise.
+    marching_ants_task: Option<gpui::Task<()>>,
+    window_active: bool,
 
     // File state
     /// Unique ID for session matching (assigned at startup).
@@ -564,6 +578,7 @@ pub struct Spreadsheet {
     pub font_picker_query: String,         // Filter query
     pub font_picker_selected: usize,       // Selected item index
     pub font_picker_scroll_offset: usize,  // First visible item in list
+    pub(crate) font_picker_wheel_px: f32,  // Wheel movement not yet a whole row
     pub font_picker_focus: FocusHandle,    // Focus handle for the picker dialog
 
     // Transient UI state (not serialized — see UiState doc)
@@ -575,6 +590,10 @@ pub struct Spreadsheet {
 
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
+    /// Auto-scroll while a drag is outside the grid (see drag_autoscroll.rs)
+    pub(crate) drag_autoscroll_task: Option<gpui::Task<()>>,
+    pub(crate) drag_autoscroll_pointer: Option<(f32, f32)>,
+    pub(crate) drag_last_cell: Option<(usize, usize)>,
 
     // Fill handle drag state
     pub fill_drag: FillDrag,
@@ -831,6 +850,15 @@ pub struct Spreadsheet {
 
     // Import report state (for Excel imports)
     pub import_result: Option<visigrid_io::xlsx::ImportResult>,
+    /// What the last CSV import decided (banner, status line, settings dialog).
+    pub csv_doc: Option<crate::csv_import_ui::CsvDocState>,
+    /// The CSV import settings dialog, while open.
+    pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
+    /// A CSV whose rows did not all fit, and how many were left out: no save
+    /// or export may write over it. Kept after Save As, cleared on the next load.
+    pub csv_protected_source: Option<(PathBuf, usize)>,
+    /// Re-checks the open CSV on disk when the window is focused.
+    csv_activation_subscription: Option<gpui::Subscription>,
     pub import_report_details_expanded: bool,
     pub import_filename: Option<String>,         // Original filename for display
     pub import_source_dir: Option<PathBuf>,      // Original directory for Save As default
@@ -1050,6 +1078,31 @@ impl Default for NamedRangeUsageCache {
 }
 
 impl Spreadsheet {
+    /// Start the copy border's animation timer if a border shows and the
+    /// window is active. About 12 redraws a second; the dashes move in 2px
+    /// steps (see `paint_marching_ants`), so it looks the same as redrawing
+    /// every frame at a tenth of the cost.
+    pub(crate) fn start_marching_ants(&mut self, cx: &mut Context<Self>) {
+        if self.marching_ants_task.is_some() || self.clipboard_visual_range.is_none() || !self.window_active {
+            return;
+        }
+        self.marching_ants_task = Some(cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_millis(83)).await;
+            let running = this.update(cx, |this, cx| {
+                if this.clipboard_visual_range.is_none() || !this.window_active {
+                    this.marching_ants_task = None;
+                    false
+                } else {
+                    cx.notify();
+                    true
+                }
+            }).unwrap_or(false);
+            if !running {
+                break;
+            }
+        }));
+    }
+
     /// Record the current workbook as the state rewind preview replays from.
     /// A clone shares its cells, pools and dependency graph with the live
     /// workbook until one of them is edited (#18 phase 3), so it costs about
@@ -1080,6 +1133,10 @@ impl Spreadsheet {
         let script_view_focus_handle = cx.focus_handle();
         let font_picker_focus = cx.focus_handle();
         let ui = UiState {
+            preferences_edit_mode: None,
+            palette_edit_mode: None,
+            ribbon: crate::toolbar::RibbonState::new(cx),
+            desktop_keytips: Default::default(),
             cell_size_input: Default::default(),
             color_picker: crate::color_palette::ColorPickerState::new(cx.focus_handle()),
             format_bar: FormatBarState {
@@ -1135,7 +1192,28 @@ impl Spreadsheet {
             }
         });
 
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::intercept_desktop_keytips(window, cx).detach();
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.ui.desktop_keytips.suppress_alt_tap = true;
+                    this.ui.desktop_keytips.alt_down = false;
+                    this.dismiss_desktop_keytips(cx);
+                }
+            }).detach();
+        }
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
+
+        // Coming back to the window: has the open CSV changed on disk?
+        // Also pauses the copy border's animation while the window is inactive.
+        let csv_activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            this.window_active = window.is_window_active();
+            if this.window_active {
+                this.check_csv_on_disk(cx);
+                this.start_marching_ants(cx);
+            }
+        });
 
         // Session server channel: requests from TCP server → GUI thread
         let (session_tx, session_rx) = std::sync::mpsc::channel();
@@ -1202,6 +1280,8 @@ impl Spreadsheet {
             search_engine: Self::create_search_engine(),
             palette_results: Vec::new(),
             palette_sections: Vec::new(),
+            palette_recent_files: Vec::new(),
+            palette_wheel_px: 0.0,
             palette_total_results: 0,
             palette_pre_selection: (0, 0),
             palette_pre_selection_end: None,
@@ -1209,6 +1289,9 @@ impl Spreadsheet {
             palette_previewing: false,
             internal_clipboard: None,
             clipboard_visual_range: None,
+            clipboard_visual_sheet: None,
+            marching_ants_task: None,
+            window_active: true,
             session_window_id: WINDOW_ID_UNSET,
             current_file: None,
             is_modified: false,
@@ -1259,9 +1342,13 @@ impl Spreadsheet {
             font_picker_query: String::new(),
             font_picker_selected: 0,
             font_picker_scroll_offset: 0,
+            font_picker_wheel_px: 0.0,
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,
+            drag_autoscroll_task: None,
+            drag_autoscroll_pointer: None,
+            drag_last_cell: None,
             fill_drag: FillDrag::None,
             dragging_row_header: false,
             dragging_col_header: false,
@@ -1394,6 +1481,10 @@ impl Spreadsheet {
             extract_focus: CreateNameFocus::default(),
 
             import_result: None,
+            csv_doc: None,
+            csv_dialog: None,
+            csv_protected_source: None,
+            csv_activation_subscription: Some(csv_activation_subscription),
             import_report_details_expanded: false,
             import_filename: None,
             import_source_dir: None,
@@ -2083,19 +2174,6 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Toggle the format bar visibility (user setting, persisted)
-    pub fn toggle_format_bar(&mut self, cx: &mut Context<Self>) {
-        use crate::settings::Setting;
-        let current = match &user_settings(cx).appearance.show_format_bar {
-            Setting::Value(v) => *v,
-            Setting::Inherit => true,
-        };
-        update_user_settings(cx, |s| {
-            s.appearance.show_format_bar = Setting::Value(!current);
-        });
-        cx.notify();
-    }
-
     // =========================================================================
     // Zoom
     // =========================================================================
@@ -2334,6 +2412,10 @@ impl Spreadsheet {
         self.add_recent_command(cmd.clone());
 
         match cmd {
+            CommandId::UseCompactToolbar => self.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx),
+            CommandId::UseRibbonToolbar => self.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx),
+            CommandId::ToggleRibbonCollapsed => self.toggle_ribbon_collapsed(window, cx),
+            CommandId::ToggleToolbar => self.toggle_toolbar_visibility(window, cx),
             // Navigation
             CommandId::GoToCell => self.show_goto(cx),
             CommandId::FindInCells => self.show_find(cx),
@@ -2455,6 +2537,8 @@ impl Spreadsheet {
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
             CommandId::ExportPdf => self.show_pdf_export(cx),
+            CommandId::CsvImportSettings => self.show_csv_import_dialog(cx),
+            CommandId::CsvImportNotes => self.show_csv_banner(cx),
             CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
@@ -3917,8 +4001,7 @@ impl Spreadsheet {
     /// Must match the actual rendered layout in views/mod.rs (top to bottom):
     ///   macOS titlebar (MACOS_TITLEBAR_HEIGHT, macOS only)
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
-    ///   Formula bar    (FORMULA_BAR_HEIGHT, hidden in zen mode)
-    ///   Format bar     (FORMAT_BAR_HEIGHT, hidden in zen mode or when disabled)
+    ///   Formula / command surface (order and height from toolbar_geometry)
     ///   Table controls (TABLE_CONTROLS_HEIGHT, when the active cell is in a Table)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
@@ -3929,18 +4012,8 @@ impl Spreadsheet {
             // Recovery remains visible even when normal chrome is hidden.
             return self.metrics.header_h + recovery_h;
         }
-        let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
-        let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
-        let formula_h = self.formula_bar_height();
-        let format_h = {
-            use crate::settings::Setting;
-            match &user_settings(cx).appearance.show_format_bar {
-                Setting::Value(v) => if *v { crate::views::format_bar::FORMAT_BAR_HEIGHT } else { 0.0 },
-                Setting::Inherit => crate::views::format_bar::FORMAT_BAR_HEIGHT,
-            }
-        };
         let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
-        titlebar_h + menu_h + formula_h + format_h + table_h + recovery_h + self.metrics.header_h
+        self.toolbar_geometry(cx).bottom + table_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {
@@ -4525,14 +4598,7 @@ impl Render for Spreadsheet {
         // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
         let formula_bar_input_left = FORMULA_BAR_TEXT_LEFT - FORMULA_BAR_PADDING;
         let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - 28.0).max(0.0);
-        // Formula bar sits directly below the menu bar (Linux) or titlebar (macOS)
-        let formula_bar_y = if cfg!(target_os = "macos") {
-            MACOS_TITLEBAR_HEIGHT
-        } else if self.zen_mode {
-            0.0
-        } else {
-            MENU_BAR_HEIGHT
-        };
+        let formula_bar_y = self.toolbar_geometry(cx).formula_top;
         self.formula_bar_text_rect = gpui::Bounds {
             origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(formula_bar_y)),
             size: gpui::size(gpui::px(formula_bar_text_width), gpui::px(self.formula_bar_height())),

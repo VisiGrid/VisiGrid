@@ -9,6 +9,30 @@
 use gpui::*;
 use crate::app::{Spreadsheet, NUM_ROWS, NUM_COLS};
 use crate::repeat::RepeatAction;
+use visigrid_engine::structural::Axis;
+
+/// Where an insert lands for `selection`, as `(at, count)` in view coordinates.
+///
+/// Whole-row and whole-column selections keep their meaning: the insert spans
+/// the selection. Any other selection inserts at its top row or left column,
+/// one line per selected row or column, as Excel's Insert Sheet Rows and
+/// Insert Sheet Columns do. Asking for rows with whole columns selected (or
+/// columns with whole rows) has no sensible span, so one line is inserted at
+/// the active cell.
+pub(crate) fn insert_target(
+    axis: Axis,
+    ((min_row, min_col), (max_row, max_col)): ((usize, usize), (usize, usize)),
+    active: (usize, usize),
+) -> (usize, usize) {
+    let whole_rows = min_col == 0 && max_col == NUM_COLS - 1;
+    let whole_cols = min_row == 0 && max_row == NUM_ROWS - 1;
+    match axis {
+        Axis::Row if whole_cols && !whole_rows => (active.0, 1),
+        Axis::Row => (min_row, max_row - min_row + 1),
+        Axis::Col if whole_rows && !whole_cols => (active.1, 1),
+        Axis::Col => (min_col, max_col - min_col + 1),
+    }
+}
 
 impl Spreadsheet {
     // =========================================================================
@@ -47,6 +71,34 @@ impl Spreadsheet {
             self.status_message = Some("Select entire row (Shift+Space) or column (Ctrl+Space) first".to_string());
             cx.notify();
         }
+    }
+
+    /// Insert rows for the current selection: above whole-row selections as
+    /// before, and otherwise above the active cell, one row per selected row.
+    pub fn insert_rows_at_selection(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if !self.view_state.additional_selections.is_empty() {
+            self.status_message = Some("Insert not supported with multiple selections".to_string());
+            cx.notify();
+            return;
+        }
+        let (at_view, count) = insert_target(Axis::Row, self.selection_range(), self.view_state.selected);
+        let data_row = self.view_to_data(at_view, cx);
+        self.insert_rows(data_row, count, cx);
+    }
+
+    /// Insert columns for the current selection: left of whole-column
+    /// selections as before, and otherwise left of the active cell, one
+    /// column per selected column.
+    pub fn insert_cols_at_selection(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        if !self.view_state.additional_selections.is_empty() {
+            self.status_message = Some("Insert not supported with multiple selections".to_string());
+            cx.notify();
+            return;
+        }
+        let (at_col, count) = insert_target(Axis::Col, self.selection_range(), self.view_state.selected);
+        self.insert_cols(at_col, count, cx);
     }
 
     /// Delete rows or columns based on current selection (Ctrl+-)
@@ -566,5 +618,53 @@ impl Spreadsheet {
         self.is_modified = true;
         self.status_message = Some(format!("Unhidden {} column(s)", cols.len()));
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{insert_target, Axis, NUM_COLS, NUM_ROWS};
+
+    fn whole_rows(from: usize, to: usize) -> ((usize, usize), (usize, usize)) {
+        ((from, 0), (to, NUM_COLS - 1))
+    }
+    fn whole_cols(from: usize, to: usize) -> ((usize, usize), (usize, usize)) {
+        ((0, from), (NUM_ROWS - 1, to))
+    }
+
+    #[test]
+    fn a_single_cell_inserts_one_line_at_the_cell() {
+        let sel = ((6, 3), (6, 3));
+        assert_eq!(insert_target(Axis::Row, sel, (6, 3)), (6, 1));
+        assert_eq!(insert_target(Axis::Col, sel, (6, 3)), (3, 1));
+    }
+
+    #[test]
+    fn a_cell_range_inserts_one_line_per_selected_row_or_column() {
+        // D4:E6: three rows, two columns, active cell anywhere inside.
+        let sel = ((3, 3), (5, 4));
+        assert_eq!(insert_target(Axis::Row, sel, (5, 4)), (3, 3));
+        assert_eq!(insert_target(Axis::Col, sel, (5, 4)), (3, 2));
+    }
+
+    #[test]
+    fn whole_row_and_column_selections_keep_their_existing_span() {
+        assert_eq!(insert_target(Axis::Row, whole_rows(4, 5), (4, 0)), (4, 2));
+        assert_eq!(insert_target(Axis::Col, whole_cols(2, 3), (0, 2)), (2, 2));
+    }
+
+    #[test]
+    fn the_other_axis_of_a_whole_line_selection_inserts_one_line_at_the_active_cell() {
+        // Whole columns selected, rows requested: one row at the active cell.
+        assert_eq!(insert_target(Axis::Row, whole_cols(2, 3), (7, 2)), (7, 1));
+        // Whole rows selected, columns requested: one column at the active cell.
+        assert_eq!(insert_target(Axis::Col, whole_rows(4, 5), (4, 9)), (9, 1));
+    }
+
+    #[test]
+    fn select_all_spans_the_grid_so_the_engine_can_refuse_it() {
+        let all = ((0, 0), (NUM_ROWS - 1, NUM_COLS - 1));
+        assert_eq!(insert_target(Axis::Row, all, (0, 0)), (0, NUM_ROWS));
+        assert_eq!(insert_target(Axis::Col, all, (0, 0)), (0, NUM_COLS));
     }
 }

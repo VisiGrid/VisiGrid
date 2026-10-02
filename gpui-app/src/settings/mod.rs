@@ -10,6 +10,8 @@
 //! - Settings are defined in one place - no distributed registration
 //! - Files are the organizing principle (user.json, embedded in .vgrid)
 
+mod toolbar;
+pub use toolbar::{ToolbarLayout, ToolbarSettings};
 mod types;
 mod user;
 mod document;

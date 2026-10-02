@@ -65,6 +65,16 @@ pub(crate) fn handle_key_down(
         return;
     }
 
+    if this.mode == Mode::CsvImport {
+        if event.keystroke.key == "space" {
+            let focus = this.csv_dialog.as_ref().map_or(0, |s| s.focus);
+            this.csv_dialog_cycle(focus, cx);
+        }
+        // Enter, Escape and Tab use their action handlers.
+        cx.stop_propagation();
+        return;
+    }
+
     if this.mode == Mode::ExportPdf {
         if event.keystroke.key == "space" {
             let option = this.pdf_export.as_ref().map_or(0, |s| s.focus);

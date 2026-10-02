@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{
-    Spreadsheet, FORMULA_BAR_HEIGHT, REF_COLORS, EditorSurface,
+    Spreadsheet, REF_COLORS, EditorSurface,
     FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH,
 };
 use crate::theme::TokenKey;
@@ -1179,6 +1179,7 @@ pub fn render_error_banner(
 
 /// Render the hover documentation popup for a function
 pub fn render_hover_docs(
+    top: f32,
     func: &'static crate::formula_context::FunctionInfo,
     panel_bg: Hsla,
     panel_border: Hsla,
@@ -1203,7 +1204,7 @@ pub fn render_hover_docs(
     // Position below the formula bar — flat, terminal-style
     div()
         .absolute()
-        .top(px(FORMULA_BAR_HEIGHT * 2.0))
+        .top(px(top))
         .left(px(90.0))
         .bg(panel_bg)
         .border_1()

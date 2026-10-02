@@ -144,7 +144,7 @@ pub fn render_paste_special_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
                 .px_1()
                 .text_size(px(11.0))
                 .text_color(text_muted)
-                .child("Ctrl+V pastes contents and keeps this sheet's formatting.")
+                .child("Ctrl+V keeps formatted cells as they are; blank cells take the copied formatting.")
         );
 
     let header = div()

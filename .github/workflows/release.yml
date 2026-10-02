@@ -182,10 +182,16 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # The Windows default shell is pwsh, which does not stop when a native
+      # command fails: only the LAST command's exit code reached the step. In
+      # 0.43.0 the first build failed (vg-session-smoke did not compile on
+      # Windows) and the step still passed because the CLI build after it did.
       - name: Build release
         run: |
           cargo build --release -p visigrid-gpui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release -p visigrid-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: List build artifacts
         shell: pwsh
@@ -303,7 +309,7 @@ jobs:
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
 
-      # rust-toolchain.toml pins 1.95.0, which rustup installs fresh —
+      # rust-toolchain.toml pins a version, which rustup installs fresh —
       # the targets above only landed on the action's stable toolchain.
       # Add them to whichever toolchain the pin resolves to.
       - name: Add targets to pinned toolchain

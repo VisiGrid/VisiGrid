@@ -171,9 +171,16 @@ pub enum CommandId {
     SaveAs,
     ExportCsv,
     ExportPdf,
+    CsvImportSettings,
+    CsvImportNotes,
     PrintPreview,
     ExportTsv,
     ExportJson,
+
+    UseCompactToolbar,
+    UseRibbonToolbar,
+    ToggleRibbonCollapsed,
+    ToggleToolbar,
 
     // Appearance
     SelectTheme,
@@ -305,6 +312,10 @@ impl CommandId {
     /// Human-readable name for the command
     pub fn name(&self) -> &'static str {
         match self {
+            Self::UseCompactToolbar => "Use Compact Toolbar",
+            Self::UseRibbonToolbar => "Use Ribbon Toolbar",
+            Self::ToggleRibbonCollapsed => "Collapse/Expand Ribbon",
+            Self::ToggleToolbar => "Show/Hide Toolbar",
             Self::GoToCell => "Go to Cell",
             Self::FindInCells => "Find in Cells",
             Self::GoToStart => "Go to Start (A1)",
@@ -395,6 +406,8 @@ impl CommandId {
             Self::SaveAs => "Save As",
             Self::ExportCsv => "Export as CSV",
             Self::ExportPdf => "Export PDF",
+            Self::CsvImportSettings => "CSV Import Settings...",
+            Self::CsvImportNotes => "Show CSV Import Notes",
             Self::PrintPreview => "Print",
             Self::ExportTsv => "Export as TSV",
             Self::ExportJson => "Export as JSON",
@@ -495,6 +508,7 @@ impl CommandId {
     /// Keyboard shortcut display string (if any)
     pub fn shortcut(&self) -> Option<&'static str> {
         match self {
+            Self::UseCompactToolbar | Self::UseRibbonToolbar | Self::ToggleRibbonCollapsed | Self::ToggleToolbar => None,
             Self::GoToCell => Some("Ctrl+G"),
             Self::FindInCells => Some("Ctrl+F"),
             Self::GoToStart => Some("Ctrl+Home"),
@@ -591,6 +605,7 @@ impl CommandId {
     /// Search keywords (additional terms that match this command)
     pub fn keywords(&self) -> &'static str {
         match self {
+            Self::UseCompactToolbar | Self::UseRibbonToolbar | Self::ToggleRibbonCollapsed | Self::ToggleToolbar => "toolbar ribbon compact appearance layout collapse expand show hide",
             Self::GoToCell => "goto jump navigate",
             Self::FindInCells => "search",
             Self::GoToStart => "home beginning",
@@ -681,6 +696,8 @@ impl CommandId {
             Self::SaveAs => "write export",
             Self::ExportCsv => "save comma",
             Self::ExportPdf => "print preview portable document paper page gridlines",
+            Self::CsvImportSettings => "csv tsv delimiter encoding column types text leading zeros reimport",
+            Self::CsvImportNotes => "csv tsv banner import report findings formulas kept as text changed on disk",
             Self::PrintPreview => "printer print preview copies pages paper",
             Self::ExportTsv => "save tab separated",
             Self::ExportJson => "save array",
@@ -874,9 +891,15 @@ impl CommandId {
             Self::SaveAs,
             Self::ExportCsv,
             Self::ExportPdf,
+            Self::CsvImportSettings,
+            Self::CsvImportNotes,
             Self::PrintPreview,
             Self::ExportTsv,
             Self::ExportJson,
+            Self::UseCompactToolbar,
+            Self::UseRibbonToolbar,
+            Self::ToggleRibbonCollapsed,
+            Self::ToggleToolbar,
             Self::SelectTheme,
             Self::SelectFont,
             Self::ToggleInspector,
@@ -987,6 +1010,8 @@ impl CommandId {
             | Self::SaveAs
             | Self::PrintPreview
             | Self::ExportPdf
+            | Self::CsvImportSettings
+            | Self::CsvImportNotes
             | Self::ExportCsv
             | Self::ExportTsv
             | Self::ExportJson
@@ -1017,6 +1042,8 @@ impl CommandId {
             | Self::FindInCells
             | Self::GoToCell => Some(MenuCategory::Edit),
             Self::AddEditComment => Some(MenuCategory::Edit),
+
+            Self::UseCompactToolbar | Self::UseRibbonToolbar | Self::ToggleRibbonCollapsed | Self::ToggleToolbar => Some(MenuCategory::View),
 
             // View menu
             Self::ToggleInspector
@@ -2061,12 +2088,39 @@ pub fn relative_age(then: std::time::SystemTime, now: std::time::SystemTime) -> 
 
 /// Recent files provider - searches recently opened files
 /// Create with a snapshot of recent file paths
+/// A recent file with what the palette shows about it, read from disk once
+/// when the palette opens rather than on every keystroke.
+#[derive(Clone, Debug)]
+pub struct RecentFile {
+    pub path: PathBuf,
+    /// Containing folder, absolute, home shown as `~`. Empty if unknown.
+    pub folder: String,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+impl RecentFile {
+    pub fn read(path: &std::path::Path) -> Self {
+        let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        Self {
+            path: path.to_path_buf(),
+            folder: absolute.parent().map(display_folder).unwrap_or_default(),
+            modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+        }
+    }
+}
+
 pub struct RecentFilesProvider {
-    files: Vec<PathBuf>,
+    files: Vec<RecentFile>,
 }
 
 impl RecentFilesProvider {
+    /// Reads each file's folder and age from disk.
     pub fn new(files: Vec<PathBuf>) -> Self {
+        Self::from_entries(files.iter().map(|p| RecentFile::read(p)).collect())
+    }
+
+    /// Uses already-read entries; no disk access.
+    pub fn from_entries(files: Vec<RecentFile>) -> Self {
         Self { files }
     }
 }
@@ -2083,7 +2137,8 @@ impl SearchProvider for RecentFilesProvider {
     fn search(&self, query: &SearchQuery, limit: usize) -> Vec<SearchItem> {
         self.files
             .iter()
-            .filter_map(|path| {
+            .filter_map(|file| {
+                let path = &file.path;
                 let filename = path.file_name()?.to_str()?;
 
                 // Score against the query
@@ -2099,10 +2154,8 @@ impl SearchProvider for RecentFilesProvider {
                     filename,
                     SearchAction::OpenFile(path.clone()),
                 )
-                .with_subtitle(display_folder(
-                    &std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).parent()?.to_path_buf(),
-                ));
-                if let Some(age) = std::fs::metadata(path).ok().and_then(|m| m.modified().ok()) {
+                .with_subtitle(file.folder.clone());
+                if let Some(age) = file.modified {
                     item = item.with_meta(relative_age(age, std::time::SystemTime::now()));
                 }
                 Some(item

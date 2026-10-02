@@ -35,8 +35,38 @@
 - **Lighter Table undo history.** Edits, pastes and fills retain changed cells instead of entire workbook snapshots. Undo/redo checks the expected cells and Table definition before changing anything, recalculates dependents, and preserves unrelated cells.
 - **Clearer Table header controls.** Inset buttons use drawn chevrons and distinct sort/filter icons, scale with zoom, and explain active criteria on hover.
 - The named-range hint now sits above the status bar with compact shortcut keycaps and a clearer dismiss button.
-- **Table-view limits:** clear criteria before structural changes, edits outside the active Table body, scripts or session batches. Cut, history rewind and guarded pivot operations are supported. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records.
+- **Table-view limits:** clear criteria before creating/resizing/appending Tables or copying reviewed results to another sheet. Safe cell edits, cut/fill, row/column operations, automation batches, reviewed Lua plans, history rewind and guarded pivot operations support active criteria. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records.
 - Saved Table views use Tables catalog version 3. VisiGrid 0.42 opens these files through its future-format read-only recovery. Clearing the last view allows the older catalog version again.
+
+## 0.43.0
+
+### CSV import
+
+- **After opening a CSV, a banner says what was decided**, one row per finding, warnings first: formulas left as text, values kept as text and in which columns, rows that did not fit, values a chosen type could not read. A clean import shows nothing. Esc closes it; **Show CSV Import Notes** in the command palette brings it back. ([#76](https://github.com/VisiGrid/VisiGrid/pull/76), [#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+- **Formulas are reviewed before they run.** **Review and evaluate…** lists every formula with its cell and flags any that reach outside the sheet (links, web requests, imports). If the file's formulas change after you approve them, they come back as text and you are asked again. ([#76](https://github.com/VisiGrid/VisiGrid/pull/76), [#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+- **Import settings.** Click the CSV line in the status bar or run **CSV Import Settings…**: delimiter, encoding, header row, decimal comma, and a type for each column (Auto, Text, Number, Date in YMD/DMY/MDY, Skip), with a live preview that marks the values a choice would change. **Remember for files with these column names** reopens matching files the same way; it never remembers "evaluate formulas". The dialog also shows the equivalent `vgrid` command. ([#76](https://github.com/VisiGrid/VisiGrid/pull/76))
+- **`vgrid` has the same options:** `--text`, `--number`, `--date col=dmy`, `--skip`, `--decimal-comma`, `--encoding`, `--no-header` and `--formulas`. Piped CSV now honours `--encoding`, and CSV piped into `vgrid calc` or `vgrid convert` gets the same safe defaults as a file: `007` and `=…` stay text. `--delimiter` sets the output delimiter (and how piped input is read); a file's own delimiter is detected. ([#69](https://github.com/VisiGrid/VisiGrid/pull/69))
+- **A CSV with more rows than a sheet holds is never overwritten.** Saving or exporting over that file is refused, with the number of rows that would be lost. ([#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+- **A CSV that changes on disk is noticed** when you return to the window. The banner says how it changed (rows added or removed, columns new or gone) and offers to re-import with the same settings. ([#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+
+### Paste and copy
+
+- **Ctrl+V into blank cells brings the copied formatting.** Cells that already have formatting keep it, so pasting into a styled report still doesn't wreck it; pasting into empty space now looks like what you copied instead of plain text. Paste Special → All still replaces the formatting everywhere. In Preferences, **Default paste** now reads **Contents / Values only** (it said Everything, which it wasn't). ([#80](https://github.com/VisiGrid/VisiGrid/pull/80))
+- **The copy border marches,** and it stays visible when the copied range is still selected; it used to be the same blue as the selection and disappeared under it. ([#80](https://github.com/VisiGrid/VisiGrid/pull/80))
+- **The copy border shows only on the sheet you copied from.** It used to appear on every sheet at the same addresses. ([#80](https://github.com/VisiGrid/VisiGrid/pull/80))
+
+### Command palette
+
+- **Every engine function is in autocomplete and the palette's `=` search**, including XLOOKUP, XMATCH, XIRR, XNPV, SUMIFS, COUNTIFS and TEXTJOIN; 39 were missing. Trackpad scrolling now moves the command palette and font picker. ([#74](https://github.com/VisiGrid/VisiGrid/pull/74))
+
+### Selection
+
+- **Dragging past the edge of the grid scrolls the sheet**, as in Excel. Drag a selection, the fill handle, a formula reference or row/column headers below, above or beside the grid and hold: the sheet keeps scrolling and the drag keeps extending, faster the further out the pointer is. Previously the drag stopped at the last visible row or column.
+- **Releasing the mouse off the grid now finishes the drag.** Letting go over the status bar or outside the window ends the selection, commits a fill-handle drag and applies Format Painter; before, only a release over a cell did.
+
+### Under the hood
+
+- **Built on Zed v1.22's GPUI**, up from v1.12, and on upstream Zed directly instead of VisiGrid's fork. The fork existed only to remove private macOS blur APIs that the Mac App Store rejects; Zed removed them too. Building from source now needs Rust 1.98.1.
 
 ## 0.42.0
 

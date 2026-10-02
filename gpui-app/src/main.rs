@@ -2,6 +2,8 @@
 #![windows_subsystem = "windows"]
 
 mod actions;
+mod toolbar;
+mod desktop_keytips;
 mod pivot_ui;
 mod table_ui;
 mod table_header_paste;
@@ -26,12 +28,14 @@ mod cond_format_ui;
 mod default_app;
 mod default_app_prompt;
 mod dialogs;
+mod drag_autoscroll;
 mod docs_links;
 mod diff;
 mod diff_actions;
 mod diff_view;
 mod editing;
 mod file_ops;
+mod csv_import_ui;
 mod pdf_export;
 mod native_print;
 mod fill;

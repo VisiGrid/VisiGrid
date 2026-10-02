@@ -251,7 +251,7 @@ pub fn render_grid(
             // Dashed borders overlay for formula references (above cells, below popups)
             .child(render_formula_ref_borders(app, pane_side))
             // Dashed border overlay for copy/cut visual range
-            .child(render_clipboard_border(app, pane_side))
+            .child(render_clipboard_border(app, cx, pane_side))
             // Popup overlay layer - positioned relative to grid, not window chrome
             .child(render_popup_overlay(app, cx))
             // Debug: draw 1px reference lines to verify pixel alignment (Cmd+Alt+Shift+G).
@@ -406,7 +406,7 @@ pub fn render_grid(
         // Dashed borders overlay for formula references (above cells, below popups)
         .child(render_formula_ref_borders(app, pane_side))
         // Dashed border overlay for copy/cut visual range
-        .child(render_clipboard_border(app, pane_side))
+        .child(render_clipboard_border(app, cx, pane_side))
         // Popup overlay layer - positioned relative to grid, not window chrome
         .child(render_popup_overlay(app, cx))
         .into_any_element()
@@ -551,6 +551,9 @@ fn render_cell(
             .h_full()
             // Keep mouse_move for edge-case drag-through (overlay handles clicks on top)
             .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+                if this.is_fill_dragging() || this.dragging_selection {
+                    this.note_drag_cell(cell_row, cell_col);
+                }
                 if this.is_fill_dragging() {
                     this.continue_fill_drag(cell_row, cell_col, cx);
                     return;
@@ -1708,6 +1711,9 @@ fn render_cell(
             if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
+            if this.is_fill_dragging() || this.dragging_selection {
+                this.note_drag_cell(cell_row, cell_col);
+            }
             // Continue fill handle drag if active (priority over selection drag)
             if this.is_fill_dragging() {
                 this.continue_fill_drag(cell_row, cell_col, cx);
@@ -2354,13 +2360,18 @@ fn formula_ref_rect(
     Some(range.pixel_rect(region.row, region.col, col_width, row_height))
 }
 
-/// Render a dashed border overlay around the copy/cut source range.
-/// Static dashed border (no animation), non-interactive (clicks pass through).
-/// Modeled on render_formula_ref_borders — same canvas pattern.
-fn render_clipboard_border(app: &Spreadsheet, pane_side: Option<SplitSide>) -> impl IntoElement {
+/// Render the "marching ants" border around the copy/cut source range.
+/// Drawn only on the sheet the range was copied from, in a cell-background
+/// base with moving accent dashes, so it stays visible on top of the
+/// selection border (same color) when the copied range is still selected.
+/// Non-interactive (clicks pass through).
+fn render_clipboard_border(app: &Spreadsheet, cx: &mut Context<Spreadsheet>, pane_side: Option<SplitSide>) -> impl IntoElement {
     let Some((r1, c1, r2, c2)) = app.clipboard_visual_range else {
         return div().into_any_element();
     };
+    if app.clipboard_visual_sheet.is_some_and(|id| id != app.sheet(cx).id) {
+        return div().into_any_element();
+    }
 
     // Only show in the active pane (same logic as formula ref borders)
     let is_active_pane = match pane_side {
@@ -2395,40 +2406,75 @@ fn render_clipboard_border(app: &Spreadsheet, pane_side: Option<SplitSide>) -> i
     let width = (bottom_right.x + bottom_right.width) - top_left.x;
     let height = (bottom_right.y + bottom_right.height) - top_left.y;
 
-    let bounds = Bounds {
-        origin: Point::new(px(x), px(y)),
-        size: Size { width: px(width), height: px(height) },
-    };
-
-    // Use SelectionBorder token color (accent blue)
-    let mut color: Hsla = app.token(TokenKey::SelectionBorder);
-    color.a = 1.0; // Ensure full opacity
+    let mut ant: Hsla = app.token(TokenKey::SelectionBorder);
+    ant.a = 1.0;
+    let mut base: Hsla = app.token(TokenKey::CellBg);
+    base.a = 1.0;
 
     canvas(
-        move |_bounds, _window, _cx| (bounds, color),
-        move |canvas_bounds, (cell_bounds, color), window, _cx| {
-            let adjusted_bounds = Bounds {
-                origin: Point::new(
-                    canvas_bounds.origin.x + cell_bounds.origin.x,
-                    canvas_bounds.origin.y + cell_bounds.origin.y,
-                ),
-                size: cell_bounds.size,
-            };
-            let quad = gpui::quad(
-                adjusted_bounds,
-                px(0.0),
-                gpui::transparent_black(),
-                px(2.0),
-                color,
-                BorderStyle::Dashed,
-            );
-            window.paint_quad(quad);
+        move |_bounds, _window, _cx| (),
+        move |canvas_bounds, (), window, _cx| {
+            let ox: f32 = canvas_bounds.origin.x.into();
+            let oy: f32 = canvas_bounds.origin.y.into();
+            // Redraws come from Spreadsheet::start_marching_ants' timer, not
+            // animation frames, so a pending copy doesn't repaint at 60-120 Hz.
+            paint_marching_ants(window, ox + x, oy + y, width, height, ant, base);
         },
     )
     .absolute()
     .inset_0()
     .size_full()
     .into_any_element()
+}
+
+/// One clock for every copy border, so the ants move at a steady speed.
+fn ants_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+/// Paint a 2px border whose dashes run clockwise around the rectangle.
+fn paint_marching_ants(window: &mut Window, x: f32, y: f32, w: f32, h: f32, ant: Hsla, base: Hsla) {
+    const TH: f32 = 2.0;
+    const DASH: f32 = 5.0;
+    const PERIOD: f32 = 10.0;
+    // 24px/s in 2px steps, matching the ~12 Hz redraw timer.
+    let phase = ((ants_epoch().elapsed().as_secs_f32() * 12.0).floor() * 2.0) % PERIOD;
+    let rect = |rx: f32, ry: f32, rw: f32, rh: f32| Bounds {
+        origin: Point::new(px(rx), px(ry)),
+        size: Size { width: px(rw), height: px(rh) },
+    };
+    // Base: the gaps between dashes, so the border reads over a selection.
+    for r in [rect(x, y, w, TH), rect(x, y + h - TH, w, TH), rect(x, y, TH, h), rect(x + w - TH, y, TH, h)] {
+        window.paint_quad(gpui::fill(r, base));
+    }
+    // Edges in clockwise order: (start x, start y, dx, dy, length).
+    let edges = [
+        (x, y, 1.0, 0.0, w),
+        (x + w - TH, y, 0.0, 1.0, h),
+        (x + w, y + h - TH, -1.0, 0.0, w),
+        (x, y + h, 0.0, -1.0, h),
+    ];
+    let mut offset = 0.0;
+    for (sx, sy, dx, dy, len) in edges {
+        // First dash start on this edge, in edge coordinates (may be negative).
+        let mut d = (phase - offset).rem_euclid(PERIOD) - PERIOD;
+        while d < len {
+            let (a, b) = (d.max(0.0), (d + DASH).min(len));
+            if b > a {
+                let (px0, py0) = (sx + dx * a, sy + dy * a);
+                let (px1, py1) = (sx + dx * b, sy + dy * b);
+                let r = if dy == 0.0 {
+                    rect(px0.min(px1), py0, (px1 - px0).abs(), TH)
+                } else {
+                    rect(px0, py0.min(py1), TH, (py1 - py0).abs())
+                };
+                window.paint_quad(gpui::fill(r, ant));
+            }
+            d += PERIOD;
+        }
+        offset += len;
+    }
 }
 
 /// Each overlay uses the same four regions and one-pixel dividers as the cell grid.
@@ -2779,6 +2825,9 @@ fn render_merge_div(
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
             if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
+            }
+            if this.is_fill_dragging() || this.dragging_selection {
+                this.note_drag_cell(origin_row, origin_col);
             }
             if this.is_fill_dragging() {
                 this.continue_fill_drag(origin_row, origin_col, cx);

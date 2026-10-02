@@ -70,3 +70,37 @@ jobs:
       # `cargo clippy --workspace --all-targets` in a clean target dir exits 0.
       - name: Clippy
         run: cargo clippy --workspace --all-targets
+
+  # The job above builds and tests on Linux only, so a change that breaks the
+  # macOS or Windows build was first compiled by the release workflow, after
+  # the tag was pushed. The Zed v1.22 gpui bump (#77) shipped in 0.43.0 having
+  # been compiled for macOS and Windows only by a hand-dispatched dry run.
+  # A type-check is enough to catch that class (platform-gated code, cfg(unix)
+  # tests, platform crates) without the time of a full release build.
+  check-macos-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-pr-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-pr-check-
+
+      - name: Check the app and CLI, tests included
+        run: cargo check --locked -p visigrid-gpui -p visigrid-cli --all-targets

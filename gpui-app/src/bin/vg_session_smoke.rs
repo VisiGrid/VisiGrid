@@ -29,8 +29,6 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[cfg(unix)]
-
 // Re-use protocol types from the session server module
 // We redefine them here to keep the binary isolated from internal types
 

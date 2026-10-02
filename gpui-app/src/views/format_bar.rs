@@ -5,7 +5,54 @@ use crate::mode::Mode;
 use crate::theme::TokenKey;
 use visigrid_engine::cell::{Alignment, CellStyle, VerticalAlignment, NumberFormat};
 
-pub const FORMAT_BAR_HEIGHT: f32 = 44.0;
+pub const FORMAT_BAR_HEIGHT: f32 = crate::toolbar::COMPACT_HEIGHT;
+
+/// The Home ribbon uses the same font picker, validated input and tri-state
+/// controls as Compact. Only their arrangement changes.
+pub(super) fn render_ribbon_font_controls(app: &mut Spreadsheet, state: &crate::app::SelectionFormatState, window: &Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    if app.ui.format_bar.size_editing && !app.ui.format_bar.size_focus.is_focused(window) {
+        commit_font_size(app, cx);
+    }
+    let text = app.token(TokenKey::TextPrimary);
+    let muted = app.token(TokenKey::TextMuted);
+    let border = app.token(TokenKey::PanelBorder);
+    let accent = app.token(TokenKey::Accent);
+    let font: SharedString = match &state.font_family {
+        TriState::Uniform(Some(f)) => f.clone().into(),
+        TriState::Mixed => "—".into(),
+        _ => app.cell_font.family.clone().into(),
+    };
+    let missing = !state.font_family.is_mixed() && app.font_catalog.is_missing(font.as_ref());
+    let tooltip = if missing { format!("{} is unavailable. The workbook font is preserved.", font) } else { format!("{} — Font", font) };
+    let size: SharedString = if app.ui.format_bar.size_editing {
+        if app.ui.format_bar.size_replace_next { app.ui.format_bar.size_input.clone().into() }
+        else { format!("{}|", app.ui.format_bar.size_input).into() }
+    } else {
+        match state.font_size {
+            TriState::Uniform(Some(s)) => s.to_string().into(),
+            TriState::Mixed => "—".into(),
+            _ => app.cell_font.size.to_string().into(),
+        }
+    };
+    let mut row = div().flex().gap_1();
+    for (label, value, code) in [("B", &state.bold, "F2"), ("I", &state.italic, "F3"), ("U", &state.underline, "F4")] {
+        let tip = super::ribbon::font_control_tooltip(app, code, window, None);
+        let control = render_style_btn(label, matches!(value, TriState::Uniform(true)), value.is_mixed(), text, muted, accent, border, Some(tip), cx);
+        row = row.child(super::ribbon::font_keytip(app, code, control));
+    }
+    let fill_tip = super::ribbon::font_control_tooltip(app, "F5", window, None);
+    let color_tip = super::ribbon::font_control_tooltip(app, "F7", window, None);
+    row = row.child(super::ribbon::font_keytip(app, "F5", render_fill_color_btn(rgba_to_hsla(&state.background_color), border, Some(fill_tip), cx)))
+        .child(super::ribbon::font_keytip(app, "F7", render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, Some(color_tip), cx)));
+    let family_tip = super::ribbon::font_control_tooltip(app, "F1", window, Some(&tooltip));
+    let size_tip = super::ribbon::font_control_tooltip(app, "F6", window, None);
+    div().flex().flex_col().gap_1()
+        .child(div().flex().gap_1()
+            .child(super::ribbon::font_keytip(app, "F1", render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, Some(family_tip), cx).w(px(200.))))
+            .child(super::ribbon::font_keytip(app, "F6", render_font_size_input(app, size, state.font_size.is_mixed(), app.ui.format_bar.size_editing,
+                app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), Some(size_tip), cx))))
+        .child(row)
+}
 
 /// Common font sizes for the dropdown.
 const FONT_SIZES: &[u32] = &[8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 36, 48, 72];
@@ -105,11 +152,11 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         .gap_1()
         // Font family button
         .child(render_font_family_btn(
-            font_display, font_is_mixed, font_missing, font_tooltip, text_primary, text_muted, panel_border, cx,
+            font_display, font_is_mixed, font_missing, font_tooltip, text_primary, text_muted, panel_border, None, cx,
         ))
         // Font size input
         .child(render_font_size_input(
-            app, size_display, size_is_mixed, size_editing, size_replace_next, text_primary, text_muted, panel_border, size_focus, cx,
+            app, size_display, size_is_mixed, size_editing, size_replace_next, text_primary, text_muted, panel_border, size_focus, None, cx,
         ))
         // Separator
         .child(toolbar_separator(panel_border))
@@ -126,9 +173,9 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
         // Separator
         .child(toolbar_separator(panel_border))
         // Fill color button
-        .child(render_fill_color_btn(fill_chip_color, panel_border, cx))
+        .child(render_fill_color_btn(fill_chip_color, panel_border, None, cx))
         // Text color button
-        .child(render_text_color_btn(text_color_hsla, text_color_is_mixed, text_primary, text_muted, panel_border, cx))
+        .child(render_text_color_btn(text_color_hsla, text_color_is_mixed, text_primary, text_muted, panel_border, None, cx))
         // Separator
         .child(toolbar_separator(panel_border))
         // Alignment buttons
@@ -226,8 +273,9 @@ fn render_font_family_btn(
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let text_color = if is_mixed { text_muted } else { text_primary };
 
     div()
@@ -251,13 +299,34 @@ fn render_font_family_btn(
             this.show_font_picker(window, cx);
         }))
         .tooltip(move |_window, cx| {
-            cx.new(|_| FontTooltip(tooltip.clone())).into()
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FontTooltip(tooltip.clone())).into()
+            }
         })
         .child(div().flex_1().overflow_hidden().text_ellipsis().child(display))
         .when(is_missing, |d| d.child(div().ml_1().text_size(px(10.0)).text_color(text_muted).child("Substituted")))
 }
 
 /// Font size editable input with dropdown arrow.
+pub(super) fn begin_font_size_edit(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) {
+    if !app.ui.format_bar.size_editing {
+        // Enter editing mode: populate buffer with current display value
+        let state = app.selection_format_state(cx);
+        app.ui.format_bar.size_input = match &state.font_size {
+            TriState::Uniform(Some(s)) => format!("{}", s),
+            TriState::Uniform(None) | TriState::Empty => app.cell_font.size.to_string(),
+            TriState::Mixed => String::new(),
+        };
+        app.ui.format_bar.size_editing = true;
+        app.ui.format_bar.size_dropdown = false;
+        app.ui.format_bar.size_replace_next = true;
+        window.focus(&app.ui.format_bar.size_focus, cx);
+        cx.notify();
+    }
+}
+
 fn render_font_size_input(
     app: &Spreadsheet,
     display: SharedString,
@@ -268,6 +337,7 @@ fn render_font_size_input(
     text_muted: Hsla,
     panel_border: Hsla,
     focus_handle: FocusHandle,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let text_color = if is_editing && is_selected_all { text_primary } else if is_mixed { text_muted } else { text_primary };
@@ -301,20 +371,7 @@ fn render_font_size_input(
                 .hover(|s| s.bg(panel_border.opacity(0.3)))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
-                    if !this.ui.format_bar.size_editing {
-                        // Enter editing mode: populate buffer with current display value
-                        let state = this.selection_format_state(cx);
-                        this.ui.format_bar.size_input = match &state.font_size {
-                            TriState::Uniform(Some(s)) => format!("{}", s),
-                            TriState::Uniform(None) | TriState::Empty => this.cell_font.size.to_string(),
-                            TriState::Mixed => String::new(),
-                        };
-                        this.ui.format_bar.size_editing = true;
-                        this.ui.format_bar.size_dropdown = false;
-                        this.ui.format_bar.size_replace_next = true;
-                        window.focus(&this.ui.format_bar.size_focus, cx);
-                        cx.notify();
-                    }
+                    begin_font_size_edit(this, window, cx);
                 }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                     if !this.ui.format_bar.size_editing {
@@ -352,8 +409,12 @@ fn render_font_size_input(
                         }
                     }
                 }))
-                .tooltip(|_window, cx: &mut App| {
-                    cx.new(|_| FormatBarTooltip("Font Size (points)")).into()
+                .tooltip(move |_window, cx: &mut App| {
+                    if let Some(tip) = &ribbon_tooltip {
+                        cx.new(|_| tip.clone()).into()
+                    } else {
+                        cx.new(|_| FormatBarTooltip("Font Size (points)")).into()
+                    }
                 })
                 .when(is_editing && is_selected_all, |d| {
                     // "Select all" visual: accent background on the text to show it will be replaced
@@ -409,8 +470,7 @@ pub fn render_font_size_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
     // Vertical offset from root div top to below the format bar.
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
 
     // Anchor at the clicked control, clamped to the window.
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
@@ -621,8 +681,7 @@ pub fn render_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) 
     let align_cas = matches!(state.alignment, TriState::Uniform(Alignment::CenterAcrossSelection));
 
     // Position below format bar, roughly under Format button
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
 
     div()
@@ -771,8 +830,9 @@ fn render_style_btn(
     text_muted: Hsla,
     accent: Hsla,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let mut btn = div()
         .w(px(30.0))
         .h(px(30.0))
@@ -846,7 +906,11 @@ fn render_style_btn(
             }
         }))
         .tooltip(move |_window, cx| {
-            cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FormatBarTooltip(tooltip_text)).into()
+            }
         })
 }
 
@@ -854,8 +918,9 @@ fn render_style_btn(
 fn render_fill_color_btn(
     chip_color: Option<Hsla>,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let chip = render_color_chip(chip_color, panel_border, 16.0, 7.0);
 
     div()
@@ -874,8 +939,12 @@ fn render_fill_color_btn(
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Fill, window, cx);
         }))
-        .tooltip(|_window, cx| {
-            cx.new(|_| FormatBarTooltip("Fill Color")).into()
+        .tooltip(move |_window, cx| {
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FormatBarTooltip("Fill Color")).into()
+            }
         })
         .child(chip)
 }
@@ -887,8 +956,9 @@ fn render_text_color_btn(
     text_primary: Hsla,
     text_muted: Hsla,
     panel_border: Hsla,
+    ribbon_tooltip: Option<super::ribbon::RibbonTooltip>,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     // Underbar color: use the actual font color, or text_primary for Automatic/None
     let underbar_color = color.unwrap_or(text_primary);
 
@@ -909,8 +979,12 @@ fn render_text_color_btn(
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
             this.show_color_picker(crate::color_palette::ColorTarget::Text, window, cx);
         }))
-        .tooltip(|_window, cx| {
-            cx.new(|_| FormatBarTooltip("Text Color")).into()
+        .tooltip(move |_window, cx| {
+            if let Some(tip) = &ribbon_tooltip {
+                cx.new(|_| tip.clone()).into()
+            } else {
+                cx.new(|_| FormatBarTooltip("Text Color")).into()
+            }
         })
         // "A" letter
         .child(
@@ -1253,8 +1327,7 @@ pub fn render_number_format_dropdown(app: &Spreadsheet, cx: &mut Context<Spreads
     let text_muted = app.token(TokenKey::TextMuted);
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
 
     // Anchor at the clicked control, clamped to the window.
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));
@@ -1378,8 +1451,7 @@ pub fn render_cell_style_dropdown(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let text_muted = app.token(TokenKey::TextMuted);
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
 
-    let chrome_above: f32 = if cfg!(target_os = "macos") { 34.0 } else { crate::app::MENU_BAR_HEIGHT };
-    let top_offset = chrome_above + app.formula_bar_height() + FORMAT_BAR_HEIGHT;
+    let top_offset = app.toolbar_geometry(cx).popup_top;
 
     // Anchor at the clicked control, clamped to the window.
     let left_offset = app.ui.format_bar.popup_x.min((f32::from(app.window_size.width) - 240.0).max(8.0));

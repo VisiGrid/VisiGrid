@@ -51,10 +51,9 @@ pub fn render_script_view(
     // Virtual scroll: show lines from scroll_offset to scroll_offset + estimated visible.
     // Use window height to estimate visible lines.
     let window_height: f32 = app.window_size.height.into();
-    // Rough estimate: subtract toolbar (32), formula bar (30), format bar (28), column headers (24),
-    // status bar (24), console if visible (lua_console.height), some padding.
+    // Use the same chrome geometry as the grid, including the selected toolbar.
     let console_h = if app.lua_console.visible { app.lua_console.height } else { 0.0 };
-    let overhead = 32.0 + 30.0 + 28.0 + 24.0 + 24.0 + console_h + 40.0; // toolbar + extras
+    let overhead = app.top_chrome_height(cx) + app.bottom_chrome_height() + console_h + 40.0; // toolbar + extras
     let available = (window_height - overhead).max(100.0);
     let max_visible = (available / line_height).ceil() as usize;
 

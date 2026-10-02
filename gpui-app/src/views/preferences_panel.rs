@@ -105,6 +105,23 @@ pub fn render_preferences_panel(
                                 .child("Choose theme…"),
                         ),
                 )
+                .child(div().flex().items_center().justify_between()
+                    .child(row_label("Toolbar layout", text_primary))
+                    .child(div().flex().gap_1().children([
+                        ("pref-toolbar-compact", "Compact", crate::settings::ToolbarLayout::Compact),
+                        ("pref-toolbar-ribbon", "Ribbon", crate::settings::ToolbarLayout::Ribbon),
+                    ].into_iter().map(|(id, label, layout)| {
+                        div().id(id).keyboard(app, id).px_3().py_1().rounded_sm().cursor_pointer()
+                            .text_size(px(12.)).text_color(text_primary).border_1()
+                            .border_color(if app.toolbar_layout(cx) == layout { accent } else { panel_border })
+                            .when(app.toolbar_layout(cx) == layout, |d| d.bg(accent.opacity(0.15)))
+                            .on_click(cx.listener(move |this, _, window, cx| this.set_toolbar_layout(layout, window, cx)))
+                            .child(label)
+                    }))))
+                .child(div().flex().items_center().justify_between()
+                    .child(row_label("Show toolbar", text_primary))
+                    .child(preference_toggle(app, "pref-toolbar-visible", user_settings.appearance.show_format_bar.resolve(true), accent, text_muted.opacity(0.25))
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_toolbar_visibility(window, cx)))))
                 // Show gridlines row
                 .child(
                     div()
@@ -347,7 +364,7 @@ pub fn render_preferences_panel(
                                     .gap_1()
                                     .child(paste_default_option(
                                         app,
-                                        "Everything",
+                                        "Contents",
                                         false,
                                         paste_values_by_default,
                                         accent,
@@ -1219,6 +1236,9 @@ const SIDEBAR_IDS: [&str; 3] = [
 ];
 const APPEARANCE_IDS: &[&str] = &[
     "pref-theme-btn",
+    "pref-toolbar-compact",
+    "pref-toolbar-ribbon",
+    "pref-toolbar-visible",
     "pref-gridlines-cb",
     "pref-comment-previews-cb",
     "pref-column-width",

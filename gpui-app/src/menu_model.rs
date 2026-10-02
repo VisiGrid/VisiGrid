@@ -23,6 +23,7 @@ pub enum MenuAction {
     ExportCsv, ExportTsv, ExportJson, ExportXlsx, ExportPdf, PrintPreview,
     Undo, Redo, Cut, Copy, Paste, PasteValues, Delete, Find, GoTo,
     CommandPalette, Inspector, ZoomIn, ZoomOut, ZoomReset,
+    UseCompactToolbar, UseRibbonToolbar, ToggleRibbonCollapsed,
     ShowFormulas, ShowZeros, FormatBar, Minimap, Profiler, ApproveModel,
     FreezeTopRow, FreezeFirstCol, FreezePanes, UnfreezePanes,
     Bold, Italic, Underline, Font,
@@ -95,7 +96,7 @@ pub fn view_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Separator,
         MenuEntry::Item { label: "Show Formulas", shortcut: Some("Ctrl+`"), action: MenuAction::ShowFormulas, accel: Some('f') },
         MenuEntry::Item { label: "Show Zeros", shortcut: None, action: MenuAction::ShowZeros, accel: Some('z') },
-        MenuEntry::Item { label: "Format Bar", shortcut: None, action: MenuAction::FormatBar, accel: Some('b') },
+        MenuEntry::Item { label: "Show Toolbar", shortcut: None, action: MenuAction::FormatBar, accel: Some('b') },
         MenuEntry::Item { label: "Minimap", shortcut: None, action: MenuAction::Minimap, accel: Some('m') },
         MenuEntry::Separator,
         MenuEntry::Item { label: "Freeze Top Row", shortcut: None, action: MenuAction::FreezeTopRow, accel: Some('t') },
@@ -103,6 +104,10 @@ pub fn view_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Freeze Panes", shortcut: None, action: MenuAction::FreezePanes, accel: Some('p') },
         MenuEntry::Item { label: "Unfreeze Panes", shortcut: None, action: MenuAction::UnfreezePanes, accel: None },
         MenuEntry::Item { label: "Approve Model", shortcut: None, action: MenuAction::ApproveModel, accel: Some('a') },
+        MenuEntry::Separator,
+        MenuEntry::Item { label: "Toolbar: Compact", shortcut: None, action: MenuAction::UseCompactToolbar, accel: Some('o') },
+        MenuEntry::Item { label: "Toolbar: Ribbon", shortcut: None, action: MenuAction::UseRibbonToolbar, accel: Some('n') },
+        MenuEntry::Item { label: "Collapse/Expand Ribbon", shortcut: None, action: MenuAction::ToggleRibbonCollapsed, accel: Some('e') },
     ]
 }
 
@@ -287,7 +292,10 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::ZoomReset => app.zoom_reset(cx),
         MenuAction::ShowFormulas => app.toggle_show_formulas(cx),
         MenuAction::ShowZeros => app.toggle_show_zeros(cx),
-        MenuAction::FormatBar => app.toggle_format_bar(cx),
+        MenuAction::FormatBar => app.toggle_toolbar_visibility(window, cx),
+        MenuAction::UseCompactToolbar => app.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx),
+        MenuAction::UseRibbonToolbar => app.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx),
+        MenuAction::ToggleRibbonCollapsed => app.toggle_ribbon_collapsed(window, cx),
         MenuAction::AddCondFormat => app.show_add_cond_format(cx),
         MenuAction::ManageCondFormats => app.toggle_cf_panel(cx),
         MenuAction::ClearCondFormats => app.clear_cond_formats_in_selection(cx),
@@ -431,4 +439,3 @@ mod drift_tests {
         }
     }
 }
-

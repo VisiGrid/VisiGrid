@@ -360,6 +360,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
 
     #[cfg(not(target_os = "macos"))]
     {
+        // GPUI emits modifier-only Alt after a clean press/release, not after Alt chords.
+        bindings.push(KeyBinding::new("alt", ShowKeyTips, Some("Spreadsheet")));
+
         // Preferences shortcut
         bindings.push(KeyBinding::new(&kb(m, ","), ShowPreferences, Some("Spreadsheet")));
 

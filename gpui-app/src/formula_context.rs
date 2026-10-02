@@ -131,10 +131,11 @@ pub enum FunctionCategory {
     Array,
     Conditional,
     Trigonometry,
+    Financial,
 }
 
 // ============================================================================
-// Function Database (96 functions)
+// Function Database (every engine function; see the test below)
 // ============================================================================
 
 /// All supported functions with their metadata
@@ -1170,6 +1171,456 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
             ParameterInfo { name: "if_empty", description: "Value if no results.", optional: true, repeatable: false },
         ],
     },
+    // Math — from the engine's list (5)
+    FunctionInfo {
+        name: "ROUNDDOWN",
+        signature: "ROUNDDOWN(number, num_digits)",
+        description: "Round a number down, towards zero, to a given number of digits — whatever the next digit is.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to round.", optional: false, repeatable: false },
+            ParameterInfo { name: "num_digits", description: "Decimal places to keep. 0 rounds to a whole number; negative values round to tens, hundreds and so on.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "ROUNDUP",
+        signature: "ROUNDUP(number, num_digits)",
+        description: "Round a number up, away from zero, to a given number of digits — whatever the next digit is.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to round.", optional: false, repeatable: false },
+            ParameterInfo { name: "num_digits", description: "Decimal places to keep. 0 rounds to a whole number; negative values round to tens, hundreds and so on.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "SUMIFS",
+        signature: "SUMIFS(sum_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)",
+        description: "Add up the numbers in a range that meet one or more conditions.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "sum_range", description: "The cells to add up.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range1", description: "The range tested against the first condition.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria1", description: "The condition to apply, such as \"x\", 100, or \">=100\".", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range2", description: "A further range to test. Ranges and criteria are added in pairs.", optional: true, repeatable: false },
+            ParameterInfo { name: "criteria2", description: "The condition applied to criteria_range2.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "SUMPRODUCT",
+        signature: "SUMPRODUCT(array1, [array2], ...)",
+        description: "Multiply corresponding values in two or more ranges and sum the results — and, with a condition inside, count or total the rows that meet it.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "array1", description: "The first range, or an expression that produces one, such as B2:B6*C2:C6 or --(A2:A6=\"East\").", optional: false, repeatable: false },
+            ParameterInfo { name: "array2", description: "Further ranges or arrays of the same shape. Values are multiplied position by position.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "TRUNC",
+        signature: "TRUNC(number, [num_digits])",
+        description: "Remove the fractional part of a number, or keep a set number of decimals, without rounding.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to truncate.", optional: false, repeatable: false },
+            ParameterInfo { name: "num_digits", description: "Decimal places to keep. Defaults to 0.", optional: true, repeatable: false },
+        ],
+    },
+    // Logical — from the engine's list (1)
+    FunctionInfo {
+        name: "IFNA",
+        signature: "IFNA(value, value_if_na)",
+        description: "Catch #N/A and nothing else, so a genuine problem still surfaces instead of being hidden.",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The formula to evaluate, usually a lookup.", optional: false, repeatable: false },
+            ParameterInfo { name: "value_if_na", description: "What to return if that formula produces #N/A specifically.", optional: false, repeatable: false },
+        ],
+    },
+    // Text — from the engine's list (7)
+    FunctionInfo {
+        name: "EXACT",
+        signature: "EXACT(text1, text2)",
+        description: "Return TRUE only when two pieces of text match exactly, capitalisation and all.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "text2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "PROPER",
+        signature: "PROPER(text)",
+        description: "Convert text to title case.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to convert.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "REPLACE",
+        signature: "REPLACE(old_text, start_num, num_chars, new_text)",
+        description: "Replace a run of characters at a known position with different text.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "old_text", description: "The text to modify.", optional: false, repeatable: false },
+            ParameterInfo { name: "start_num", description: "Where the replacement starts, counting from 1.", optional: false, repeatable: false },
+            ParameterInfo { name: "num_chars", description: "How many characters to remove. Zero inserts without removing.", optional: false, repeatable: false },
+            ParameterInfo { name: "new_text", description: "What to put there.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "SEARCH",
+        signature: "SEARCH(find_text, within_text, [start_num])",
+        description: "Return the position of one piece of text inside another, without caring about capitalisation.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "find_text", description: "What to look for.", optional: false, repeatable: false },
+            ParameterInfo { name: "within_text", description: "The text to look in.", optional: false, repeatable: false },
+            ParameterInfo { name: "start_num", description: "Which character to start from. Defaults to the first.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TEXTAFTER",
+        signature: "TEXTAFTER(text, delimiter, [instance_num])",
+        description: "Split a string and keep the part after a separator.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to split.", optional: false, repeatable: false },
+            ParameterInfo { name: "delimiter", description: "The separator to look for.", optional: false, repeatable: false },
+            ParameterInfo { name: "instance_num", description: "Which occurrence to split at. Defaults to the first; negative counts from the end.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TEXTBEFORE",
+        signature: "TEXTBEFORE(text, delimiter, [instance_num])",
+        description: "Split a string and keep the part before a separator, without counting characters.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to split.", optional: false, repeatable: false },
+            ParameterInfo { name: "delimiter", description: "The separator to look for.", optional: false, repeatable: false },
+            ParameterInfo { name: "instance_num", description: "Which occurrence to split at. Defaults to the first; negative counts from the end.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TEXTJOIN",
+        signature: "TEXTJOIN(delimiter, ignore_empty, text1, [text2], ...)",
+        description: "Combine values with a delimiter between them, optionally skipping empty ones.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "delimiter", description: "What to put between the values. Given once, not repeated.", optional: false, repeatable: false },
+            ParameterInfo { name: "ignore_empty", description: "TRUE to skip empty values, FALSE to keep their separators.", optional: false, repeatable: false },
+            ParameterInfo { name: "text1", description: "The first value to join.", optional: false, repeatable: false },
+            ParameterInfo { name: "text2", description: "Further values.", optional: true, repeatable: true },
+        ],
+    },
+    // Lookup — from the engine's list (2)
+    FunctionInfo {
+        name: "XLOOKUP",
+        signature: "XLOOKUP(lookup_value, lookup_array, return_array)",
+        description: "Look up a value in one range and return the matching value from another.",
+        category: FunctionCategory::Lookup,
+        parameters: &[
+            ParameterInfo { name: "lookup_value", description: "The value to search for.", optional: false, repeatable: false },
+            ParameterInfo { name: "lookup_array", description: "The range to search in.", optional: false, repeatable: false },
+            ParameterInfo { name: "return_array", description: "The range to return a value from, matched by position.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "XMATCH",
+        signature: "XMATCH(lookup_value, lookup_array, [match_mode], [search_mode])",
+        description: "Return where a value sits in a range, with exact matching by default and the option to search backwards.",
+        category: FunctionCategory::Lookup,
+        parameters: &[
+            ParameterInfo { name: "lookup_value", description: "The value to find.", optional: false, repeatable: false },
+            ParameterInfo { name: "lookup_array", description: "The range to search.", optional: false, repeatable: false },
+            ParameterInfo { name: "match_mode", description: "0 exact (default), -1 exact or next smaller, 1 exact or next larger, 2 wildcard.", optional: true, repeatable: false },
+            ParameterInfo { name: "search_mode", description: "1 first to last (default), -1 last to first.", optional: true, repeatable: false },
+        ],
+    },
+    // DateTime — from the engine's list (4)
+    FunctionInfo {
+        name: "DAYS",
+        signature: "DAYS(end_date, start_date)",
+        description: "Count the calendar days from one date to another.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "end_date", description: "The later date. Comes first.", optional: false, repeatable: false },
+            ParameterInfo { name: "start_date", description: "The earlier date.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "NETWORKDAYS",
+        signature: "NETWORKDAYS(start_date, end_date, [holidays])",
+        description: "Count the days between two dates, skipping weekends.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "start_date", description: "The first day, counted.", optional: false, repeatable: false },
+            ParameterInfo { name: "end_date", description: "The last day, also counted.", optional: false, repeatable: false },
+            ParameterInfo { name: "holidays", description: "A range of dates to exclude as well.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TIME",
+        signature: "TIME(hour, minute, second)",
+        description: "Turn three numbers into a time value you can compare and do arithmetic on.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "hour", description: "The hour, 0 to 23. Larger values wrap.", optional: false, repeatable: false },
+            ParameterInfo { name: "minute", description: "The minute, 0 to 59. Larger values roll into hours.", optional: false, repeatable: false },
+            ParameterInfo { name: "second", description: "The second, 0 to 59. Larger values roll into minutes.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "WORKDAY",
+        signature: "WORKDAY(start_date, days, [holidays])",
+        description: "Add or subtract working days from a date, skipping weekends.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "start_date", description: "The date to count from. Not itself counted.", optional: false, repeatable: false },
+            ParameterInfo { name: "days", description: "How many working days to move. Negative counts backwards.", optional: false, repeatable: false },
+            ParameterInfo { name: "holidays", description: "A range of dates to skip as well.", optional: true, repeatable: false },
+        ],
+    },
+    // Statistical — from the engine's list (6)
+    FunctionInfo {
+        name: "AVERAGEIF",
+        signature: "AVERAGEIF(range, criteria, [average_range])",
+        description: "Average only the values whose row meets a condition.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "range", description: "The cells tested against the condition.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria", description: "The condition, such as \"East\" or \">15\".", optional: false, repeatable: false },
+            ParameterInfo { name: "average_range", description: "The cells to average. Omit it to average the tested cells.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "AVERAGEIFS",
+        signature: "AVERAGEIFS(average_range, range1, criteria1, [range2, criteria2], ...)",
+        description: "Average the values whose row satisfies every one of a set of criteria.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "average_range", description: "The cells to average. First, unlike AVERAGEIF.", optional: false, repeatable: false },
+            ParameterInfo { name: "range1", description: "The first range to test.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria1", description: "The condition applied to it.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "AVG",
+        signature: "AVG(number1, [number2], ...)",
+        description: "Return the mean of a range. A VisiGrid alias, not an Excel function.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "number1", description: "A range or value to average.", optional: false, repeatable: false },
+            ParameterInfo { name: "number2", description: "Further ranges or values.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "COUNTIFS",
+        signature: "COUNTIFS(range1, criteria1, [range2, criteria2], ...)",
+        description: "Count rows that satisfy every one of a set of criteria.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "range1", description: "The first range to test.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria1", description: "The condition applied to it.", optional: false, repeatable: false },
+            ParameterInfo { name: "range2", description: "Further range/criteria pairs. All must hold for a row to count.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "NORM.S.DIST",
+        signature: "NORM.S.DIST(z, cumulative)",
+        description: "Return the probability that a standard normal value falls at or below z, or the height of the bell curve at z.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "z", description: "The value, in standard deviations from the mean.", optional: false, repeatable: false },
+            ParameterInfo { name: "cumulative", description: "TRUE for the probability of a value at or below z; FALSE for the density at z.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "NORMSDIST",
+        signature: "NORMSDIST(z)",
+        description: "The pre-2010 name for the cumulative form of NORM.S.DIST — the probability that a standard normal value falls at or below z.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "z", description: "The value, in standard deviations from the mean.", optional: false, repeatable: false },
+        ],
+    },
+    // Financial — from the engine's list (13)
+    FunctionInfo {
+        name: "CUMIPMT",
+        signature: "CUMIPMT(rate, nper, pv, start_period, end_period, type)",
+        description: "Add up the interest portion of a loan's payments between two periods, such as one year of mortgage interest.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The total number of payments.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The amount borrowed, as a positive number.", optional: false, repeatable: false },
+            ParameterInfo { name: "start_period", description: "The first payment to include, counting from 1.", optional: false, repeatable: false },
+            ParameterInfo { name: "end_period", description: "The last payment to include.", optional: false, repeatable: false },
+            ParameterInfo { name: "type", description: "0 for payments at the end of each period, 1 for the start. Required.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "CUMPRINC",
+        signature: "CUMPRINC(rate, nper, pv, start_period, end_period, type)",
+        description: "Add up the principal portion of a loan's payments between two periods — how much the balance fell.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The total number of payments.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The amount borrowed, as a positive number.", optional: false, repeatable: false },
+            ParameterInfo { name: "start_period", description: "The first payment to include, counting from 1.", optional: false, repeatable: false },
+            ParameterInfo { name: "end_period", description: "The last payment to include.", optional: false, repeatable: false },
+            ParameterInfo { name: "type", description: "0 for payments at the end of each period, 1 for the start. Required.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "FV",
+        signature: "FV(rate, nper, pmt, [pv], [type])",
+        description: "Calculate what regular payments and a starting balance grow to at a fixed interest rate.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The number of periods.", optional: false, repeatable: false },
+            ParameterInfo { name: "pmt", description: "The amount added each period. Money paid in is negative.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The starting balance. Money put in is negative. Defaults to 0.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) for payments at the end of each period, 1 for the start.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "IPMT",
+        signature: "IPMT(rate, per, nper, pv, [fv], [type])",
+        description: "Calculate how much of a given loan payment is interest, for any period of the loan.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "per", description: "Which payment, from 1 to nper.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The total number of payments.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The amount borrowed.", optional: false, repeatable: false },
+            ParameterInfo { name: "fv", description: "The balance to leave at the end. Defaults to 0.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) for payments at the end of each period, 1 for the start.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "IRR",
+        signature: "IRR(values, [guess])",
+        description: "Find the discount rate at which a series of cash flows has a net present value of zero — the return an investment earns.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "values", description: "The cash flows, in order, starting with the initial investment as a negative number.", optional: false, repeatable: false },
+            ParameterInfo { name: "guess", description: "A starting estimate for the rate. Rarely needed.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "NPER",
+        signature: "NPER(rate, pmt, pv, [fv], [type])",
+        description: "Work out the number of periods needed to pay off a loan, or to reach a savings target, at a fixed rate and payment.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "pmt", description: "The payment each period, negative for money paid out.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The amount now.", optional: false, repeatable: false },
+            ParameterInfo { name: "fv", description: "The balance to reach. Defaults to 0.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) for payments at the end of each period, 1 for the start.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "NPV",
+        signature: "NPV(rate, value1, [value2], ...)",
+        description: "Discount a series of future cash flows to today's value at a given rate. The initial investment belongs outside the function.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The discount rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "value1", description: "Cash flows, one per period, in order. Values or a range.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "Further cash flows.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "PMT",
+        signature: "PMT(rate, nper, pv, [fv], [type])",
+        description: "Calculate the fixed periodic payment for a loan or annuity from the rate, the number of periods and the amount borrowed.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period. For monthly payments on an annual rate, divide by 12.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The total number of payments. A 30-year monthly mortgage is 360.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The present value — the amount borrowed.", optional: false, repeatable: false },
+            ParameterInfo { name: "fv", description: "The balance to leave at the end. Defaults to 0, a loan paid off in full.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) if payments fall at the end of each period, 1 if at the start.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "PPMT",
+        signature: "PPMT(rate, per, nper, pv, [fv], [type])",
+        description: "Calculate how much of a given loan payment reduces the balance, for any period of the loan.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "per", description: "Which payment, from 1 to nper.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The total number of payments.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The amount borrowed.", optional: false, repeatable: false },
+            ParameterInfo { name: "fv", description: "The balance to leave at the end. Defaults to 0.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) for payments at the end of each period, 1 for the start.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "PV",
+        signature: "PV(rate, nper, pmt, [fv], [type])",
+        description: "Calculate what a series of equal future payments is worth today — how much you can borrow for a given payment, or what an annuity costs.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The interest rate per period.", optional: false, repeatable: false },
+            ParameterInfo { name: "nper", description: "The number of payments.", optional: false, repeatable: false },
+            ParameterInfo { name: "pmt", description: "The payment each period. Money paid out is negative.", optional: false, repeatable: false },
+            ParameterInfo { name: "fv", description: "A lump sum at the end, in addition to the payments. Defaults to 0.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) for payments at the end of each period, 1 for the start.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "RATE",
+        signature: "RATE(nper, pmt, pv, [fv], [type], [guess])",
+        description: "Work out the interest rate per period from the number of payments, the payment and the amount — the rate a loan is really charging.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "nper", description: "The number of payments.", optional: false, repeatable: false },
+            ParameterInfo { name: "pmt", description: "The payment each period, negative for money paid out.", optional: false, repeatable: false },
+            ParameterInfo { name: "pv", description: "The amount borrowed or invested now.", optional: false, repeatable: false },
+            ParameterInfo { name: "fv", description: "The balance to leave at the end. Defaults to 0.", optional: true, repeatable: false },
+            ParameterInfo { name: "type", description: "0 (the default) for payments at the end of each period, 1 for the start.", optional: true, repeatable: false },
+            ParameterInfo { name: "guess", description: "A starting estimate. Defaults to 10%.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "XIRR",
+        signature: "XIRR(values, dates, [guess])",
+        description: "Find the annual return of cash flows that arrive on irregular dates — the rate at which their XNPV is zero.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "values", description: "The cash flows, with at least one negative and one positive.", optional: false, repeatable: false },
+            ParameterInfo { name: "dates", description: "The date of each cash flow, one per value.", optional: false, repeatable: false },
+            ParameterInfo { name: "guess", description: "A starting estimate. Defaults to 10%; rarely needed.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "XNPV",
+        signature: "XNPV(rate, values, dates)",
+        description: "Discount cash flows that arrive on irregular dates to today's value, each by its own number of days — NPV for real-world timing.",
+        category: FunctionCategory::Financial,
+        parameters: &[
+            ParameterInfo { name: "rate", description: "The annual discount rate.", optional: false, repeatable: false },
+            ParameterInfo { name: "values", description: "The cash flows. The first is usually the investment, as a negative number.", optional: false, repeatable: false },
+            ParameterInfo { name: "dates", description: "The date of each cash flow, one per value. None may be earlier than the first.", optional: false, repeatable: false },
+        ],
+    },
+    // Array — from the engine's list (1)
+    FunctionInfo {
+        name: "SPARKLINE",
+        signature: "SPARKLINE(data, [type])",
+        description: "Draw a range of numbers as a row of block characters in a single cell — a trend you can read at a glance beside the data.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "data", description: "The numbers to draw, in order.", optional: false, repeatable: false },
+            ParameterInfo { name: "type", description: "\"bar\" (the default) or \"winloss\". \"line\" is accepted and currently draws the same as \"bar\".", optional: true, repeatable: false },
+        ],
+    },
 ];
 
 // ============================================================================
@@ -2188,5 +2639,26 @@ mod tests {
             assert!(!d.message.contains("Invalid character"),
                 "Should not have invalid character error, got: {}", d.message);
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_parity_tests {
+    use super::FUNCTIONS;
+    use visigrid_engine::formula::functions::list_functions;
+
+    /// Autocomplete, signature help and the palette's `=` search all read
+    /// FUNCTIONS, which is written by hand. It fell 39 functions behind the
+    /// engine (XLOOKUP, XIRR, SUMIFS…) before anyone noticed; this keeps the
+    /// two lists equal.
+    #[test]
+    fn every_engine_function_is_listed_and_nothing_else() {
+        let listed: std::collections::BTreeSet<&str> = FUNCTIONS.iter().map(|f| f.name).collect();
+        let engine: std::collections::BTreeSet<&str> = list_functions().iter().copied().collect();
+        let missing: Vec<_> = engine.difference(&listed).collect();
+        let extra: Vec<_> = listed.difference(&engine).collect();
+        assert!(missing.is_empty(), "engine functions missing from FUNCTIONS: {missing:?}");
+        assert!(extra.is_empty(), "FUNCTIONS lists functions the engine lacks: {extra:?}");
+        assert_eq!(listed.len(), FUNCTIONS.len(), "a function is listed twice");
     }
 }

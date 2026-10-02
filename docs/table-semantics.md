@@ -165,7 +165,7 @@ Direct entry, F2, formula-bar/IME edits, Delete, and Paste (contents, all, value
 
 The batch is preflighted and recalculated on a candidate workbook. It is published only when every saved Table view still passes layout validation, including any spills produced by recalculation. An edited sort key follows its record to the new position; a record that no longer matches the filter moves focus to the nearest remaining record at the old display position without a second Enter/Tab movement (or to the header if no records remain). Edit sessions retain the original record and revision; a stale edit is refused. Changes to calculated columns are individual overrides, never automatic fills into hidden records.
 
-The name box, Go To and formula point-picking use canonical cell addresses. A1 ranges still span their canonical endpoints, including hidden records. Copy captures each canonical source row. Relative A1 formula references use each source/destination record pair, even if criteria change between copying and pasting. Paste Values preserves literal text such as leading-zero IDs and formula-looking strings. Contents preserves destination formatting; All includes copied formatting and comments. Each operation has one atomic undo/redo step, including dependent values and filter membership. History retains only before/after images of changed cells and the target sheet's Table schemas/optional view definition. It preserves cell presence, typed values, formulas, formats, comments, style IDs and frozen formulas without retaining whole workbooks or row projections. Undo/redo preflights every expected cell image and the target sheet’s Table schemas/optional view definition, recalculates a temporary candidate, then publishes atomically; unrelated current cells remain intact. A stale target or unsafe recalculation leaves both the workbook and history position unchanged. Hidden records remain replayable because the original edit may have filtered them out. Rewind supports these actions and rebuilds visibility from the reconstructed records.
+The name box, Go To and formula point-picking use canonical cell addresses. A1 ranges still span their canonical endpoints, including hidden records. Copy captures each canonical source row. Relative A1 formula references use each source/destination record pair, even if criteria change between copying and pasting. Paste Values preserves literal text such as leading-zero IDs and formula-looking strings. Contents preserves existing destination formatting and brings internal source formatting into otherwise unformatted cells, matching ordinary Ctrl+V. All replaces destination formatting with copied formatting; both carry comments. Each operation has one atomic undo/redo step, including dependent values and filter membership. History retains only before/after images of changed cells and the target sheet's Table schemas/optional view definition. It preserves cell presence, typed values, formulas, formats, comments, style IDs and frozen formulas without retaining whole workbooks or row projections. Undo/redo preflights every expected cell image and the target sheet’s Table schemas/optional view definition, recalculates a temporary candidate, then publishes atomically; unrelated current cells remain intact. A stale target or unsafe recalculation leaves both the workbook and history position unchanged. Hidden records remain replayable because the original edit may have filtered them out. Rewind supports these actions and rebuilds visibility from the reconstructed records.
 
 ### Editing outside filtered Tables
 
@@ -274,14 +274,22 @@ This is an interoperability subset:
 
 The import/export reports count Table definitions and include compatibility warnings in copied details. XLSX interchange tests inspect the actual ZIP/XML parts, use independently constructed writer fixtures and exercise repeated XLSX/native round trips. These checks do not substitute for opening the output in Microsoft Excel.
 
-## Next Phase 2 slices
+## Phase 2 release boundary — 2026-10-02
 
-1. Table creation/resizing/appending while criteria are active.
+Phase 2 feature scope is frozen. It includes saved Table criteria and header controls; guarded editing, paste, cut/fill, row/column operations, sparse undo/redo and rewind through views; Table-backed pivots; initial Excel Table interchange; structured-reference editing and multi-header paste; canonical automation batches and reviewed Lua plans. The Review card and header controls include the completed design passes.
+
+Feature-complete does not mean released. Merge review/CI, release builds, platform smoke tests and fixes for confirmed safety or correctness defects remain Phase 2 release work. Linux live coverage and dated test results are recorded below; macOS/Windows live UI verification is outstanding. Advertise XLSX as the documented interoperability subset. Do not claim lossless Excel parity or unmeasured large-data performance.
+
+## Phase 3 backlog
+
+1. Create, resize and append Tables while criteria are active; start with appending records and filling calculated columns without clearing filters.
 2. Copy reviewed results to another sheet while criteria are active.
 3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
-4. Remaining structural edge cases and cross-platform QA.
+4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
+5. Named saved views and richer mixed-layout support beyond the current saved criteria.
+6. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
 
-Totals rows and saved views come later. Web/cloud preservation is deferred.
+Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.
 
 Existing PivotTables remain a separate feature.
 

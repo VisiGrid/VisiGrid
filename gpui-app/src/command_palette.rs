@@ -17,7 +17,7 @@ use crate::search::{
     MenuCategory, ReferenceEntry, ReferencesProvider, SearchProvider, SearchQuery,
     SearchAction, SearchItem, SearchKind, CommandId, PrecedentEntry, PrecedentsProvider,
     CellSearchProvider, RecentFilesProvider, NamedRangeSearchProvider, NamedRangeEntry,
-    CommandSearchProvider,
+    CommandSearchProvider, RecentFile,
 };
 use crate::user_keybindings;
 use visigrid_engine::named_range::NamedRangeTarget;
@@ -30,6 +30,18 @@ pub struct PaletteSection {
     pub len: usize,
     /// Empty = a divider with no heading (the "Open from disk" row).
     pub title: String,
+}
+
+/// Wheel pixels → whole rows, carrying the remainder in `acc`.
+///
+/// Rounding each event on its own dropped trackpad scrolling entirely: a
+/// trackpad sends many events of a few pixels, and each rounded to zero rows.
+/// Positive `dy` scrolls up, so it moves the list toward its start.
+pub(crate) fn wheel_rows(acc: &mut f32, dy: f32, row_h: f32) -> isize {
+    *acc -= dy;
+    let rows = (*acc / row_h).trunc();
+    *acc -= rows * row_h;
+    rows as isize
 }
 
 /// A command as a palette row.
@@ -85,6 +97,7 @@ impl Spreadsheet {
 
         // Save pre-palette state for restore on Esc (only if not already in palette)
         if self.mode != Mode::Command {
+            self.ui.palette_edit_mode = self.mode.is_editing().then_some(self.mode);
             self.palette_pre_selection = self.view_state.selected;
             self.palette_pre_selection_end = self.view_state.selection_end;
             self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
@@ -95,7 +108,10 @@ impl Spreadsheet {
         self.palette_query.clear();
         self.palette_selected = 0;
         self.palette_scroll_offset = 0;
+        self.palette_wheel_px = 0.0;
         self.palette_scope = scope;
+        // Folder and age of each recent file: read now, not per keystroke
+        self.palette_recent_files = self.recent_files.iter().map(|p| RecentFile::read(p)).collect();
         self.update_palette_results(cx);
         cx.notify();
     }
@@ -391,7 +407,7 @@ impl Spreadsheet {
             self.view_state.scroll_col = self.palette_pre_scroll.1;
         }
 
-        self.mode = Mode::Navigation;
+        self.mode = self.ui.palette_edit_mode.take().unwrap_or(Mode::Navigation);
         self.palette_query.clear();
         self.palette_selected = 0;
         self.palette_scroll_offset = 0;
@@ -467,7 +483,7 @@ impl Spreadsheet {
 
     /// Ctrl+K: recent files, then a way out to the file dialog.
     fn quick_open_sections(&self, query: &SearchQuery) -> Vec<(String, Vec<SearchItem>)> {
-        let files = RecentFilesProvider::new(self.recent_files.clone()).search(query, 50);
+        let files = RecentFilesProvider::from_entries(self.palette_recent_files.clone()).search(query, 50);
         let title = if query.needle.is_empty() { "Recent files" } else { "Files" };
         vec![
             (title.to_string(), files),
@@ -492,7 +508,7 @@ impl Spreadsheet {
             items
         };
 
-        let files = RecentFilesProvider::new(self.recent_files.iter().take(3).cloned().collect())
+        let files = RecentFilesProvider::from_entries(self.palette_recent_files.iter().take(3).cloned().collect())
             .search(&SearchQuery::parse(""), 3);
 
         vec![
@@ -509,8 +525,8 @@ impl Spreadsheet {
         let mut results = self.search_engine.search(query.raw, LIMIT);
 
         // Recent files join unprefixed search
-        if query.prefix.is_none() && !self.recent_files.is_empty() {
-            let provider = RecentFilesProvider::new(self.recent_files.clone());
+        if query.prefix.is_none() && !self.palette_recent_files.is_empty() {
+            let provider = RecentFilesProvider::from_entries(self.palette_recent_files.clone());
             results.extend(provider.search(query, 10));
         }
 
@@ -620,15 +636,34 @@ impl Spreadsheet {
             return (label, suggested);
         }
 
+        // A sample is enough to tell numbers from text. Small selections are
+        // walked cell by cell; a large one (a whole column) is matched against
+        // the sheet's stored cells instead, so empty space costs nothing.
+        const SAMPLE: usize = 200;
         let (mut numbers, mut texts) = (0usize, 0usize);
-        for ((row, col), _) in sheet.cells_iter() {
-            if row < r0 || row > r1 || col < c0 || col > c1 {
-                continue;
+        let count = |v: Value, numbers: &mut usize, texts: &mut usize| match v {
+            Value::Number(_) => *numbers += 1,
+            Value::Text(_) | Value::Boolean(_) => *texts += 1,
+            _ => {}
+        };
+        let area = (r1 - r0 + 1).saturating_mul(c1 - c0 + 1);
+        if area <= 4 * SAMPLE {
+            'cells: for row in r0..=r1 {
+                for col in c0..=c1 {
+                    count(sheet.get_computed_value(row, col), &mut numbers, &mut texts);
+                    if numbers + texts >= SAMPLE {
+                        break 'cells;
+                    }
+                }
             }
-            match sheet.get_computed_value(row, col) {
-                Value::Number(_) => numbers += 1,
-                Value::Text(_) | Value::Boolean(_) => texts += 1,
-                _ => {}
+        } else {
+            for ((row, col), _) in sheet.cells_iter() {
+                if (r0..=r1).contains(&row) && (c0..=c1).contains(&col) {
+                    count(sheet.get_computed_value(row, col), &mut numbers, &mut texts);
+                    if numbers + texts >= SAMPLE {
+                        break;
+                    }
+                }
             }
         }
 
@@ -822,6 +857,17 @@ impl Spreadsheet {
 
     pub fn palette_execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
+            // Layout actions change personal chrome, not the suspended editor.
+            if matches!(item.action, SearchAction::RunCommand(CommandId::UseCompactToolbar
+                | CommandId::UseRibbonToolbar | CommandId::ToggleRibbonCollapsed | CommandId::ToggleToolbar)) {
+                self.view_state.selected = self.palette_pre_selection;
+                self.view_state.selection_end = self.palette_pre_selection_end;
+                self.view_state.scroll_row = self.palette_pre_scroll.0;
+                self.view_state.scroll_col = self.palette_pre_scroll.1;
+                self.mode = self.ui.palette_edit_mode.take().unwrap_or(Mode::Navigation);
+            } else {
+                self.ui.palette_edit_mode = None;
+            }
             // Clear palette state - don't restore since we're executing
             self.palette_query.clear();
             self.palette_selected = 0;
@@ -844,6 +890,7 @@ impl Spreadsheet {
     pub fn palette_execute_secondary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.palette_results.get(self.palette_selected).cloned() {
             if let Some(secondary) = item.secondary_action {
+                self.ui.palette_edit_mode = None;
                 // Clear palette state
                 self.palette_query.clear();
                 self.palette_selected = 0;
@@ -872,6 +919,7 @@ impl Spreadsheet {
         self.font_picker_query.clear();
         self.font_picker_selected = 0;
         self.font_picker_scroll_offset = 0;
+        self.font_picker_wheel_px = 0.0;
         // Focus the picker so first click is an activation click, not a focus click
         window.focus(&self.font_picker_focus, cx);
         cx.notify();
@@ -1111,5 +1159,22 @@ impl Spreadsheet {
             }
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::wheel_rows;
+
+    #[test]
+    fn small_trackpad_deltas_add_up_to_rows() {
+        let mut acc = 0.0;
+        // Ten 4px swipes downward (negative dy) = 40px = one 30px row, 10px left over
+        let moved: isize = (0..10).map(|_| wheel_rows(&mut acc, -4.0, 30.0)).sum();
+        assert_eq!(moved, 1);
+        assert!((acc - 10.0).abs() < 1e-4);
+        // A mouse notch is a whole row each time
+        assert_eq!(wheel_rows(&mut 0.0, 30.0, 30.0), -1);
+        assert_eq!(wheel_rows(&mut 0.0, -90.0, 30.0), 3);
     }
 }

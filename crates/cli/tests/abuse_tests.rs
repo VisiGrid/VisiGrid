@@ -369,8 +369,26 @@ fn test_balanced_fill_variance_zero() {
 // The stripe-qbo-recon template has XLOOKUP/IF formulas in columns J-L
 // on the stripe sheet. --clear must preserve them.
 
+/// A private copy of a committed `.sheet` fixture, made once per test binary.
+///
+/// Loading a `.sheet` migrates an older schema in place, so pointing `vgrid`
+/// at the tracked file rewrote it on every `cargo test` and left two binary
+/// fixtures dirty in `git status` (they kept getting committed by accident).
+/// Each test binary copies the fixture into cargo's scratch directory once,
+/// under its own name, so parallel binaries never race on the same file.
+fn fixture_copy(rel: &str, copy_name: &str, cell: &'static std::sync::OnceLock<std::path::PathBuf>) -> std::path::PathBuf {
+    cell.get_or_init(|| {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let dst = Path::new(env!("CARGO_TARGET_TMPDIR")).join(copy_name);
+        std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("copy {} -> {}: {e}", src.display(), dst.display()));
+        dst
+    })
+    .clone()
+}
+
 fn recon_template_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recon/templates/stripe-qbo-recon.sheet")
+    static COPY: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    fixture_copy("tests/recon/templates/stripe-qbo-recon.sheet", "abuse-stripe-qbo-recon.sheet", &COPY)
 }
 
 fn recon_csv_path(name: &str) -> std::path::PathBuf {
