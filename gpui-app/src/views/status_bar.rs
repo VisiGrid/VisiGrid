@@ -647,6 +647,24 @@ fn render_status_message(
 const MAX_STATS_CELLS: usize = 10_000;
 
 /// Calculate statistics for the current selection
+fn visible_selection_rows(rows: &visigrid_engine::filter::RowView, first: usize, last: usize) -> &[usize] {
+    let visible = rows.visible_rows();
+    &visible[visible.partition_point(|r| *r < first)..visible.partition_point(|r| *r <= last)]
+}
+
+fn selection_numbers(sheet: &visigrid_engine::sheet::Sheet, rows: &visigrid_engine::filter::RowView, selected: &[usize], first_col: usize, last_col: usize) -> Vec<f64> {
+    let mut values = Vec::new();
+    for &view_row in selected {
+        let row = rows.view_to_data(view_row);
+        for col in first_col..=last_col {
+            if let visigrid_engine::formula::eval::Value::Number(n) = sheet.get_computed_value(row,col) {
+                values.push(n);
+            }
+        }
+    }
+    values
+}
+
 fn calculate_selection_stats(app: &Spreadsheet, cx: &App) -> Vec<Div> {
     let ((min_row, min_col), (max_row, max_col)) = app.selection_range();
     let text_muted = app.token(TokenKey::TextMuted);
@@ -659,7 +677,8 @@ fn calculate_selection_stats(app: &Spreadsheet, cx: &App) -> Vec<Div> {
     }
 
     // Calculate total cell count without iterating
-    let row_count = max_row - min_row + 1;
+    let selected_rows = visible_selection_rows(&app.row_view, min_row, max_row);
+    let row_count = selected_rows.len();
     let col_count = max_col - min_col + 1;
     let total_cells = row_count * col_count;
 
@@ -672,19 +691,9 @@ fn calculate_selection_stats(app: &Spreadsheet, cx: &App) -> Vec<Div> {
         ];
     }
 
-    // Collect numeric values from selection
-    let mut values: Vec<f64> = Vec::new();
-    let mut count = 0usize;
-
-    for row in min_row..=max_row {
-        for col in min_col..=max_col {
-            count += 1;
-            let display = app.sheet(cx).get_display(row, col);
-            if let Ok(num) = display.parse::<f64>() {
-                values.push(num);
-            }
-        }
-    }
+    // Read actual visible records, using numeric values independently of formatting.
+    let values = selection_numbers(app.sheet(cx), &app.row_view, selected_rows, min_col, max_col);
+    let count = total_cells;
 
     if values.is_empty() {
         // No numeric values, just show count
@@ -1165,4 +1174,17 @@ fn panel_toggle_btn(
             on_click(this, window, cx);
         }))
         .child(icon)
+}
+
+#[cfg(test)]
+mod selection_stats_tests {
+    #[test]
+    fn sorted_filtered_selection_stats_read_visible_records() {
+        let wb = crate::table_edit::tests::fixture(true);
+        let sheet = wb.active_sheet();
+        let view = sheet.build_saved_table_view(30).unwrap().unwrap();
+        let rows = super::visible_selection_rows(view.rows(),3,6);
+        assert_eq!(rows.len(),3);
+        assert_eq!(super::selection_numbers(sheet,view.rows(),rows,2,2),vec![20.0,30.0,40.0]);
+    }
 }

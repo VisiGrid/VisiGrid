@@ -81,6 +81,8 @@ mod sheet_ops;
 mod sort_filter;
 mod table_filter_ui;
 mod table_edit;
+mod table_cell_history;
+mod table_fill;
 mod split_view;
 mod theme;
 mod trace;

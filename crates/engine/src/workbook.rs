@@ -2130,6 +2130,23 @@ impl Workbook {
         self.note_cell_changed(CellId::new(sheet_id, row, col))
     }
 
+    /// Restore a sparse history image with dependency tracking. Callers must
+    /// validate the whole batch on a candidate before publishing it.
+    pub fn restore_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize, image: Option<crate::cell::Cell>) -> Result<(), String> {
+        self.ensure_writable()?;
+        let sheet = self.sheets.get_mut(sheet_index).ok_or("Sheet no longer exists.")?;
+        if row >= sheet.rows || col >= sheet.cols { return Err("Cell is outside the sheet.".into()); }
+        if let Some(error) = sheet.table_value_write_error(row, col) { return Err(error); }
+        if sheet.is_pivot_owned(row,col) || sheet.get_merge(row,col).is_some() || sheet.is_spill_receiver(row,col) {
+            return Err("Cannot restore a protected, merged or spilled cell.".into());
+        }
+        let id = sheet.id;
+        sheet.restore_history_cell(row,col,image);
+        self.update_cell_deps(id,row,col);
+        self.note_cell_changed(CellId::new(id,row,col));
+        Ok(())
+    }
+
     /// Clear a cell on a specific sheet with dep tracking + recalc notification.
     /// Removes the value and spill state, unlike `set_value("")`, but keeps a comment.
     pub fn clear_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize) -> Recalculated {

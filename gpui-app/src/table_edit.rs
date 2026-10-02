@@ -2,7 +2,8 @@
 //! recalculate a candidate, and publish only if every saved view is still safe.
 use crate::{
     app::{Spreadsheet, NUM_ROWS},
-    history::{UndoAction, WorkbookSnapshotCommit},
+    history::UndoAction,
+    table_cell_history::TableCellsCommit,
 };
 use gpui::*;
 use visigrid_engine::{
@@ -201,8 +202,7 @@ impl Spreadsheet {
                 return false;
             }
         }
-        let before = self.wb(cx).clone();
-        let candidate = match prepare_table_writes(&before, self.sheet_index(cx), &writes) {
+        let candidate = match prepare_table_writes(self.wb(cx), self.sheet_index(cx), &writes) {
             Ok(candidate) => candidate,
             Err(error) => {
                 self.status_message = Some(error);
@@ -210,14 +210,21 @@ impl Spreadsheet {
                 return false;
             }
         };
-        let before_row_view = self.row_view.clone();
+        let commit = TableCellsCommit::capture(
+            self.sheet(cx),
+            candidate.active_sheet(),
+            writes.iter().map(|w| (w.row, w.col)),
+        );
+        if commit.patches.is_empty() {
+            return true;
+        }
         let old_focus = self.view_state.selected;
-        let record = before_row_view.view_to_data(old_focus.0);
-        let range = before
-            .active_sheet()
+        let record = self.row_view.view_to_data(old_focus.0);
+        let range = self
+            .sheet(cx)
             .tables()
             .iter()
-            .find(|t| Some(t.id) == before.active_sheet().table_view_spec().map(|s| s.table))
+            .find(|t| Some(t.id) == self.sheet(cx).table_view_spec().map(|s| s.table))
             .unwrap()
             .range;
         self.workbook
@@ -227,20 +234,57 @@ impl Spreadsheet {
         self.view_state.select_cell(focus, old_focus.1);
         self.ensure_visible(cx);
         self.history.record_action_with_provenance(
-            UndoAction::WorkbookSnapshot {
-                commit: Box::new(WorkbookSnapshotCommit::table_cells(
-                    description,
-                    before,
-                    self.wb(cx).clone(),
-                )),
-                before_row_view,
-                after_row_view: self.row_view.clone(),
+            UndoAction::TableCellsChanged {
+                sheet_index: self.sheet_index(cx),
+                commit: Box::new(commit),
+                description: description.into(),
             },
             None,
         );
         self.bump_cells_rev();
         self.is_modified = true;
         self.clipboard_visual_range = None;
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn replay_table_cells(
+        &mut self,
+        commit: &TableCellsCommit,
+        undo: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.wb(cx).sheet_index_by_id(commit.sheet) else {
+            self.status_message = Some("The history sheet no longer exists.".into());
+            cx.notify();
+            return false;
+        };
+        let sheet = self.wb(cx).sheet(index).unwrap();
+        if let Some(spec) = sheet.table_view_spec() {
+            if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table) {
+                if let Some(error) = crate::table_filter_ui::desktop_layout_error(
+                    table,
+                    self.row_heights.get(&sheet.id),
+                    self.hidden_rows.get(&sheet.id),
+                    sheet.frozen_panes.0,
+                ) {
+                    self.status_message = Some(error);
+                    cx.notify();
+                    return false;
+                }
+            }
+        }
+        let result = self.workbook.update(cx, |wb, _| commit.replay(wb, undo));
+        if let Err(error) = result {
+            self.status_message = Some(error);
+            cx.notify();
+            return false;
+        }
+        if self.sheet_index(cx) != index {
+            self.activate_sheet(index, cx);
+        }
+        self.sync_table_view(cx);
+        self.bump_cells_rev();
         cx.notify();
         true
     }
@@ -287,9 +331,9 @@ impl Spreadsheet {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{prepare_table_writes, TableCellWrite};
-    use crate::history::WorkbookSnapshotCommit;
+    use crate::table_cell_history::TableCellsCommit;
     use visigrid_engine::{
         filter::{ColumnFilter, FilterKey, SortDirection},
         formula::eval::Value,
@@ -299,7 +343,7 @@ mod tests {
         workbook::Workbook,
     };
 
-    fn fixture(filtered: bool) -> Workbook {
+    pub(crate) fn fixture(filtered: bool) -> Workbook {
         let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(7), 30, 8)], 0);
         for (r, values) in [
             ["Group", "Amount", "Result"],
@@ -391,15 +435,20 @@ mod tests {
             after.active_sheet().get_computed_value(5, 3),
             Value::Number(120.0)
         );
-        let commit = WorkbookSnapshotCommit::table_cells("Paste", before.clone(), after.clone());
+        let commit = TableCellsCommit::capture(
+            before.active_sheet(),
+            after.active_sheet(),
+            writes.iter().map(|w| (w.row, w.col)),
+        );
+        assert_eq!(commit.patches.len(), 3);
         let mut wb = after;
-        commit.undo_into(&mut wb);
+        commit.replay(&mut wb, true).unwrap();
         assert_eq!(wb.active_sheet().get_raw(5, 2), "20");
         assert_eq!(
             wb.active_sheet().table_view_spec(),
             before.active_sheet().table_view_spec()
         );
-        commit.redo_into(&mut wb);
+        commit.replay(&mut wb, false).unwrap();
         assert_eq!(wb.active_sheet().get_raw(5, 2), "60");
     }
 
@@ -492,5 +541,104 @@ mod tests {
         assert_eq!(after.active_sheet().get_raw(4, 3), "=C5*2");
         assert!(after.active_sheet().is_calculated_exception(5, 3));
         assert!(!after.active_sheet().is_calculated_exception(4, 3));
+    }
+    #[test]
+    fn sparse_history_guards_whole_batch_and_preserves_unrelated_cells() {
+        let before = fixture(true);
+        let writes = vec![
+            TableCellWrite::value(3, 2, "70".into()),
+            TableCellWrite::value(6, 2, "80".into()),
+        ];
+        let after = prepare_table_writes(&before, 0, &writes).unwrap();
+        let commit = TableCellsCommit::capture(
+            before.active_sheet(),
+            after.active_sheet(),
+            [(3, 2), (6, 2), (3, 2)],
+        );
+        assert_eq!(commit.patches.len(), 2);
+        let mut wb = after.clone();
+        wb.set_cell_value_tracked(0, 6, 2, "999");
+        let rev = wb.revision();
+        assert!(commit.replay(&mut wb, true).is_err());
+        assert_eq!(wb.revision(), rev);
+        assert_eq!(wb.active_sheet().get_raw(3, 2), "70");
+        wb = after;
+        wb.set_cell_value_tracked(0, 20, 7, "unrelated");
+        commit.replay(&mut wb, true).unwrap();
+        assert_eq!(wb.active_sheet().get_raw(20, 7), "unrelated");
+        assert_eq!(
+            wb.active_sheet().get_computed_value(0, 1),
+            Value::Number(100.0)
+        );
+        commit.replay(&mut wb, false).unwrap();
+        assert_eq!(
+            wb.active_sheet().get_computed_value(0, 1),
+            Value::Number(180.0)
+        );
+        wb.set_table_view_spec(SheetId(7), None).unwrap();
+        let rev = wb.revision();
+        assert!(commit.replay(&mut wb, true).is_err());
+        assert_eq!(wb.revision(), rev);
+    }
+
+    #[test]
+    fn sparse_history_restores_hidden_record_and_literal_cell_image() {
+        let mut before = fixture(true);
+        before.set_cell_text_tracked(0, 5, 3, "=1+1");
+        let mut format = before.active_sheet().get_format(5, 3).clone();
+        format.bold = true;
+        before
+            .sheet_mut(0)
+            .unwrap()
+            .set_format(5, 3, format.clone());
+        let writes = vec![
+            TableCellWrite::value(5, 1, "East".into()),
+            TableCellWrite::value(5, 3, "=C6+1".into()),
+        ];
+        let mut after = prepare_table_writes(&before, 0, &writes).unwrap();
+        let commit = TableCellsCommit::capture(
+            before.active_sheet(),
+            after.active_sheet(),
+            [(5, 1), (5, 3)],
+        );
+        assert!(
+            after
+                .active_sheet()
+                .build_saved_table_view(30)
+                .unwrap()
+                .unwrap()
+                .focus_record(5)
+                .unwrap()
+                .record_hidden
+        );
+        commit.replay(&mut after, true).unwrap();
+        assert_eq!(
+            after.active_sheet().get_computed_value(5, 3),
+            Value::Text("=1+1".into())
+        );
+        assert_eq!(after.active_sheet().get_format(5, 3), format);
+        commit.replay(&mut after, false).unwrap();
+        assert_eq!(
+            after.active_sheet().get_computed_value(5, 3),
+            Value::Number(21.0)
+        );
+        let noop =
+            TableCellsCommit::capture(before.active_sheet(), before.active_sheet(), [(5, 1)]);
+        assert!(noop.patches.is_empty());
+    }
+
+    #[test]
+    fn sparse_history_postflight_failure_is_atomic() {
+        let before = fixture(false);
+        let mut after =
+            prepare_table_writes(&before, 0, &[TableCellWrite::value(3, 2, "29".into())]).unwrap();
+        let commit =
+            TableCellsCommit::capture(before.active_sheet(), after.active_sheet(), [(3, 2)]);
+        // Safe now; undo would grow this spill into adjacent Table body rows.
+        after.set_cell_value_tracked(0, 0, 0, "=SEQUENCE((C4-29)*5+1)");
+        let rev = after.revision();
+        assert!(commit.replay(&mut after, true).is_err());
+        assert_eq!(after.revision(), rev);
+        assert_eq!(after.active_sheet().get_raw(3, 2), "29");
     }
 }

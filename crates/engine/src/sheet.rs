@@ -1544,6 +1544,21 @@ impl Sheet {
         )
     }
 
+    /// Restore an authoritative cell image for guarded history replay. Derived
+    /// spill state and computed caches are rebuilt by the workbook, never saved.
+    pub(crate) fn restore_history_cell(&mut self, row: usize, col: usize, image: Option<Cell>) {
+        self.clear_spill_from(row, col);
+        self.cells.remove(row, col);
+        self.spill_values.remove(&(row, col));
+        if let Some(mut cell) = image {
+            cell.clear_spill_state();
+            cell.format = self.intern_format((*cell.format).clone());
+            self.has_any_borders |= cell.format.has_any_border();
+            self.with_cell(row, col, |target| *target = cell);
+        }
+        self.edit_generation = self.edit_generation.wrapping_add(1);
+    }
+
     /// Comments do not affect the cell value, format, or calculation graph.
     pub fn comment(&self, row: usize, col: usize) -> Option<&crate::cell::CellComment> {
         self.cells.get(row, col).and_then(|c| c.comment())

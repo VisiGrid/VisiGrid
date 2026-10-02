@@ -102,7 +102,6 @@ pub struct CellFormatPatch {
 /// redo even though the stored snapshots retain their original revisions.
 #[derive(Clone, Debug)]
 pub struct WorkbookSnapshotCommit {
-    pub(crate) table_cells: bool,
     pub description: String,
     before: Workbook,
     after: Workbook,
@@ -112,14 +111,9 @@ impl WorkbookSnapshotCommit {
     pub fn new(description: impl Into<String>, before: Workbook, after: Workbook) -> Self {
         Self {
             description: description.into(),
-            table_cells: false,
             before,
             after,
         }
-    }
-
-    pub(crate) fn table_cells(description: &str, before: Workbook, after: Workbook) -> Self {
-        Self { description: description.into(), before, after, table_cells: true }
     }
 
     pub fn undo_into(&self, workbook: &mut Workbook) {
@@ -230,6 +224,7 @@ pub enum UndoAction {
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    TableCellsChanged { sheet_index: usize, commit: Box<crate::table_cell_history::TableCellsCommit>, description: String },
     TableViewChanged {
         sheet_index: usize,
         commit: Box<visigrid_engine::workbook::TableViewCommit>,
@@ -485,7 +480,7 @@ impl UndoAction {
             }
             UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
-            UndoAction::TableViewChanged { description, .. } => description.clone(),
+            UndoAction::TableViewChanged { description, .. } | UndoAction::TableCellsChanged { description, .. } => description.clone(),
             UndoAction::TableCommit { description, .. } => description.clone(),
             UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
@@ -1191,6 +1186,11 @@ impl History {
     /// Extract sheet index, affected cells, and bounding range from an action.
     fn extract_action_details(action: &UndoAction) -> (Option<usize>, Vec<(usize, usize, String, String)>, Option<(usize, usize, usize, usize)>) {
         match action {
+            UndoAction::TableCellsChanged { sheet_index, commit, .. } => {
+                let cells = commit.changes();
+                let range = Self::bounding_box(&cells);
+                (Some(*sheet_index), cells, range)
+            },
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
@@ -1623,7 +1623,6 @@ impl History {
                 after_row_view,
                 ..
             } => {
-                if commit.table_cells { return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::WorkbookSnapshot)); }
                 commit.replay_into(workbook);
                 view_state.per_sheet = vec![
                     crate::app::PreviewSheetView::default();
@@ -1639,6 +1638,7 @@ impl History {
             UndoAction::TableViewChanged { .. } => {
                 return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::TableViewChanged));
             }
+            UndoAction::TableCellsChanged { .. } => { return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::TableCellsChanged)); }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
                 if commit.inserted_header_row().is_some() {
@@ -1816,6 +1816,7 @@ pub enum UndoActionKind {
     PivotCommit,
     TableCommit,
     TableViewChanged,
+    TableCellsChanged,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1857,6 +1858,7 @@ impl UndoActionKind {
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::TableCommit => true,
             UndoActionKind::TableViewChanged => false,
+            UndoActionKind::TableCellsChanged => false,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
@@ -1905,6 +1907,7 @@ impl UndoActionKind {
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::TableCommit => "Table",
             UndoActionKind::TableViewChanged => "Table view",
+            UndoActionKind::TableCellsChanged => "Table cells",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
@@ -1946,6 +1949,7 @@ impl UndoActionKind {
             UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::TableCommit => 0x1F,
             UndoActionKind::TableViewChanged => 0x20,
+            UndoActionKind::TableCellsChanged => 0x21,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
@@ -1987,6 +1991,7 @@ impl UndoAction {
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::TableCommit { .. } => UndoActionKind::TableCommit,
             UndoAction::TableViewChanged { .. } => UndoActionKind::TableViewChanged,
+            UndoAction::TableCellsChanged { .. } => UndoActionKind::TableCellsChanged,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
@@ -2011,7 +2016,6 @@ impl UndoAction {
     /// Check if this action (and any nested actions in Group) are replay-supported
     pub fn is_replay_supported(&self) -> bool {
         match self {
-            UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells => false,
             UndoAction::Group { actions, .. } => {
                 actions.iter().all(|a| a.is_replay_supported())
             }
@@ -2022,7 +2026,6 @@ impl UndoAction {
     /// Find the first unsupported action kind in this action (including nested)
     pub fn first_unsupported_kind(&self) -> Option<UndoActionKind> {
         match self {
-            UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells => Some(UndoActionKind::WorkbookSnapshot),
             UndoAction::Group { actions, .. } => {
                 for action in actions {
                     if let Some(kind) = action.first_unsupported_kind() {
@@ -2537,6 +2540,7 @@ mod tests {
             UndoActionKind::WorkbookSnapshot,
             UndoActionKind::TableCommit,
             UndoActionKind::TableViewChanged,
+            UndoActionKind::TableCellsChanged,
             UndoActionKind::PivotCommit,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,

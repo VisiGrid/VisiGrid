@@ -899,8 +899,7 @@ impl Spreadsheet {
     pub fn confirm_edit_in_place(&mut self, cx: &mut Context<Self>) {
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
             if self.is_multi_selection() {
-                self.status_message = Some("Use paste to fill visible Table selections; clear the view for Ctrl+Enter fill.".into());
-                cx.notify();
+                self.fill_table_selection(cx);
             } else if self.mode.is_editing() { self.commit_current_edit(cx); }
             else { self.start_edit(cx); }
             return;

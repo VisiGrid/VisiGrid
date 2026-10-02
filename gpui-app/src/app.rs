@@ -595,6 +595,7 @@ pub struct Spreadsheet {
     pub formula_nav_mode: crate::mode::FormulaNavMode, // Caret vs Point submode in Formula mode
     pub formula_nav_manual_override: Option<crate::mode::FormulaNavMode>, // F2 toggle latch - wins over auto-switch
     pub formula_home_sheet: Option<usize>,              // Sheet where formula is being entered (for cross-sheet refs)
+    pub(crate) table_fill_revision: Option<(visigrid_engine::sheet::SheetId, u64)>,
     pub(crate) table_edit_target: Option<(usize, usize, usize, u64)>,
     pub formula_edit_cell: Option<(usize, usize)>,     // Cell being edited (preserved across sheet switches in formula mode)
     pub formula_ref_sheet: Option<usize>,               // Sheet where current ref target lives (None = home sheet)
@@ -1273,6 +1274,7 @@ impl Spreadsheet {
             formula_nav_manual_override: None,
             formula_home_sheet: None,
             formula_edit_cell: None,
+            table_fill_revision: None,
             table_edit_target: None,
             formula_ref_sheet: None,
             formula_cross_sheet_name: None,

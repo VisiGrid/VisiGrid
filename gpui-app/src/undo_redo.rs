@@ -37,7 +37,7 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
-                && !matches!(&entry.action, UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells)
+                && !matches!(&entry.action, UndoAction::TableCellsChanged { .. })
                 && self.block_table_view_edit(cx) {
                 self.history.redo(); return;
             }
@@ -153,14 +153,13 @@ impl Spreadsheet {
                     before_row_view,
                     ..
                 } => {
-                    let record = self.row_view.view_to_data(self.view_state.selected.0);
                     self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
-                    if commit.table_cells {
-                        self.view_state.selected.0 = record;
-                        self.sync_table_view(cx);
-                    }
                     self.status_message = Some(format!("Undo: {}", commit.description));
+                }
+                UndoAction::TableCellsChanged { commit, description, .. } => {
+                    if !self.replay_table_cells(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
                 }
                 UndoAction::TableViewChanged { commit, description, .. } => {
                     if !self.replay_table_view(&commit, true, cx) { self.history.redo(); return; }
@@ -633,6 +632,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
+            UndoAction::TableCellsChanged { commit, .. } => { self.replay_table_cells(&commit, true, cx); }
             UndoAction::TableViewChanged { commit, .. } => { self.replay_table_view(&commit, true, cx); }
             UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, true, cx); }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
@@ -1029,6 +1029,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
+            UndoAction::TableCellsChanged { commit, .. } => { if !self.replay_table_cells(&commit, false, cx) { return false; } }
             UndoAction::TableViewChanged { commit, .. } => { if !self.replay_table_view(&commit, false, cx) { return false; } }
             UndoAction::TableCommit { commit, .. } => { if !self.replay_table_commit(&commit, false, cx) { return false; } }
             UndoAction::PivotCommit { commit, created_sheet, .. } => {
@@ -1247,7 +1248,7 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
-                && !matches!(&entry.action, UndoAction::WorkbookSnapshot { commit, .. } if commit.table_cells)
+                && !matches!(&entry.action, UndoAction::TableCellsChanged { .. })
                 && self.block_table_view_edit(cx) {
                 self.history.undo(); return;
             }
@@ -1364,14 +1365,13 @@ impl Spreadsheet {
                     after_row_view,
                     ..
                 } => {
-                    let record = self.row_view.view_to_data(self.view_state.selected.0);
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
-                    if commit.table_cells {
-                        self.view_state.selected.0 = record;
-                        self.sync_table_view(cx);
-                    }
                     self.status_message = Some(format!("Redo: {}", commit.description));
+                }
+                UndoAction::TableCellsChanged { commit, description, .. } => {
+                    if !self.replay_table_cells(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::TableViewChanged { commit, description, .. } => {
                     if !self.replay_table_view(&commit, false, cx) { self.history.undo(); return; }
