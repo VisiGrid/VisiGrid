@@ -42,7 +42,7 @@ pub(super) fn render_ribbon_font_controls(app: &mut Spreadsheet, state: &crate::
         .child(super::ribbon::font_keytip(app, "F7", render_text_color_btn(rgba_to_hsla(&state.font_color), state.font_color.is_mixed(), text, muted, border, cx)));
     div().flex().flex_col().gap_1()
         .child(div().flex().gap_1()
-            .child(super::ribbon::font_keytip(app, "F1", render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, cx)))
+            .child(super::ribbon::font_keytip(app, "F1", render_font_family_btn(font, state.font_family.is_mixed(), missing, tooltip, text, muted, border, cx).w(px(200.))))
             .child(super::ribbon::font_keytip(app, "F6", render_font_size_input(app, size, state.font_size.is_mixed(), app.ui.format_bar.size_editing,
                 app.ui.format_bar.size_replace_next, text, muted, border, app.ui.format_bar.size_focus.clone(), cx))))
         .child(row)
@@ -268,7 +268,7 @@ fn render_font_family_btn(
     text_muted: Hsla,
     panel_border: Hsla,
     cx: &mut Context<Spreadsheet>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let text_color = if is_mixed { text_muted } else { text_primary };
 
     div()

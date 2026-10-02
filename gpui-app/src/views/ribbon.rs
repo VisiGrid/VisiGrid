@@ -36,7 +36,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
         RibbonTab::Home => vec![
             group(
                 "Clipboard",
-                178.,
+                326.,
                 &[
                     C(Paste, "Paste"),
                     C(Cut, "Cut"),
@@ -48,7 +48,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             ),
             Group {
                 label: "Font",
-                width: 250.,
+                width: 278.,
                 items: &[
                     C(SelectFont, "Font…"),
                     C(ToggleBold, "Bold"),
@@ -62,7 +62,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             },
             group(
                 "Alignment",
-                98.,
+                108.,
                 &[
                     C(AlignLeft, "Left"),
                     C(AlignCenter, "Center"),
@@ -71,7 +71,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             ),
             group(
                 "Number",
-                112.,
+                154.,
                 &[
                     Item::NumberFormat,
                     C(FormatCurrency, "Currency"),
@@ -80,7 +80,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             ),
             group(
                 "Styles",
-                142.,
+                168.,
                 &[
                     Item::Styles,
                     C(AddConditionalFormat, "Conditional…"),
@@ -89,7 +89,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             ),
             group(
                 "Editing",
-                150.,
+                220.,
                 &[
                     C(AutoSum, "AutoSum"),
                     C(FindInCells, "Find"),
@@ -124,7 +124,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             ),
             group(
                 "Inspect",
-                220.,
+                350.,
                 &[
                     C(ToggleTrace, "Trace dependencies"),
                     C(CycleTracePrecedent, "Next precedent"),
@@ -136,7 +136,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
         RibbonTab::Data => vec![
             group(
                 "Sort & filter",
-                220.,
+                280.,
                 &[
                     C(SortAscending, "Sort A → Z"),
                     C(SortDescending, "Sort Z → A"),
@@ -154,7 +154,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
             ),
             group(
                 "Pivot tables",
-                265.,
+                330.,
                 &[
                     C(InsertPivotTable, "Pivot table…"),
                     C(RefreshPivot, "Refresh pivot"),
@@ -166,7 +166,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
         RibbonTab::View => vec![
             group(
                 "Freeze",
-                195.,
+                344.,
                 &[
                     C(FreezeTopRow, "Freeze top row"),
                     C(FreezeFirstColumn, "Freeze first column"),
@@ -292,11 +292,266 @@ fn invoke(
     cx.notify();
 }
 
+/// Small native vector icons share a 24-unit grid and inherit theme/disabled color.
+/// Text remains the command's accessible label; these are only scan aids.
+fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
+    use CommandId::*;
+    use Item::Command as C;
+    let glyph = match item {
+        C(AutoSum, _) => Some("Σ"),
+        C(FormatCurrency, _) => Some("$"),
+        C(FormatPercent, _) => Some("%"),
+        C(ToggleBold, _) => Some("B"),
+        C(ToggleItalic, _) => Some("I"),
+        C(ToggleUnderline, _) => Some("U"),
+        C(SelectFont, _) | Item::FontSize | Item::TextColor => Some("A"),
+        C(ZoomReset, _) => Some("1:1"),
+        _ => None,
+    };
+    if let Some(glyph) = glyph {
+        return div()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(size))
+            .text_color(color)
+            .child(glyph)
+            .into_any_element();
+    }
+    // Each polyline is independent; closed shapes repeat their first point.
+    let lines: &'static [&'static [(f32, f32)]] = match item {
+        C(Paste | PasteValues | PasteSpecial, _) => &[
+            &[
+                (8., 5.),
+                (4., 5.),
+                (4., 21.),
+                (20., 21.),
+                (20., 5.),
+                (16., 5.),
+            ],
+            &[(8., 3.), (16., 3.), (16., 7.), (8., 7.), (8., 3.)],
+            &[(8., 12.), (16., 12.)],
+            &[(8., 16.), (14., 16.)],
+        ],
+        C(Copy, _) => &[
+            &[(8., 8.), (20., 8.), (20., 21.), (8., 21.), (8., 8.)],
+            &[(15., 5.), (15., 3.), (3., 3.), (3., 16.), (5., 16.)],
+        ],
+        C(Cut, _) => &[
+            &[
+                (4., 3.),
+                (20., 19.),
+                (20., 22.),
+                (17., 22.),
+                (14., 19.),
+                (14., 16.),
+                (21., 3.),
+            ],
+            &[
+                (10., 16.),
+                (10., 19.),
+                (7., 22.),
+                (4., 22.),
+                (4., 19.),
+                (10., 13.),
+            ],
+        ],
+        C(FormatPainter, _) => &[
+            &[(3., 3.), (17., 3.), (17., 9.), (3., 9.), (3., 3.)],
+            &[
+                (17., 6.),
+                (21., 6.),
+                (21., 13.),
+                (12., 13.),
+                (12., 21.),
+                (9., 21.),
+                (9., 16.),
+            ],
+        ],
+        C(AlignLeft, _) => &[
+            &[(3., 5.), (21., 5.)],
+            &[(3., 10.), (14., 10.)],
+            &[(3., 15.), (21., 15.)],
+            &[(3., 20.), (14., 20.)],
+        ],
+        C(AlignCenter, _) => &[
+            &[(3., 5.), (21., 5.)],
+            &[(7., 10.), (17., 10.)],
+            &[(3., 15.), (21., 15.)],
+            &[(7., 20.), (17., 20.)],
+        ],
+        C(AlignRight, _) => &[
+            &[(3., 5.), (21., 5.)],
+            &[(10., 10.), (21., 10.)],
+            &[(3., 15.), (21., 15.)],
+            &[(10., 20.), (21., 20.)],
+        ],
+        C(FindInCells | ZoomIn | ZoomOut, _) => &[
+            &[
+                (9., 3.),
+                (14., 5.),
+                (16., 10.),
+                (14., 15.),
+                (9., 17.),
+                (4., 15.),
+                (2., 10.),
+                (4., 5.),
+                (9., 3.),
+            ],
+            &[(15., 16.), (22., 23.)],
+        ],
+        C(FillDown, _) => &[
+            &[(4., 3.), (20., 3.)],
+            &[(12., 6.), (12., 21.), (6., 15.)],
+            &[(12., 21.), (18., 15.)],
+        ],
+        C(FillRight, _) => &[
+            &[(3., 4.), (3., 20.)],
+            &[(6., 12.), (21., 12.), (15., 6.)],
+            &[(21., 12.), (15., 18.)],
+        ],
+        C(ToggleAutoFilter, _) => &[&[
+            (3., 4.),
+            (21., 4.),
+            (14., 12.),
+            (14., 20.),
+            (10., 22.),
+            (10., 12.),
+            (3., 4.),
+        ]],
+        C(SortAscending, _) => &[
+            &[(5., 3.), (5., 21.), (1., 17.)],
+            &[(5., 21.), (9., 17.)],
+            &[(12., 5.), (16., 5.)],
+            &[(12., 11.), (19., 11.)],
+            &[(12., 17.), (22., 17.)],
+        ],
+        C(SortDescending, _) => &[
+            &[(5., 3.), (5., 21.), (1., 17.)],
+            &[(5., 21.), (9., 17.)],
+            &[(12., 5.), (22., 5.)],
+            &[(12., 11.), (19., 11.)],
+            &[(12., 17.), (16., 17.)],
+        ],
+        C(ClearSort | UnfreezePanes, _) => &[&[(5., 5.), (19., 19.)], &[(19., 5.), (5., 19.)]],
+        C(Recalculate | RefreshPivot | RefreshAllPivots, _) => &[
+            &[
+                (20., 9.),
+                (17., 4.),
+                (8., 3.),
+                (3., 9.),
+                (3., 16.),
+                (9., 21.),
+                (16., 21.),
+                (21., 16.),
+            ],
+            &[(20., 2.), (20., 9.), (13., 9.)],
+        ],
+        C(ValidationDialog, _) => &[&[(3., 12.), (9., 18.), (21., 5.)]],
+        C(TrimWhitespace, _) => &[
+            &[(3., 4.), (3., 20.)],
+            &[(21., 4.), (21., 20.)],
+            &[(7., 12.), (17., 12.)],
+        ],
+        C(ToggleTrace | CycleTracePrecedent | CycleTraceDependent, _) => &[
+            &[(3., 3.), (9., 3.), (9., 9.), (3., 9.), (3., 3.)],
+            &[(15., 15.), (21., 15.), (21., 21.), (15., 21.), (15., 15.)],
+            &[(9., 6.), (18., 6.), (18., 12.)],
+        ],
+        C(ToggleCommentsSidebar, _) => &[&[
+            (3., 3.),
+            (21., 3.),
+            (21., 17.),
+            (10., 17.),
+            (5., 21.),
+            (5., 17.),
+            (3., 17.),
+            (3., 3.),
+        ]],
+        C(ToggleInspector | ToggleMinimap, _) => &[
+            &[(3., 4.), (21., 4.), (21., 20.), (3., 20.), (3., 4.)],
+            &[(15., 4.), (15., 20.)],
+        ],
+        C(SelectTheme | FillColor, _) => &[
+            &[(12., 2.), (21., 11.), (12., 20.), (3., 11.), (12., 2.)],
+            &[(3., 23.), (21., 23.)],
+        ],
+        C(ToggleZenMode, _) => &[
+            &[(3., 9.), (3., 3.), (9., 3.)],
+            &[(15., 3.), (21., 3.), (21., 9.)],
+            &[(21., 15.), (21., 21.), (15., 21.)],
+            &[(9., 21.), (3., 21.), (3., 15.)],
+        ],
+        Item::InsertRows => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(3., 9.), (21., 9.)],
+            &[(8., 15.), (16., 15.)],
+            &[(12., 11.), (12., 19.)],
+        ],
+        Item::InsertCols => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(9., 3.), (9., 21.)],
+            &[(11., 12.), (19., 12.)],
+            &[(15., 8.), (15., 16.)],
+        ],
+        C(AddSheet, _) => &[
+            &[
+                (3., 2.),
+                (15., 2.),
+                (21., 8.),
+                (21., 22.),
+                (3., 22.),
+                (3., 2.),
+            ],
+            &[(8., 14.), (16., 14.)],
+            &[(12., 10.), (12., 18.)],
+        ],
+        C(FreezeTopRow, _) => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(3., 8.), (21., 8.)],
+        ],
+        C(FreezeFirstColumn, _) => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(8., 3.), (8., 21.)],
+        ],
+        // Cell formatting, named ranges, and pivot operations share the cell grid.
+        _ => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(3., 9.), (21., 9.)],
+            &[(9., 3.), (9., 21.)],
+        ],
+    };
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            for line in lines {
+                let mut path = PathBuilder::stroke(px(1.4));
+                for (index, &(x, y)) in line.iter().enumerate() {
+                    let point = bounds.origin + point(px(x * size / 24.), px(y * size / 24.));
+                    if index == 0 {
+                        path.move_to(point);
+                    } else {
+                        path.line_to(point);
+                    }
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, color);
+                }
+            }
+        },
+    )
+    .size(px(size))
+    .flex_shrink_0()
+    .into_any_element()
+}
+
 fn command_button(
     app: &Spreadsheet,
     item: Item,
     id: String,
     state: &SelectionFormatState,
+    prominent: bool,
     cx: &mut Context<Spreadsheet>,
 ) -> Stateful<Div> {
     let reason = disabled_reason(app, item);
@@ -339,8 +594,9 @@ fn command_button(
         .w_full()
         .min_w_0()
         .overflow_hidden()
-        .h(px(21.))
+        .h(px(if prominent { 66. } else { 22. }))
         .px_1()
+        .when(prominent, |d| d.flex_col().justify_center().gap_1())
         .rounded_sm()
         .role(Role::Button)
         .aria_label(item_label(item))
@@ -366,17 +622,30 @@ fn command_button(
         .flex()
         .items_center()
         .gap_1()
-        .when(app.ui.desktop_keytips.ribbon(app.ui.ribbon.tab), |d| {
+        .child({
             let code = keytip_for(app.ui.ribbon.tab, item);
-            d.when(
-                code.to_ascii_lowercase()
-                    .starts_with(&app.ui.desktop_keytips.prefix),
-                |d| d.child(keytip_badge(app, code).flex_shrink_0()),
-            )
+            let show_hint = app.ui.desktop_keytips.ribbon(app.ui.ribbon.tab)
+                && code
+                    .to_ascii_lowercase()
+                    .starts_with(&app.ui.desktop_keytips.prefix);
+            // Hints replace the icon in a fixed slot: labels never shift or truncate
+            // just because the user pressed Alt.
+            div()
+                .w(px(if prominent { 32. } else { 24. }))
+                .h(px(if prominent { 30. } else { 18. }))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(if show_hint {
+                    keytip_badge(app, code).into_any_element()
+                } else {
+                    command_icon(item, if prominent { 28. } else { 16. }, text)
+                })
         })
         .child(
             div()
-                .flex_1()
+                .when(!prominent, |d| d.flex_1())
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
@@ -544,7 +813,8 @@ pub fn render_ribbon(
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .text_size(px(12.))
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(text)
                 .border_b_2()
                 .border_color(if active == tab { accent } else { bg })
@@ -593,10 +863,32 @@ pub fn render_ribbon(
             .aria_label("Collapse or expand ribbon")
             .aria_expanded(!collapsed)
             .px_2()
+            .h(px(24.))
+            .rounded_sm()
+            .flex()
+            .items_center()
             .cursor_pointer()
-            .text_color(text)
-            .text_size(px(12.))
+            .text_color(app.token(TokenKey::TextMuted))
+            .text_size(px(11.))
+            .hover(|s| s.bg(border.opacity(0.3)))
+            .gap_1()
             .child(if collapsed { "Expand" } else { "Collapse" })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let mut path = PathBuilder::stroke(px(1.4));
+                        let (edge, middle) = if collapsed { (4., 8.) } else { (8., 4.) };
+                        path.move_to(bounds.origin + point(px(2.), px(edge)));
+                        path.line_to(bounds.origin + point(px(6.), px(middle)));
+                        path.line_to(bounds.origin + point(px(10.), px(edge)));
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, text);
+                        }
+                    },
+                )
+                .size(px(12.)),
+            )
             .on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
                 this.toggle_ribbon_collapsed(window, cx);
@@ -653,9 +945,10 @@ fn render_body(
             .flex()
             .flex_col()
             .justify_between()
-            .px_1()
-            .border_r_1()
-            .border_color(border);
+            .px_2()
+            .when(index + 1 < entries.len(), |d| {
+                d.border_r_1().border_color(border.opacity(0.6))
+            });
         if width < group.width {
             el = el.child(
                 div()
@@ -666,7 +959,10 @@ fn render_body(
                     .size_full()
                     .flex()
                     .flex_col()
+                    .items_center()
                     .justify_center()
+                    .gap_1()
+                    .rounded_sm()
                     .text_size(px(11.))
                     .text_color(app.token(TokenKey::TextPrimary))
                     .cursor_pointer()
@@ -684,6 +980,7 @@ fn render_body(
                         }
                         cx.notify();
                     }))
+                    .child(command_icon(group.items[0], 22., muted))
                     .child(group.label)
                     .child("▾")
                     .relative()
@@ -702,8 +999,25 @@ fn render_body(
                     app, &state, window, cx,
                 ));
             } else {
-                let mut columns = div().flex().gap_1();
-                for (column, items) in group.items.chunks(3).enumerate() {
+                let prominent = group.label == "Clipboard";
+                let mut columns = div().flex().gap_1().h(px(66.));
+                if prominent {
+                    columns =
+                        columns.child(div().w(px(60.)).flex_shrink_0().child(command_button(
+                            app,
+                            group.items[0],
+                            format!("ribbon-{index}-primary"),
+                            &state,
+                            true,
+                            cx,
+                        )));
+                }
+                let items = if prominent {
+                    &group.items[1..]
+                } else {
+                    group.items
+                };
+                for (column, items) in items.chunks(3).enumerate() {
                     let mut col = div().flex().flex_col().flex_1().min_w_0();
                     for (row, item) in items.iter().enumerate() {
                         col = col.child(command_button(
@@ -711,6 +1025,7 @@ fn render_body(
                             *item,
                             format!("ribbon-{index}-{column}-{row}"),
                             &state,
+                            false,
                             cx,
                         ));
                     }
@@ -720,8 +1035,11 @@ fn render_body(
             }
             el = el.child(
                 div()
-                    .text_size(px(11.))
+                    .h(px(12.))
+                    .line_height(px(12.))
+                    .text_size(px(10.))
                     .text_color(muted)
+                    .text_center()
                     .child(group.label),
             );
         }
@@ -790,8 +1108,16 @@ pub fn render_group_menu(
             cx.notify();
         }))
         .flex()
-        .flex_col();
+        .flex_col()
+        .gap_1();
     if let Some(group) = entries.get(index) {
+        panel = panel.child(
+            div()
+                .pb_1()
+                .text_size(px(11.))
+                .text_color(app.token(TokenKey::TextMuted))
+                .child(group.label),
+        );
         if group.font && disabled_reason(app, group.items[0]).is_none() {
             return panel.child(super::format_bar::render_ribbon_font_controls(
                 app, &state, window, cx,
@@ -803,6 +1129,7 @@ pub fn render_group_menu(
                 *item,
                 format!("ribbon-overflow-{i}"),
                 &state,
+                false,
                 cx,
             ));
         }

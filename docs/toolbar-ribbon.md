@@ -19,6 +19,22 @@ It is an opt-in native UI implementation, not a release of the complete spec.
 No account is required and no workbook format changes are involved. Changing
 the layout is a personal preference, not a document edit or undo operation.
 
+## Ribbon design pass
+
+The ribbon keeps its 32-pixel tab strip and 88-pixel command body. Tabs use a
+stronger type hierarchy; group captions are centered below the controls and
+separators are subdued. Paste is a larger primary control, while other commands
+pair a small native vector icon with a text label. Icons inherit the theme and
+disabled colors. Font controls continue to use the shared Compact components, with a wider
+font-family picker in Ribbon.
+
+Command icons reserve a fixed slot that becomes the KeyTip badge when Alt hints
+are visible, so toggling hints does not move or shorten the labels. Command
+codes and dispatch are unchanged. Wider groups make labels more readable;
+narrow windows collapse whole groups earlier instead of shrinking their text.
+Overflow controls include an icon, group name, and chevron, and their popovers
+repeat the group name as a heading.
+
 ## Alt KeyTips (Linux and Windows)
 
 Tap and release **Alt** by itself to show hints. Existing menu letters stay
@@ -115,6 +131,12 @@ Compact showing menu-only hints, and a 941-pixel tiled window revealing the
 Editing overflow group and opening Find through its KeyTip. Windows runtime and macOS review remain open.
 A screenshot is saved alongside the workspace concept
 at `work/visigrid-toolbar/native-ribbon.png` (outside this repository).
+
+The design pass was checked in Ledger Dark and Ledger Light on Linux at scale
+1, including Home and Data command labels, Alt hints without label movement,
+and the 941-pixel Editing overflow panel with Find invoked by its KeyTip.
+Review captures are in `work/visigrid-toolbar/native-ribbon-design-*.png` outside
+this repository. Mac rendering and other display scales still need native review.
 
 Settings tests cover legacy defaults, hidden-toolbar migration, malformed
 fields, round trips, future-schema retention, atomic save, and write failure.
