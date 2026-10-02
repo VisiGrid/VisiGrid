@@ -79,10 +79,16 @@ chrome remains hidden in Zen; Table controls and recovery banners keep their
 existing behavior.
 
 `views/ribbon.rs` describes tabs/groups and dispatches existing `CommandId`
-operations. Row/column insertion preserves the existing whole-row/column
-selection requirement. Commands that require cell navigation stay disabled
+operations. Ribbon Insert rows/columns inserts at the selection's top row or
+left column, one line per selected row or column. Whole-line selections retain
+their span; requesting the other axis inserts one line at the active cell.
+Additional selections are rejected. These commands use the existing structural
+edit and undo paths. Ctrl+= retains its whole-row/column selection requirement.
+Commands that require cell navigation stay disabled
 during an active edit or modal; changing layout itself does not commit or
-discard a cell edit. Read-only restrictions are rechecked on invocation.
+discard a cell edit. The Font group keeps its real controls visible and dimmed
+under a blocking cover during an edit or modal. Read-only restrictions are
+rechecked on invocation.
 
 `appearance.toolbar` stores `schema_version`, `layout`, and
 `ribbon_collapsed` in the user settings. Unknown fields are retained. Malformed
@@ -117,7 +123,7 @@ phases. This branch does not expose placeholder customization controls.
 ## Validation
 
 On Linux, `cargo check` and the desktop build pass. The desktop unit suite passes
-with **615 passed, 0 failed, 3 ignored**. It caught and fixed a duplicate View
+with **625 passed, 0 failed, 3 ignored**. It caught and fixed a duplicate View
 accelerator and a default preference serialization regression.
 
 Linux/Wayland smoke checks at 1920×1200, scale 1: Home/Data tab rendering,
@@ -128,7 +134,7 @@ acceptance matrix above. Additional Linux KeyTips checks cover Alt tap, root/tab
 Bold dispatch, disabled formatting during a cell edit, Escape preserving that
 draft, the collapsed font-size editor, held Alt+F without stray hints, and
 Compact showing menu-only hints, and a 941-pixel tiled window revealing the
-Editing overflow group and opening Find through its KeyTip. Windows runtime and macOS review remain open.
+Editing overflow group and opening Find through its KeyTip. Windows runtime and the separate macOS keyboard design remain open.
 A screenshot is saved alongside the workspace concept
 at `work/visigrid-toolbar/native-ribbon.png` (outside this repository).
 
@@ -136,7 +142,21 @@ The design pass was checked in Ledger Dark and Ledger Light on Linux at scale
 1, including Home and Data command labels, Alt hints without label movement,
 and the 941-pixel Editing overflow panel with Find invoked by its KeyTip.
 Review captures are in `work/visigrid-toolbar/native-ribbon-design-*.png` outside
-this repository. Mac rendering and other display scales still need native review.
+this repository. Other display scales still need native review.
+
+PR #81 follow-up at `45c4cfa`:
+
+- The Mac review reports successful Apple Silicon release-build checks in both
+  themes across all tabs, collapse/flyout, 1000-point overflow, layout switching,
+  Font controls under the Conditional Format editor, insertion from D5, and
+  status messages. Its screenshots are embedded in PR #81. Mac KeyTips remain
+  deferred.
+- The Linux desktop build and full 625-test suite pass. Native checks at
+  2560×1440, scale 1 confirm readable Home KeyTips after the column-spacing
+  change, disabled Font controls preserving a cell-edit draft on clicks,
+  insertion of a row at D5 and a column at A4 through KeyTips, undo for both,
+  and the 1000-pixel Editing overflow menu invoking Find through its KeyTip.
+  These checks supplement, rather than complete, the acceptance matrix above.
 
 Settings tests cover legacy defaults, hidden-toolbar migration, malformed
 fields, round trips, future-schema retention, atomic save, and write failure.
