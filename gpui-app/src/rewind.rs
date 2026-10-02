@@ -101,8 +101,19 @@ impl Spreadsheet {
             let table = sheet.table_view_spec().and_then(|s| sheet.tables().iter().find(|t| t.id == s.table))
                 .ok_or("The preview Table no longer exists.")?;
             if let Some(error) = crate::table_filter_ui::desktop_layout_error(
-                table, self.row_heights.get(&sheet.id), self.hidden_rows.get(&sheet.id), sheet.frozen_panes.0,
-            ) { return Err(error); }
+                table,
+                view.structure_layout
+                    .as_ref()
+                    .map(|l| &l.heights)
+                    .or_else(|| self.row_heights.get(&sheet.id)),
+                view.structure_layout
+                    .as_ref()
+                    .map(|l| &l.hidden_rows)
+                    .or_else(|| self.hidden_rows.get(&sheet.id)),
+                sheet.frozen_panes.0,
+            ) {
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -395,23 +406,32 @@ impl Spreadsheet {
                     column, direction: if ascending { visigrid_engine::filter::SortDirection::Ascending } else { visigrid_engine::filter::SortDirection::Descending },
                 });
         }
-        if session.quality != PreviewQuality::Ok { return Err("Cannot rewind an incomplete preview.".into()); }
-        for sheet in plan.new_workbook.sheets() {
-            if let Some(view) = sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))? {
-                let table = sheet.tables().iter().find(|t| t.id == view.spec().table).unwrap();
-                if let Some(error) = crate::table_filter_ui::desktop_layout_error(
-                    table, self.row_heights.get(&sheet.id), self.hidden_rows.get(&sheet.id), sheet.frozen_panes.0,
-                ) { return Err(error); }
-            }
+        if session.quality != PreviewQuality::Ok {
+            return Err("Cannot rewind an incomplete preview.".into());
         }
+        self.validate_preview_layout(&plan.new_workbook, &plan.new_view_state)?;
 
         // === ATOMIC COMMIT: Do not fail after this point ===
 
         // 1. Replace the workbook content
         self.rewind_preview = RewindPreviewState::Off;
-        self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&plan.new_workbook));
-        self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
-        self.debug_assert_sheet_cache_sync(cx);  // Catch desync at rewind
+        self.workbook.update(cx, |wb, _| {
+            wb.restore_snapshot_monotonic(&plan.new_workbook)
+        });
+        for (sheet, view) in plan
+            .new_workbook
+            .sheets()
+            .iter()
+            .zip(&plan.new_view_state.per_sheet)
+        {
+            if let Some(layout) = &view.structure_layout {
+                self.install_structure_layout(sheet.id, layout);
+            }
+        }
+        self.view_state.frozen_rows = plan.new_workbook.active_sheet().frozen_panes.0;
+        self.view_state.frozen_cols = plan.new_workbook.active_sheet().frozen_panes.1;
+        self.update_cached_sheet_id(cx); // Keep per-sheet sizing cache in sync
+        self.debug_assert_sheet_cache_sync(cx); // Catch desync at rewind
         // Retained actions still replay from the original base. Replacing it
         // with the target snapshot would replay those edits twice next time.
         let active_idx = self.sheet_index(cx);

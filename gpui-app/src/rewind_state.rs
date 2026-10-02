@@ -91,6 +91,7 @@ pub struct PreviewViewState {
 /// Per-sheet view state for preview rendering
 #[derive(Clone, Debug, Default)]
 pub struct PreviewSheetView {
+    pub(crate) structure_layout: Option<crate::table_structure::StructureLayout>,
     /// Rebuilt from historical Table criteria and computed cells; preview only.
     pub table_rows: Option<visigrid_engine::filter::RowView>,
     /// Row order permutation (None = identity order)

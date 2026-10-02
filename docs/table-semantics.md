@@ -36,7 +36,7 @@ Desktop entry points:
 - A rectangular paste starting in the body or immediately below it, contained within its width and extending below the bottom, appends through the pasted last row. Represented blank records count. Existing body writes and new bounds share one undo entry.
 - A paste crossing both side and bottom boundaries refuses with Resize guidance. Writes separated by a blank row or entirely to the right do not imply growth. Single-cell paste broadcast/fill across a selected range retains existing fill behavior.
 - Tab from the last body cell appends one empty row and selects its first column. An in-progress edit in that last cell joins the append commit. A header-only Table uses the **Add row** control; that control is also available for nonempty Tables.
-- Clearing cell values retains membership. Appending and structural row edits refuse active sorting/filtering until cleared.
+- Clearing cell values retains membership. Appending still requires clearing active sorting/filtering; whole-row edits use the guarded structural path below.
 
 Normal paste, Paste Values and Paste Formulas share append preflight. An internal normal paste carrying merges/comments (or replacing destination comments) refuses growth with guidance to use Paste Values or resize first; it never silently drops those objects. Omitted cells in calculated columns receive their rule; supplied values/formulas, including explicit blank cells, take priority.
 
@@ -177,7 +177,7 @@ Recalculation runs on a candidate workbook, then every saved Table view and its 
 
 History retains sparse exact cell images, the target sheet's Table schemas and its optional view definition. Undo/redo and rewind recalculate dependent sheets and validate all saved views before publishing. Schema comparison follows Table IDs, independent of catalog order. A stale target or unsafe replay preserves the workbook and history position. Edits outside a Table retain their canonical focus; edits to Table records keep the existing visible-record fallback.
 
-Cut and fill commands also support safe outside cells, as described below. Structural changes, scripts and other mutation surfaces remain subject to the saved-view gate.
+Cut and fill commands also support safe outside cells, as described below. Whole-row/column edits use the guarded structural path below. Scripts and other mutation surfaces remain subject to the saved-view gate.
 
 ### Filling visible records
 
@@ -193,13 +193,25 @@ Cut (Ctrl+X / Cmd+X) captures the primary selection in display order and immedia
 
 The clipboard retains canonical source rows, formulas, typed values, formatting, comments and exact cell boundaries, including embedded tabs/newlines and blank trailing cells. Paste is a separate operation and undo step; it uses the existing visible-record paste rules and canonical formula rebasing. Cutting sort/filter fields can move or hide records, so selection uses the same visible-area trimming and safe fallback as fill. No stale source outline is shown after cut. Undo/redo restores cleared records and filter membership using sparse guarded cell history.
 
+### Row and column structural edits with saved views
+
+![Column insertion retains the Table filter, sort and calculated values](images/tables/filtered-column-insert.png)
+
+Select entire rows (Shift+Space) or columns (Ctrl+Space), then Insert/Delete. Rows resolve once through the current projection: deletion removes only selected visible records, coalescing canonical spans from bottom to top in one transaction and one undo entry. Insertion adds the visible selection's row count before its first displayed record, even when that record is not the lowest canonical row. New records are subject to the saved filters and may immediately disappear. Column edits use worksheet coordinates. Repeat (F4), undo and redo use the same guarded path.
+
+Existing Table IDs and surviving column IDs, criteria, calculated rules and overrides follow structural movement. New interior columns receive fresh IDs. Deleting a filter/sort column requires clearing that criterion first. Header deletion, removal of every Table column, partial pivot output cuts, unsafe spills/layouts and grid-edge data or formatting loss are refused atomically. Deleting the last body record leaves a header-only Table with dormant saved criteria. Rows/columns on another sheet also use a candidate workbook so rewritten references and dependent Table projections are validated together. Ordinary worksheet-range sorts/filters on the target sheet must be cleared first.
+
+History retains changed authored cells and structural metadata, including cross-sheet formula rewrites, named ranges, validation/conditional formatting, merges, print setup, freeze boundaries and pivot placement. Desktop row heights, column widths and manually hidden positions shift with the edit and restore on replay. No workbook or derived projection is retained in the structural entry. A full authored-state guard refuses stale replay before publication. Limits are 1,000 canonical spans, 100,000 selected visible rows and 100,000 changed stored-cell positions; moved cells count toward the latter limit.
+
+Rewind rebuilds structural edits and their historical sizing/visibility. Before the first guarded structural entry, layout is recovered from that entry's before-state; intervening older structural, grouped or snapshot entries can refuse preview when layout cannot be reconstructed safely. Existing rewind replay/time limits still apply. Scripts and session batches remain gated.
+
 ### History rewind
 
 Hold Space on a history entry to preview the state before it; Up/Down scrubs adjacent entries. Table sort/filter entries work even though they do not change any cells. Each snapshot replays guarded criteria and sparse cell commits, then rebuilds each sheet’s Table row order and visibility from its historical cells. Canonical history highlights map into the preview projection; when all affected records are hidden, focus falls back to the Table header. A failed scrub leaves the current preview intact.
 
 Preview is read-only. Opening rewind confirmation keeps the preview after Space is released; Escape/Cancel returns to live state, and Enter confirms. Releasing Space outside confirmation restores the live sheet, projection, selection (including additional selections) and scroll position. Preview sheet switching changes only the snapshot’s active sheet. Confirmed rewind validates the history fingerprint, live workbook revision, selected target, engine layout and desktop Table layout before publishing. It advances the live revision, restores filter state, discards the later history/redo branch and records an audit entry. Retained history continues to replay from the original base; audit entries have no cell effect, so later previews and rewinds remain usable. Existing replay count/time limits and unsupported-action gates remain in force.
 
-**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, structural changes, scripts, session batches and unrelated history actions remain gated. Safe direct edits, Delete, cut, paste and fill can target cells outside Tables and on other sheets; cut/fill rectangles cannot cross a Table body boundary. Header-name paste and guarded pivot actions, including their undo/redo, are supported. Clear the criteria before those operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths from invalidating formula-dependent filters.
+**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, Table creation/resizing/appending, scripts, session batches and unrelated history actions remain gated. Safe direct edits, Delete, cut, paste and fill can target cells outside Tables and on other sheets; cut/fill rectangles cannot cross a Table body boundary. Header-name paste, whole-row/column edits and guarded pivot actions, including their undo/redo, are supported. Clear the criteria before unsupported operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths from invalidating formula-dependent filters.
 
 ### Multi-header schema paste
 
@@ -211,7 +223,7 @@ Internal clipboard cells retain exact boundaries, including blank trailing cells
 
 The complete new schema is validated before publication. Stable column IDs preserve saved filters/sorts and Table-backed pivot bindings; dependent formulas and calculated-column rules follow the renamed fields, including name swaps and escaped headers. Existing calculated-column overrides remain unchanged. Every saved view is rebuilt against a recalculated candidate, and desktop layout restrictions are checked before publication. Failure leaves cells, schema and history unchanged.
 
-A successful paste records one sparse `TableCommit`, with the same guarded candidate validation for undo/redo and history rewind. Saved criteria do not block header-rename history; unrelated schema/structural operations remain gated. Native save/reopen retains the renamed schema, formulas and view bindings.
+A successful paste records one sparse `TableCommit`, with the same guarded candidate validation for undo/redo and history rewind. Saved criteria do not block header-rename history; unrelated schema operations remain gated. Native save/reopen retains the renamed schema, formulas and view bindings.
 
 ### Table-backed pivot sources
 
@@ -246,7 +258,7 @@ The import/export reports count Table definitions and include compatibility warn
 
 ## Next Phase 2 slices
 
-1. Extend guarded mutation support to structural changes and scripts.
+1. Extend guarded mutation support to scripts and session batches.
 2. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 3. Remaining structural edge cases and cross-platform QA.
 
@@ -304,3 +316,5 @@ Multi-header paste validation, 2026-10-02: desktop tests passed 648 tests with z
 Outside-Table editing validation, 2026-10-02: desktop tests passed 659 tests with zero failures and 3 existing ignores; the launchable build passed. Eleven new regressions cover titles/notes/totals, other-sheet precedents changing sort/filter results, atomic mixed-target and spill rejection, protected targets and merged origins, visible-row paste mapping, sparse undo/redo, stale replay, catalog-order independence and history rewind. Linux live QA verified note edits with undo/redo, rectangular paste below a filtered Table, Delete/undo, cross-sheet filter changes with undo/redo, and unsafe-spill rejection with the edit buffer retained. Saved-file inspection confirmed the rejected control value stayed unchanged, the hidden record and calculated override survived, and filter/sort bindings remained intact ([screenshot](images/tables/outside-filtered-table-editing.png)). macOS/Windows live UI remains untested.
 
 Outside-Table cut/fill validation, 2026-10-02: the desktop suite passed 671 tests with zero failures and 3 existing ignores; the launchable build passed. Twelve new regressions cover exact cut/paste payloads and separate sparse history, cross-sheet filter changes and rewind, ordinary worksheet projection mapping, formula offsets and destination metadata, four-direction series/copy, literal text, mixed selections, protected sources and targets, bounds/size limits and atomic unsafe-spill rejection. Linux live QA verified rectangular cut/paste with separate undo steps, Fill Down/Right, edit-buffer Ctrl+Enter, fill-handle series and undo/redo, header-cut rejection with an unchanged clipboard, cross-sheet cut/fill and undo, and unsafe cross-sheet fill rejection ([screenshot](images/tables/outside-filtered-table-fill.png)). Saved-file checks confirmed exact formula offsets and series values, unchanged Table schema/view metadata, the hidden record and calculated override, and the unchanged rejected spill control. macOS/Windows live UI remains untested.
+
+Structural edits through saved views, 2026-10-02: 1,302 engine/I/O tests and the final 686 desktop tests passed (27 existing ignores total), including 15 new structural regressions. The launchable desktop build passed. Linux native checks verified sorted/filtered multi-row deletion preserving hidden records, row insertion filling calculated rules, one-step undo/redo, column insertion retaining IDs and criteria, protected-criterion column refusal, deletion/restoration of an unfiltered calculated column and its override, custom width/height and hidden-row movement, cross-sheet reference rewrites, F4 repeat, and saved SQLite metadata. Automated rewind tests cover structural replay and historical layout recovery; existing unsupported-action gates remain. macOS/Windows live UI was not tested.

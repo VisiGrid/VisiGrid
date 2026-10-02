@@ -63,6 +63,20 @@ impl Sheet {
     /// Rebuild from current computed values. Refuses unsafe layouts without
     /// mutating or dropping the saved criteria. Call after recalculation.
     pub fn build_saved_table_view(&self, row_count: usize) -> Result<Option<TableView>, String> {
+        if let Some(spec) = &self.table_view_spec {
+            let table = self
+                .tables()
+                .iter()
+                .find(|t| t.id == spec.table)
+                .ok_or("The saved Table view's Table no longer exists.")?;
+            spec.validate_schema(table)?;
+            // Deleting the final record suspends projection, not saved intent.
+            // Direct activation of a new empty-body view remains refused.
+            if table.range.data_rows() == 0 {
+                return Ok(None);
+            }
+        }
+
         self.table_view_spec
             .clone()
             .map(|spec| TableView::build(self, spec, row_count, None))

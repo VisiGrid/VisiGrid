@@ -224,7 +224,16 @@ pub enum UndoAction {
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
-    TableCellsChanged { sheet_index: usize, commit: Box<crate::table_cell_history::TableCellsCommit>, description: String },
+    TableStructureChanged {
+        sheet_index: usize,
+        history: Box<crate::table_structure::TableStructureHistory>,
+        description: String,
+    },
+    TableCellsChanged {
+        sheet_index: usize,
+        commit: Box<crate::table_cell_history::TableCellsCommit>,
+        description: String,
+    },
     TableViewChanged {
         sheet_index: usize,
         commit: Box<visigrid_engine::workbook::TableViewCommit>,
@@ -480,7 +489,9 @@ impl UndoAction {
             }
             UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
-            UndoAction::TableViewChanged { description, .. } | UndoAction::TableCellsChanged { description, .. } => description.clone(),
+            UndoAction::TableStructureChanged { description, .. }
+            | UndoAction::TableViewChanged { description, .. }
+            | UndoAction::TableCellsChanged { description, .. } => description.clone(),
             UndoAction::TableCommit { description, .. } => description.clone(),
             UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
@@ -1190,7 +1201,10 @@ impl History {
                 let cells = commit.changes();
                 let range = Self::bounding_box(&cells);
                 (Some(*sheet_index), cells, range)
-            },
+            }
+            UndoAction::TableStructureChanged { sheet_index, .. } => {
+                (Some(*sheet_index), vec![], None)
+            }
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
@@ -1532,6 +1546,64 @@ impl History {
             Self::apply_action_forward(&mut workbook, &mut view_state, &entry.action)?;
         }
 
+        view_state.per_sheet.resize_with(workbook.sheet_count(), PreviewSheetView::default);
+        for (index, entry) in self.undo_stack.iter().enumerate().skip(i) {
+            if let UndoAction::TableStructureChanged { history, .. } = &entry.action {
+                if let Some(sheet_index) = workbook.sheet_index_by_id(history.commit.sheet) {
+                    let view = &mut view_state.per_sheet[sheet_index];
+                    if view.structure_layout.is_none() {
+                        let mut layout = history.before.clone();
+                        for earlier in self.undo_stack[i..index].iter().rev() {
+                            match &earlier.action {
+                                UndoAction::ColumnWidthSet {
+                                    sheet_id, col, old, ..
+                                } if *sheet_id == history.commit.sheet => {
+                                    if let Some(v) = old {
+                                        layout.widths.insert(*col, *v);
+                                    } else {
+                                        layout.widths.remove(col);
+                                    }
+                                }
+                                UndoAction::RowHeightSet {
+                                    sheet_id, row, old, ..
+                                } if *sheet_id == history.commit.sheet => {
+                                    if let Some(v) = old {
+                                        layout.heights.insert(*row, *v);
+                                    } else {
+                                        layout.heights.remove(row);
+                                    }
+                                }
+                                UndoAction::RowVisibilityChanged { sheet_id, rows, hidden }
+                                    if *sheet_id == history.commit.sheet => {
+                                    for row in rows {
+                                        if *hidden { layout.hidden_rows.remove(row); }
+                                        else { layout.hidden_rows.insert(*row); }
+                                    }
+                                }
+                                UndoAction::ColVisibilityChanged { sheet_id, cols, hidden }
+                                    if *sheet_id == history.commit.sheet => {
+                                    for col in cols {
+                                        if *hidden { layout.hidden_cols.remove(col); }
+                                        else { layout.hidden_cols.insert(*col); }
+                                    }
+                                }
+                                UndoAction::RowsInserted { .. }
+                                | UndoAction::RowsDeleted { .. }
+                                | UndoAction::ColsInserted { .. }
+                                | UndoAction::ColsDeleted { .. }
+                                | UndoAction::WorkbookSnapshot { .. }
+                                | UndoAction::Group { .. } => {
+                                    return Err(PreviewBuildError::InvariantViolation("Cannot reconstruct layout across older structural history.".into()));
+                                }
+                                _ => {}
+                            }
+                        }
+                        view.structure_layout = Some(layout);
+                    }
+                }
+            }
+        }
+
         // Rebuild projections from the reconstructed cells, including views
         // already present in the base snapshot (no history action required).
         view_state.per_sheet.resize_with(workbook.sheet_count(), PreviewSheetView::default);
@@ -1568,6 +1640,14 @@ impl History {
         view_state: &mut crate::app::PreviewViewState,
         action: &UndoAction,
     ) -> Result<(), PreviewBuildError> {
+        if view_state.per_sheet.iter().any(|v| v.structure_layout.is_some())
+            && matches!(action, UndoAction::RowsInserted { .. } | UndoAction::RowsDeleted { .. }
+                | UndoAction::ColsInserted { .. } | UndoAction::ColsDeleted { .. }
+                | UndoAction::WorkbookSnapshot { .. } | UndoAction::FreezePanesChanged { .. })
+        {
+            return Err(PreviewBuildError::InvariantViolation(
+                "Cannot reconstruct layout across older structural history.".into()));
+        }
         match action {
             UndoAction::Comments { sheet_index, patches, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Missing comment sheet".into()))?;
@@ -1653,6 +1733,21 @@ impl History {
                 workbook.recompute_full_ordered();
                 workbook.apply_table_view_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
+            UndoAction::TableStructureChanged {
+                sheet_index,
+                history,
+                ..
+            } => {
+                history
+                    .commit
+                    .replay(workbook, false)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
+                if let Some(view) = view_state.per_sheet.get_mut(*sheet_index) {
+                    view.row_order = None;
+                    view.sort = None;
+                    view.structure_layout = Some(history.after.clone());
+                }
+            }
             UndoAction::TableCellsChanged { commit, .. } => {
                 workbook.rebuild_dep_graph();
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
@@ -1734,9 +1829,57 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::ColumnWidthSet { .. } | UndoAction::RowHeightSet { .. }
-            | UndoAction::RowVisibilityChanged { .. } | UndoAction::ColVisibilityChanged { .. }
-            | UndoAction::FreezePanesChanged { .. } => {
+            UndoAction::ColumnWidthSet {
+                sheet_id, col, new, ..
+            } => {
+                if let Some(layout) = workbook
+                    .sheet_index_by_id(*sheet_id)
+                    .and_then(|i| view_state.per_sheet.get_mut(i))
+                    .and_then(|v| v.structure_layout.as_mut())
+                {
+                    if let Some(v) = new {
+                        layout.widths.insert(*col, *v);
+                    } else {
+                        layout.widths.remove(col);
+                    }
+                }
+            }
+            UndoAction::RowHeightSet {
+                sheet_id, row, new, ..
+            } => {
+                if let Some(layout) = workbook
+                    .sheet_index_by_id(*sheet_id)
+                    .and_then(|i| view_state.per_sheet.get_mut(i))
+                    .and_then(|v| v.structure_layout.as_mut())
+                {
+                    if let Some(v) = new {
+                        layout.heights.insert(*row, *v);
+                    } else {
+                        layout.heights.remove(row);
+                    }
+                }
+            }
+            UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                if let Some(layout) = workbook.sheet_index_by_id(*sheet_id)
+                    .and_then(|i| view_state.per_sheet.get_mut(i))
+                    .and_then(|v| v.structure_layout.as_mut()) {
+                    for row in rows {
+                        if *hidden { layout.hidden_rows.insert(*row); }
+                        else { layout.hidden_rows.remove(row); }
+                    }
+                }
+            }
+            UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
+                if let Some(layout) = workbook.sheet_index_by_id(*sheet_id)
+                    .and_then(|i| view_state.per_sheet.get_mut(i))
+                    .and_then(|v| v.structure_layout.as_mut()) {
+                    for col in cols {
+                        if *hidden { layout.hidden_cols.insert(*col); }
+                        else { layout.hidden_cols.remove(col); }
+                    }
+                }
+            }
+            UndoAction::FreezePanesChanged { .. } => {
                 // Column/row sizing and visibility are stored at the app level (Spreadsheet), not in Workbook.
                 // For preview purposes, we skip these - the preview shows correct data values
                 // even if column widths or visibility differ from the historical state.
@@ -1837,6 +1980,7 @@ pub enum UndoActionKind {
     TableCommit,
     TableViewChanged,
     TableCellsChanged,
+    TableStructureChanged,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -1879,6 +2023,7 @@ impl UndoActionKind {
             UndoActionKind::TableCommit => true,
             UndoActionKind::TableViewChanged => true,
             UndoActionKind::TableCellsChanged => true,
+            UndoActionKind::TableStructureChanged => true,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
@@ -1928,6 +2073,7 @@ impl UndoActionKind {
             UndoActionKind::TableCommit => "Table",
             UndoActionKind::TableViewChanged => "Table view",
             UndoActionKind::TableCellsChanged => "Table cells",
+            UndoActionKind::TableStructureChanged => "Table structure",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
@@ -1970,6 +2116,7 @@ impl UndoActionKind {
             UndoActionKind::TableCommit => 0x1F,
             UndoActionKind::TableViewChanged => 0x20,
             UndoActionKind::TableCellsChanged => 0x21,
+            UndoActionKind::TableStructureChanged => 0x22,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
@@ -2012,6 +2159,7 @@ impl UndoAction {
             UndoAction::TableCommit { .. } => UndoActionKind::TableCommit,
             UndoAction::TableViewChanged { .. } => UndoActionKind::TableViewChanged,
             UndoAction::TableCellsChanged { .. } => UndoActionKind::TableCellsChanged,
+            UndoAction::TableStructureChanged { .. } => UndoActionKind::TableStructureChanged,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
@@ -2561,6 +2709,7 @@ mod tests {
             UndoActionKind::TableCommit,
             UndoActionKind::TableViewChanged,
             UndoActionKind::TableCellsChanged,
+            UndoActionKind::TableStructureChanged,
             UndoActionKind::PivotCommit,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,

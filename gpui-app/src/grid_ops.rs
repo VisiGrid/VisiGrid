@@ -17,6 +17,10 @@ impl Spreadsheet {
 
     /// Insert rows or columns based on current selection (Ctrl+=)
     pub fn insert_rows_or_cols(&mut self, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.table_structure_selection(false, cx);
+            return;
+        }
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
 
@@ -47,6 +51,10 @@ impl Spreadsheet {
 
     /// Delete rows or columns based on current selection (Ctrl+-)
     pub fn delete_rows_or_cols(&mut self, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.table_structure_selection(true, cx);
+            return;
+        }
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
 
@@ -91,6 +99,18 @@ impl Spreadsheet {
 
     /// Insert rows at position with undo support
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.apply_table_structure(
+                vec![visigrid_engine::workbook::StructureStep {
+                    axis: visigrid_engine::structural::Axis::Row,
+                    at: at_row,
+                    count,
+                    delete: false,
+                }],
+                cx,
+            );
+            return;
+        }
         self.set_repeat(RepeatAction::InsertRows(count));
         let sheet_index = self.sheet_index(cx);
         if !self.sheet(cx).tables().is_empty() && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
@@ -156,6 +176,18 @@ impl Spreadsheet {
 
     /// Delete rows at position with undo support
     pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.apply_table_structure(
+                vec![visigrid_engine::workbook::StructureStep {
+                    axis: visigrid_engine::structural::Axis::Row,
+                    at: at_row,
+                    count,
+                    delete: true,
+                }],
+                cx,
+            );
+            return;
+        }
         self.set_repeat(RepeatAction::DeleteRows(count));
         let sheet_index = self.sheet_index(cx);
         if !self.sheet(cx).tables().is_empty() && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
@@ -242,6 +274,18 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.apply_table_structure(
+                vec![visigrid_engine::workbook::StructureStep {
+                    axis: visigrid_engine::structural::Axis::Col,
+                    at: at_col,
+                    count,
+                    delete: false,
+                }],
+                cx,
+            );
+            return;
+        }
         self.set_repeat(RepeatAction::InsertCols(count));
         let sheet_index = self.sheet_index(cx);
         let table_columns = match self.wb(cx).prepare_table_column_history(sheet_index, at_col, count, false) {
@@ -298,6 +342,18 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.apply_table_structure(
+                vec![visigrid_engine::workbook::StructureStep {
+                    axis: visigrid_engine::structural::Axis::Col,
+                    at: at_col,
+                    count,
+                    delete: true,
+                }],
+                cx,
+            );
+            return;
+        }
         self.set_repeat(RepeatAction::DeleteCols(count));
         let sheet_index = self.sheet_index(cx);
         let table_columns = match self.wb(cx).prepare_table_column_history(sheet_index, at_col, count, true) {

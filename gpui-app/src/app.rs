@@ -3138,8 +3138,21 @@ impl Spreadsheet {
         start
     }
 
+    fn preview_structure_layout(&self) -> Option<&crate::table_structure::StructureLayout> {
+        self.preview_session()
+            .and_then(|s| s.view_state.per_sheet.get(s.snapshot.active_sheet_index()))
+            .and_then(|v| v.structure_layout.as_ref())
+    }
+
     /// Get width for a column (custom or default) for the current sheet
     pub fn col_width(&self, col: usize) -> f32 {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout
+                .widths
+                .get(&col)
+                .copied()
+                .unwrap_or(self.metrics.default_cell_sizes.column_width);
+        }
         self.col_widths
             .get(&self.cached_sheet_id)
             .and_then(|sheet_widths| sheet_widths.get(&col))
@@ -3149,6 +3162,13 @@ impl Spreadsheet {
 
     /// Get height for a row (custom or default) for the current sheet
     pub fn row_height(&self, row: usize) -> f32 {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout
+                .heights
+                .get(&row)
+                .copied()
+                .unwrap_or(self.metrics.default_cell_sizes.row_height);
+        }
         self.row_heights
             .get(&self.cached_sheet_id)
             .and_then(|sheet_heights| sheet_heights.get(&row))
@@ -3259,6 +3279,9 @@ impl Spreadsheet {
 
     /// Check if a row is hidden on the current sheet
     pub fn is_row_hidden(&self, row: usize) -> bool {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout.hidden_rows.contains(&row);
+        }
         self.hidden_rows
             .get(&self.cached_sheet_id)
             .map_or(false, |set| set.contains(&row))
@@ -3266,6 +3289,9 @@ impl Spreadsheet {
 
     /// Check if a column is hidden on the current sheet
     pub fn is_col_hidden(&self, col: usize) -> bool {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout.hidden_cols.contains(&col);
+        }
         self.hidden_cols
             .get(&self.cached_sheet_id)
             .map_or(false, |set| set.contains(&col))
@@ -3273,12 +3299,22 @@ impl Spreadsheet {
 
     /// Check if current sheet has any hidden rows
     pub fn has_hidden_rows(&self) -> bool {
-        self.hidden_rows.get(&self.cached_sheet_id).map_or(false, |s| !s.is_empty())
+        if let Some(layout) = self.preview_structure_layout() {
+            return !layout.hidden_rows.is_empty();
+        }
+        self.hidden_rows
+            .get(&self.cached_sheet_id)
+            .map_or(false, |s| !s.is_empty())
     }
 
     /// Check if current sheet has any hidden columns
     pub fn has_hidden_cols(&self) -> bool {
-        self.hidden_cols.get(&self.cached_sheet_id).map_or(false, |s| !s.is_empty())
+        if let Some(layout) = self.preview_structure_layout() {
+            return !layout.hidden_cols.is_empty();
+        }
+        self.hidden_cols
+            .get(&self.cached_sheet_id)
+            .map_or(false, |s| !s.is_empty())
     }
 
     /// Get the nth visible column starting from scroll_col, skipping hidden columns.
@@ -3288,11 +3324,10 @@ impl Spreadsheet {
             let col = scroll_col + visible_index;
             return if col < NUM_COLS { Some(col) } else { None };
         }
-        let hidden = self.hidden_cols.get(&self.cached_sheet_id).unwrap();
         let mut count = 0;
         let mut col = scroll_col;
         while col < NUM_COLS {
-            if !hidden.contains(&col) {
+            if !self.is_col_hidden(col) {
                 if count == visible_index {
                     return Some(col);
                 }
@@ -3309,12 +3344,11 @@ impl Spreadsheet {
         if !self.has_hidden_rows() {
             return self.nth_visible_row(visible_index, cx);
         }
-        let hidden = self.hidden_rows.get(&self.cached_sheet_id).unwrap();
         let mut count = 0;
         let mut idx = 0;
         loop {
             let (view_row, data_row) = self.nth_visible_row(idx, cx)?;
-            if !hidden.contains(&data_row) {
+            if !self.is_row_hidden(data_row) {
                 if count == visible_index {
                     return Some((view_row, data_row));
                 }

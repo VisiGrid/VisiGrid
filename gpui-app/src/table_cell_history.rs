@@ -116,10 +116,15 @@ impl TableCellsCommit {
         let sheet = wb.sheet(index).unwrap();
         if sheet.table_view_spec() != self.view.as_ref()
             || sheet.tables().len() != self.tables.len()
-            || self
-                .tables
-                .iter()
-                .any(|saved| sheet.tables().iter().find(|t| t.id == saved.id) != Some(saved))
+            || self.tables.iter().any(|saved| {
+                !sheet.tables().iter().any(|current| {
+                    let mut saved = saved.clone();
+                    let mut current = current.clone();
+                    saved.next_column_id = 0;
+                    current.next_column_id = 0;
+                    saved == current
+                })
+            })
         {
             return Err(
                 "The Table or its view changed since this edit. Undo/redo was not applied.".into(),

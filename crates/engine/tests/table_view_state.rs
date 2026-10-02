@@ -271,7 +271,7 @@ fn empty_bodies_and_late_neighbors_suspend_projection_without_losing_intent() {
         .unwrap();
     wb.structural_edit(0, Axis::Row, 3, 3, true).unwrap();
     assert!(wb.validate_table_view_specs().is_ok());
-    assert!(wb.active_sheet().build_saved_table_view(30).is_err());
+    assert!(wb.active_sheet().build_saved_table_view(30).unwrap().is_none());
     wb.restore_tables(wb.saved_tables()).unwrap();
     wb.append_table_rows(spec.table, 1, &[(3, 2, "10".into())])
         .unwrap();
