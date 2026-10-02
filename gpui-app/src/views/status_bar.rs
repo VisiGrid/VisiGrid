@@ -575,11 +575,21 @@ fn render_status_message(
             .into_any_element();
     }
 
+    // An open CSV keeps its import summary in the status bar; clicking it
+    // opens the import settings
+    let csv_line = app.current_csv().map(|c| (format!("Opened {}", c.file_name()), format!("{} · {}", c.file_name(), c.summary)));
+    let csv_clickable = hint_buffer.is_none()
+        && csv_line.as_ref().is_some_and(|(opened, _)| {
+            app.status_message.as_ref().map_or(true, |m| m.starts_with(opened.as_str()))
+        });
+
     // Priority: hint buffer > status message > mode text
     let message = if let Some(hint) = hint_buffer {
         hint.to_string()
     } else if let Some(msg) = &app.status_message {
         msg.clone()
+    } else if let Some((_, line)) = csv_line.as_ref().filter(|_| csv_clickable) {
+        line.clone()
     } else if let Some(pivot) = app.pivot_status_text(cx) {
         if mode_text.is_empty() { pivot } else { format!("{mode_text} \u{00b7} {pivot}") }
     } else {
@@ -592,7 +602,18 @@ fn render_status_message(
     let panel_border = app.token(TokenKey::PanelBorder);
 
     // If there's an import result, make the message clickable
-    let msg_el: AnyElement = if has_import_result && app.status_message.is_some() {
+    let msg_el: AnyElement = if csv_clickable {
+        div()
+            .id("status-message")
+            .text_color(accent)
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.show_csv_import_dialog(cx);
+            }))
+            .child(message)
+            .into_any_element()
+    } else if has_import_result && app.status_message.is_some() {
         div()
             .id("status-message")
             .text_color(accent)

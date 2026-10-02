@@ -830,6 +830,10 @@ pub struct Spreadsheet {
 
     // Import report state (for Excel imports)
     pub import_result: Option<visigrid_io::xlsx::ImportResult>,
+    /// What the last CSV import decided (banner, status line, settings dialog).
+    pub csv_doc: Option<crate::csv_import_ui::CsvDocState>,
+    /// The CSV import settings dialog, while open.
+    pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
     pub import_report_details_expanded: bool,
     pub import_filename: Option<String>,         // Original filename for display
     pub import_source_dir: Option<PathBuf>,      // Original directory for Save As default
@@ -1390,6 +1394,8 @@ impl Spreadsheet {
             extract_focus: CreateNameFocus::default(),
 
             import_result: None,
+            csv_doc: None,
+            csv_dialog: None,
             import_report_details_expanded: false,
             import_filename: None,
             import_source_dir: None,
@@ -2448,6 +2454,7 @@ impl Spreadsheet {
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
             CommandId::ExportPdf => self.show_pdf_export(cx),
+            CommandId::CsvImportSettings => self.show_csv_import_dialog(cx),
             CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),

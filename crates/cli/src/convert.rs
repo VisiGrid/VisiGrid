@@ -681,10 +681,16 @@ fn sheet_layout_to_export(
 }
 
 pub(crate) fn read_stdin(format: Format, delimiter: char, csv: &visigrid_io::csv::CsvOptions, into_row: usize, into_col: usize) -> Result<visigrid_engine::sheet::Sheet, CliError> {
-    let mut input = String::new();
+    let mut bytes = Vec::new();
     io::stdin()
-        .read_to_string(&mut input)
+        .read_to_end(&mut bytes)
         .map_err(|e| CliError::io(e.to_string()))?;
+    // CSV decodes like a file does: --encoding if given, else a byte-order
+    // mark, else UTF-8, else Windows-1252. Other formats must be UTF-8.
+    let input = match format {
+        Format::Csv | Format::Tsv => visigrid_io::csv_import::decode(&bytes, csv.encoding).0,
+        _ => String::from_utf8(bytes).map_err(|_| CliError::parse("stdin is not valid UTF-8"))?,
+    };
 
     if input.is_empty() {
         return Err(CliError::parse("no input received on stdin")

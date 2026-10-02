@@ -456,6 +456,18 @@ impl Spreadsheet {
 
     /// Start background CSV/TSV/Parquet import with delayed overlay
     fn start_csv_import(&mut self, path: &PathBuf, ext: &str, cx: &mut Context<Self>) {
+        self.start_delimited_import(path, ext, None, cx);
+    }
+
+    /// Re-import a CSV/TSV with explicit settings (the import dialog, the
+    /// banner's "Evaluate formulas"). None: saved settings for its columns,
+    /// else the defaults.
+    pub fn start_csv_import_with(&mut self, path: &PathBuf, options: Option<csv::CsvOptions>, cx: &mut Context<Self>) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv").to_lowercase();
+        self.start_delimited_import(path, &ext, options, cx);
+    }
+
+    fn start_delimited_import(&mut self, path: &PathBuf, ext: &str, explicit: Option<csv::CsvOptions>, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
@@ -495,23 +507,33 @@ impl Spreadsheet {
                     // A Parquet file bigger than a sheet loads what fits;
                     // the note says so rather than letting rows vanish.
                     // So does a CSV: what it kept as text, and what did not fit.
-                    let (sheet, note) = match ext.as_str() {
+                    let (sheet, note, csv_doc) = match ext.as_str() {
                         "parquet" => {
                             let imported = parquet::import(&path_for_import)?;
                             let note = imported.truncation_message();
-                            (imported.sheet, note)
+                            (imported.sheet, note, None)
                         }
                         _ => {
-                            let options = csv::CsvOptions { delimiter: (ext == "tsv").then_some(b'\t'), ..Default::default() };
+                            // Explicit settings, else ones saved for these
+                            // column names, else the defaults
+                            let (options, saved) = match explicit {
+                                Some(options) => (options, false),
+                                None => match crate::csv_import_ui::saved_options_for(&path_for_import) {
+                                    Some(options) => (options, true),
+                                    None => (csv::CsvOptions { delimiter: (ext == "tsv").then_some(b'\t'), ..Default::default() }, false),
+                                },
+                            };
                             let imported = csv::import_report(&path_for_import, &options)?;
-                            let note = imported.message();
-                            (imported.sheet, note)
+                            let doc = crate::csv_import_ui::CsvDocState::new(path_for_import.clone(), options, &imported, saved);
+                            // The banner carries the details; the status bar the summary
+                            let note = Some(doc.summary.clone());
+                            (imported.sheet, note, Some(doc))
                         }
                     };
                     let mut workbook = Workbook::from_sheets(vec![sheet], 0);
                     workbook.rebuild_dep_graph();
                     workbook.recompute_full_ordered();
-                    Ok::<(Workbook, Option<String>), String>((workbook, note))
+                    Ok::<(Workbook, Option<String>, Option<crate::csv_import_ui::CsvDocState>), String>((workbook, note, csv_doc))
                 })
                 .await;
 
@@ -525,8 +547,10 @@ impl Spreadsheet {
                     .unwrap_or(0);
 
                 match import_result {
-                    Ok((workbook, note)) => {
+                    Ok((workbook, note, csv_doc)) => {
                         if this.block_if_previewing(cx) { return; }
+                        let is_csv = csv_doc.is_some();
+                        this.csv_doc = csv_doc;
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
@@ -563,6 +587,7 @@ impl Spreadsheet {
                             format!("{}ms", duration_ms)
                         };
                         this.status_message = Some(match note {
+                            Some(note) if is_csv => format!("Opened {} in {} · {}", filename_for_completion, duration_str, note),
                             Some(note) => format!("Opened {} in {}. {}", filename_for_completion, duration_str, note),
                             None => format!("Opened {} in {}", filename_for_completion, duration_str),
                         });
