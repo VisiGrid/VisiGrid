@@ -40,6 +40,15 @@ pub fn try_save_user_settings(settings: &UserSettings) -> std::io::Result<()> {
 }
 
 fn save_user_settings_to(path: &Path, settings: &UserSettings) -> std::io::Result<()> {
+    // Rename over the target, not over a dotfile manager's settings.json link.
+    // Refuse dangling/cyclic links rather than silently replacing them.
+    let destination = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)?,
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error),
+    };
+    let path = destination.as_path();
     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     let json = serde_json::to_vec_pretty(settings).map_err(std::io::Error::other)?;
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
@@ -67,6 +76,40 @@ mod toolbar_persistence_tests {
         assert!(!loaded.appearance.show_format_bar.resolve(true));
         assert_eq!(loaded.appearance.theme_id.as_value().unwrap(), "keep");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_follows_relative_and_absolute_settings_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("managed.json");
+        let relative = dir.path().join("settings.json");
+        let absolute = dir.path().join("another-settings.json");
+        std::fs::write(&target, "{}").unwrap();
+        symlink("managed.json", &relative).unwrap();
+        symlink(&relative, &absolute).unwrap(); // Also exercise a chain of links.
+        let mut settings = UserSettings::default();
+        settings.appearance.toolbar.set_layout(ToolbarLayout::Ribbon);
+        for path in [&relative, &absolute] {
+            save_user_settings_to(path, &settings).unwrap();
+            assert!(std::fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+            let loaded: UserSettings = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+            assert_eq!(loaded.appearance.toolbar.layout(), ToolbarLayout::Ribbon);
+        }
+        assert_eq!(std::fs::read_link(relative).unwrap(), std::path::PathBuf::from("managed.json"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_settings_symlink_is_preserved_on_save_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::os::unix::fs::symlink("missing.json", &path).unwrap();
+        assert!(save_user_settings_to(&path, &UserSettings::default()).is_err());
+        assert_eq!(std::fs::read_link(path).unwrap(), std::path::PathBuf::from("missing.json"));
+        assert!(!dir.path().join("missing.json").exists());
     }
 
     #[test]

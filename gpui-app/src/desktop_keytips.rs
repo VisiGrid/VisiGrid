@@ -63,11 +63,15 @@ pub const TAB_KEYS: [(char, RibbonTab); 5] = [
     ('w', RibbonTab::View),
 ];
 
+/// Alt-tap is part of the opt-in ribbon, never a mode switch while typing.
+fn scope_available(layout: ToolbarLayout, mode: crate::mode::Mode, visible: bool) -> bool {
+    layout == ToolbarLayout::Ribbon && mode.is_navigation() && visible
+}
+
 impl Spreadsheet {
     pub fn desktop_keytips_available(&self, window: &Window, cx: &App) -> bool {
         window.is_window_active()
-            && !self.zen_mode
-            && (self.mode.is_navigation() || self.mode.is_editing())
+            && scope_available(self.toolbar_layout(cx), self.mode, self.toolbar_visible(cx))
             && self.edit_marked_range.is_none()
             && (self.focus_handle.is_focused(window) || self.ui.ribbon.contains_focus(window, cx))
             && !self.ui.format_bar.is_active(window)
@@ -196,6 +200,26 @@ impl Spreadsheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn alt_tap_is_only_available_in_visible_ribbon_navigation() {
+        use crate::mode::Mode;
+        for mode in [
+            Mode::Navigation,
+            Mode::Edit,
+            Mode::Formula,
+            Mode::Find,
+            Mode::Command,
+            Mode::FontPicker,
+        ] {
+            assert!(!scope_available(ToolbarLayout::Compact, mode, true));
+            assert!(!scope_available(ToolbarLayout::Ribbon, mode, false));
+            assert_eq!(
+                scope_available(ToolbarLayout::Ribbon, mode, true),
+                mode == Mode::Navigation
+            );
+        }
+    }
+
     #[test]
     fn root_letters_do_not_collide_and_help_stays_h() {
         let mut keys: Vec<_> = MENU_KEYS
