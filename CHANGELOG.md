@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Excel Tables import/export.** `.xlsx` files preserve supported Table names, bounds, headers, row banding, structured references and calculated-column rules, including blank/value/formula overrides. Import reports unsupported metadata; export reviews lost filter/sort criteria and pivot definitions before writing. Header-only Tables require an empty record before export. Excel's long `#This Row` selector is now supported.
+- Fixed Excel imports starting away from A1 dropping their last rows or rightmost columns, including values-only imports.
+
 - Desktop Save now preserves pivot definitions as well as their output cells, including existing range-based pivots.
 
 - **Table-backed pivot sources.** Select a named Table in the pivot drawer. Refresh includes its current records, follows column identities through renames and structural movement, and includes hidden records. Missing sources or fields keep the last good result and explain how to repair the pivot. Native/full-JSON files preserve the bindings; guarded pivot operations and undo/redo work with active Table views.

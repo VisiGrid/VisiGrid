@@ -56,6 +56,10 @@ pub struct SheetStats {
 #[derive(Debug, Default)]
 
 pub struct ImportResult {
+    /// Table definitions restored before formula binding.
+    pub tables_imported: usize,
+    /// Unsupported or corrupt Table definitions retained as cells, with warnings.
+    pub tables_skipped: usize,
     /// Per-sheet statistics
     pub sheet_stats: Vec<SheetStats>,
     /// Count of sheets imported
@@ -207,6 +211,7 @@ impl ImportResult {
             format!("{} sheet{}", self.sheets_imported, if self.sheets_imported == 1 { "" } else { "s" }),
             format!("{} cells", self.cells_imported),
         ];
+        if self.tables_imported > 0 { parts.push(format!("{} Tables", self.tables_imported)); }
         if self.formulas_imported > 0 {
             parts.push(format!("{} formulas", self.formulas_imported));
         }
@@ -446,17 +451,19 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             continue;
         }
 
-        // Cap dimensions to our limits
-        let effective_rows = height.min(MAX_ROWS);
-        let effective_cols = width.min(MAX_COLS);
-
-        if height > MAX_ROWS || width > MAX_COLS {
-            stats.truncated_rows = height.saturating_sub(MAX_ROWS);
-            stats.truncated_cols = width.saturating_sub(MAX_COLS);
+        // Calamine dimensions are sizes relative to range.start(), not absolute
+        // sheet coordinates. A Table starting at B3 must not lose its last row
+        // or rightmost header before its definition is installed.
+        let (data_start_row, data_start_col) = range.start().unwrap_or((0, 0));
+        let end_row = data_start_row as usize + height;
+        let end_col = data_start_col as usize + width;
+        if end_row > MAX_ROWS || end_col > MAX_COLS {
+            stats.truncated_rows = end_row.saturating_sub(MAX_ROWS);
+            stats.truncated_cols = end_col.saturating_sub(MAX_COLS);
             result.truncated = true;
             result.warnings.push(format!(
-                "Sheet '{}' truncated from {}x{} to {}x{}",
-                sheet_name, height, width, effective_rows, effective_cols
+                "Sheet '{}' extends beyond the {}x{} import bounds; out-of-bounds cells were skipped",
+                sheet_name, MAX_ROWS, MAX_COLS
             ));
         }
 
@@ -464,18 +471,15 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         next_sheet_id += 1;
         cached_snapshots.push(HashMap::new());
 
-        // Range start offset (data may not begin at A1)
-        let (data_start_row, data_start_col) = range.start().unwrap_or((0, 0));
-
         for (row_idx, row) in range.rows().enumerate() {
             let target_row = data_start_row as usize + row_idx;
-            if target_row >= effective_rows {
+            if target_row >= MAX_ROWS {
                 break;
             }
 
             for (col_idx, cell) in row.iter().enumerate() {
                 let target_col = data_start_col as usize + col_idx;
-                if target_col >= effective_cols {
+                if target_col >= MAX_COLS {
                     break;
                 }
 
@@ -615,13 +619,13 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 
                 for (row_idx, row) in formula_range.rows().enumerate() {
                     let target_row = formula_start_row as usize + row_idx;
-                    if target_row >= effective_rows {
+                    if target_row >= MAX_ROWS {
                         break;
                     }
 
                     for (col_idx, formula) in row.iter().enumerate() {
                         let target_col = formula_start_col as usize + col_idx;
-                        if target_col >= effective_cols {
+                        if target_col >= MAX_COLS {
                             break;
                         }
 
@@ -751,6 +755,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
     result.warnings.extend(notes.warnings);
     result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
+
+    crate::xlsx_tables::import(path, &mut workbook, &mut result, options.values_only);
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)
@@ -1155,6 +1161,8 @@ fn exceeds_excel_precision(n: f64) -> bool {
 /// Result of an Excel export operation
 #[derive(Debug, Default)]
 pub struct ExportResult {
+    /// Real OOXML Table parts written, including calculated-column rules.
+    pub tables_exported: usize,
     /// Number of sheets exported
     pub sheets_exported: usize,
     /// Total cells exported
@@ -1191,6 +1199,7 @@ impl ExportResult {
             format!("{} sheet{}", self.sheets_exported, if self.sheets_exported == 1 { "" } else { "s" }),
             format!("{} cells", self.cells_exported),
         ];
+        if self.tables_exported > 0 { parts.push(format!("{} Tables", self.tables_exported)); }
         if self.formulas_exported > 0 {
             parts.push(format!("{} formulas", self.formulas_exported));
         }
@@ -1303,6 +1312,10 @@ impl ExportResult {
             lines.push(precision_report);
         }
 
+        if !self.warnings.is_empty() {
+            lines.push(String::new());
+            lines.push(self.warnings.join("\n"));
+        }
         lines.join("\n")
     }
 
@@ -1320,6 +1333,7 @@ impl ExportResult {
             sections.push(precision_report);
         }
 
+        if !self.warnings.is_empty() { sections.push(self.warnings.join("\n")); }
         sections.join("\n\n")
     }
 }
@@ -1414,13 +1428,10 @@ pub fn export(
 ) -> Result<ExportResult, String> {
     let start_time = Instant::now();
     let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
-    if result.comments_exported == 0 {
-        xlsx_workbook.save(path).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
-    } else {
-        let bytes = xlsx_workbook.save_to_buffer().map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
-        let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
-        std::fs::write(path, bytes).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
-    }
+    let bytes = xlsx_workbook.save_to_buffer().map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
+    let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
+    std::fs::write(path, bytes).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok(result)
 }
@@ -1436,8 +1447,15 @@ pub fn export_to_buffer(
         .save_to_buffer()
         .map_err(|e| format!("Failed to serialize XLSX: {}", e))?;
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
+}
+
+/// Table-specific losses reported before desktop export and in every host's
+/// export result. Fatal cases are rejected before the destination is written.
+pub fn table_export_warnings(workbook: &Workbook) -> Result<Vec<String>, String> {
+    crate::xlsx_tables::export_warnings(workbook)
 }
 
 /// Shared body: build the rust_xlsxwriter workbook from ours.
@@ -1445,7 +1463,9 @@ fn build_export(
     workbook: &Workbook,
     layouts: Option<&[ExportLayout]>,
 ) -> Result<(XlsxWorkbook, ExportResult), String> {
+    workbook.ensure_writable()?;
     let mut result = ExportResult::default();
+    result.warnings = table_export_warnings(workbook)?;
 
     let mut xlsx_workbook = XlsxWorkbook::new();
 
@@ -1492,6 +1512,8 @@ fn build_export(
                 .map_err(|e| format!("Failed to write merge: {}", e))?;
             result.merges_exported += 1;
         }
+
+        crate::xlsx_tables::write(sheet, worksheet, &mut result)?;
 
         // Export cells (skips merge-hidden cells; origin cells overwrite the
         // blank written by merge_range above)
@@ -1697,7 +1719,8 @@ fn export_sheet_cells(
                 // Try to export as formula if it has a valid AST
                 if ast.is_some() {
                     // Export the formula string (strip leading '=')
-                    let formula_str = source.strip_prefix('=').unwrap_or(source);
+                    let excel_source = crate::xlsx_tables::excel_formula(source);
+                    let formula_str = excel_source.strip_prefix('=').unwrap_or(&excel_source);
                     let format = apply_number_format(format, &cell.format().number_format);
 
                     worksheet
@@ -2529,7 +2552,7 @@ fn parse_xlsx_cell_ref(cell_ref: &str) -> Option<(usize, usize)> {
 }
 
 /// Build an Excel Format from VisiGrid CellFormat
-fn build_excel_format(cell_format: &CellFormat) -> Format {
+pub(crate) fn build_excel_format(cell_format: &CellFormat) -> Format {
     let mut format = Format::new();
 
     // Font styling

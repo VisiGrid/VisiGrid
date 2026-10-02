@@ -604,6 +604,7 @@ impl Spreadsheet {
     }
 
     pub fn show_export_report(&mut self, cx: &mut Context<Self>) {
+        self.pending_xlsx_export = None;
         if self.export_result.is_some() {
             self.lua_console.visible = false;
             self.mode = Mode::ExportReport;
@@ -612,6 +613,7 @@ impl Spreadsheet {
     }
 
     pub fn hide_export_report(&mut self, cx: &mut Context<Self>) {
+        self.pending_xlsx_export = None;
         self.mode = Mode::Navigation;
         cx.notify();
     }

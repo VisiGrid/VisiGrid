@@ -180,6 +180,7 @@ pub fn parse(table: Option<String>, input: &str) -> Result<StructuredReference, 
                 "#data" => TableSection::Data,
                 "#headers" => TableSection::Headers,
                 "#all" => TableSection::All,
+                "#this row" => TableSection::ThisRow,
                 _ => return Err(format!("Unsupported table selector: {label}")),
             };
             parts.remove(0);

@@ -86,6 +86,7 @@ pub fn render_import_report_dialog(
                         ("Sheets", format_number(ir.sheets_imported)),
                         ("Cells", format_number(ir.cells_imported)),
                         ("Formulas", format_number(ir.formulas_imported)),
+                        ("Tables", format_number(ir.tables_imported)),
                         ("Import time", format!("{} ms", format_number(ir.import_duration_ms))),
                     ].into_iter().map(|(label, value)| {
                         div().flex_1().min_w(px(125.0)).p_3().rounded_md().border_1().border_color(c.border).bg(c.surface)

@@ -1094,12 +1094,30 @@ impl Spreadsheet {
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
         if self.block_read_only_recovery(cx) { return; }
-        if self.wb(cx).tables().next().is_some() {
-            self.status_message = Some("Excel export does not preserve Tables yet. Save as .sheet, or convert Tables to ranges before exporting.".into()); cx.notify(); return;
-        }
-        // Commit any pending edit so it's included in the export
         self.commit_pending_edit(cx);
+        let warnings = match xlsx::table_export_warnings(self.wb(cx)) {
+            Ok(warnings) => warnings,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        if warnings.is_empty() {
+            self.export_xlsx_reviewed(warnings, cx);
+            return;
+        }
+        self.pending_xlsx_export = Some(warnings);
+        self.lua_console.visible = false;
+        self.mode = crate::mode::Mode::ExportReport;
+        cx.notify();
+    }
 
+    pub(crate) fn confirm_xlsx_export(&mut self, cx: &mut Context<Self>) {
+        let Some(warnings) = self.pending_xlsx_export.take() else { return; };
+        self.hide_export_report(cx);
+        self.export_xlsx_reviewed(warnings, cx);
+    }
+
+    fn export_xlsx_reviewed(&mut self, reviewed_warnings: Vec<String>, cx: &mut Context<Self>) {
+        self.pending_xlsx_export = None;
+        if self.block_read_only_recovery(cx) { return; }
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
@@ -1117,9 +1135,6 @@ impl Spreadsheet {
             .unwrap_or("export");
         let suggested_name = format!("{}.xlsx", base_name);
 
-        // Build layout information for each sheet
-        let _layouts = self.build_export_layouts(cx);
-
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
@@ -1128,8 +1143,10 @@ impl Spreadsheet {
                     // Rebuild layouts in case data changed
                     let layouts = this.build_export_layouts(cx);
 
-                    if this.wb(cx).tables().next().is_some() {
-                        this.status_message=Some("Convert Tables to ranges before exporting to Excel.".into()); cx.notify(); return;
+                    match xlsx::table_export_warnings(this.wb(cx)) {
+                        Ok(warnings) if warnings == reviewed_warnings => {},
+                        Ok(_) => { this.status_message = Some("The workbook's export details changed. Export again to review them.".into()); cx.notify(); return; }
+                        Err(error) => { this.status_message = Some(error); cx.notify(); return; }
                     }
 
                     match xlsx::export(this.wb(cx), &path, Some(&layouts)) {

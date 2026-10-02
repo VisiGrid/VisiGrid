@@ -114,7 +114,7 @@ Native semantic fingerprints use v3 for Table-bearing workbooks, including Table
 - Selecting a Table cell shows its name, exact range, record count, Add row, Rename, Resize, Banded Rows, and Convert to Range. Convert has a reviewable confirmation. Header tint, alternating body rows, and the active Table outline render only in the viewport; explicit/conditional fills retain precedence, and no per-cell formatting is stamped.
 - Editing a header cell invokes a schema rename and rewrites dependent formulas. Invalid edits leave the original header intact and report the reason. Bulk paste/fill/clear/cut, transforms, and Replace All that include headers are refused before mutation. Fill Down may use a header as its source when all destinations are body cells. Multi-header schema paste remains a follow-up.
 - Creation, rename, resize, banding, conversion, and header edits use sparse `TableCommit` history entries. Rewind can replay them and locate their Table range. Stale top-level undo/redo reports an error and retains its history position.
-- Worksheet sort/AutoFilter refuses Table-bearing sheets pending Table-aware views. Merge refuses Table cells before clearing any values. Desktop Excel export refuses Tables until the user converts them to ranges or saves in `.sheet` format; XLSX Table interchange is still unimplemented.
+- Worksheet sort/AutoFilter refuses Table-bearing sheets pending Table-aware views. Merge refuses Table cells before clearing any values. Desktop Excel export preserves the supported Table subset described below, with a pre-export review for lost sort/filter criteria and pivot definitions.
 
 Multi-header paste remains outside this slice. Table-backed pivot sources and Table-local filters are described below.
 
@@ -192,10 +192,29 @@ Source-sheet edits and Table metadata changes mark the pivot out of date. Metada
 
 Native and full-JSON persistence keep stable bindings, last output and refresh state. Table catalogs load after pivot output ownership, then establish the source-generation baseline so the first post-load edit is detected. The Table source wire representation deliberately differs from the legacy rectangle: older readers reject unsupported pivot metadata and retain materialized output as plain values, rather than silently refreshing the wrong range. The existing per-sheet pivot fallback applies. A Table name is also accepted as the session `create_pivot.source` / CLI pivot range argument; scripted mutation through active criteria remains gated.
 
+### Excel Table import/export
+
+![Excel export compatibility review](images/tables/xlsx-export-review.png)
+
+`.xlsx` import follows workbook, worksheet and Table relationships instead of assuming matching part numbers. It restores names, exact inclusive bounds, column names and row banding, then binds and recalculates structured formulas. Both `[@Qty]` and Excel's `[[#This Row],[Qty]]` spelling work. Data beginning away from A1 is imported using absolute sheet bounds, including the rightmost header and last record. Values-only import retains cached cells and Table membership, but does not install automatic-fill rules.
+
+Excel export writes actual OOXML Tables, including header controls, row banding and supported structured references. Calculated-column rules are rebased to the first record and stored separately from cell formulas. Explicit blank, value and alternate-formula overrides stay authoritative. The exporter never asks the Table writer to fill cells; doing that would overwrite exceptions. Import does not infer missing formulas or fill blank records. Appending after import uses the restored rule. Comments and native save/reopen remain compatible.
+
+This is an interoperability subset:
+
+- Excel theme colors, custom Table styles, first/last-column emphasis and column banding are not preserved as Table style metadata. VisiGrid retains supported cell formatting and row banding, and reports unsupported style options.
+- Excel totals rows, hidden header rows, query/XML Tables, invalid schemas and inconsistent header cells retain their cells without a Table definition, with an import warning. Formulas referring to a skipped Table can show errors. Unsupported calculated-column syntax retains the Table and existing cells but omits its fill rule, with a warning. Truncated workbook imports do not restore Table definitions.
+- Saved Excel filter/sort criteria are not imported. A warning explains that body rows are made visible and the physically stored order is retained. Filter-button visibility is not imported; VisiGrid shows its controls and warns when Excel hid them.
+- Export includes every stored Table record in canonical order. Active VisiGrid sort/filter criteria are not exported. The desktop requires review before opening the export destination chooser, and checks again before writing if the warnings have changed. API/CLI callers receive the same warnings in `ExportResult`.
+- Pivots remain materialized output cells in `.xlsx`; definitions and Table-source bindings are not exported. The desktop review and export report disclose this.
+- Header-only Tables cannot be exported by the current writer without changing their bounds. Export refuses before touching the destination and asks for an empty record. Native `.sheet` files retain full fidelity.
+
+The import/export reports count Table definitions and include compatibility warnings in copied details. XLSX interchange tests inspect the actual ZIP/XML parts, use independently constructed writer fixtures and exercise repeated XLSX/native round trips. These checks do not substitute for opening the output in Microsoft Excel.
+
 ## Next Phase 2 slices
 
 1. Extend mapped mutation support to other editing surfaces and scripts.
-2. XLSX Table interoperability subset and export-loss messaging.
+2. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 3. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
 
 Totals rows and saved views come later. Web/cloud preservation is deferred.
@@ -241,3 +260,6 @@ Release-hardening validation, 2026-10-01: I/O and session-host tests passed 393 
 Cut through Table views, 2026-10-01: desktop suite passed 621 tests with zero failures and 3 existing ignores; native debug build passed. New regressions cover display-order capture, hidden-record preservation, content/comment clearing with retained formatting, filter-key disappearance, sparse undo/redo, invalid bounds and post-recalculation rejection, multiline clipboard cells, and canonical formula rebasing across separate cut/paste history steps. Linux native QA confirmed visible-only cut/paste against saved canonical cells, separate undo steps, empty-view focus, filter-key undo/redo, header refusal with unchanged clipboard, and cancelling a text cut in the cell editor. macOS/Windows native UI was not exercised.
 
 Table history rewind, 2026-10-02: desktop suite passed 627 tests with zero failures and 3 existing ignores; final native debug build passed. New regressions cover loaded base criteria, sort/filter/cell replay, dependent formula results, empty views, canonical highlight mapping, stale cell/criteria refusal, per-sheet projections, invalid layout, and a second rewind across a retained prefix and audit entry. Linux native QA verified Space preview/release, arrow-key scrubbing between Table view and cell entries, criteria-only entries, confirmation surviving Space release, Escape cancellation, Enter confirmation, editing after rewind, and a second successful rewind. Saved canonical cells confirmed retained edits and untouched hidden records. macOS/Windows native UI was not exercised.
+
+
+Excel Table interchange, 2026-10-02: the engine/I/O/desktop regression run passed 1,929 tests (27 existing ignores); the final focused XLSX suite passed all 9 tests, including the subsequently added blank-first-record/offset values-only regression. The final desktop rerun passed 628 tests (3 existing ignores), and the launchable build passed. Coverage includes real Table XML and relationships, multiple sheets, an independently generated writer fixture, calculated rules rebased from a later row, blank/value/formula overrides, post-import row append, repeated native/XLSX round trips, comments, escaped headers/formulas, malformed/unsupported metadata, canonical filtered exports, visibility warnings and destination preservation on header-only refusal. Linux live QA verified the wrapped pre-export review, Escape cancellation and continuation to the destination chooser. End-to-end interchange is verified by automated tests; Microsoft Excel and macOS/Windows live UI remain untested.

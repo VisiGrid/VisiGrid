@@ -430,6 +430,8 @@ pub(crate) fn bind(
                 this.hide_refactor_log(cx);
             } else if this.mode == Mode::ExtractNamedRange {
                 this.hide_extract_named_range(cx);
+            } else if this.mode == Mode::ExportReport {
+                this.hide_export_report(cx);
             } else if this.mode == Mode::ImportReport {
                 this.hide_import_report(cx);
             } else if this.mode == Mode::ExplainDiff {
