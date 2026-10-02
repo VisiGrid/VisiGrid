@@ -572,6 +572,10 @@ pub struct Spreadsheet {
 
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
+    /// Auto-scroll while a drag is outside the grid (see drag_autoscroll.rs)
+    pub(crate) drag_autoscroll_task: Option<gpui::Task<()>>,
+    pub(crate) drag_autoscroll_pointer: Option<(f32, f32)>,
+    pub(crate) drag_last_cell: Option<(usize, usize)>,
 
     // Fill handle drag state
     pub fill_drag: FillDrag,
@@ -1253,6 +1257,9 @@ impl Spreadsheet {
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,
+            drag_autoscroll_task: None,
+            drag_autoscroll_pointer: None,
+            drag_last_cell: None,
             fill_drag: FillDrag::None,
             dragging_row_header: false,
             dragging_col_header: false,

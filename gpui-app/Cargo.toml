@@ -39,15 +39,14 @@ visigrid-license = { workspace = true }
 visigrid-print = { path = "../crates/print", features = ["preview", "native-print"] }
 image = { version = "0.25", default-features = false }
 
-# gpui — VisiGrid/zed fork: upstream v1.12.x stable (f96212f2c5) plus one
-# commit dropping private CGS blur APIs for Mac App Store compliance.
-# Bumping is a rebase of that commit onto a newer base, not a rev change,
-# and the fork mirror itself trails upstream — sync it first.
-# Verified on Linux/Wayland. macOS Tahoe/Metal is NOT verified: 0.30.0 is
-# the first release carrying the CGS blur removal, so check window chrome
-# on a real Mac — CI proves the DMG builds, not that it renders.
-gpui = { git = "https://github.com/VisiGrid/zed", rev = "218fb58d83" }
-gpui_platform = { git = "https://github.com/VisiGrid/zed", rev = "218fb58d83", features = ["wayland", "x11", "font-kit"] }
+# gpui — upstream Zed, pinned to a stable release tag. Bumping is a tag
+# change here plus the matching channel in rust-toolchain.toml (Zed's own).
+# We used to carry a fork (VisiGrid/zed) for one commit removing the private
+# CGS blur APIs that Mac App Store review rejects; upstream removed the same
+# code in zed#56315 (July 2026) and v1.22.0 has no CGS calls. Before a bump,
+# check `grep -rn CGS crates/gpui_macos` in the new tag stays empty.
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0", features = ["wayland", "x11", "font-kit"] }
 
 # External deps
 serde = { workspace = true }

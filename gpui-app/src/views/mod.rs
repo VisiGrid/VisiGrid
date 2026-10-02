@@ -220,6 +220,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         // Mouse move for resize and header selection dragging
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            // Keep a drag going past the grid's edge (selection, fill, headers)
+            this.update_drag_autoscroll(event, cx);
             if this
                 .review_mode
                 .as_ref()
@@ -299,7 +301,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         // Mouse up to end resize and header selection drag
-        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        // Released outside the window, e.g. after dragging past the grid's edge
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, cx| {
+            this.release_drag_off_grid(event.modifiers.control || event.modifiers.platform, cx);
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, cx| {
+            // A release off the grid still finishes a selection or fill drag
+            this.release_drag_off_grid(event.modifiers.control || event.modifiers.platform, cx);
             if let Some(state) = this.review_mode.as_mut() {
                 if state.card_is_dragging() {
                     state.end_card_drag();

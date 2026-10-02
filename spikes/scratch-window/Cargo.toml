@@ -3,13 +3,13 @@ name = "scratch-window-spike"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Phase 0 spike for VisiGrid scratch mode: PopUp window + global hotkey on the pinned gpui fork"
+description = "Phase 0 spike for VisiGrid scratch mode: PopUp window + global hotkey on the pinned upstream gpui"
 
 [workspace]
 
 [dependencies]
-gpui = { git = "https://github.com/VisiGrid/zed", rev = "218fb58d83" }
-gpui_platform = { git = "https://github.com/VisiGrid/zed", rev = "218fb58d83", features = ["wayland", "x11", "font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0", features = ["wayland", "x11", "font-kit"] }
 global-hotkey = "0.8"
 
 [target.'cfg(unix)'.dependencies]
