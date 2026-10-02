@@ -157,7 +157,7 @@ impl Spreadsheet {
         // Clear color map for fresh edit session
         self.clear_formula_ref_colors();
         if is_formula {
-            self.update_formula_refs();
+            self.update_formula_refs(cx);
             // F2 on existing formula: start in Caret mode (user wants to edit text).
             // Set the manual override so auto-switch doesn't flip to Point when
             // cursor passes an operator. Override clears on buffer mutation (typing).
@@ -1167,6 +1167,7 @@ impl Spreadsheet {
                 self.formula_ref_end = None;
             }
             self.autocomplete_suppressed = false;
+            self.autocomplete_selected = 0;
             self.reset_caret_activity();
 
             // If there's a selection, delete it
@@ -1175,7 +1176,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1195,7 +1196,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1215,6 +1216,7 @@ impl Spreadsheet {
                 self.formula_ref_end = None;
             }
             self.autocomplete_suppressed = false;
+            self.autocomplete_selected = 0;
             self.reset_caret_activity();
 
             // If there's a selection, delete it
@@ -1223,7 +1225,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1244,7 +1246,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1286,7 +1288,7 @@ impl Spreadsheet {
 
             // Update highlighted refs for formulas
             if self.mode.is_formula() {
-                self.update_formula_refs();
+                self.update_formula_refs(cx);
                 // Buffer mutation clears F2 override, then auto-switch based on caret
                 self.clear_formula_nav_override();
                 self.update_formula_nav_mode();
@@ -1294,6 +1296,7 @@ impl Spreadsheet {
 
             // Text edit: clear suppression so autocomplete can reopen
             self.autocomplete_suppressed = false;
+            self.autocomplete_selected = 0;
 
             // Reset caret blink (keep visible while typing)
             self.reset_caret_activity();

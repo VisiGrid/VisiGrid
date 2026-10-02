@@ -189,6 +189,8 @@ after Ctrl+A must not be able to rewrite the sheet.
 | Enter | Commit formula, move down |
 | Escape | Cancel formula entry |
 
+When formula autocomplete is visible, Tab/Enter accepts its selection without committing the cell, and Escape dismisses it before normal cancellation. A list containing Table or column suggestions owns Up/Down for selection; dismiss it to resume reference pointing. Suggestion previews do not change the active cell or workbook.
+
 ### Formula Mode Invariants
 - The active cell does not change during formula entry
 - Selection changes are temporary and used only to construct references
@@ -220,7 +222,7 @@ after Ctrl+A must not be able to rewrite the sheet.
 4. Additional selections are zero or more non-overlapping rectangles
 5. Edit mode is mutually exclusive with navigation
 6. Arrow keys without Shift always collapse to single cell
-7. Escape always cancels current operation and returns to navigation
+7. Escape dismisses an open autocomplete list first; otherwise it cancels the current operation and returns to navigation
 
 ---
 

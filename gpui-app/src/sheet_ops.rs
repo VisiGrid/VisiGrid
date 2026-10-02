@@ -638,6 +638,7 @@ impl Spreadsheet {
                 // Hide autocomplete on cross-sheet navigation
                 self.autocomplete_visible = false;
                 self.autocomplete_suppressed = true;
+                self.update_formula_refs(cx);
                 cx.notify();
             }
             return;

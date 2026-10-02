@@ -320,10 +320,11 @@ impl Spreadsheet {
             let text_end = formula.len() - 1; // Before ")"
             self.formula_highlighted_refs = vec![FormulaRef {
                 key,
+                sheet: None,
                 start,
                 end,
                 color_index: 0,
-                text_byte_range: text_start..text_end,
+                text_char_range: text_start..text_end,
             }];
         } else {
             self.formula_highlighted_refs.clear();

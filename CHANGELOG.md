@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Structured-reference editing.** Formula suggestions now include Tables, columns and supported section selectors. Tab/Enter or a click inserts an escaped reference; Escape dismisses suggestions before cancelling the edit. Selected suggestions preview their cells, and structured references use matching formula/grid colors with the correct sheet and filtered record coordinates. Keyboard selection remains visible in long suggestion lists.
+
 - **Excel Tables import/export.** `.xlsx` files preserve supported Table names, bounds, headers, row banding, structured references and calculated-column rules, including blank/value/formula overrides. Import reports unsupported metadata; export reviews lost filter/sort criteria and pivot definitions before writing. Header-only Tables require an empty record before export. Excel's long `#This Row` selector is now supported.
 - Fixed Excel imports starting away from A1 dropping their last rows or rightmost columns, including values-only imports.
 

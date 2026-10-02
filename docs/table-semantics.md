@@ -91,7 +91,16 @@ Stored expressions remain symbolic. Evaluation resolves names against the live s
 
 Rename rewriting resolves the old schema and follows stable column IDs, including atomic column-name swaps. It changes only source reference spans, preserving strings, whitespace, and grouping elsewhere in the formula. Removing a referenced column writes a permanent `#REF!`; recreating its name does not repair that reference. Undo restores the original source. Local references in released cells become explicitly Table-qualified so they cannot silently adopt another Table's context.
 
-Copy/fill preserves structured tokens and adjusts ordinary A1 references in the same formula. This first subset does not implement Excel's horizontal structured-column fill shifts. The editor treats structured selectors as opaque reference tokens, suppressing unrelated function completion and false bracket diagnostics. Column autocomplete, range highlighting, cross-workbook paste provenance, and conditional-format/validation formula rewrites still require integration before those editing flows advertise Table support.
+Copy/fill preserves structured tokens and adjusts ordinary A1 references in the same formula. This first subset does not implement Excel's horizontal structured-column fill shifts. Cross-workbook paste provenance and conditional-format/validation formula rewrites still require integration before those editing flows advertise Table support.
+
+### Structured-reference editing
+
+Table names join formula suggestions as a name is typed. Accepting a Table opens its column list (`Sales[`). Typing `=SUM(Sales[` offers its columns and supported section selectors; typing `=[@` inside a Table body offers that Table's columns. Suggestions use the formula's home sheet and canonical record, including through Table filters and cross-sheet pointing. Headers with spaces, Unicode, brackets, apostrophes or leading `#`/`@` are inserted with valid structured-reference escaping. Existing section/column spans and the expression surrounding a completed token are retained. Unsupported/external references, strings, unknown Tables and invalid current-row contexts do not offer column completions.
+
+Up/Down selects a suggestion and keeps it visible in the list. Tab, Enter or a click accepts it without committing the cell. Acceptance of a column closes the brackets but does not insert a function parenthesis. Escape first dismisses the list; a subsequent Escape follows normal edit cancellation. Typing reopens suggestions. Caret movement refreshes an open list; text selection, cell picking and sheet switching remove the suggestion preview. The shared editor buffer makes this available from both the cell editor and formula bar; replacement/caret offsets use UTF-8 bytes and syntax-color spans use character indices.
+
+Selected suggestions preview their resolved cells; accepted structured references retain formula-text colors and grid highlights. Resolution uses the engine's Table selectors and bounds, so headers, full Tables, column spans and current-row references agree with calculation. Highlights only appear on the referenced sheet. Filtered/sorted views map canonical records into the visible viewport without highlighting hidden records or selecting a different record. Empty bodies and invalid/missing references do not fabricate a range. Ordinary A1 references retain their colors alongside Table references.
+
 
 ## Persistence
 
@@ -215,7 +224,7 @@ The import/export reports count Table definitions and include compatibility warn
 
 1. Extend mapped mutation support to other editing surfaces and scripts.
 2. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
-3. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
+3. Multi-header schema paste and remaining structural edge cases and QA.
 
 Totals rows and saved views come later. Web/cloud preservation is deferred.
 
@@ -263,3 +272,5 @@ Table history rewind, 2026-10-02: desktop suite passed 627 tests with zero failu
 
 
 Excel Table interchange, 2026-10-02: the engine/I/O/desktop regression run passed 1,929 tests (27 existing ignores); the final focused XLSX suite passed all 9 tests, including the subsequently added blank-first-record/offset values-only regression. The final desktop rerun passed 628 tests (3 existing ignores), and the launchable build passed. Coverage includes real Table XML and relationships, multiple sheets, an independently generated writer fixture, calculated rules rebased from a later row, blank/value/formula overrides, post-import row append, repeated native/XLSX round trips, comments, escaped headers/formulas, malformed/unsupported metadata, canonical filtered exports, visibility warnings and destination preservation on header-only refusal. Linux live QA verified the wrapped pre-export review, Escape cancellation and continuation to the destination chooser. End-to-end interchange is verified by automated tests; Microsoft Excel and macOS/Windows live UI remain untested.
+
+Structured-reference editor validation, 2026-10-02: the final desktop suite passed 637 tests (zero failures, 3 existing ignores), and the launchable native build passed. Nine new regressions cover qualified/local completion, supported sections and column spans, Unicode/escaped names, mid-expression replacement, schema renames, calculation after acceptance, cross-sheet resolution, header-only bounds, and sorted/filtered record highlighting. Linux live QA verified Table-name suggestions and matching formula/grid preview of the body with headers and adjacent notes excluded ([screenshot](images/tables/structured-reference-completion.png)). Further live keyboard checks stopped when another window took focus; acceptance/dismissal and filtered editing still need full live QA on Linux, macOS and Windows.

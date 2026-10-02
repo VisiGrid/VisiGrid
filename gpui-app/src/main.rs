@@ -15,6 +15,7 @@ mod rewind;
 mod ai_actions;
 mod app;
 mod autocomplete;
+mod table_formula_editor;
 mod clipboard;
 mod comments;
 mod comment_sidebar;

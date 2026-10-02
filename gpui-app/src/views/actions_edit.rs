@@ -385,6 +385,10 @@ pub(crate) fn bind(
                 cx.notify();
                 return;
             }
+            if this.mode.is_editing() && this.autocomplete_visible {
+                this.autocomplete_dismiss(cx);
+                return;
+            }
             // Import overlay takes priority - dismiss it but let import continue
             if this.import_overlay_visible {
                 this.dismiss_import_overlay(cx);

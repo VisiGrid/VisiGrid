@@ -259,12 +259,13 @@ impl Spreadsheet {
         // deletes back past the '=' should leave it.
         self.recompute_edit_mode();
         if self.mode.is_formula() {
-            self.update_formula_refs();
+            self.update_formula_refs(cx);
             self.clear_formula_nav_override();
             self.update_formula_nav_mode();
         }
 
         self.autocomplete_suppressed = false;
+        self.autocomplete_selected = 0;
         self.reset_caret_activity();
         self.edit_scroll_dirty = true;
         self.formula_bar_cache_dirty = true;

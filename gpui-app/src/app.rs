@@ -4508,7 +4508,8 @@ impl Render for Spreadsheet {
         // This avoids re-parsing on every render
         if !self.mode.is_editing() {
             let cell = self.view_state.selected;
-            let formula = self.sheet(cx).get_raw(cell.0, cell.1);
+            let row = self.view_to_data(cell.0, cx);
+            let formula = self.sheet(cx).get_raw(row, cell.1);
 
             // Only update cache if cell or formula changed
             let cache_valid = self.formula_bar_cache_cell == Some(cell)
@@ -4518,7 +4519,7 @@ impl Render for Spreadsheet {
                 self.formula_bar_cache_cell = Some(cell);
                 self.formula_bar_cache_formula = formula.clone();
                 self.formula_bar_cache_refs = if formula.starts_with('=') || formula.starts_with('+') {
-                    Self::parse_formula_refs(&formula)
+                    Self::parse_table_formula_refs(&formula, self.wb(cx), self.sheet(cx).id, (row, cell.1))
                 } else {
                     Vec::new()
                 };

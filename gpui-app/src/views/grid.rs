@@ -2263,11 +2263,12 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
     // Collect unique ranges with their color indices
     // We deduplicate by RefKey so each range gets one border
     let mut seen_keys = std::collections::HashSet::new();
-    let mut ranges: Vec<(RefKey, usize)> = Vec::new();
+    let mut ranges = Vec::new();
 
     for fref in refs {
+        if fref.sheet.is_some_and(|sheet| sheet != app.cached_sheet_id()) { continue; }
         if seen_keys.insert(fref.key.clone()) {
-            ranges.push((fref.key.clone(), fref.color_index));
+            ranges.push(fref);
         }
     }
 
@@ -2278,20 +2279,39 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
     let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
     let mut layers = Vec::new();
     for region in grid_overlay_regions(app, view_state) {
-        let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = ranges.iter()
+        let mut projected = Vec::new();
+        for fref in &ranges {
+            if fref.sheet.is_some() && (app.table_view_installed || app.filter_state.sort.is_some()) {
+                let visible = app.row_view.visible_rows();
+                let first = visible.partition_point(|&r| r < region.row);
+                let rows = visible.iter().skip(first).copied().take(region.rows)
+                    .take_while(|r| region.height.is_none() || *r < region.row + region.rows);
+                let end = fref.end.unwrap_or(fref.start);
+                for (start,last) in crate::table_formula_editor::projected_runs(&app.row_view, fref.start.0..end.0 + 1, rows) {
+                    projected.push((RefKey::new(start,fref.start.1,last,end.1),fref.color_index));
+                }
+            } else { projected.push((fref.key.clone(), fref.color_index)); }
+        }
+        let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = projected.iter()
             .filter_map(|(key, color_idx)| {
+                // Filtered view indices can extend beyond the visible row count.
+                let mut projected_region = region;
+                if app.table_view_installed || app.filter_state.sort.is_some() {
+                    let visible = app.row_view.visible_rows();
+                    let first = visible.partition_point(|&r| r < region.row);
+                    if region.height.is_none() {
+                        if let Some(last) = visible.iter().skip(first).take(region.rows).last() { projected_region.rows = last + 1 - region.row; }
+                    }
+                }
                 let (x, y, width, height) = formula_ref_rect(
-                    key, region,
+                    key, projected_region,
                     |c| if app.is_col_hidden(c) { 0.0 } else { app.metrics.col_width(app.col_width(c)) },
                     |r| if app.is_row_hidden(r) { 0.0 } else { app.metrics.row_height(app.row_height(r)) },
                 )?;
                 if width <= 0.0 || height <= 0.0 { return None; }
                 let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
                 color.a = 1.0;
-                Some((Bounds {
-                    origin: Point::new(px(x), px(y)),
-                    size: Size { width: px(width), height: px(height) },
-                }, color))
+                Some((Bounds { origin: Point::new(px(x), px(y)), size: Size { width: px(width), height: px(height) } }, color))
             }).collect();
         if range_bounds.is_empty() { continue; }
         let borders = canvas(
@@ -3341,7 +3361,7 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
         .inset_0()
         // Formula autocomplete popup
         .when(app.autocomplete_visible, |div| {
-            let suggestions = app.autocomplete_suggestions();
+            let suggestions = app.autocomplete_suggestions(cx);
             let selected = app.autocomplete_selected;
             div.child(formula_bar::render_autocomplete_popup(
                 &suggestions,

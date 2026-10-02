@@ -79,6 +79,7 @@ pub enum TokenType {
     CellRef,
     Range,
     NamedRange,
+    StructuredRef,
     Number,
     String,
     Boolean,
@@ -1231,7 +1232,7 @@ enum AnalyzerTokenKind {
     Whitespace,
     Bang,         // '!' for sheet references
     SheetPrefix,  // Quoted sheet name like 'Sheet Name'
-    StructuredRef, // Opaque Table selector; column completion is a later feature
+    StructuredRef, // Keep Table selectors intact for completion and diagnostics
     Unknown,
 }
 
@@ -1592,7 +1593,7 @@ pub fn analyze(formula: &str, cursor: usize) -> FormulaContext {
                 }
             }
             AnalyzerTokenKind::CellRef => TokenType::CellRef,
-            AnalyzerTokenKind::StructuredRef => TokenType::NamedRange,
+            AnalyzerTokenKind::StructuredRef => TokenType::StructuredRef,
             AnalyzerTokenKind::Number => TokenType::Number,
             AnalyzerTokenKind::String => TokenType::String,
             AnalyzerTokenKind::SheetPrefix => TokenType::String, // Treat quoted sheet names like strings for highlighting
@@ -1880,7 +1881,7 @@ pub fn tokenize_for_highlight(formula: &str) -> Vec<(Range<usize>, TokenType)> {
                 AnalyzerTokenKind::String => TokenType::String,
                 AnalyzerTokenKind::SheetPrefix => TokenType::String, // Quoted sheet names
                 AnalyzerTokenKind::CellRef => TokenType::CellRef,
-                AnalyzerTokenKind::StructuredRef => TokenType::NamedRange,
+                AnalyzerTokenKind::StructuredRef => TokenType::StructuredRef,
                 AnalyzerTokenKind::Operator => TokenType::Operator,
                 AnalyzerTokenKind::Comparison => TokenType::Comparison,
                 AnalyzerTokenKind::LParen | AnalyzerTokenKind::RParen => TokenType::Paren,
