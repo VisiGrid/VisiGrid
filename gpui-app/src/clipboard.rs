@@ -2367,7 +2367,8 @@ mod table_paste_tests {
         for formats in &mut ic.formats { formats[0].bold = true; }
         let sheet = before.active_sheet();
         let view = sheet.build_saved_table_view(30).unwrap().unwrap();
-        let targets = view_safe_paste_targets(sheet, view.rows(), (3, 2), 2, 1).unwrap();
+        // Slot 3 contains the filtered-out East record; slot 4 is the first visible record.
+        let targets = view_safe_paste_targets(sheet, view.rows(), (4, 2), 2, 1).unwrap();
         assert_eq!(targets.iter().map(|t| t.0).collect::<Vec<_>>(), vec![5, 3]);
         let writes = super::table_paste_writes_for_sheet(
             sheet, &ic.raw_cells, Some(&ic), TablePasteKind::Contents, targets.clone());
