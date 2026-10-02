@@ -36,8 +36,14 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
+            if crate::pivot_ui::is_pivot_history(&entry.action) {
+                if let Err(error) = self.preflight_pivot_history(&entry.action, true, cx) {
+                    self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+                }
+            }
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(&entry.action, UndoAction::TableCellsChanged { .. })
+                && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && self.block_table_view_edit(cx) {
                 self.history.redo(); return;
             }
@@ -1247,8 +1253,14 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
+            if crate::pivot_ui::is_pivot_history(&entry.action) {
+                if let Err(error) = self.preflight_pivot_history(&entry.action, false, cx) {
+                    self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+                }
+            }
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(&entry.action, UndoAction::TableCellsChanged { .. })
+                && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && self.block_table_view_edit(cx) {
                 self.history.undo(); return;
             }

@@ -215,7 +215,7 @@ pub enum StructureOp {
         /// Sheet holding the source; omit for the active sheet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<usize>,
-        /// A1 range of the source including its header row (e.g. "A1:D500").
+        /// Table name, or A1 source range including its header (e.g. "A1:D500").
         /// Omit to use the sheet's whole data area from A1.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,

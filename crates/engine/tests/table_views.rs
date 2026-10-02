@@ -463,7 +463,7 @@ fn other_tables_and_pivot_output_in_body_rows_are_refused() {
             id: 1,
             name: "Pivot1".into(),
             source: visigrid_engine::pivot::PivotSource {
-                sheet_id: SheetId(1),
+                table_id: None, sheet_id: SheetId(1),
                 start_row: 0,
                 start_col: 0,
                 end_row: 1,

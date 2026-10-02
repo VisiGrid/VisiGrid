@@ -1757,12 +1757,12 @@ mod full_json_tests {
         let t = PivotTable {
             id: 7,
             name: "PivotTable1".into(),
-            source: PivotSource { sheet_id: wb.sheet(0).unwrap().id, start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
+            source: PivotSource { table_id: None, sheet_id: wb.sheet(0).unwrap().id, start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
             definition: PivotDefinition {
-                rows: vec![PivotField { offset: 0, header: "K".into() }],
+                rows: vec![PivotField { column_id: None, offset: 0, header: "K".into() }],
                 column: None,
                 values: vec![PivotValueField {
-                    field: PivotField { offset: 1, header: "V".into() },
+                    field: PivotField { column_id: None, offset: 1, header: "V".into() },
                     aggregation: Aggregation::DistinctCount,
                     number_format: None,
                 }],
@@ -1774,7 +1774,7 @@ mod full_json_tests {
             stale: false,
             source_generation: None,
         };
-        let (snap, gen) = wb.pivot_snapshot(&t).unwrap();
+        let (t, snap, gen) = wb.pivot_snapshot(&t).unwrap();
         let output = aggregate(&t.definition, &snap).unwrap();
         let commit = wb.prepare_pivot_commit(out_id, t, &output, gen, 0).unwrap();
         wb.apply_pivot_state(&commit.after).unwrap();

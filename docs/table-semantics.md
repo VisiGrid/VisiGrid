@@ -116,7 +116,7 @@ Native semantic fingerprints use v3 for Table-bearing workbooks, including Table
 - Creation, rename, resize, banding, conversion, and header edits use sparse `TableCommit` history entries. Rewind can replay them and locate their Table range. Stale top-level undo/redo reports an error and retains its history position.
 - Worksheet sort/AutoFilter refuses Table-bearing sheets pending Table-aware views. Merge refuses Table cells before clearing any values. Desktop Excel export refuses Tables until the user converts them to ranges or saves in `.sheet` format; XLSX Table interchange is still unimplemented.
 
-Table-backed pivot sources, multi-header paste, and Table-local filters remain outside this slice.
+Multi-header paste remains outside this slice. Table-backed pivot sources and Table-local filters are described below.
 
 ## Phase 2: Table view engine foundation
 
@@ -178,20 +178,33 @@ Hold Space on a history entry to preview the state before it; Up/Down scrubs adj
 
 Preview is read-only. Opening rewind confirmation keeps the preview after Space is released; Escape/Cancel returns to live state, and Enter confirms. Releasing Space outside confirmation restores the live sheet, projection, selection (including additional selections) and scroll position. Preview sheet switching changes only the snapshot’s active sheet. Confirmed rewind validates the history fingerprint, live workbook revision, selected target, engine layout and desktop Table layout before publishing. It advances the live revision, restores filter state, discards the later history/redo branch and records an audit entry. Retained history continues to replay from the original base; audit entries have no cell effect, so later previews and rewinds remain usable. Existing replay count/time limits and unsupported-action gates remain in force.
 
-**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, edits outside an active Table body, structural changes, scripts, session batches and unrelated history actions remain gated. Clear the criteria before those operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths and cross-sheet edits from invalidating formula-dependent filters.
+**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, edits outside an active Table body, structural changes, scripts, session batches and unrelated history actions remain gated. Guarded pivot actions and their undo/redo are supported. Clear the criteria before those operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths and cross-sheet edits from invalidating formula-dependent filters.
+
+### Table-backed pivot sources
+
+![Table-backed pivot after a column rename and row append](images/tables/table-pivot-source.png)
+
+Insert → PivotTable from a Table selects the entire named Table, including records hidden by its filters. The drawer's **Choose Table…** control lists Tables across the workbook; **S**, Up/Down and Enter provide keyboard selection. Choosing a different source clears draft fields; the workbook changes only on Apply. A blank selection can start with the first available Table. Range-based pivots keep their existing behavior.
+
+A Table source stores `TableId`; every assigned field stores `TableColumnId`. Saved bounds, offsets and names are caches. Each refresh resolves the current bounds and column positions by identity before reading canonical cells. Appended records are included on explicit refresh; Table/column renames and structural column movement retain the binding. Filters never change membership or freshness. A removed Table or field refuses the complete refresh, preserves the last output, and appears in stale/failed-refresh feedback. Reusing its old name cannot retarget it. The field drawer keeps missing fields removable and allows choosing a replacement Table.
+
+Source-sheet edits and Table metadata changes mark the pivot out of date. Metadata-only resize/rename also invalidates an in-flight computation. As with range pivots, formula changes driven only by other sheets may require a manual refresh without a stale indicator; refresh always reads current computed values. Creating, refreshing and deleting pivots with saved Table views uses a candidate workbook and rebuilds all affected views before publication, so output placement or recalculation cannot invalidate a filtered layout. Pivot undo/redo (including the new output sheet and its widths) is admitted through the criteria gate with the same view checks; unrelated history remains gated.
+
+Native and full-JSON persistence keep stable bindings, last output and refresh state. Table catalogs load after pivot output ownership, then establish the source-generation baseline so the first post-load edit is detected. The Table source wire representation deliberately differs from the legacy rectangle: older readers reject unsupported pivot metadata and retain materialized output as plain values, rather than silently refreshing the wrong range. The existing per-sheet pivot fallback applies. A Table name is also accepted as the session `create_pivot.source` / CLI pivot range argument; scripted mutation through active criteria remains gated.
 
 ## Next Phase 2 slices
 
 1. Extend mapped mutation support to other editing surfaces and scripts.
-2. Table-backed pivot sources with stable field IDs, explicit refresh, and stale-state feedback.
-3. XLSX Table interoperability subset and export-loss messaging.
-4. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
+2. XLSX Table interoperability subset and export-loss messaging.
+3. Multi-header schema paste, structured-reference autocomplete/highlighting, and remaining structural edge cases and QA.
 
 Totals rows and saved views come later. Web/cloud preservation is deferred.
 
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+Table-backed pivots, 2026-10-02: the combined engine, I/O, session-host and desktop run passed 2,002 tests (27 existing ignores), including 628 desktop tests. Native QA then exposed a pre-existing omission in the desktop full-save writer; after adding pivot metadata to that path, all 322 I/O tests passed (9 existing ignores), including the new full-save regression for Table and range sources. The final launchable desktop build passed. Linux UI verification covered keyboard source selection, creation from a filtered Table including hidden records, creation/refresh undo and redo while criteria remain active, source edits, stale feedback, column rename, appended-row inclusion, and desktop save/reopen followed by another source edit and successful refresh. SQLite inspection confirmed persisted Table/column IDs and output values. Automated cases additionally cover missing/reused identities, structural column movement, empty sources, source-generation invalidation, native/full-JSON roundtrips, and atomic rejection of a refresh that would spill beside a filtered Table on another sheet. macOS/Windows live UI remains untested.
 
 Phase 2 sparse history, fill and controls, 2026-10-01: 616 desktop tests passed with zero failures and 3 existing ignores; 963 engine tests passed with zero failures and 15 existing ignores. The launchable desktop build and code check passed. New regressions cover stale/atomic sparse replay, hidden targets, exact cell images and absence, recalculation refusal, visible-order fill, canonical formula offsets, literal text, copy/series in both directions, whole-plan boundary refusal and visible selection statistics. Linux live QA verified Fill Down/Right, Ctrl+Enter editing, canonical formulas across filtered records, fill-handle copy/series, boundary refusal and one-step undo/redo. Saved SQLite cells confirmed hidden records stayed unchanged. Native preview checks covered inset header controls, active-state tooltips, menu click/Escape, the relocated hint and its dismissal, and the corrected visible-cell sum. macOS/Windows live UI remains untested.
 

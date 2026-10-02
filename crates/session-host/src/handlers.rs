@@ -286,14 +286,19 @@ pub fn resolve_create_pivot(
     let StructureOp::CreatePivot { source, rows, column, values, .. } = op else {
         return Err(("invalid_op", "not a create_pivot op".into()));
     };
-    let target = structure_target_sheet(op, wb.active_sheet_index());
+    let named_table = source.as_deref().and_then(|name| wb.table_by_name(name));
+    let target = named_table.and_then(|(id, _)| wb.sheet_index_by_id(id)).unwrap_or_else(|| structure_target_sheet(op, wb.active_sheet_index()));
     let sheet = wb.sheets().get(target).ok_or_else(|| {
         ("sheet_not_found", format!("sheet index {} does not exist (workbook has {} sheets)", target, wb.sheets().len()))
     })?;
     let (r0, c0, r1, c1) = match source {
+        _ if named_table.is_some() => {
+            let r = named_table.unwrap().1.range;
+            (r.start_row, r.start_col, r.end_row, r.end_col)
+        }
         Some(range) => {
             let (a, b) = range.split_once(':').unwrap_or((range.as_str(), range.as_str()));
-            let bad = || ("invalid_op", format!("source \"{}\" is not an A1 range like A1:D100", range));
+            let bad = || ("invalid_op", format!("source \"{}\" is not a Table name or an A1 range like A1:D100", range));
             let (ar, ac) = parse_a1_cell(a).ok_or_else(bad)?;
             let (br, bc) = parse_a1_cell(b).ok_or_else(bad)?;
             (ar.min(br), ac.min(bc), ar.max(br), ac.max(bc))
@@ -322,10 +327,15 @@ pub fn resolve_create_pivot(
             }),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let source = PivotSource { sheet_id: sheet.id, start_row: r0 as u32, start_col: c0 as u32, end_row: r1 as u32, end_col: c1 as u32 };
+    let source = PivotSource { table_id: named_table.map(|(_, t)| t.id), sheet_id: sheet.id, start_row: r0 as u32, start_col: c0 as u32, end_row: r1 as u32, end_col: c1 as u32 };
     let profile = visigrid_engine::pivot::column_profile(sheet, &source);
-    let definition = PivotDefinition::from_names(&headers, rows, column.as_deref(), &values, &profile)
+    let mut definition = PivotDefinition::from_names(&headers, rows, column.as_deref(), &values, &profile)
         .map_err(|m| ("invalid_op", m))?;
+    if let Some((_, table)) = named_table {
+        for field in definition.rows.iter_mut().chain(definition.column.iter_mut()).chain(definition.values.iter_mut().map(|v| &mut v.field)) {
+            field.column_id = Some(table.columns[field.offset as usize].id);
+        }
+    }
     visigrid_engine::pivot::validate(&definition, &headers).map_err(|e| ("invalid_op", e.to_string()))?;
     // Asked-for Sum/Average/Min/Max of a column with no numbers would show
     // zeros or errors: say so instead.
@@ -1290,6 +1300,15 @@ mod validation_tests {
         let err = resolve_create_pivot(&op(vec![spec("Region", Some("sum"))]), &wb).unwrap_err().1;
         assert!(err.contains("\"Region\" has no numbers to sum"), "{err}");
         assert!(resolve_create_pivot(&op(vec![spec("Region", Some("distinct_count"))]), &wb).is_ok());
+
+        let id = wb.create_table(wb.sheet(0).unwrap().id, visigrid_engine::table::TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 1,
+        }, "Sales").unwrap().table_id();
+        let mut named = op(vec![spec("Amount", None)]);
+        if let StructureOp::CreatePivot { source, .. } = &mut named { *source = Some("sales".into()); }
+        let (source, definition) = resolve_create_pivot(&named, &wb).unwrap();
+        assert_eq!(source.table_id, Some(id));
+        assert_eq!(definition.values[0].field.column_id, Some(wb.table(id).unwrap().1.columns[1].id));
 
         // Headless output shows the currency format.
         apply_structure(&mut wb, &op(vec![spec("Amount", None)])).unwrap();

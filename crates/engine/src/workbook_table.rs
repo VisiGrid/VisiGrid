@@ -1114,6 +1114,9 @@ impl Workbook {
             sheet.table_id_high_water = self.next_table_id - 1;
         }
         self.refresh_table_name_reservations();
+        // Pivots load before Tables; establish their metadata-aware baseline
+        // only once the complete source catalog is available.
+        self.update_pivot_staleness();
         Ok(())
     }
 }

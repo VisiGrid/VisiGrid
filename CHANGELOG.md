@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Desktop Save now preserves pivot definitions as well as their output cells, including existing range-based pivots.
+
+- **Table-backed pivot sources.** Select a named Table in the pivot drawer. Refresh includes its current records, follows column identities through renames and structural movement, and includes hidden records. Missing sources or fields keep the last good result and explain how to repair the pivot. Native/full-JSON files preserve the bindings; guarded pivot operations and undo/redo work with active Table views.
+
 - **History rewind for Table views** previews historical sort/filter criteria and visible records, including filtered edits, fills and cuts. Releasing Space restores the live selection and view. Confirmed rewind restores criteria and cells together, rejects stale previews, and keeps later rewinds usable.
 
 - **Cut through Table views** clears only visible records in the primary selection, preserving hidden records and source formatting. Contents and comments are captured before sort/filter keys change. Cut and paste remain separate undoable steps; invalid cuts leave the document and previous clipboard intact. Internal paste also preserves cell boundaries for text containing tabs or newlines.
@@ -12,7 +16,7 @@
 - **Lighter Table undo history.** Edits, pastes and fills retain changed cells instead of entire workbook snapshots. Undo/redo checks the expected cells and Table definition before changing anything, recalculates dependents, and preserves unrelated cells.
 - **Clearer Table header controls.** Inset buttons use drawn chevrons and distinct sort/filter icons, scale with zoom, and explain active criteria on hover.
 - The named-range hint now sits above the status bar with compact shortcut keycaps and a clearer dismiss button.
-- **Table-view limits:** clear criteria before structural changes, cut, edits outside the active Table body, scripts or session batches. Rewind through Table-view actions is still pending. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records.
+- **Table-view limits:** clear criteria before structural changes, edits outside the active Table body, scripts or session batches. Cut, history rewind and guarded pivot operations are supported. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records.
 - Saved Table views use Tables catalog version 3. VisiGrid 0.42 opens these files through its future-format read-only recovery. Clearing the last view allows the older catalog version again.
 
 ## 0.42.0
