@@ -294,6 +294,15 @@ fn render_findings(
     card
 }
 
+/// The review step's confirm button. With unsaved edits it names the cost.
+fn evaluate_label(total: usize, dirty: bool) -> String {
+    if dirty {
+        format!("Discard edits and evaluate {total}")
+    } else {
+        format!("Evaluate {total} formula{}", plural(total))
+    }
+}
+
 /// The step before evaluating: the formulas themselves, with any that reach
 /// outside the sheet called out. "Keep as text" comes first.
 fn render_formula_review(
@@ -312,6 +321,9 @@ fn render_formula_review(
         .map(|&(r, col)| (app.cell_ref_at(r, col), sheet.get_raw(r, col)))
         .collect();
     let outside = formulas.iter().filter(|(_, f)| crate::csv_import_ui::reaches_outside(f)).count();
+    // Evaluating re-imports the file, which replaces the sheet and its undo
+    // history: say so when there is something to lose, as the dialog does
+    let dirty = app.is_dirty();
 
     let mut list = div()
         .rounded(px(4.0))
@@ -360,6 +372,10 @@ fn render_formula_review(
             0 => "None of these reach outside the sheet.".to_string(),
             n => format!("{n} formula{} reach{} outside the sheet (a link, a web request or an import).", plural(n), if n == 1 { "es" } else { "" }),
         }))
+        .when(dirty, |d| {
+            d.child(div().text_size(px(11.0)).line_height(px(16.0)).text_color(c.error)
+                .child("Evaluating re-imports the file: your unsaved edits to this sheet will be lost."))
+        })
         .child(
             div()
                 .flex()
@@ -374,7 +390,7 @@ fn render_formula_review(
                         })),
                 )
                 .child(
-                    Button::new("csv-evaluate", format!("Evaluate {total} formula{}", plural(total)))
+                    Button::new("csv-evaluate", evaluate_label(total, dirty))
                         .secondary(c.warn.opacity(0.7), c.warn)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.csv_evaluate_formulas(cx);
@@ -505,7 +521,7 @@ pub(crate) fn render_csv_import_dialog(app: &Spreadsheet, cx: &mut Context<Sprea
                 })),
         )
         .child(
-            Button::new("csv-reimport", "Re-import")
+            Button::new("csv-reimport", if dirty { "Discard edits and re-import" } else { "Re-import" })
                 .disabled(state.preview.is_err())
                 .primary(c.accent, c.inverse)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
@@ -783,4 +799,16 @@ fn render_preview(state: &CsvDialogState, c: &Colors, body_h: f32, cx: &mut Cont
                 .overflow_hidden()
                 .child(columns),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::evaluate_label;
+
+    #[test]
+    fn evaluate_button_names_the_cost_of_unsaved_edits() {
+        assert_eq!(evaluate_label(2, false), "Evaluate 2 formulas");
+        assert_eq!(evaluate_label(1, false), "Evaluate 1 formula");
+        assert_eq!(evaluate_label(2, true), "Discard edits and evaluate 2");
+    }
 }
