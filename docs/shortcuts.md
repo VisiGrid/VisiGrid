@@ -67,7 +67,7 @@ Complete reference for keyboard shortcuts.
 | Ctrl+C | Copy |
 | Alt, H, C, P | Copy selected range as a picture (PNG) |
 | Ctrl+X | Cut |
-| Ctrl+V | Paste contents; keeps the destination's formatting |
+| Ctrl+V | Paste contents; formatted cells keep their look, blank cells take the copied formatting |
 | Ctrl+Shift+V | Paste values (right after Ctrl+Shift+C: paste that format) |
 | Ctrl+Alt+V | Paste Special: All (A), Values (V), Formulas (F), Formats (T) |
 | Ctrl+Shift+C | Copy format |

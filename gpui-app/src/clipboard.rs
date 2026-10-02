@@ -549,6 +549,7 @@ impl Spreadsheet {
 
         // Set visual range for dashed border overlay
         self.clipboard_visual_range = Some((min_row, min_col, max_row, max_col));
+        self.clipboard_visual_sheet = Some(self.sheet(cx).id);
 
         if is_filtered {
             self.status_message = Some("Copied visible rows to clipboard".to_string());
@@ -699,8 +700,9 @@ impl Spreadsheet {
             return;
         }
 
-        // Ctrl+V brings contents (formulas, comments, merges) and leaves the
-        // destination's formatting alone.
+        // Ctrl+V brings contents (formulas, comments, merges). Cells that are
+        // already formatted keep their look; blank, unformatted cells take the
+        // copied formatting, so pasting into empty space still looks right.
         self.paste_contents(false, cx);
     }
 
@@ -710,18 +712,23 @@ impl Spreadsheet {
         self.paste_contents(true, cx);
     }
 
-    /// Set a pasted cell's format, recording the change for undo.
-    fn set_pasted_format(&mut self, row: usize, col: usize, format: CellFormat, patches: &mut Vec<CellFormatPatch>, cx: &mut Context<Self>) {
+    /// Set a pasted cell's format, recording the change for undo. Unless
+    /// `overwrite`, only a cell with no formatting of its own takes it.
+    fn set_pasted_format(&mut self, row: usize, col: usize, format: CellFormat, overwrite: bool, patches: &mut Vec<CellFormatPatch>, cx: &mut Context<Self>) {
         let before = self.sheet(cx).get_format(row, col).clone();
+        if !overwrite && before != CellFormat::default() {
+            return;
+        }
         if before != format {
             self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
             patches.push(CellFormatPatch { row, col, before, after: format });
         }
     }
 
-    /// Full paste. `with_formats` also copies the source formatting, which only
-    /// an internal clipboard carries.
-    fn paste_contents(&mut self, with_formats: bool, cx: &mut Context<Self>) {
+    /// Full paste. Formatting comes only from an internal clipboard: with
+    /// `all_formats` it replaces every destination format (Paste Special > All);
+    /// without, it fills only unformatted cells (Ctrl+V).
+    fn paste_contents(&mut self, all_formats: bool, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() { self.paste_into_edit(cx); return; }
         // Read clipboard item to get both text and metadata
@@ -759,7 +766,7 @@ impl Spreadsheet {
             let mut changes = Vec::new();
             let mut comment_patches = Vec::new();
             let mut format_patches = Vec::new();
-            let with_formats = with_formats && is_internal;
+            let with_formats = is_internal;
 
             // For external pastes without tabs, try CSV-aware parsing (handles commas,
             // semicolons, pipes, and quoted fields). Only use the result if it found
@@ -882,7 +889,7 @@ impl Spreadsheet {
                     }
                     if with_formats {
                         if let Some(format) = self.internal_clipboard.as_ref().and_then(|ic| ic.formats.first()).and_then(|r| r.first()).cloned() {
-                            self.set_pasted_format(*data_row, *col, format, &mut format_patches, cx);
+                            self.set_pasted_format(*data_row, *col, format, all_formats, &mut format_patches, cx);
                         }
                     }
                 }
@@ -1059,7 +1066,7 @@ impl Spreadsheet {
                         }
                         if with_formats {
                             if let Some(format) = self.internal_clipboard.as_ref().and_then(|ic| ic.formats.get(row_offset)).and_then(|r| r.get(col_offset)).cloned() {
-                                self.set_pasted_format(target_data_row, col, format, &mut format_patches, cx);
+                                self.set_pasted_format(target_data_row, col, format, all_formats, &mut format_patches, cx);
                             }
                         }
 

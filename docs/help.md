@@ -272,7 +272,7 @@ Press `Ctrl+Alt+V` after copying cells to open the Paste Special dialog. Its hea
 | Formulas | `F` | Formulas with references adjusted; keeps this sheet's formatting |
 | Formats | `T` | Formatting only; leaves the cells' contents alone |
 
-Plain `Ctrl+V` pastes contents (formulas, comments, merged cells) and keeps the destination's formatting. To bring the copied formatting too, use **All**. `Ctrl+Shift+V` pastes values. Text copied from another app has no formatting, so Formats is unavailable for it.
+Plain `Ctrl+V` pastes contents (formulas, comments, merged cells). Cells that already have formatting keep it; blank, unformatted cells take the copied formatting. To replace the destination's formatting everywhere, use **All**. `Ctrl+Shift+V` pastes values. Text copied from another app has no formatting, so Formats is unavailable for it.
 
 To make `Ctrl+V` paste values instead, set **Preferences → Default paste → Values only**.
 

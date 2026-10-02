@@ -498,6 +498,8 @@ pub struct Spreadsheet {
     /// Visual range for copy/cut dashed border overlay (r1, c1, r2, c2).
     /// Set on Copy/Cut, cleared on Paste/Escape/edit start/confirm/delete.
     pub clipboard_visual_range: Option<(usize, usize, usize, usize)>,
+    /// Sheet the copy border belongs to; it's drawn only there.
+    pub clipboard_visual_sheet: Option<SheetId>,
 
     // File state
     /// Unique ID for session matching (assigned at startup).
@@ -1227,6 +1229,7 @@ impl Spreadsheet {
             palette_previewing: false,
             internal_clipboard: None,
             clipboard_visual_range: None,
+            clipboard_visual_sheet: None,
             session_window_id: WINDOW_ID_UNSET,
             current_file: None,
             is_modified: false,

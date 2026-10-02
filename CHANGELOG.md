@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Paste and copy
+
+- **Ctrl+V into blank cells brings the copied formatting.** Cells that already have formatting keep it, so pasting into a styled report still doesn't wreck it; pasting into empty space now looks like what you copied instead of plain text. Paste Special → All still replaces the formatting everywhere. In Preferences, **Default paste** now reads **Contents / Values only** (it said Everything, which it wasn't).
+- **The copy border marches,** and it stays visible when the copied range is still selected; it used to be the same blue as the selection and disappeared under it.
+- **The copy border shows only on the sheet you copied from.** It used to appear on every sheet at the same addresses.
+
 ## 0.43.0
 
 ### CSV import
