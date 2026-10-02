@@ -64,8 +64,8 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
     };
 
     // Get sheet information (convert to owned Strings to break borrow on cx for closure usage)
-    let sheet_names: Vec<String> = app.wb(cx).sheet_names().iter().map(|s| s.to_string()).collect();
-    let active_index = app.wb(cx).active_sheet_index();
+    let sheet_names: Vec<String> = app.display_workbook(cx).sheet_names().iter().map(|s| s.to_string()).collect();
+    let active_index = app.sheet_index(cx);
     let renaming_sheet = app.renaming_sheet;
     let context_menu_sheet = app.sheet_context_menu;
 

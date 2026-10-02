@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn table_view_history_is_undoable_without_claiming_rewind_support() {
+    fn table_view_history_supports_undo_and_rewind() {
         let (mut wb, mut spec) = fixture();
         spec.sort = Some(TableSort {
             column: wb.table(spec.table).unwrap().1.columns[0].id,
@@ -624,7 +624,7 @@ mod tests {
             None,
         );
         let entry = history.undo().unwrap();
-        assert!(!entry.action.is_replay_supported());
+        assert!(entry.action.is_replay_supported());
         let UndoAction::TableViewChanged { commit, .. } = entry.action else {
             panic!("wrong history action")
         };

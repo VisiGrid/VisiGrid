@@ -3327,9 +3327,11 @@ impl Spreadsheet {
     pub fn update_cached_sheet_id(&mut self, cx: &mut Context<Self>) {
         self.table_filter_dropdown = None;
         self.table_view_sync_key = None;
-        let sheet = self.workbook.read(cx).active_sheet();
-        self.cached_sheet_id = sheet.id;
-        let (rows, cols) = sheet.frozen_panes;
+        let sheet = self.display_workbook(cx).active_sheet();
+        let sheet_id = sheet.id;
+        let panes = sheet.frozen_panes;
+        self.cached_sheet_id = sheet_id;
+        let (rows, cols) = panes;
         self.view_state.frozen_rows = rows;
         self.view_state.frozen_cols = cols;
         self.view_state.scroll_row = self.view_state.scroll_row.max(rows);
@@ -3348,7 +3350,7 @@ impl Spreadsheet {
     pub fn debug_assert_sheet_cache_sync(&self, cx: &Context<Self>) {
         #[cfg(debug_assertions)]
         {
-            let actual_id = self.workbook.read(cx).active_sheet().id;
+            let actual_id = self.display_workbook(cx).active_sheet().id;
             debug_assert_eq!(
                 self.cached_sheet_id, actual_id,
                 "cached_sheet_id desync! cached={:?}, actual={:?}. \

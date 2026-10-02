@@ -217,7 +217,7 @@ impl Spreadsheet {
     /// Get the active sheet index (for undo history)
     /// Pass &**cx from Context, or &app directly.
     pub fn sheet_index(&self, cx: &App) -> usize {
-        self.wb(cx).active_sheet_index()
+        self.display_workbook(cx).active_sheet_index()
     }
 
     /// Get the role for a cell from metadata (for role-based auto-styling)
@@ -546,7 +546,7 @@ impl Spreadsheet {
     /// Review Mode may navigate back to its source sheet, but no caller may
     /// expose a different sheet until the plan is applied or dismissed.
     pub fn activate_sheet(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        let Some(target_sheet_id) = self.wb(cx).sheet(index).map(|sheet| sheet.id) else {
+        let Some(target_sheet_id) = self.display_workbook(cx).sheet(index).map(|sheet| sheet.id) else {
             return false;
         };
         if self
@@ -559,6 +559,13 @@ impl Spreadsheet {
             cx.notify();
             return false;
         }
+        if let crate::app::RewindPreviewState::On(session) = &mut self.rewind_preview {
+            if !session.snapshot.set_active_sheet(index) { return false; }
+            self.install_preview_rows();
+            self.update_cached_sheet_id(cx);
+            self.active_view_state_mut().active_sheet = index;
+            return true;
+        }
         if !self.wb_mut(cx, |wb| wb.set_active_sheet(index)) {
             return false;
         }
@@ -570,11 +577,11 @@ impl Spreadsheet {
 
     /// Move to the next sheet
     pub fn next_sheet(&mut self, cx: &mut Context<Self>) {
-        let count = self.wb(cx).sheet_count();
+        let count = self.display_workbook(cx).sheet_count();
         if count == 0 {
             return;
         }
-        let current = self.wb(cx).active_sheet_index();
+        let current = self.sheet_index(cx);
         if current + 1 >= count {
             return;
         }
@@ -587,11 +594,11 @@ impl Spreadsheet {
 
     /// Move to the previous sheet
     pub fn prev_sheet(&mut self, cx: &mut Context<Self>) {
-        let count = self.wb(cx).sheet_count();
+        let count = self.display_workbook(cx).sheet_count();
         if count == 0 {
             return;
         }
-        let current = self.wb(cx).active_sheet_index();
+        let current = self.sheet_index(cx);
         if current == 0 {
             return;
         }

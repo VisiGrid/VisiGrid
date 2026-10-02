@@ -292,7 +292,7 @@ impl EntityInputHandler for Spreadsheet {
             let names_filter =
                 self.inspector_visible && self.inspector_tab == InspectorTab::Names;
             let history_peek =
-                self.selected_history_id.is_some() && self.history_highlight_range.is_some();
+                self.selected_history_id.is_some();
             if names_filter || history_peek || self.vim_mode_enabled(cx) {
                 return false;
             }

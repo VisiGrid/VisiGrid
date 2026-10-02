@@ -39,7 +39,7 @@ pub(crate) fn render_table_controls(
         return div().into_any_element();
     };
     let id = table.id;
-    let view_only = crate::table_filter_ui::has_table_criteria(app.wb(cx));
+    let view_only = crate::table_filter_ui::has_table_criteria(app.display_workbook(cx));
     div()
         .id("table-controls")
         .h(px(crate::table_ui::TABLE_CONTROLS_HEIGHT))

@@ -9,6 +9,28 @@ use crate::app::{Spreadsheet, NUM_ROWS};
 use crate::history::HistoryFingerprint;
 use crate::rewind_state::*;
 
+pub(crate) fn preview_rows(view: Option<&PreviewSheetView>) -> visigrid_engine::filter::RowView {
+    if let Some(rows) = view.and_then(|v| v.table_rows.as_ref()) { return rows.clone(); }
+    let mut rows = visigrid_engine::filter::RowView::new(NUM_ROWS);
+    if let Some(order) = view.and_then(|v| v.row_order.as_ref()) { rows.apply_sort(order.clone()); }
+    rows
+}
+
+pub(crate) fn preview_selection(
+    rows: &visigrid_engine::filter::RowView,
+    start: (usize, usize), end: (usize, usize),
+    table: Option<visigrid_engine::table::TableRange>,
+) -> ((usize, usize), (usize, usize)) {
+    let mut visible = (start.0.min(end.0)..=start.0.max(end.0)).filter_map(|r| rows.data_to_view(r));
+    if let Some(first) = visible.next() {
+        let (lo, hi) = visible.fold((first,first), |(lo,hi), r| (lo.min(r),hi.max(r)));
+        ((lo,start.1),(hi,end.1))
+    } else {
+        let row = table.map(|t| t.start_row).unwrap_or(0);
+        ((row,start.1),(row,start.1))
+    }
+}
+
 impl Spreadsheet {
     /// Get multi-edit preview for a cell during editing.
     /// Returns the value that will be applied to this cell when edit is confirmed.
@@ -73,6 +95,38 @@ impl Spreadsheet {
             false
         }
     }
+    fn validate_preview_layout(&self, workbook: &visigrid_engine::workbook::Workbook, views: &PreviewViewState) -> Result<(), String> {
+        for (sheet, view) in workbook.sheets().iter().zip(&views.per_sheet) {
+            if view.table_rows.is_none() { continue; }
+            let table = sheet.table_view_spec().and_then(|s| sheet.tables().iter().find(|t| t.id == s.table))
+                .ok_or("The preview Table no longer exists.")?;
+            if let Some(error) = crate::table_filter_ui::desktop_layout_error(
+                table, self.row_heights.get(&sheet.id), self.hidden_rows.get(&sheet.id), sheet.frozen_panes.0,
+            ) { return Err(error); }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn install_preview_rows(&mut self) {
+        let RewindPreviewState::On(session) = &self.rewind_preview else { return; };
+        let view = session.view_state.per_sheet.get(session.snapshot.active_sheet_index());
+        self.row_view = preview_rows(view);
+        self.table_view_installed = view.is_some_and(|v| v.table_rows.is_some());
+    }
+
+    fn navigate_preview(&mut self, sheet: usize, range: Option<(usize, usize, usize, usize, usize)>, cx: &mut Context<Self>) {
+        self.activate_sheet(sheet, cx);
+        let table_range = self.sheet(cx).table_view_spec()
+            .and_then(|s| self.sheet(cx).tables().iter().find(|t| t.id == s.table)).map(|t| t.range);
+        let (r0, c0, r1, c1) = range.map(|(_, a, b, c, d)| (a,b,c,d))
+            .or_else(|| table_range.map(|r| (r.start_row,r.start_col,r.start_row,r.end_col)))
+            .unwrap_or((0,0,0,0));
+        let (start, end) = preview_selection(&self.row_view, (r0,c0), (r1,c1), table_range);
+        self.view_state.select_cell(start.0, start.1);
+        if end != start { self.view_state.selection_end = Some(end); }
+        self.ensure_visible(cx);
+    }
+
     /// Enter preview mode for the currently selected history entry
     pub fn enter_preview(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         self.wb(cx).ensure_writable()?;
@@ -80,12 +134,6 @@ impl Spreadsheet {
             self.block_if_previewing(cx);
             return Err("Review Mode is active".to_string());
         }
-        // Must have a history highlight to preview
-        let (sheet_idx, start_row, start_col, end_row, end_col) = match self.history_highlight_range {
-            Some(range) => range,
-            None => return Err("No history entry selected".to_string()),
-        };
-
         // Must have a selected history entry
         let entry_id = match self.selected_history_id {
             Some(id) => id,
@@ -104,6 +152,8 @@ impl Spreadsheet {
             None => return Err("Invalid history index".to_string()),
         };
         let action_summary = entry.action.summary().unwrap_or_else(|| entry.action.label());
+        let sheet_idx = self.history.display_entries().iter().find(|e| e.id == entry_id)
+            .and_then(|e| e.sheet_index).unwrap_or(self.sheet_index(cx));
 
         // Build the preview workbook and view state (state BEFORE this action)
         let build_result = self.history.build_workbook_before(
@@ -130,8 +180,11 @@ impl Spreadsheet {
             }
         })?;
 
+        self.validate_preview_layout(&build_result.workbook, &build_result.view_state)?;
+
         // Capture current focus for restoration
         let live_focus = PreviewFocus {
+            additional_selections: self.view_state.additional_selections.clone(),
             sheet_index: self.sheet_index(cx),
             selected: self.view_state.selected,
             selection_end: self.view_state.selection_end,
@@ -147,6 +200,9 @@ impl Spreadsheet {
             snapshot: build_result.workbook,
             view_state: build_result.view_state,
             live_focus,
+            live_rows: self.row_view.clone(),
+            live_table_view_installed: self.table_view_installed,
+            live_revision: self.wb(cx).revision(),
             history_fingerprint: self.history.fingerprint(),
             replay_count: build_result.replay_count,
             build_ms: build_result.build_ms,
@@ -155,18 +211,7 @@ impl Spreadsheet {
 
         self.rewind_preview = RewindPreviewState::On(session);
 
-        // Navigate to the affected area in preview
-        // Switch to the sheet where the action occurred
-        self.activate_sheet(sheet_idx, cx);
-        self.view_state.selected = (start_row, start_col);
-        self.view_state.selection_end = if start_row != end_row || start_col != end_col {
-            Some((end_row, end_col))
-        } else {
-            None
-        };
-
-        // Ensure the selection is visible
-        self.ensure_visible(cx);
+        self.navigate_preview(sheet_idx, self.history_highlight_range, cx);
 
         self.status_message = Some(format!("Preview: Before \"{}\" — Release Space to return", action_summary));
         cx.notify();
@@ -175,12 +220,20 @@ impl Spreadsheet {
     /// Exit preview mode, restoring live state
     pub fn exit_preview(&mut self, cx: &mut Context<Self>) {
         if let RewindPreviewState::On(session) = std::mem::take(&mut self.rewind_preview) {
-            // Restore live focus (Option A: peek behavior)
             self.activate_sheet(session.live_focus.sheet_index, cx);
+            self.row_view = session.live_rows;
+            self.table_view_installed = session.live_table_view_installed;
             self.view_state.selected = session.live_focus.selected;
             self.view_state.selection_end = session.live_focus.selection_end;
+            self.view_state.additional_selections = session.live_focus.additional_selections;
             self.view_state.scroll_row = session.live_focus.scroll_row;
             self.view_state.scroll_col = session.live_focus.scroll_col;
+            if self.wb(cx).revision() == session.live_revision {
+                self.table_view_sync_key = Some((self.sheet(cx).id, self.wb(cx).revision()));
+            } else {
+                self.table_view_sync_key = None;
+                self.sync_table_view(cx);
+            }
 
             self.status_message = Some("Returned to current state".to_string());
             cx.notify();
@@ -230,70 +283,35 @@ impl Spreadsheet {
                 .and_then(|e| e.sheet_index.and_then(|si| e.affected_range.map(|(sr, sc, er, ec)| (si, sr, sc, er, ec))))
         };
 
-        // Store the current live focus, fingerprint, and quality (preserve across scrubs)
-        let (live_focus, history_fingerprint, original_quality) = if let RewindPreviewState::On(ref session) = self.rewind_preview {
-            (session.live_focus.clone(), session.history_fingerprint, session.quality.clone())
-        } else {
-            return; // Not actually previewing
-        };
-
-        // Update selection
-        self.selected_history_id = Some(new_id);
-        self.history_highlight_range = new_highlight;
-
-        // Exit current preview temporarily
-        self.rewind_preview = RewindPreviewState::Off;
-
-        // Re-enter preview with new entry
+        // Build first: a refused scrub must not replace the current snapshot
+        // or disturb the live projection saved when Space was first pressed.
         match self.history.build_workbook_before(
-            new_idx,
-            self.base_workbook.as_ref(),
-            MAX_PREVIEW_REPLAY,
-            MAX_PREVIEW_BUILD_MS,
-        ) {
-            Ok(build_result) => {
-                let session = RewindPreviewSession {
-                    entry_id: new_id,
-                    target_global_index: new_idx,
-                    action_summary: action_summary.clone(),
-                    snapshot: build_result.workbook,
-                    view_state: build_result.view_state,
-                    live_focus,
-                    history_fingerprint,  // Preserved from original preview
-                    replay_count: build_result.replay_count,
-                    build_ms: build_result.build_ms,
-                    quality: original_quality,  // Preserve quality from original entry
-                };
-
-                self.rewind_preview = RewindPreviewState::On(session);
-
-                // Navigate to the affected area
-                if let Some((sheet_idx, start_row, start_col, end_row, end_col)) = new_highlight {
-                    self.activate_sheet(sheet_idx, cx);
-                    self.view_state.selected = (start_row, start_col);
-                    self.view_state.selection_end = if start_row != end_row || start_col != end_col {
-                        Some((end_row, end_col))
-                    } else {
-                        None
-                    };
-                    self.ensure_visible(cx);
-                }
-
+            new_idx, self.base_workbook.as_ref(), MAX_PREVIEW_REPLAY, MAX_PREVIEW_BUILD_MS,
+        ).and_then(|build| {
+            self.validate_preview_layout(&build.workbook, &build.view_state)
+                .map_err(crate::history::PreviewBuildError::InvariantViolation)?;
+            Ok(build)
+        }) {
+            Ok(build) => {
+                let sheet_idx = self.history.display_entries().iter().find(|e| e.id == new_id)
+                    .and_then(|e| e.sheet_index).unwrap_or(self.sheet_index(cx));
+                let RewindPreviewState::On(session) = &mut self.rewind_preview else { return; };
+                session.entry_id = new_id;
+                session.target_global_index = new_idx;
+                session.action_summary = action_summary.clone();
+                session.snapshot = build.workbook;
+                session.view_state = build.view_state;
+                session.replay_count = build.replay_count;
+                session.build_ms = build.build_ms;
+                self.selected_history_id = Some(new_id);
+                self.history_highlight_range = new_highlight;
+                self.navigate_preview(sheet_idx, new_highlight, cx);
                 self.status_message = Some(format!(
                     "Preview: Before \"{}\" [{}/{}] — ↑↓ to scrub, release Space to return",
                     action_summary, new_idx + 1, history_len
                 ));
             }
-            Err(e) => {
-                // Preview build failed - show error and restore live focus
-                self.activate_sheet(live_focus.sheet_index, cx);
-                self.view_state.selected = live_focus.selected;
-                self.view_state.selection_end = live_focus.selection_end;
-                self.view_state.scroll_row = live_focus.scroll_row;
-                self.view_state.scroll_col = live_focus.scroll_col;
-
-                self.status_message = Some(format!("Preview failed: {:?}", e));
-            }
+            Err(e) => self.status_message = Some(format!("Preview unchanged: {:?}", e)),
         }
         cx.notify();
     }
@@ -341,6 +359,7 @@ impl Spreadsheet {
     /// Apply a rewind plan atomically. This is a destructive operation.
     /// Returns Err if the history has changed since the plan was built.
     pub fn apply_rewind_plan(&mut self, plan: RewindPlan, cx: &mut Context<Self>) -> Result<(), String> {
+        self.wb(cx).ensure_writable()?;
         // Validate history fingerprint hasn't changed
         let session = match &self.rewind_preview {
             RewindPreviewState::On(s) => s,
@@ -348,11 +367,8 @@ impl Spreadsheet {
         };
 
         let current_fingerprint = self.history.fingerprint();
-        if current_fingerprint != session.history_fingerprint {
-            return Err(format!(
-                "History changed during preview. Expected {:?}, got {:?}. Please re-enter preview to try again.",
-                session.history_fingerprint, current_fingerprint
-            ));
+        if current_fingerprint != session.history_fingerprint || self.wb(cx).revision() != session.live_revision {
+            return Err("The workbook or history changed during preview. Re-enter preview to try again.".into());
         }
 
         // Extract audit entry details before consuming plan
@@ -368,29 +384,44 @@ impl Spreadsheet {
             _ => return Err("Invalid audit action in plan".to_string()),
         };
 
+        if target_entry_id != session.entry_id || plan.truncate_at != session.target_global_index {
+            return Err("The preview target changed. Re-enter preview to try again.".into());
+        }
+        let active_projection = plan.new_workbook.active_sheet().build_saved_table_view(NUM_ROWS.min(plan.new_workbook.active_sheet().rows))?;
+        let mut filters = active_projection.as_ref().map(|v| v.filters().clone()).unwrap_or_default();
+        if active_projection.is_none() {
+            filters.sort = plan.new_view_state.per_sheet.get(plan.new_workbook.active_sheet_index())
+                .and_then(|v| v.sort).map(|(column, ascending)| visigrid_engine::filter::SortState {
+                    column, direction: if ascending { visigrid_engine::filter::SortDirection::Ascending } else { visigrid_engine::filter::SortDirection::Descending },
+                });
+        }
+        if session.quality != PreviewQuality::Ok { return Err("Cannot rewind an incomplete preview.".into()); }
+        for sheet in plan.new_workbook.sheets() {
+            if let Some(view) = sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))? {
+                let table = sheet.tables().iter().find(|t| t.id == view.spec().table).unwrap();
+                if let Some(error) = crate::table_filter_ui::desktop_layout_error(
+                    table, self.row_heights.get(&sheet.id), self.hidden_rows.get(&sheet.id), sheet.frozen_panes.0,
+                ) { return Err(error); }
+            }
+        }
+
         // === ATOMIC COMMIT: Do not fail after this point ===
 
         // 1. Replace the workbook content
-        self.workbook.update(cx, |wb, _| {
-            *wb = plan.new_workbook;
-        });
+        self.rewind_preview = RewindPreviewState::Off;
+        self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&plan.new_workbook));
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);  // Catch desync at rewind
-        // Update base_workbook to match (this is now the canonical state)
-        self.capture_base_workbook(cx);
-
-        // 2. Apply view state from the plan (row ordering per sheet)
-        // Reset row_view to identity for the current sheet
-        self.row_view = visigrid_engine::filter::RowView::new(NUM_ROWS);
-
-        // If the preview view state has sort info for current sheet, re-apply it
+        // Retained actions still replay from the original base. Replacing it
+        // with the target snapshot would replay those edits twice next time.
         let active_idx = self.sheet_index(cx);
-        if let Some(sheet_view) = plan.new_view_state.per_sheet.get(active_idx) {
-            if let Some(ref row_order) = sheet_view.row_order {
-                // Apply the stored row order
-                self.row_view.apply_sort(row_order.clone());
-            }
-        }
+        let view = plan.new_view_state.per_sheet.get(active_idx);
+        self.row_view = preview_rows(view);
+        self.filter_state = filters;
+        self.table_view_installed = view.is_some_and(|v| v.table_rows.is_some());
+        self.table_view_sync_key = Some((self.sheet(cx).id, self.wb(cx).revision()));
+        self.bump_cells_rev();
+        self.clipboard_visual_range = None;
 
         // 3. Truncate history and append audit entry
         self.history.truncate_and_append_rewind(
@@ -429,14 +460,14 @@ impl Spreadsheet {
     }
     /// Check if a rewind is safe (history hasn't changed during preview).
     /// Returns (is_safe, discarded_count, target_summary).
-    pub fn rewind_safety_check(&self) -> Option<(bool, usize, String)> {
+    pub fn rewind_safety_check(&self, cx: &App) -> Option<(bool, usize, String)> {
         let session = match &self.rewind_preview {
             RewindPreviewState::On(s) => s,
             RewindPreviewState::Off => return None,
         };
 
         let current_fingerprint = self.history.fingerprint();
-        let is_safe = current_fingerprint == session.history_fingerprint;
+        let is_safe = current_fingerprint == session.history_fingerprint && self.wb(cx).revision() == session.live_revision;
         let discarded = self.history.undo_count().saturating_sub(session.target_global_index);
 
         Some((is_safe, discarded, session.action_summary.clone()))
@@ -462,7 +493,7 @@ impl Spreadsheet {
         };
 
         // Check safety (fingerprint)
-        let (is_safe, discard_count, target_summary) = match self.rewind_safety_check() {
+        let (is_safe, discard_count, target_summary) = match self.rewind_safety_check(cx) {
             Some(s) => s,
             None => {
                 self.status_message = Some("Cannot verify rewind safety".to_string());
@@ -472,7 +503,7 @@ impl Spreadsheet {
         };
 
         if !is_safe {
-            self.status_message = Some("History changed during preview — please re-enter preview".to_string());
+            self.status_message = Some("Workbook or history changed during preview — please re-enter preview".to_string());
             cx.notify();
             return;
         }
@@ -560,6 +591,7 @@ impl Spreadsheet {
                 self.rewind_success.show(audit_data);
             }
             Err(e) => {
+                self.exit_preview(cx);
                 self.status_message = Some(format!("Rewind failed: {}", e));
             }
         }
@@ -568,6 +600,7 @@ impl Spreadsheet {
     /// Cancel the rewind confirmation dialog.
     pub fn cancel_rewind(&mut self, cx: &mut Context<Self>) {
         self.rewind_confirm.hide();
+        self.exit_preview(cx);
         cx.notify();
     }
     /// Dismiss the rewind success banner.

@@ -82,6 +82,8 @@ mod sort_filter;
 mod table_filter_ui;
 mod table_edit;
 mod table_cut;
+#[cfg(test)]
+mod table_rewind_tests;
 mod table_cell_history;
 mod table_fill;
 mod split_view;

@@ -244,6 +244,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
             if this.guard_terminal_focus(window, cx, "ConfirmEdit") { return; }
+            if this.rewind_confirm.visible { this.confirm_rewind(cx); return; }
             // Close-confirm dialog: Enter activates focused button
             if this.close_confirm_visible {
                 let choice = this.close_confirm_focused;
@@ -343,6 +344,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
             if this.guard_terminal_focus(window, cx, "CancelEdit") { return; }
+            if this.rewind_confirm.visible { this.cancel_rewind(cx); return; }
             // Close-confirm dialog: Escape dismisses
             if this.close_confirm_visible {
                 this.close_confirm_visible = false;

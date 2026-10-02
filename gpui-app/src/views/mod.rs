@@ -184,7 +184,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.f1_help_visible = false;
                 cx.notify();
             }
-            if event.keystroke.key == "space" && this.is_previewing() {
+            if event.keystroke.key == "space" && this.is_previewing() && !this.rewind_confirm.visible {
                 this.exit_preview(cx);
             }
         }))

@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if this.rewind_confirm.visible {
+        if event.keystroke.key == "escape" { this.cancel_rewind(cx); }
+        cx.stop_propagation();
+        return;
+    }
     if this.pending_table_recovery.is_some() {
         if event.keystroke.key == "escape" { this.pending_table_recovery = None; cx.notify(); }
         cx.stop_propagation();
@@ -325,7 +330,6 @@ pub(crate) fn handle_key_down(
         && !this.mode.is_editing()
         && !this.is_previewing()
         && this.selected_history_id.is_some()
-        && this.history_highlight_range.is_some()
     {
         if let Err(e) = this.enter_preview(cx) {
             this.status_message = Some(format!("Preview failed: {}", e));

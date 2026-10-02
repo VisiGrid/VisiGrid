@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **History rewind for Table views** previews historical sort/filter criteria and visible records, including filtered edits, fills and cuts. Releasing Space restores the live selection and view. Confirmed rewind restores criteria and cells together, rejects stale previews, and keeps later rewinds usable.
+
 - **Cut through Table views** clears only visible records in the primary selection, preserving hidden records and source formatting. Contents and comments are captured before sort/filter keys change. Cut and paste remain separate undoable steps; invalid cuts leave the document and previous clipboard intact. Internal paste also preserves cell boundaries for text containing tabs or newlines.
 
 - **Table header dropdowns** sort records and filter by searchable values within the Table’s exact bounds. Clear sort and filters independently, or use **Clear view** to restore the original order. Click a header arrow or press Alt+Down on a header. Criteria survive native/full-JSON save and reopen, and support desktop undo/redo.

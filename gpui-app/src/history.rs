@@ -1532,6 +1532,19 @@ impl History {
             Self::apply_action_forward(&mut workbook, &mut view_state, &entry.action)?;
         }
 
+        // Rebuild projections from the reconstructed cells, including views
+        // already present in the base snapshot (no history action required).
+        view_state.per_sheet.resize_with(workbook.sheet_count(), PreviewSheetView::default);
+        for (sheet, view) in workbook.sheets().iter().zip(&mut view_state.per_sheet) {
+            let projection = sheet.build_saved_table_view(crate::app::NUM_ROWS.min(sheet.rows))
+                .map_err(PreviewBuildError::InvariantViolation)?;
+            if let Some(table_view) = &projection {
+                view.sort = table_view.filters().sort.as_ref().map(|s| (s.column, s.direction == visigrid_engine::filter::SortDirection::Ascending));
+            }
+            view.table_rows = projection.map(|v| v.rows().clone());
+        }
+        if start.elapsed() > timeout { return Err(PreviewBuildError::Timeout); }
+
         let build_ms = start.elapsed().as_millis() as u64;
 
         Ok(PreviewBuildResult {
@@ -1635,10 +1648,15 @@ impl History {
                     }
                 }
             }
-            UndoAction::TableViewChanged { .. } => {
-                return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::TableViewChanged));
+            UndoAction::TableViewChanged { commit, .. } => {
+                workbook.rebuild_dep_graph();
+                workbook.recompute_full_ordered();
+                workbook.apply_table_view_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
-            UndoAction::TableCellsChanged { .. } => { return Err(PreviewBuildError::UnsupportedAction(UndoActionKind::TableCellsChanged)); }
+            UndoAction::TableCellsChanged { commit, .. } => {
+                workbook.rebuild_dep_graph();
+                commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
+            }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
                 if commit.inserted_header_row().is_some() {
@@ -1773,13 +1791,9 @@ impl History {
                     ))?;
                 sheet.validations.clear_exclusions_in_range(range);
             }
-            UndoAction::Rewind { .. } => {
-                // Rewind is audit-only - should never appear in replay paths
-                // because rewind truncates history (nothing follows it to replay)
-                return Err(PreviewBuildError::InvariantViolation(
-                    "Rewind action found in replay path - this should be impossible".to_string()
-                ));
-            }
+            // The retained prefix already describes this state. Audit entries
+            // have no workbook effect, including during a later rewind.
+            UndoAction::Rewind { .. } => {}
             UndoAction::SetMerges { sheet_index, after, cleared_values, .. } => {
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
@@ -1857,8 +1871,8 @@ impl UndoActionKind {
             UndoActionKind::Comments => true,
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::TableCommit => true,
-            UndoActionKind::TableViewChanged => false,
-            UndoActionKind::TableCellsChanged => false,
+            UndoActionKind::TableViewChanged => true,
+            UndoActionKind::TableCellsChanged => true,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
@@ -1885,7 +1899,7 @@ impl UndoActionKind {
 
             // Rewind is audit-only - should never appear in replay paths
             // (Rewind truncates history, so nothing follows it to replay)
-            UndoActionKind::Rewind => false,
+            UndoActionKind::Rewind => true,
         }
     }
 
