@@ -120,7 +120,30 @@ impl Spreadsheet {
 
     /// Called on open, sheet switch and revision changes. No document mutation.
     pub(crate) fn sync_table_view(&mut self, cx: &mut Context<Self>) {
-        if self.is_previewing() || self.review_mode.is_some() {
+        if self.is_previewing() {
+            return;
+        }
+        if self.review_mode.is_some() {
+            // Review endpoints are aligned to source worksheet rows. Reveal
+            // filtered records without changing the workbook's saved criteria.
+            if self.table_view_sync_key.is_some()
+                && self
+                    .sheet(cx)
+                    .table_view_spec()
+                    .is_some_and(|spec| spec.sort.is_some() || !spec.filters.is_empty())
+            {
+                let row = self.row_view.view_to_data(self.view_state.selected.0);
+                if let Some(pane) = &mut self.split_pane {
+                    let row = self.row_view.view_to_data(pane.view_state.selected.0);
+                    pane.view_state.select_cell(row, pane.view_state.selected.1);
+                    pane.view_state.additional_selections.clear();
+                }
+                self.row_view = RowView::new(crate::app::NUM_ROWS);
+                self.filter_state = FilterState::default();
+                self.view_state.select_cell(row, self.view_state.selected.1);
+                self.view_state.additional_selections.clear();
+                self.table_view_sync_key = None;
+            }
             return;
         }
         let sheet = self.sheet(cx);

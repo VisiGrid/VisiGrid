@@ -12,8 +12,8 @@ use crate::review_mode::{review_proposal_color, ReviewEndpoint};
 use crate::terminal::state::PendingResult;
 use crate::theme::TokenKey;
 
-pub const REVIEW_CARD_WIDTH: f32 = 360.0;
-pub const REVIEW_CARD_HEIGHT_ESTIMATE: f32 = 292.0;
+pub const REVIEW_CARD_WIDTH: f32 = 440.0;
+pub const REVIEW_CARD_HEIGHT_ESTIMATE: f32 = 480.0;
 const REVIEW_CARD_GAP: f32 = 16.0;
 const REVIEW_CARD_DATA_GUTTER_COLS: usize = 1;
 
@@ -83,7 +83,7 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     } else if apply_status.blocking {
         "Proposal cannot be applied".to_string()
     } else {
-        format!("{} ready to review", count_label(total))
+        "Review changes".to_string()
     };
     let group = change.group_id.as_ref().and_then(|id| {
         plan.groups
@@ -111,6 +111,7 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
             .map(|reason| (warn, reason.to_string()))
     };
 
+    let card_width = REVIEW_CARD_WIDTH.min((app.grid_layout.viewport_size.0 - 16.0).max(1.0));
     let first_empty_col = prepared
         .source_workbook()
         .sheet_by_id(state.source_sheet_id)
@@ -122,7 +123,7 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let safe_dock_col = first_empty_col.saturating_add(REVIEW_CARD_DATA_GUTTER_COLS);
     let preferred_left = app.metrics.header_w + app.col_x_offset(safe_dock_col) + REVIEW_CARD_GAP;
     let preferred_fits =
-        preferred_left + REVIEW_CARD_WIDTH + REVIEW_CARD_GAP <= app.grid_layout.viewport_size.0;
+        preferred_left + card_width + REVIEW_CARD_GAP <= app.grid_layout.viewport_size.0;
     let active = app.active_cell_rect();
     let fallback_top = if active.y + active.height
         > app.grid_layout.viewport_size.1 - REVIEW_CARD_HEIGHT_ESTIMATE - REVIEW_CARD_GAP
@@ -132,8 +133,8 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         (app.grid_layout.viewport_size.1 - REVIEW_CARD_HEIGHT_ESTIMATE - REVIEW_CARD_GAP)
             .max(REVIEW_CARD_GAP)
     };
-    let fallback_left = (app.grid_layout.viewport_size.0 - REVIEW_CARD_WIDTH - REVIEW_CARD_GAP)
-        .max(REVIEW_CARD_GAP);
+    let fallback_left =
+        (app.grid_layout.viewport_size.0 - card_width - REVIEW_CARD_GAP).max(REVIEW_CARD_GAP);
     let automatic_position = if preferred_fits {
         (preferred_left, REVIEW_CARD_GAP)
     } else {
@@ -142,7 +143,7 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let (card_left, card_top) = state.card_position().unwrap_or(automatic_position);
     let card_left = card_left.clamp(
         8.0,
-        (app.grid_layout.viewport_size.0 - REVIEW_CARD_WIDTH - 8.0).max(8.0),
+        (app.grid_layout.viewport_size.0 - card_width - 8.0).max(8.0),
     );
     let card_top = card_top.clamp(
         8.0,
@@ -174,8 +175,19 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
     let mut card = div()
         .id("review-card")
         .absolute()
-        .w(px(REVIEW_CARD_WIDTH))
-        .p(px(12.0))
+        .w(px(card_width))
+        .max_h(px(
+            (app.grid_layout.viewport_size.1 - card_top - 8.0).max(1.0)
+        ))
+        .overflow_y_scroll()
+        .p(px(16.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                window.focus(&this.focus_handle, cx);
+            }),
+        )
         .rounded(px(12.0))
         .bg(surface)
         .border_1()
@@ -184,7 +196,7 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         } else if apply_status.blocking {
             error.opacity(0.65)
         } else {
-            proposal.opacity(0.26)
+            border
         })
         .shadow_lg()
         .left(px(card_left))
@@ -221,77 +233,100 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                         )
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(text)
                                 .child(title),
                         )
                         .child(
                             div()
-                                .mt(px(3.0))
-                                .text_size(px(10.0))
+                                .mt(px(5.0))
+                                .text_size(px(11.0))
+                                .whitespace_normal()
                                 .text_color(muted)
                                 .child(format!(
                                     "{} · {}",
-                                    change_address(app, change),
+                                    count_label(total),
                                     producer_attribution(plan)
                                 )),
                         ),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when(show_endpoint, |row| row.child(endpoint))
-                        .child(
-                            div()
-                                .id("review-collapse")
-                                .cursor_pointer()
-                                .h(px(26.0))
-                                .px(px(8.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(5.0))
-                                .rounded(px(7.0))
-                                .border_1()
-                                .border_color(border.opacity(0.7))
-                                .text_size(px(9.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(muted)
-                                .hover(|style| style.bg(border.opacity(0.32)).text_color(text))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(state) = this.review_mode.as_mut() {
-                                        state.toggle_collapsed();
-                                        cx.notify();
-                                    }
-                                }))
-                                .child("Collapse")
-                                .child(div().text_size(px(8.0)).child("▾")),
-                        ),
+                    div().flex().items_center().gap(px(6.0)).child(
+                        div()
+                            .id("review-collapse")
+                            .cursor_pointer()
+                            .h(px(28.0))
+                            .px(px(8.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(border.opacity(0.7))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(muted)
+                            .hover(|style| style.bg(border.opacity(0.32)).text_color(text))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(state) = this.review_mode.as_mut() {
+                                    state.toggle_collapsed();
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Collapse")
+                            .child(div().text_size(px(8.0)).child("▾")),
+                    ),
                 ),
         )
         .child(
             div()
-                .mt(px(6.0))
+                .mt(px(16.0))
+                .pt(px(12.0))
+                .border_t_1()
+                .border_color(border)
                 .flex()
                 .items_center()
-                .gap(px(7.0))
-                .child(previous)
+                .justify_between()
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(12.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(text)
                         .child(format!("Change {} of {total}", position + 1)),
                 )
-                .child(next),
+                .child(div().flex().gap(px(4.0)).child(previous).child(next)),
         )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(muted)
+                .whitespace_normal()
+                .child(change_address(app, change)),
+        )
+        .when(show_endpoint, |card| {
+            card.child(
+                div()
+                    .mt(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(muted)
+                            .child("Worksheet preview"),
+                    )
+                    .child(endpoint),
+            )
+        })
         .when_some(group, |card, group| {
             card.child(
                 div()
-                    .mt(px(7.0))
-                    .text_size(px(10.0))
+                    .mt(px(8.0))
+                    .text_size(px(11.0))
+                    .whitespace_normal()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if change.kind == ChangeKind::RowDeleted {
                         error
@@ -314,13 +349,23 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
         .when_some(change.reason.as_ref(), |card, reason| {
             card.child(
                 div()
-                    .mt(px(6.0))
-                    .text_size(px(10.0))
+                    .mt(px(8.0))
+                    .text_size(px(12.0))
+                    .whitespace_normal()
                     .text_color(muted)
                     .child(reason.0.clone()),
             )
         });
 
+    if prepared
+        .source_workbook()
+        .sheet_by_id(state.source_sheet_id)
+        .and_then(|sheet| sheet.table_view_spec())
+        .is_some_and(|spec| spec.sort.is_some() || !spec.filters.is_empty())
+    {
+        card = card.child(message_line(MessageIcon::Info,
+            "Hidden rows are shown during review. Your saved filters and sort return when you apply or discard.".into(), muted, border));
+    }
     if let Some((color, message)) = blocked {
         card = card.child(message_line(
             if apply_status.stale {
@@ -340,17 +385,17 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
 
     card.child(
         div()
-            .mt(px(10.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
+            .mt(px(16.0))
+            .pt(px(14.0))
+            .border_t_1()
+            .border_color(border)
             .when(is_mcp && !can_apply, |row| {
                 row.child(
                     div()
-                        .flex_1()
-                        .text_size(px(9.0))
+                        .mb(px(10.0))
+                        .text_size(px(11.0))
                         .text_color(muted)
+                        .whitespace_normal()
                         .child("Waiting for the agent to resubmit"),
                 )
             })
@@ -359,83 +404,67 @@ pub fn render_review_card(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                     div()
                         .id("review-repreview")
                         .cursor_pointer()
-                        .px(px(11.0))
-                        .py(px(7.0))
-                        .rounded(px(7.0))
-                        .bg(warn)
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(inverse)
+                        .mb(px(10.0))
+                        .text_size(px(12.0))
+                        .text_color(warn)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.preview_last_lua(window, cx)),
                         )
-                        .child("Re-preview"),
+                        .child("Refresh preview"),
                 )
             })
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(7.0))
+                    .justify_end()
+                    .gap(px(8.0))
                     .child(
                         div()
                             .id("review-dismiss")
                             .cursor_pointer()
-                            .px(px(10.0))
-                            .py(px(5.0))
+                            .h(px(36.0))
+                            .px(px(12.0))
                             .rounded(px(7.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
                             .border_1()
                             .border_color(border)
+                            .text_size(px(12.0))
+                            .text_color(text)
                             .hover(|style| style.bg(border.opacity(0.28)))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.dismiss_structured_result(cx)),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(text)
-                                            .child("Discard plan"),
-                                    )
-                                    .child(div().text_size(px(8.0)).text_color(muted).child("Esc")),
-                            ),
+                            .child("Discard")
+                            .child(div().text_size(px(10.0)).text_color(muted).child("Esc")),
                     )
                     .when(can_apply, |buttons| {
                         buttons.child(
                             div()
                                 .id("review-apply")
                                 .cursor_pointer()
-                                .px(px(10.0))
-                                .py(px(5.0))
+                                .h(px(36.0))
+                                .px(px(14.0))
                                 .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
                                 .bg(proposal)
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(inverse)
                                 .hover(|style| style.bg(proposal.opacity(0.84)))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.apply_lua_to_current_sheet(window, cx)
                                 }))
+                                .child(format!("Apply {}", count_label(total)))
                                 .child(
                                     div()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_size(px(10.0))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(inverse)
-                                                .child(format!("Apply {}", count_label(total))),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(8.0))
-                                                .text_color(inverse.opacity(0.76))
-                                                .child("Enter"),
-                                        ),
+                                        .text_size(px(10.0))
+                                        .text_color(inverse.opacity(0.76))
+                                        .child("↵"),
                                 ),
                         )
                     }),
@@ -539,15 +568,15 @@ fn endpoint_segment(
     div()
         .id(id)
         .cursor_pointer()
-        .px(px(6.0))
-        .py(px(3.0))
+        .px(px(10.0))
+        .py(px(5.0))
         .rounded(px(4.0))
         .bg(if active {
             surface
         } else {
             gpui::transparent_black()
         })
-        .text_size(px(9.0))
+        .text_size(px(11.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(if active { proposal } else { muted })
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -612,56 +641,68 @@ fn hero_diff(
     muted: Hsla,
 ) -> Div {
     let after_color = if deletion { error } else { proposal };
+    // Each endpoint gets the full card width. Horizontal scrolling preserves
+    // exact long formulas instead of hiding their differing suffixes.
+    let endpoint = |id, label, value: String, color: Hsla, accent: bool| {
+        div()
+            .w_full()
+            .min_w_0()
+            .p(px(10.0))
+            .rounded(px(7.0))
+            .bg(if accent {
+                color.opacity(0.07)
+            } else {
+                border.opacity(0.12)
+            })
+            .border_1()
+            .border_color(if accent {
+                color.opacity(0.26)
+            } else {
+                border.opacity(0.6)
+            })
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if accent { color } else { muted })
+                    .child(label),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .mt(px(6.0))
+                    .w_full()
+                    .overflow_x_scroll()
+                    .font_family("monospace")
+                    .text_size(px(13.0))
+                    .text_color(color)
+                    .child(div().whitespace_nowrap().child(value)),
+            )
+    };
     div()
-        .mt(px(5.0))
+        .mt(px(12.0))
         .flex()
-        .items_center()
+        .flex_col()
         .gap(px(8.0))
-        .child(
-            div()
-                .min_w(px(0.0))
-                .max_w(px(138.0))
-                .overflow_hidden()
-                .text_ellipsis()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(6.0))
-                .bg(border.opacity(0.18))
-                .border_1()
-                .border_color(border.opacity(0.62))
-                .text_size(px(18.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(text.opacity(0.82))
-                .child(before),
-        )
-        .child(
-            div()
-                .text_size(px(19.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(muted)
-                .child("→"),
-        )
-        .child(
-            div()
-                .min_w(px(0.0))
-                .max_w(px(138.0))
-                .overflow_hidden()
-                .text_ellipsis()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(6.0))
-                .bg(after_color.opacity(0.11))
-                .border_1()
-                .border_color(after_color.opacity(0.34))
-                .text_size(px(18.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(after_color)
-                .child(after),
-        )
+        .child(endpoint(
+            "review-value-before",
+            "Before",
+            before,
+            text,
+            false,
+        ))
+        .child(endpoint(
+            "review-value-after",
+            "After",
+            after,
+            after_color,
+            true,
+        ))
 }
 
 #[derive(Clone, Copy)]
 enum MessageIcon {
+    Info,
     Passed,
     Warning,
     Error,
@@ -670,21 +711,21 @@ enum MessageIcon {
 
 fn message_line(icon: MessageIcon, message: String, color: Hsla, border: Hsla) -> Div {
     let glyph = match icon {
+        MessageIcon::Info => "i",
         MessageIcon::Passed => "✓",
         MessageIcon::Warning => "!",
         MessageIcon::Error => "×",
         MessageIcon::Pending => "·",
     };
     div()
-        .mt(px(11.0))
-        .pt(px(9.0))
+        .mt(px(12.0))
+        .p(px(10.0))
+        .rounded(px(7.0))
+        .bg(border.opacity(0.12))
         .flex()
-        .items_center()
-        .gap(px(6.0))
-        .border_t_1()
-        .border_color(border)
-        .text_size(px(10.0))
-        .font_weight(FontWeight::SEMIBOLD)
+        .items_start()
+        .gap(px(8.0))
+        .text_size(px(11.0))
         .text_color(color)
         .child(
             div()
@@ -701,7 +742,7 @@ fn message_line(icon: MessageIcon, message: String, color: Hsla, border: Hsla) -
                 .font_weight(FontWeight::BOLD)
                 .child(glyph),
         )
-        .child(message)
+        .child(div().flex_1().min_w_0().whitespace_normal().child(message))
 }
 
 fn producer_attribution(plan: &visigrid_engine::operation_plan::OperationPlan) -> String {

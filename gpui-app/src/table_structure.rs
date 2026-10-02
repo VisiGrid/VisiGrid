@@ -66,6 +66,8 @@ impl StructureLayout {
 #[derive(Clone, Debug)]
 pub(crate) struct TableStructureHistory {
     pub commit: GuardedStructureCommit,
+    /// Desktop-only frozen panes normalized into a reviewed commit's source.
+    pub source_frozen: Option<(usize, usize)>,
     pub(crate) before: StructureLayout,
     pub(crate) after: StructureLayout,
 }
@@ -118,7 +120,7 @@ pub(crate) fn selected_row_steps(
     Ok(spans)
 }
 impl Spreadsheet {
-    fn structure_layout(&self, id: SheetId) -> StructureLayout {
+    pub(crate) fn structure_layout(&self, id: SheetId) -> StructureLayout {
         StructureLayout {
             heights: self.row_heights.get(&id).cloned().unwrap_or_default(),
             widths: self.col_widths.get(&id).cloned().unwrap_or_default(),
@@ -132,7 +134,7 @@ impl Spreadsheet {
         self.hidden_rows.insert(id, layout.hidden_rows.clone());
         self.hidden_cols.insert(id, layout.hidden_cols.clone());
     }
-    fn validate_structure_layout(
+    pub(crate) fn validate_structure_layout(
         &self,
         wb: &Workbook,
         id: SheetId,
@@ -234,6 +236,7 @@ impl Spreadsheet {
             Ok::<_, String>((
                 candidate,
                 TableStructureHistory {
+                    source_frozen: None,
                     commit,
                     before,
                     after,
@@ -678,6 +681,7 @@ mod tests {
         h.record_named_range_action(UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
+                source_frozen: None,
                 commit,
                 before: layout,
                 after,
@@ -718,6 +722,7 @@ mod tests {
         history.record_named_range_action(UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
+                source_frozen: None,
                 commit: c,
                 before: before.clone(),
                 after: after.clone(),

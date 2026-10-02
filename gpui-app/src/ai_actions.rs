@@ -1169,7 +1169,7 @@ sheet:cols()
         let mut preview_error = result.error;
         let prepared_plan = if preview_error.is_none() {
             if result.ops.iter().any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
-                && (self.row_view.is_sorted() || self.filter_state.is_enabled())
+                && !self.table_view_installed && (self.row_view.is_sorted() || self.filter_state.is_enabled())
             {
                 preview_error = Some(
                     "unsupported_view_state: clear the active sort/filter before reviewing row deletion".into(),
@@ -1184,7 +1184,10 @@ sheet:cols()
                     &result.ops,
                     default_lua_verification(),
                 ) {
-                    Ok(plan) => match require_visible_plan_changes(plan) {
+                    Ok(plan) => match require_visible_plan_changes(plan).and_then(|plan| {
+                        self.validate_table_review(&plan)?;
+                        Ok(plan)
+                    }) {
                         Ok(plan) => Some(plan),
                         Err(error) => {
                             preview_error = Some(error);
@@ -1283,7 +1286,7 @@ sheet:cols()
         let mut preview_error = result.error;
         let prepared_plan = if preview_error.is_none() {
             if result.ops.iter().any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
-                && (self.row_view.is_sorted() || self.filter_state.is_enabled())
+                && !self.table_view_installed && (self.row_view.is_sorted() || self.filter_state.is_enabled())
             {
                 preview_error = Some(
                     "unsupported_view_state: clear the active sort/filter before reviewing row deletion".into(),
@@ -1298,7 +1301,10 @@ sheet:cols()
                     &result.ops,
                     default_lua_verification(),
                 ) {
-                    Ok(plan) => match require_visible_plan_changes(plan) {
+                    Ok(plan) => match require_visible_plan_changes(plan).and_then(|plan| {
+                        self.validate_table_review(&plan)?;
+                        Ok(plan)
+                    }) {
                         Ok(plan) => Some(plan),
                         Err(error) => {
                             preview_error = Some(error);
@@ -1430,7 +1436,9 @@ sheet:cols()
     }
     /// Apply the pending Lua preview to the current (source) sheet.
     pub fn apply_lua_to_current_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_table_view_edit(cx) { return; }
+        if self.block_read_only_recovery(cx) || self.is_previewing() {
+            return;
+        }
         use crate::terminal::state::PendingResult;
 
         let preview = match self.terminal.pending_result.take() {
@@ -1450,17 +1458,22 @@ sheet:cols()
         }
 
         let Some(prepared) = preview.prepared_plan.as_ref() else {
-            self.status_message = Some("Cannot apply: preview did not produce a valid operation plan.".into());
+            self.status_message =
+                Some("Cannot apply: preview did not produce a valid operation plan.".into());
             self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
             cx.notify();
             return;
         };
         if prepared.plan().operations.iter().any(|operation| {
-            matches!(operation.operation, visigrid_engine::operation_plan::PlannedOp::DeleteRows { .. })
-        }) && (self.row_view.is_sorted() || self.filter_state.is_enabled()) {
-            self.status_message = Some(
-                "Cannot apply row deletion while the sheet is sorted or filtered.".into(),
-            );
+            matches!(
+                operation.operation,
+                visigrid_engine::operation_plan::PlannedOp::DeleteRows { .. }
+            )
+        }) && !self.table_view_installed
+            && (self.row_view.is_sorted() || self.filter_state.is_enabled())
+        {
+            self.status_message =
+                Some("Cannot apply row deletion while the sheet is sorted or filtered.".into());
             self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
             cx.notify();
             return;
@@ -1485,8 +1498,7 @@ sheet:cols()
             .verification
             .iter()
             .filter(|result| {
-                result.status
-                    == visigrid_engine::operation_plan::VerificationStatus::Passed
+                result.status == visigrid_engine::operation_plan::VerificationStatus::Passed
             })
             .count();
         let verification_count = commit.verification.len();
@@ -1495,36 +1507,46 @@ sheet:cols()
         let applied_changes = prepared.plan().changes.len();
 
         let sheet_id = prepared.plan().source_sheet_id;
-        let sheet_idx = self.workbook.read(cx)
+        let sheet_idx = self
+            .workbook
+            .read(cx)
             .sheet_index_by_id(sheet_id)
             .expect("verified plan source sheet still exists");
-        let before_row_view = self.row_view.clone();
-        let before_row_heights = self.row_heights.get(&sheet_id).cloned().unwrap_or_default();
-        let (after_row_view, after_row_heights) = plan_row_state_after_apply(
-            &before_row_view,
-            &before_row_heights,
-            &prepared.plan().operations,
-        );
-        self.workbook.update(cx, |workbook, _| *workbook = commit.applied.clone());
-        self.row_view = after_row_view.clone();
-        self.row_heights.insert(sheet_id, after_row_heights.clone());
+        let sheet_name = self.workbook.read(cx).sheets()[sheet_idx].name.clone();
+        if self.wb(cx).has_table_criteria() {
+            if let Err(error) =
+                self.publish_table_review(&commit, sheet_id, &prepared.plan().operations, cx)
+            {
+                self.status_message = Some(format!("Cannot apply: {error}"));
+                self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
+                cx.notify();
+                return;
+            }
+        } else {
+            let before_row_view = self.row_view.clone();
+            let before_row_heights = self.row_heights.get(&sheet_id).cloned().unwrap_or_default();
+            let (after_row_view, after_row_heights) = plan_row_state_after_apply(
+                &before_row_view,
+                &before_row_heights,
+                &prepared.plan().operations,
+            );
+            self.workbook
+                .update(cx, |workbook, _| *workbook = commit.applied.clone());
+            self.row_view = after_row_view.clone();
+            self.row_heights.insert(sheet_id, after_row_heights.clone());
 
-        let sheet_name = self.workbook.read(cx)
-            .sheet_names()
-            .get(sheet_idx)
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::PlanCommit {
-                commit: Box::new(commit),
-                sheet_id,
-                before_row_view,
-                after_row_view,
-                before_row_heights,
-                after_row_heights,
-            },
-            None,
-        );
+            self.history.record_action_with_provenance(
+                crate::history::UndoAction::PlanCommit {
+                    commit: Box::new(commit),
+                    sheet_id,
+                    before_row_view,
+                    after_row_view,
+                    before_row_heights,
+                    after_row_heights,
+                },
+                None,
+            );
+        }
         self.bump_cells_rev();
         self.is_modified = true;
         self.review_mode = None;

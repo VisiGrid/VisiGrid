@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Clearer change review.** The Review card has full-width Before/After comparisons with scrollable formulas, a separate worksheet-preview control, a contained filter notice, and larger Apply/Discard actions. Card clicks keep keyboard focus in Review without selecting cells underneath; Enter and Escape now reach the Review actions.
+
+- **Review Lua changes with Table filters active.** Review reveals source worksheet rows, including filtered records, and supports guarded cell edits and row-deletion previews. Apply restores the saved view and records one undoable transaction with row layout preserved. Session proposals still require approval in the desktop; stale plans and unsafe candidates leave the workbook unchanged.
+
 - **Run script and session batches with Table filters active.** Lua console/debug cell writes, CLI workbook scripts and session batches use canonical worksheet addresses, including explicitly addressed hidden records. Unsafe writes and late spills reject the complete batch. Multi-sheet desktop batches have one guarded undo/redo/rewind entry; session row/column commands retain structural protections and agent attribution. Failed Lua runs no longer apply collected writes.
 
 - **Insert and delete rows/columns with Table filters active.** Row deletion skips filtered-out records; sorted selections are resolved before one atomic edit. Table identities, formulas, calculated columns and criteria survive supported movement, with guarded undo/redo and history rewind. Deleting a column used by a filter or sort requires clearing that criterion first.

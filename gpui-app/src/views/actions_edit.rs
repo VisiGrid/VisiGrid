@@ -298,6 +298,11 @@ pub(crate) fn bind(
                 crate::views::lua_console::execute_console(this, cx);
                 return;
             }
+            // Bound actions run before on_key_down, including Review's raw keys.
+            if this.review_mode.is_some() && this.mode == Mode::Navigation {
+                this.apply_review_if_ready(window, cx);
+                return;
+            }
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
@@ -396,6 +401,8 @@ pub(crate) fn bind(
             }
             if this.open_menu.is_some() {
                 this.close_menu(cx);
+            } else if this.review_mode.is_some() && this.mode == Mode::Navigation {
+                this.dismiss_structured_result(cx);
             } else if this.mode == Mode::Command {
                 this.hide_palette(cx);
             } else if this.mode == Mode::GoTo {

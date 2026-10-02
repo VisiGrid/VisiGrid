@@ -85,6 +85,7 @@ mod table_filter_ui;
 mod table_edit;
 mod table_structure;
 mod table_batch;
+mod table_review;
 #[cfg(test)]
 mod table_outside_edit_tests;
 #[cfg(test)]

@@ -1593,6 +1593,7 @@ impl History {
                                 | UndoAction::ColsInserted { .. }
                                 | UndoAction::ColsDeleted { .. }
                                 | UndoAction::WorkbookSnapshot { .. }
+                                | UndoAction::FreezePanesChanged { .. }
                                 | UndoAction::Group { .. } => {
                                     return Err(PreviewBuildError::InvariantViolation("Cannot reconstruct layout across older structural history.".into()));
                                 }
@@ -1600,6 +1601,9 @@ impl History {
                             }
                         }
                         view.structure_layout = Some(layout);
+                        if let Some(frozen) = history.source_frozen {
+                            workbook.sheet_mut(sheet_index).unwrap().frozen_panes = frozen;
+                        }
                     }
                 }
             }
@@ -1742,6 +1746,11 @@ impl History {
                 history,
                 ..
             } => {
+                if let Some(frozen) = history.source_frozen {
+                    workbook.sheet_by_id_mut(history.commit.sheet)
+                        .ok_or_else(|| PreviewBuildError::InvariantViolation("Review source sheet no longer exists.".into()))?
+                        .frozen_panes = frozen;
+                }
                 history
                     .commit
                     .replay(workbook, false)

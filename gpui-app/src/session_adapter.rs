@@ -158,9 +158,6 @@ impl Spreadsheet {
         client: String,
         cx: &mut Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
-            return plan_error("table_view_active", crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE, false);
-        }
         use crate::plan_manager::{McpPlanRecord, McpPlanState};
         use crate::terminal::state::{LuaPreviewData, PendingResult};
         use visigrid_engine::operation_plan::{PlanId, PlanProducer};
@@ -212,6 +209,13 @@ impl Spreadsheet {
                 true,
             );
         }
+        if self.mode.is_editing() || self.is_previewing() {
+            return plan_error(
+                "review_unavailable",
+                "Finish cell editing and return to the live workbook before creating a plan",
+                true,
+            );
+        }
         if self.import_in_progress || self.hub_activity.is_some() {
             return plan_error(
                 "review_unavailable",
@@ -225,7 +229,11 @@ impl Spreadsheet {
         if req.title.trim().is_empty() || req.title.len() > 120 {
             return plan_error("bad_request", "title must be 1–120 bytes", false);
         }
-        if req.description.as_ref().is_some_and(|value| value.len() > 1000) {
+        if req
+            .description
+            .as_ref()
+            .is_some_and(|value| value.len() > 1000)
+        {
             return plan_error(
                 "bad_request",
                 "description must be at most 1000 bytes",
@@ -236,7 +244,11 @@ impl Spreadsheet {
             return plan_error("bad_request", "script must not be empty", false);
         }
         if producer_source.len() > 262_144 {
-            return plan_error("script_too_large", "script exceeds the 256 KiB limit", false);
+            return plan_error(
+                "script_too_large",
+                "script exceeds the 256 KiB limit",
+                false,
+            );
         }
         if req.verification.len() > visigrid_engine::operation_plan::MAX_VERIFICATION_DEFINITIONS {
             return plan_error(
@@ -278,7 +290,9 @@ impl Spreadsheet {
             Err(message) => return plan_error("plan_invalid", message, false),
         };
         let plan_id = format!("pv_{}", uuid::Uuid::new_v4().simple());
-        let script_hash = blake3::hash(producer_source.as_bytes()).to_hex().to_string();
+        let script_hash = blake3::hash(producer_source.as_bytes())
+            .to_hex()
+            .to_string();
         let source_sheet_index = active_sheet;
 
         let result = self
@@ -301,6 +315,7 @@ impl Spreadsheet {
             .ops
             .iter()
             .any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
+            && !self.table_view_installed
             && (self.row_view.is_sorted() || self.filter_state.is_enabled())
         {
             self.mcp_plans.insert(
@@ -329,7 +344,12 @@ impl Spreadsheet {
             &result.ops,
             verification,
         );
-        let prepared = match prepared.and_then(crate::ai_actions::require_visible_plan_changes) {
+        let prepared = match prepared
+            .and_then(crate::ai_actions::require_visible_plan_changes)
+            .and_then(|plan| {
+                self.validate_table_review(&plan)?;
+                Ok(plan)
+            }) {
             Ok(plan) => plan,
             Err(message) => {
                 self.mcp_plans.insert(invalid(message), req.idempotency_key);
@@ -521,9 +541,6 @@ impl Spreadsheet {
         req: &visigrid_protocol::ApplyPlanMessage,
         cx: &Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
-            return plan_error("table_view_active", crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE, false);
-        }
         use crate::plan_manager::McpPlanState;
         let Some(record) = self.mcp_plans.record(&req.plan_id) else {
             return plan_error("plan_not_found", "plan is unknown or expired", false);
