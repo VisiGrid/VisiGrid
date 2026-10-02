@@ -36,7 +36,7 @@ fn groups(tab: RibbonTab) -> Vec<Group> {
         RibbonTab::Home => vec![
             group(
                 "Clipboard",
-                326.,
+                296.,
                 &[
                     C(Paste, "Paste"),
                     C(Cut, "Cut"),
@@ -242,12 +242,6 @@ fn disabled_reason(app: &Spreadsheet, item: Item) -> Option<&'static str> {
         return Some("Return to an editable sheet to use this command");
     }
     match item {
-        Item::InsertRows if !app.is_row_selection() => {
-            Some("Select entire rows first (Shift+Space)")
-        }
-        Item::InsertCols if !app.is_col_selection() => {
-            Some("Select entire columns first (Ctrl+Space)")
-        }
         Item::Command(CommandId::Undo, _) if !app.history.can_undo() => Some("Nothing to undo"),
         Item::Command(CommandId::Redo, _) if !app.history.can_redo() => Some("Nothing to redo"),
         _ => None,
@@ -287,7 +281,8 @@ fn invoke(
         Item::TextColor => {
             app.show_color_picker(crate::color_palette::ColorTarget::Text, window, cx)
         }
-        Item::InsertRows | Item::InsertCols => app.insert_rows_or_cols(cx),
+        Item::InsertRows => app.insert_rows_at_selection(cx),
+        Item::InsertCols => app.insert_cols_at_selection(cx),
     }
     cx.notify();
 }
@@ -306,22 +301,27 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
         C(ToggleUnderline, _) => Some("U"),
         C(SelectFont, _) | Item::FontSize | Item::TextColor => Some("A"),
         C(ZoomReset, _) => Some("1:1"),
+        Item::NumberFormat => Some("123"),
         _ => None,
     };
     if let Some(glyph) = glyph {
+        // Multi-character glyphs ("123", "1:1") are set smaller so they fit the
+        // same box as a single letter instead of clipping.
+        let text_size = if glyph.chars().count() > 1 { size * 0.55 } else { size };
         return div()
             .size(px(size))
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(size))
+            .text_size(px(text_size))
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(color)
             .child(glyph)
             .into_any_element();
     }
     // Each polyline is independent; closed shapes repeat their first point.
     let lines: &'static [&'static [(f32, f32)]] = match item {
-        C(Paste | PasteValues | PasteSpecial, _) => &[
+        C(Paste, _) => &[
             &[
                 (8., 5.),
                 (4., 5.),
@@ -333,6 +333,34 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
             &[(8., 3.), (16., 3.), (16., 7.), (8., 7.), (8., 3.)],
             &[(8., 12.), (16., 12.)],
             &[(8., 16.), (14., 16.)],
+        ],
+        // Values: the clipboard with a tick, "just the numbers".
+        C(PasteValues, _) => &[
+            &[
+                (8., 5.),
+                (4., 5.),
+                (4., 21.),
+                (20., 21.),
+                (20., 5.),
+                (16., 5.),
+            ],
+            &[(8., 3.), (16., 3.), (16., 7.), (8., 7.), (8., 3.)],
+            &[(8., 14.), (11., 17.), (16., 11.)],
+        ],
+        // Paste special: the clipboard with an asterisk, "choose what".
+        C(PasteSpecial, _) => &[
+            &[
+                (8., 5.),
+                (4., 5.),
+                (4., 21.),
+                (20., 21.),
+                (20., 5.),
+                (16., 5.),
+            ],
+            &[(8., 3.), (16., 3.), (16., 7.), (8., 7.), (8., 3.)],
+            &[(12., 10.), (12., 18.)],
+            &[(8., 12.), (16., 16.)],
+            &[(16., 12.), (8., 16.)],
         ],
         C(Copy, _) => &[
             &[(8., 8.), (20., 8.), (20., 21.), (8., 21.), (8., 8.)],
@@ -387,7 +415,7 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
             &[(3., 15.), (21., 15.)],
             &[(10., 20.), (21., 20.)],
         ],
-        C(FindInCells | ZoomIn | ZoomOut, _) => &[
+        C(FindInCells, _) => &[
             &[
                 (9., 3.),
                 (14., 5.),
@@ -400,6 +428,37 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
                 (9., 3.),
             ],
             &[(15., 16.), (22., 23.)],
+        ],
+        C(ZoomIn, _) => &[
+            &[
+                (9., 3.),
+                (14., 5.),
+                (16., 10.),
+                (14., 15.),
+                (9., 17.),
+                (4., 15.),
+                (2., 10.),
+                (4., 5.),
+                (9., 3.),
+            ],
+            &[(15., 16.), (22., 23.)],
+            &[(6., 10.), (12., 10.)],
+            &[(9., 7.), (9., 13.)],
+        ],
+        C(ZoomOut, _) => &[
+            &[
+                (9., 3.),
+                (14., 5.),
+                (16., 10.),
+                (14., 15.),
+                (9., 17.),
+                (4., 15.),
+                (2., 10.),
+                (4., 5.),
+                (9., 3.),
+            ],
+            &[(15., 16.), (22., 23.)],
+            &[(6., 10.), (12., 10.)],
         ],
         C(FillDown, _) => &[
             &[(4., 3.), (20., 3.)],
@@ -434,7 +493,14 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
             &[(12., 11.), (19., 11.)],
             &[(12., 17.), (16., 17.)],
         ],
-        C(ClearSort | UnfreezePanes, _) => &[&[(5., 5.), (19., 19.)], &[(19., 5.), (5., 19.)]],
+        C(ClearSort, _) => &[&[(5., 5.), (19., 19.)], &[(19., 5.), (5., 19.)]],
+        // Unfreeze: the grid with its frozen edges struck through.
+        C(UnfreezePanes, _) => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(3., 9.), (21., 9.)],
+            &[(9., 3.), (9., 21.)],
+            &[(5., 19.), (19., 5.)],
+        ],
         C(Recalculate | RefreshPivot | RefreshAllPivots, _) => &[
             &[
                 (20., 9.),
@@ -473,9 +539,16 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
             &[(3., 4.), (21., 4.), (21., 20.), (3., 20.), (3., 4.)],
             &[(15., 4.), (15., 20.)],
         ],
-        C(SelectTheme | FillColor, _) => &[
+        // Theme: a palette diamond over a colour bar.
+        C(SelectTheme, _) => &[
             &[(12., 2.), (21., 11.), (12., 20.), (3., 11.), (12., 2.)],
             &[(3., 23.), (21., 23.)],
+        ],
+        // Fill colour: a tipped paint bucket and a drop.
+        C(FillColor, _) => &[
+            &[(4., 11.), (12., 3.), (19., 10.), (11., 18.), (4., 11.)],
+            &[(12., 3.), (9., 6.)],
+            &[(20., 14.), (23., 18.), (20., 21.), (17., 18.), (20., 14.)],
         ],
         C(ToggleZenMode, _) => &[
             &[(3., 9.), (3., 3.), (9., 3.)],
@@ -515,7 +588,60 @@ fn command_icon(item: Item, size: f32, color: Hsla) -> AnyElement {
             &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
             &[(8., 3.), (8., 21.)],
         ],
-        // Cell formatting, named ranges, and pivot operations share the cell grid.
+        // Freeze panes: the grid with a cross at the frozen corner.
+        C(FreezePanes, _) => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(3., 9.), (21., 9.)],
+            &[(9., 3.), (9., 21.)],
+            &[(4.5, 4.5), (7.5, 7.5)],
+            &[(7.5, 4.5), (4.5, 7.5)],
+        ],
+        // Cell styles: a cell with a brush stroke across it.
+        Item::Styles => &[
+            &[(3., 5.), (21., 5.), (21., 19.), (3., 19.), (3., 5.)],
+            &[(3., 15.), (8., 10.), (13., 15.), (18., 10.), (21., 13.)],
+        ],
+        // Conditional formatting: data bars of growing length.
+        C(AddConditionalFormat, _) => &[
+            &[(3., 3.), (3., 21.)],
+            &[(3., 6.), (10., 6.)],
+            &[(3., 12.), (15., 12.)],
+            &[(3., 18.), (21., 18.)],
+        ],
+        // Manage rules: a list with a tick beside each rule.
+        C(ManageConditionalFormats, _) => &[
+            &[(3., 6.), (5., 8.), (8., 4.)],
+            &[(11., 6.), (21., 6.)],
+            &[(3., 13.), (5., 15.), (8., 11.)],
+            &[(11., 13.), (21., 13.)],
+            &[(3., 20.), (5., 22.), (8., 18.)],
+            &[(11., 20.), (21., 20.)],
+        ],
+        // Pivot table: a table whose header row and column are marked, with
+        // an arrow turning rows into columns.
+        C(InsertPivotTable, _) => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(3., 9.), (21., 9.)],
+            &[(9., 3.), (9., 21.)],
+            &[(3., 6.), (21., 6.)],
+            &[(6., 3.), (6., 21.)],
+            &[(13., 17.), (17., 13.), (13., 13.)],
+            &[(17., 13.), (17., 17.)],
+        ],
+        // Pivot fields: the field list with its checkboxes.
+        C(EditPivotFields, _) => &[
+            &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+            &[(6., 7.), (9., 7.), (9., 10.), (6., 10.), (6., 7.)],
+            &[(12., 8.5), (18., 8.5)],
+            &[(6., 14.), (9., 14.), (9., 17.), (6., 17.), (6., 14.)],
+            &[(12., 15.5), (18., 15.5)],
+        ],
+        // Named range: a name tag over the cells it names.
+        C(ExtractNamedRange, _) => &[
+            &[(3., 7.), (14., 7.), (21., 12.), (14., 17.), (3., 17.), (3., 7.)],
+            &[(6., 11.), (8., 11.), (8., 13.), (6., 13.), (6., 11.)],
+        ],
+        // Anything else shares the cell grid.
         _ => &[
             &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
             &[(3., 9.), (21., 9.)],
@@ -586,6 +712,8 @@ fn command_button(
         .map(str::to_owned)
         .unwrap_or_else(|| match item {
             Item::Command(command, _) => command.name().to_string(),
+            Item::InsertRows => "Insert rows above the selection".to_string(),
+            Item::InsertCols => "Insert columns left of the selection".to_string(),
             _ => item_label(item).to_string(),
         })
         .into();
@@ -651,6 +779,32 @@ fn command_button(
                 .text_ellipsis()
                 .child(item_label(item)),
         )
+}
+
+/// The Font group keeps its real controls on screen while a dialog or cell
+/// edit owns input: dimmed, with a transparent cover that swallows clicks and
+/// explains why. Swapping them for a text list made the group jump and
+/// truncate its labels.
+fn font_group(
+    controls: impl IntoElement,
+    reason: Option<&'static str>,
+    cx: &mut Context<Spreadsheet>,
+) -> Div {
+    let mut wrap = div().relative().child(controls);
+    if let Some(reason) = reason {
+        let tooltip: SharedString = reason.into();
+        wrap = wrap.opacity(0.45).child(
+            div()
+                .id("ribbon-font-cover")
+                .absolute()
+                .inset_0()
+                .cursor_default()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .tooltip(move |_, cx| cx.new(|_| RibbonTooltip(tooltip.clone())).into()),
+        );
+    }
+    wrap
 }
 
 /// Group prefixes are stable, unique within each tab, and separate from root letters.
@@ -994,10 +1148,12 @@ fn render_body(
                     }),
             );
         } else {
-            if group.font && disabled_reason(app, group.items[0]).is_none() {
-                el = el.child(super::format_bar::render_ribbon_font_controls(
+            if group.font {
+                let reason = disabled_reason(app, group.items[0]);
+                let controls = super::format_bar::render_ribbon_font_controls(
                     app, &state, window, cx,
-                ));
+                );
+                el = el.child(font_group(controls, reason, cx));
             } else {
                 let prominent = group.label == "Clipboard";
                 let mut columns = div().flex().gap_1().h(px(66.));
@@ -1017,8 +1173,16 @@ fn render_body(
                 } else {
                     group.items
                 };
+                // A single column fills its group so every row highlights
+                // edge to edge. Several columns size to their labels, so a
+                // short column doesn't push the next one halfway across.
+                let multi = items.len() > 3;
+                if multi {
+                    columns = columns.gap_2();
+                }
                 for (column, items) in items.chunks(3).enumerate() {
-                    let mut col = div().flex().flex_col().flex_1().min_w_0();
+                    let mut col = div().flex().flex_col().min_w_0();
+                    col = if multi { col.flex_none() } else { col.flex_1() };
                     for (row, item) in items.iter().enumerate() {
                         col = col.child(command_button(
                             app,
@@ -1118,10 +1282,12 @@ pub fn render_group_menu(
                 .text_color(app.token(TokenKey::TextMuted))
                 .child(group.label),
         );
-        if group.font && disabled_reason(app, group.items[0]).is_none() {
-            return panel.child(super::format_bar::render_ribbon_font_controls(
+        if group.font {
+            let reason = disabled_reason(app, group.items[0]);
+            let controls = super::format_bar::render_ribbon_font_controls(
                 app, &state, window, cx,
-            ));
+            );
+            return panel.child(font_group(controls, reason, cx));
         }
         for (i, item) in group.items.iter().enumerate() {
             panel = panel.child(command_button(

@@ -216,13 +216,23 @@ impl Spreadsheet {
         if !self.prepare_toolbar_change(window, cx) {
             return;
         }
+        let changed = self.toolbar_layout(cx) != layout;
+        self.status_message = None;
         self.update_toolbar_preferences(cx, |s| s.appearance.toolbar.set_layout(layout));
+        if changed && self.status_message.is_none() {
+            self.status_message = Some(match layout {
+                ToolbarLayout::Ribbon => "Ribbon toolbar on.".into(),
+                ToolbarLayout::Compact => "Compact toolbar on.".into(),
+            });
+        }
     }
 
     pub fn toggle_ribbon_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.toolbar_layout(cx) != ToolbarLayout::Ribbon {
-            self.status_message =
-                Some("Choose the Ribbon toolbar to collapse or expand it.".into());
+            self.status_message = Some(
+                "Collapse/Expand applies to the Ribbon toolbar. Use View \u{2192} Ribbon Toolbar to switch."
+                    .into(),
+            );
             cx.notify();
             return;
         }
@@ -230,7 +240,15 @@ impl Spreadsheet {
             return;
         }
         let collapsed = !self.ribbon_collapsed(cx);
+        self.status_message = None;
         self.update_toolbar_preferences(cx, |s| s.appearance.toolbar.set_collapsed(collapsed));
+        if self.status_message.is_none() {
+            self.status_message = Some(if collapsed {
+                "Ribbon collapsed. Click a tab to show it until you pick a command.".into()
+            } else {
+                "Ribbon expanded.".into()
+            });
+        }
     }
 
     pub fn toggle_toolbar_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
