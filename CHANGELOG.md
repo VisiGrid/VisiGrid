@@ -1,13 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Paste and copy
-
-- **Ctrl+V into blank cells brings the copied formatting.** Cells that already have formatting keep it, so pasting into a styled report still doesn't wreck it; pasting into empty space now looks like what you copied instead of plain text. Paste Special → All still replaces the formatting everywhere. In Preferences, **Default paste** now reads **Contents / Values only** (it said Everything, which it wasn't).
-- **The copy border marches,** and it stays visible when the copied range is still selected; it used to be the same blue as the selection and disappeared under it.
-- **The copy border shows only on the sheet you copied from.** It used to appear on every sheet at the same addresses.
-
 ## 0.43.0
 
 ### CSV import
@@ -18,6 +10,12 @@
 - **`vgrid` has the same options:** `--text`, `--number`, `--date col=dmy`, `--skip`, `--decimal-comma`, `--encoding`, `--no-header` and `--formulas`. Piped CSV now honours `--encoding`, and CSV piped into `vgrid calc` or `vgrid convert` gets the same safe defaults as a file: `007` and `=…` stay text. `--delimiter` sets the output delimiter (and how piped input is read); a file's own delimiter is detected. ([#69](https://github.com/VisiGrid/VisiGrid/pull/69))
 - **A CSV with more rows than a sheet holds is never overwritten.** Saving or exporting over that file is refused, with the number of rows that would be lost. ([#79](https://github.com/VisiGrid/VisiGrid/pull/79))
 - **A CSV that changes on disk is noticed** when you return to the window. The banner says how it changed (rows added or removed, columns new or gone) and offers to re-import with the same settings. ([#79](https://github.com/VisiGrid/VisiGrid/pull/79))
+
+### Paste and copy
+
+- **Ctrl+V into blank cells brings the copied formatting.** Cells that already have formatting keep it, so pasting into a styled report still doesn't wreck it; pasting into empty space now looks like what you copied instead of plain text. Paste Special → All still replaces the formatting everywhere. In Preferences, **Default paste** now reads **Contents / Values only** (it said Everything, which it wasn't). ([#80](https://github.com/VisiGrid/VisiGrid/pull/80))
+- **The copy border marches,** and it stays visible when the copied range is still selected; it used to be the same blue as the selection and disappeared under it. ([#80](https://github.com/VisiGrid/VisiGrid/pull/80))
+- **The copy border shows only on the sheet you copied from.** It used to appear on every sheet at the same addresses. ([#80](https://github.com/VisiGrid/VisiGrid/pull/80))
 
 ### Command palette
 
