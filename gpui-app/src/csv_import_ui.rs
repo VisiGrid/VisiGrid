@@ -147,17 +147,22 @@ impl CsvDialogState {
     }
 
     /// The `vgrid` command that imports the file the same way.
+    ///
+    /// `convert` detects a file's delimiter and treats `--delimiter` as the
+    /// OUTPUT delimiter; only piped input is read with it. So a chosen
+    /// delimiter is written as piped input, or the command would read the
+    /// file differently from the dialog.
     pub fn cli_line(&self) -> String {
-        let name = self.path.file_name().and_then(|n| n.to_str()).unwrap_or("file.csv");
+        let name = shell_quote(self.path.file_name().and_then(|n| n.to_str()).unwrap_or("file.csv"));
         let stem = self.path.file_stem().and_then(|n| n.to_str()).unwrap_or("file");
-        let mut parts = vec![
-            "vgrid convert".to_string(),
-            shell_quote(name),
-            "-t sheet -o".to_string(),
-            shell_quote(&format!("{stem}.sheet")),
-        ];
-        parts.extend(self.options.cli_flags());
-        parts.join(" ")
+        let out = shell_quote(&format!("{stem}.sheet"));
+        let flags = self.options.cli_flags().join(" ");
+        let flags = if flags.is_empty() { String::new() } else { format!(" {flags}") };
+        if self.options.delimiter.is_some() {
+            format!("vgrid convert -f csv{flags} -t sheet -o {out} < {name}")
+        } else {
+            format!("vgrid convert {name} -t sheet -o {out}{flags}")
+        }
     }
 }
 
@@ -577,6 +582,28 @@ mod tests {
         assert_eq!(
             state.cli_line(),
             "vgrid convert 'orders 2024.csv' -t sheet -o 'orders 2024.sheet' --text zip --decimal-comma"
+        );
+    }
+
+    #[test]
+    fn a_chosen_delimiter_is_written_as_piped_input() {
+        // `convert file.csv --delimiter ';'` sets the output delimiter and
+        // still sniffs the file; piped input is read with it.
+        let mut options = CsvOptions::default();
+        options.delimiter = Some(b';');
+        options.encoding = Some(Encoding::Windows1252);
+        let state = CsvDialogState {
+            path: PathBuf::from("/tmp/orders.csv"),
+            options,
+            head: Vec::new(),
+            preview: Err(String::new()),
+            focus: 0,
+            remember: false,
+            columns_scroll: ScrollHandle::new(),
+        };
+        assert_eq!(
+            state.cli_line(),
+            "vgrid convert -f csv --delimiter ';' --encoding windows-1252 -t sheet -o orders.sheet < orders.csv"
         );
     }
 }
