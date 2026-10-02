@@ -280,6 +280,17 @@ fn render_findings(
             .child(dismiss_button("csv-banner-dismiss", c, cx, false)),
     );
 
+    if list.is_empty() {
+        // Reopened from the palette after a clean import
+        card = card.child(
+            div()
+                .px(px(14.0))
+                .py(px(10.0))
+                .text_size(px(12.0))
+                .text_color(c.muted)
+                .child(format!("Nothing to note: every value came in as it was in the file. {}.", doc.summary)),
+        );
+    }
     for f in list {
         let warning = f.mark == "!";
         let has_actions = !f.actions.is_empty();

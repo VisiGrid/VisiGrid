@@ -172,6 +172,7 @@ pub enum CommandId {
     ExportCsv,
     ExportPdf,
     CsvImportSettings,
+    CsvImportNotes,
     PrintPreview,
     ExportTsv,
     ExportJson,
@@ -397,6 +398,7 @@ impl CommandId {
             Self::ExportCsv => "Export as CSV",
             Self::ExportPdf => "Export PDF",
             Self::CsvImportSettings => "CSV Import Settings...",
+            Self::CsvImportNotes => "Show CSV Import Notes",
             Self::PrintPreview => "Print",
             Self::ExportTsv => "Export as TSV",
             Self::ExportJson => "Export as JSON",
@@ -684,6 +686,7 @@ impl CommandId {
             Self::ExportCsv => "save comma",
             Self::ExportPdf => "print preview portable document paper page gridlines",
             Self::CsvImportSettings => "csv tsv delimiter encoding column types text leading zeros reimport",
+            Self::CsvImportNotes => "csv tsv banner import report findings formulas kept as text changed on disk",
             Self::PrintPreview => "printer print preview copies pages paper",
             Self::ExportTsv => "save tab separated",
             Self::ExportJson => "save array",
@@ -878,6 +881,7 @@ impl CommandId {
             Self::ExportCsv,
             Self::ExportPdf,
             Self::CsvImportSettings,
+            Self::CsvImportNotes,
             Self::PrintPreview,
             Self::ExportTsv,
             Self::ExportJson,
@@ -992,6 +996,7 @@ impl CommandId {
             | Self::PrintPreview
             | Self::ExportPdf
             | Self::CsvImportSettings
+            | Self::CsvImportNotes
             | Self::ExportCsv
             | Self::ExportTsv
             | Self::ExportJson

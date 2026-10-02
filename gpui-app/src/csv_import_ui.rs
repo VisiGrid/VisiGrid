@@ -481,6 +481,19 @@ impl Spreadsheet {
         true
     }
 
+    /// Bring the import banner back after it was closed (palette command).
+    pub fn show_csv_banner(&mut self, cx: &mut Context<Self>) {
+        let current = self.current_file.clone();
+        match self.csv_doc.as_mut().filter(|d| current.as_ref() == Some(&d.path)) {
+            Some(doc) => {
+                doc.banner_visible = true;
+                doc.reviewing_formulas = false;
+            }
+            None => self.status_message = Some("Import notes are for an open CSV file".into()),
+        }
+        cx.notify();
+    }
+
     pub fn dismiss_csv_banner(&mut self, cx: &mut Context<Self>) {
         if let Some(doc) = self.csv_doc.as_mut() {
             doc.banner_visible = false;
