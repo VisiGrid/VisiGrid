@@ -129,9 +129,8 @@ pub fn render_font_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                 .py_1()
                 // Scroll wheel on the list scrolls the font list
                 .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
-                    let delta = event.delta.pixel_delta(px(24.0));
-                    let dy: f32 = delta.y.into();
-                    let lines = (dy / -24.0).round() as i32;
+                    let dy: f32 = event.delta.pixel_delta(px(24.0)).y.into();
+                    let lines = crate::command_palette::wheel_rows(&mut this.font_picker_wheel_px, dy, 24.0) as i32;
                     if lines != 0 {
                         this.font_picker_scroll(lines, cx);
                     }

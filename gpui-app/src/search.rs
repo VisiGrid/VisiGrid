@@ -2071,12 +2071,39 @@ pub fn relative_age(then: std::time::SystemTime, now: std::time::SystemTime) -> 
 
 /// Recent files provider - searches recently opened files
 /// Create with a snapshot of recent file paths
+/// A recent file with what the palette shows about it, read from disk once
+/// when the palette opens rather than on every keystroke.
+#[derive(Clone, Debug)]
+pub struct RecentFile {
+    pub path: PathBuf,
+    /// Containing folder, absolute, home shown as `~`. Empty if unknown.
+    pub folder: String,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+impl RecentFile {
+    pub fn read(path: &std::path::Path) -> Self {
+        let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        Self {
+            path: path.to_path_buf(),
+            folder: absolute.parent().map(display_folder).unwrap_or_default(),
+            modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+        }
+    }
+}
+
 pub struct RecentFilesProvider {
-    files: Vec<PathBuf>,
+    files: Vec<RecentFile>,
 }
 
 impl RecentFilesProvider {
+    /// Reads each file's folder and age from disk.
     pub fn new(files: Vec<PathBuf>) -> Self {
+        Self::from_entries(files.iter().map(|p| RecentFile::read(p)).collect())
+    }
+
+    /// Uses already-read entries; no disk access.
+    pub fn from_entries(files: Vec<RecentFile>) -> Self {
         Self { files }
     }
 }
@@ -2093,7 +2120,8 @@ impl SearchProvider for RecentFilesProvider {
     fn search(&self, query: &SearchQuery, limit: usize) -> Vec<SearchItem> {
         self.files
             .iter()
-            .filter_map(|path| {
+            .filter_map(|file| {
+                let path = &file.path;
                 let filename = path.file_name()?.to_str()?;
 
                 // Score against the query
@@ -2109,10 +2137,8 @@ impl SearchProvider for RecentFilesProvider {
                     filename,
                     SearchAction::OpenFile(path.clone()),
                 )
-                .with_subtitle(display_folder(
-                    &std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).parent()?.to_path_buf(),
-                ));
-                if let Some(age) = std::fs::metadata(path).ok().and_then(|m| m.modified().ok()) {
+                .with_subtitle(file.folder.clone());
+                if let Some(age) = file.modified {
                     item = item.with_meta(relative_age(age, std::time::SystemTime::now()));
                 }
                 Some(item
