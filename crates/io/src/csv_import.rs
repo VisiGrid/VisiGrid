@@ -616,7 +616,9 @@ pub(crate) fn import_str(content: &str, encoding: Encoding, options: &CsvOptions
             ensure(&mut decisions, &mut seen, &mut dest_of, record.len() - 1, &header);
         }
         for (col_idx, field) in record.iter().enumerate() {
-            if field.starts_with('=') {
+            // The same test keep_as_text uses (trimmed), so a formula with
+            // leading spaces is fingerprinted like any other
+            if field.trim().starts_with('=') {
                 use std::hash::Hash;
                 (row_idx, col_idx, field).hash(&mut formulas);
             }
@@ -829,6 +831,9 @@ mod tests {
         // Non-formula changes do not matter
         let d = "id,note\n9,=1+1\n8,=HYPERLINK(\"http://x\",\"y\")\n";
         assert_eq!(text.formulas_digest, run(d, &CsvOptions::default()).formulas_digest);
+        // A formula behind leading spaces is still a formula: adding one changes it
+        let e = "id,note\n1,=1+1\n2,=HYPERLINK(\"http://x\",\"y\")\n3, =HYPERLINK(\"http://evil\",\"y\")\n";
+        assert_ne!(text.formulas_digest, run(e, &CsvOptions::default()).formulas_digest);
     }
 
     #[test]
