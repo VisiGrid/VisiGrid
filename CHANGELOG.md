@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Selection
+
+- **Dragging past the edge of the grid scrolls the sheet**, as in Excel. Drag a selection, the fill handle, a formula reference or row/column headers below, above or beside the grid and hold: the sheet keeps scrolling and the drag keeps extending, faster the further out the pointer is. Previously the drag stopped at the last visible row or column.
+- **Releasing the mouse off the grid now finishes the drag.** Letting go over the status bar or outside the window ends the selection, commits a fill-handle drag and applies Format Painter; before, only a release over a cell did.
+
 ### Under the hood
 
 - **Built on Zed v1.22's GPUI**, up from v1.12, and on upstream Zed directly instead of VisiGrid's fork. The fork existed only to remove private macOS blur APIs that the Mac App Store rejects; Zed removed them too. Building from source now needs Rust 1.98.1.

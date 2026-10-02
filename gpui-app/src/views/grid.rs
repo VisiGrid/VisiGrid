@@ -551,6 +551,9 @@ fn render_cell(
             .h_full()
             // Keep mouse_move for edge-case drag-through (overlay handles clicks on top)
             .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
+                if this.is_fill_dragging() || this.dragging_selection {
+                    this.note_drag_cell(cell_row, cell_col);
+                }
                 if this.is_fill_dragging() {
                     this.continue_fill_drag(cell_row, cell_col, cx);
                     return;
@@ -1696,6 +1699,9 @@ fn render_cell(
             if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
             }
+            if this.is_fill_dragging() || this.dragging_selection {
+                this.note_drag_cell(cell_row, cell_col);
+            }
             // Continue fill handle drag if active (priority over selection drag)
             if this.is_fill_dragging() {
                 this.continue_fill_drag(cell_row, cell_col, cx);
@@ -2747,6 +2753,9 @@ fn render_merge_div(
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
             if this.inspector_visible || this.filter_dropdown_col.is_some() {
                 return;
+            }
+            if this.is_fill_dragging() || this.dragging_selection {
+                this.note_drag_cell(origin_row, origin_col);
             }
             if this.is_fill_dragging() {
                 this.continue_fill_drag(origin_row, origin_col, cx);
