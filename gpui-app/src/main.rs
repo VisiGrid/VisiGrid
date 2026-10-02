@@ -83,6 +83,8 @@ mod sheet_ops;
 mod sort_filter;
 mod table_filter_ui;
 mod table_edit;
+#[cfg(test)]
+mod table_outside_edit_tests;
 mod table_cut;
 #[cfg(test)]
 mod table_rewind_tests;

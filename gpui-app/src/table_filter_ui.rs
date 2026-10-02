@@ -10,7 +10,7 @@ use visigrid_engine::{
 };
 
 pub(crate) const TABLE_VIEW_EDIT_MESSAGE: &str =
-    "Clear Table sorting and filters before this operation. Body cell edits, pastes, fills and pasting header names are supported.";
+    "Clear Table sorting and filters before this operation. Safe cell edits and pastes, Table-body fills, and header-name paste are supported.";
 const VALUE_LIMIT: usize = 500;
 
 pub(crate) fn has_table_criteria(wb: &Workbook) -> bool {
@@ -52,6 +52,24 @@ pub(crate) fn desktop_layout_error(
 }
 
 impl Spreadsheet {
+    pub(crate) fn validate_saved_view_layout(&self, wb: &Workbook) -> Result<(), String> {
+        for sheet in wb.sheets() {
+            if let Some(spec) = sheet.table_view_spec() {
+                if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table) {
+                    if let Some(error) = crate::table_filter_ui::desktop_layout_error(
+                        table,
+                        self.row_heights.get(&sheet.id),
+                        self.hidden_rows.get(&sheet.id),
+                        sheet.frozen_panes.0,
+                    ) {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn table_view_record_counts(&self, cx: &App) -> Option<(usize, usize)> {
         if !self.table_view_installed {
             return None;

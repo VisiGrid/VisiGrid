@@ -211,7 +211,7 @@ impl Spreadsheet {
             let prepared =
                 prepare_header_paste(self.wb(cx), self.sheet_index(cx), row, col, &grid)?;
             if let Some((candidate, commit)) = prepared {
-                self.validate_header_view_layout(&candidate)?;
+                self.validate_saved_view_layout(&candidate)?;
                 self.workbook
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.table_filter_dropdown = None;
@@ -239,24 +239,6 @@ impl Spreadsheet {
         true
     }
 
-    pub(crate) fn validate_header_view_layout(&self, wb: &Workbook) -> Result<(), String> {
-        for sheet in wb.sheets() {
-            if let Some(spec) = sheet.table_view_spec() {
-                if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table) {
-                    if let Some(error) = crate::table_filter_ui::desktop_layout_error(
-                        table,
-                        self.row_heights.get(&sheet.id),
-                        self.hidden_rows.get(&sheet.id),
-                        sheet.frozen_panes.0,
-                    ) {
-                        return Err(error);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn replay_table_headers(
         &mut self,
         commit: &TableCommit,
@@ -264,7 +246,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) -> bool {
         let result = prepare_header_replay(self.wb(cx), commit, undo).and_then(|candidate| {
-            self.validate_header_view_layout(&candidate)?;
+            self.validate_saved_view_layout(&candidate)?;
             Ok(candidate)
         });
         match result {

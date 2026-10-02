@@ -18,8 +18,8 @@ pub struct TableCellPatch {
 #[derive(Clone, Debug)]
 pub struct TableCellsCommit {
     pub sheet: SheetId,
-    table: DataTable,
-    view: TableViewSpec,
+    tables: Vec<DataTable>,
+    view: Option<TableViewSpec>,
     pub patches: Vec<TableCellPatch>,
 }
 
@@ -60,16 +60,8 @@ impl TableCellsCommit {
         after: &Sheet,
         targets: impl IntoIterator<Item = (usize, usize)>,
     ) -> Self {
-        let view = before
-            .table_view_spec()
-            .expect("preflighted Table view")
-            .clone();
-        let table = before
-            .tables()
-            .iter()
-            .find(|t| t.id == view.table)
-            .unwrap()
-            .clone();
+        let view = before.table_view_spec().cloned();
+        let tables = before.tables().to_vec();
         let patches = targets
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>()
@@ -87,7 +79,7 @@ impl TableCellsCommit {
             .collect();
         Self {
             sheet: before.id,
-            table,
+            tables,
             view,
             patches,
         }
@@ -122,22 +114,28 @@ impl TableCellsCommit {
             .sheet_index_by_id(self.sheet)
             .ok_or("The history sheet no longer exists.")?;
         let sheet = wb.sheet(index).unwrap();
-        if sheet.table_view_spec() != Some(&self.view)
-            || sheet.tables().iter().find(|t| t.id == self.table.id) != Some(&self.table)
+        if sheet.table_view_spec() != self.view.as_ref()
+            || sheet.tables().len() != self.tables.len()
+            || self
+                .tables
+                .iter()
+                .any(|saved| sheet.tables().iter().find(|t| t.id == saved.id) != Some(saved))
         {
             return Err(
                 "The Table or its view changed since this edit. Undo/redo was not applied.".into(),
             );
         }
-        let view = sheet
-            .build_saved_table_view(sheet.rows)?
-            .ok_or("The Table view no longer exists.")?;
+        crate::table_edit::validate_view_safe_targets(
+            wb,
+            index,
+            &self
+                .patches
+                .iter()
+                .map(|p| (p.row, p.col))
+                .collect::<Vec<_>>(),
+            true,
+        )?;
         for patch in &self.patches {
-            if !self.table.range.contains(patch.row, patch.col)
-                || patch.row == self.table.range.start_row
-            {
-                return Err("History target is outside the Table body.".into());
-            }
             let expected = if undo { &patch.after } else { &patch.before };
             if !same_cell(&image(sheet, patch.row, patch.col), expected) {
                 return Err(
@@ -145,19 +143,6 @@ impl TableCellsCommit {
                 );
             }
         }
-        view.validate_mutation_ranges(
-            sheet,
-            &self
-                .patches
-                .iter()
-                .map(|p| visigrid_engine::validation::CellRange {
-                    start_row: p.row,
-                    end_row: p.row,
-                    start_col: p.col,
-                    end_col: p.col,
-                })
-                .collect::<Vec<_>>(),
-        )?;
         if self.patches.is_empty() {
             return Ok(());
         }
@@ -180,6 +165,16 @@ impl TableCellsCommit {
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Could not recalculate history: {error:?}"));
         }
+        crate::table_edit::validate_view_safe_targets(
+            &candidate,
+            index,
+            &self
+                .patches
+                .iter()
+                .map(|p| (p.row, p.col))
+                .collect::<Vec<_>>(),
+            true,
+        )?;
         for sheet in candidate.sheets() {
             sheet.build_saved_table_view(sheet.rows)?;
         }

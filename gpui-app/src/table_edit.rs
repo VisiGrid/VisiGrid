@@ -66,35 +66,110 @@ impl TableCellWrite {
     }
 }
 
-fn validate_table_writes(
+/// Validate canonical cells in a workbook with saved Table views. History may
+/// revisit hidden records because an earlier edit can itself hide its target.
+pub(crate) fn validate_view_safe_targets(
     wb: &Workbook,
     sheet_index: usize,
-    writes: &[TableCellWrite],
+    targets: &[(usize, usize)],
+    allow_hidden: bool,
 ) -> Result<(), String> {
+    wb.ensure_writable()?;
     let sheet = wb.sheet(sheet_index).ok_or("The sheet no longer exists.")?;
-    let view = sheet
-        .build_saved_table_view(NUM_ROWS.min(sheet.rows))?
-        .ok_or("Select a filtered or sorted Table body cell, or clear the Table views first.")?;
-    let range = view.range();
-    for write in writes {
-        if write.row <= range.start_row
-            || write.row > range.end_row
-            || write.col < range.start_col
-            || write.col > range.end_col
+    let view = sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))?;
+    for &(row, col) in targets {
+        if row >= sheet.rows || col >= sheet.cols {
+            return Err("The edit extends beyond the worksheet. Nothing was changed.".into());
+        }
+        if let Some(view) = &view {
+            if !allow_hidden && !view.rows().is_data_row_visible(row) {
+                return Err("Cannot write to a hidden Table record.".into());
+            }
+        }
+        if sheet.is_pivot_owned(row, col) {
+            return Err("Cannot edit PivotTable output. Edit its source data instead.".into());
+        }
+        if sheet.get_spill_parent(row, col).is_some() {
+            return Err("Cannot edit a spill receiver. Edit the source formula instead.".into());
+        }
+        if sheet
+            .get_merge(row, col)
+            .is_some_and(|m| m.start != (row, col))
         {
-            return Err("Edits must stay inside the Table body. Clear the view to edit headers, adjacent cells or grow the Table.".into());
+            return Err("The edit includes covered merged cells. Edit the merged cell's top-left cell or unmerge first.".into());
         }
-        if view.focus_record(write.row)?.record_hidden {
-            return Err("Cannot write to a hidden Table record.".into());
-        }
-        if sheet.get_spill_parent(write.row, write.col).is_some() {
-            return Err("Cannot edit a spill receiver.".into());
-        }
-        if let Some(error) = sheet.table_value_write_error(write.row, write.col) {
+        if let Some(error) = sheet.table_value_write_error(row, col) {
             return Err(error);
         }
     }
+    if let Some(view) = view {
+        view.validate_mutation_ranges(
+            sheet,
+            &targets
+                .iter()
+                .map(|&(row, col)| visigrid_engine::validation::CellRange {
+                    start_row: row,
+                    end_row: row,
+                    start_col: col,
+                    end_col: col,
+                })
+                .collect::<Vec<_>>(),
+        )?;
+    }
     Ok(())
+}
+
+/// A paste beginning in a Table body stays in that body. Other destinations
+/// use visible worksheet rows, then share the same all-target preflight.
+pub(crate) fn view_safe_paste_targets(
+    sheet: &visigrid_engine::sheet::Sheet,
+    rows: &visigrid_engine::filter::RowView,
+    start: (usize, usize),
+    height: usize,
+    width: usize,
+) -> Result<Vec<(usize, usize, usize, usize)>, String> {
+    if height == 0 || width == 0 || height.saturating_mul(width) > 100_000 {
+        return Err("Paste between 1 and 100,000 cells at a time.".into());
+    }
+    if start
+        .1
+        .checked_add(width)
+        .is_none_or(|end| end > sheet.cols)
+    {
+        return Err("The paste extends beyond the worksheet's columns.".into());
+    }
+    let view = sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))?;
+    let in_body = view.as_ref().filter(|v| {
+        let r = v.range();
+        start.0 > r.start_row && start.0 <= r.end_row
+    });
+    let data_rows = if let Some(view) = in_body {
+        let range = view.range();
+        if start.1 < range.start_col || start.1 + width > range.end_col + 1 {
+            return Err("The paste exceeds the Table's columns. Nothing was pasted.".into());
+        }
+        view.visible_body_rows(start.0, height)?
+    } else {
+        let first = rows
+            .visible_index_of(start.0)
+            .ok_or("Select a visible cell before pasting.")?;
+        let data: Vec<_> = rows
+            .visible_rows()
+            .iter()
+            .skip(first)
+            .take(height)
+            .map(|&r| rows.view_to_data(r))
+            .collect();
+        if data.len() != height || data.iter().any(|&r| r >= sheet.rows) {
+            return Err("The paste extends beyond the worksheet's rows.".into());
+        }
+        data
+    };
+    Ok(data_rows
+        .into_iter()
+        .enumerate()
+        .flat_map(|(ri, r)| (0..width).map(move |ci| (r, start.1 + ci, ri, ci)))
+        .collect())
 }
 
 pub(crate) fn prepare_table_writes(
@@ -102,7 +177,12 @@ pub(crate) fn prepare_table_writes(
     sheet_index: usize,
     writes: &[TableCellWrite],
 ) -> Result<Workbook, String> {
-    validate_table_writes(wb, sheet_index, writes)?;
+    validate_view_safe_targets(
+        wb,
+        sheet_index,
+        &writes.iter().map(|w| (w.row, w.col)).collect::<Vec<_>>(),
+        false,
+    )?;
     let mut candidate = wb.clone();
     {
         let mut batch = candidate.batch_guard();
@@ -126,6 +206,13 @@ pub(crate) fn prepare_table_writes(
     if let Some(error) = candidate.take_incremental_errors().first() {
         return Err(format!("The edit could not be recalculated: {error:?}"));
     }
+    // A new spill must not silently consume another target from this batch.
+    validate_view_safe_targets(
+        &candidate,
+        sheet_index,
+        &writes.iter().map(|w| (w.row, w.col)).collect::<Vec<_>>(),
+        true,
+    )?;
     // Recalculation can change a spill or a formula-backed key on another sheet.
     for sheet in candidate.sheets() {
         sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))?;
@@ -156,17 +243,16 @@ impl Spreadsheet {
         }
         let (view_row, col) = self.view_state.selected;
         let row = self.row_view.view_to_data(view_row);
-        let result = validate_table_writes(
-            self.wb(cx),
-            self.sheet_index(cx),
-            &[TableCellWrite::value(
-                row,
-                col,
-                self.sheet(cx).get_raw(row, col),
-            )],
-        );
+        let (row, col) = self
+            .sheet(cx)
+            .get_merge(row, col)
+            .map_or((row, col), |m| m.start);
+        let result = self.validate_saved_view_layout(self.wb(cx)).and_then(|_| {
+            validate_view_safe_targets(self.wb(cx), self.sheet_index(cx), &[(row, col)], false)
+        });
         match result {
             Ok(_) => {
+                self.view_state.selected = (self.row_view.data_to_view(row).unwrap_or(row), col);
                 self.table_edit_target =
                     Some((self.sheet_index(cx), row, col, self.wb(cx).revision()));
                 false
@@ -202,7 +288,11 @@ impl Spreadsheet {
                 return false;
             }
         }
-        let candidate = match prepare_table_writes(self.wb(cx), self.sheet_index(cx), &writes) {
+        let candidate = match prepare_table_writes(self.wb(cx), self.sheet_index(cx), &writes)
+            .and_then(|candidate| {
+                self.validate_saved_view_layout(&candidate)?;
+                Ok(candidate)
+            }) {
             Ok(candidate) => candidate,
             Err(error) => {
                 self.status_message = Some(error);
@@ -225,12 +315,15 @@ impl Spreadsheet {
             .tables()
             .iter()
             .find(|t| Some(t.id) == self.sheet(cx).table_view_spec().map(|s| s.table))
-            .unwrap()
-            .range;
+            .map(|table| table.range);
         self.workbook
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.sync_table_view(cx);
-        let focus = focus_after_edit(&self.row_view, range, old_focus.0, record);
+        let focus = if let Some(range) = range {
+            focus_after_edit(&self.row_view, range, old_focus.0, record)
+        } else {
+            self.row_view.data_to_view(record).unwrap_or(old_focus.0)
+        };
         self.view_state.select_cell(focus, old_focus.1);
         self.ensure_visible(cx);
         self.history.record_action_with_provenance(
@@ -274,7 +367,9 @@ impl Spreadsheet {
                 }
             }
         }
-        let result = self.workbook.update(cx, |wb, _| commit.replay(wb, undo));
+        let result = self
+            .validate_saved_view_layout(self.wb(cx))
+            .and_then(|_| self.workbook.update(cx, |wb, _| commit.replay(wb, undo)));
         if let Err(error) = result {
             self.status_message = Some(error);
             cx.notify();
@@ -300,7 +395,7 @@ impl Spreadsheet {
                 }
                 for col in c1..=c2 {
                     if targets.len() >= 100_000 {
-                        return Err("Select at most 100,000 cells for one Table edit.".into());
+                        return Err("Select at most 100,000 cells for one edit.".into());
                     }
                     targets.insert((self.row_view.view_to_data(row), col));
                 }
@@ -318,7 +413,7 @@ impl Spreadsheet {
                         .into_iter()
                         .map(|(r, c)| TableCellWrite::value(r, c, String::new()))
                         .collect(),
-                    "Clear visible Table cells",
+                    "Clear cells",
                     cx,
                 );
             }
@@ -459,7 +554,7 @@ pub(crate) mod tests {
             TableCellWrite::value(4, 2, "99".into()),
             TableCellWrite::value(2, 2, "Header".into()),
             TableCellWrite::value(5, 4, "Adjacent".into()),
-            TableCellWrite::value(7, 2, "Growth".into()),
+            TableCellWrite::value(30, 2, "Out of bounds".into()),
         ] {
             assert!(prepare_table_writes(
                 &wb,

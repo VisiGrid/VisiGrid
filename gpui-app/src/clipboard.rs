@@ -2125,7 +2125,7 @@ impl Spreadsheet {
         let result = self.plan_table_paste(kind, cx);
         match result {
             Ok(writes) => {
-                self.apply_table_cell_writes(writes, "Paste visible Table cells", cx);
+                self.apply_table_cell_writes(writes, "Paste cells", cx);
             }
             Err(error) => {
                 self.status_message = Some(error);
@@ -2186,17 +2186,6 @@ impl Spreadsheet {
             return Err("Paste at most 100,000 cells at a time through a Table view.".into());
         }
         let (start, col) = self.view_state.selected;
-        let view = self
-            .sheet(cx)
-            .build_saved_table_view(NUM_ROWS)?
-            .ok_or("Select a sorted or filtered Table body cell before pasting.")?;
-        let table = self
-            .sheet(cx)
-            .tables()
-            .iter()
-            .find(|t| t.id == view.spec().table)
-            .ok_or("The Table no longer exists.")?;
-        self.table_layout_check(table)?;
         let broadcast = grid.len() == 1 && width == 1 && self.is_multi_selection();
         let targets: Vec<(usize, usize, usize, usize)> = if broadcast {
             self.table_selection_targets(cx)?
@@ -2207,19 +2196,13 @@ impl Spreadsheet {
             if !self.view_state.additional_selections.is_empty() {
                 return Err("Select one destination for a multi-cell paste.".into());
             }
-            let range = view.range();
-            if col < range.start_col
-                || col
-                    .checked_add(width)
-                    .is_none_or(|end| end > range.end_col + 1)
-            {
-                return Err("The paste exceeds the Table's columns. Nothing was pasted.".into());
-            }
-            view.visible_body_rows(start, grid.len())?
-                .into_iter()
-                .enumerate()
-                .flat_map(|(ri, r)| (0..width).map(move |ci| (r, col + ci, ri, ci)))
-                .collect()
+            crate::table_edit::view_safe_paste_targets(
+                self.sheet(cx),
+                &self.row_view,
+                (start, col),
+                grid.len(),
+                width,
+            )?
         };
         Ok(table_paste_writes(&grid, ic, kind, targets))
     }
