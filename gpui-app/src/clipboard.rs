@@ -2230,7 +2230,7 @@ fn table_paste_writes_for_sheet(
     let mut writes = table_paste_writes(grid, ic, source_kind, targets);
     if kind == TablePasteKind::Contents {
         for write in &mut writes {
-            if sheet.get_format(write.row, write.col) != &CellFormat::default() {
+            if sheet.get_format(write.row, write.col) != CellFormat::default() {
                 write.format = None;
             }
         }
@@ -2373,12 +2373,12 @@ mod table_paste_tests {
             sheet, &ic.raw_cells, Some(&ic), TablePasteKind::Contents, targets.clone());
         let mut after = prepare_table_writes(&before, 0, &writes).unwrap();
         assert!(after.active_sheet().get_format(5, 2).bold);
-        assert_eq!(after.active_sheet().get_format(3, 2), &italic);
+        assert_eq!(after.active_sheet().get_format(3, 2), italic);
         assert_eq!(after.active_sheet().get_raw(4, 2), "10");
         let commit = before.capture_guarded_batch(&after).unwrap();
         commit.replay(&mut after, true).unwrap();
-        assert_eq!(after.active_sheet().get_format(5, 2), &CellFormat::default());
-        assert_eq!(after.active_sheet().get_format(3, 2), &italic);
+        assert_eq!(after.active_sheet().get_format(5, 2), CellFormat::default());
+        assert_eq!(after.active_sheet().get_format(3, 2), italic);
         commit.replay(&mut after, false).unwrap();
         assert!(after.active_sheet().get_format(5, 2).bold);
         let all = super::table_paste_writes_for_sheet(
