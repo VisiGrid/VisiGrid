@@ -172,6 +172,68 @@ pub(crate) fn view_safe_paste_targets(
         .collect())
 }
 
+/// Resolve a cut/fill rectangle once in display order. These operations do not
+/// transfer merges or cross the boundary between a projected Table and notes.
+/// Sources receive the same protection as destinations, even when not written.
+pub(crate) fn view_safe_selection_rows(
+    sheet: &visigrid_engine::sheet::Sheet,
+    rows: &visigrid_engine::filter::RowView,
+    rect: ((usize, usize), (usize, usize)),
+) -> Result<Vec<usize>, String> {
+    let ((r0, c0), (r1, c1)) = rect;
+    if r0 > r1 || c0 > c1 || r1 >= rows.row_count() || c1 >= sheet.cols {
+        return Err("The selection extends beyond the worksheet.".into());
+    }
+    if let Some(view) = sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))? {
+        let range = view.range();
+        if r0 <= range.end_row
+            && r1 > range.start_row
+            && (r0 <= range.start_row
+                || r1 > range.end_row
+                || c0 < range.start_col
+                || c1 > range.end_col)
+        {
+            return Err(
+                "Cut and fill cannot cross the Table body boundary or include cells beside it."
+                    .into(),
+            );
+        }
+    }
+    let data: Vec<_> = rows
+        .visible_rows()
+        .iter()
+        .copied()
+        .filter(|r| *r >= r0 && *r <= r1)
+        .map(|r| rows.view_to_data(r))
+        .collect();
+    if data.is_empty() {
+        return Err("Select at least one visible cell.".into());
+    }
+    if data.len().saturating_mul(c1 - c0 + 1) > 100_000 {
+        return Err("Cut or fill at most 100,000 visible cells at once.".into());
+    }
+    for &row in &data {
+        if row >= sheet.rows {
+            return Err("The selection extends beyond the worksheet.".into());
+        }
+        for col in c0..=c1 {
+            if sheet.get_merge(row, col).is_some() {
+                return Err("Unmerge source and destination cells before cutting or filling through a Table view.".into());
+            }
+            if sheet.is_pivot_owned(row, col) {
+                return Err("Cut and fill cannot include PivotTable output.".into());
+            }
+            if sheet.get_spill_parent(row, col).is_some() {
+                return Err("Cut and fill cannot include spill receivers.".into());
+            }
+            if let Some(error) = sheet.table_value_write_error(row, col) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(data)
+}
+
 pub(crate) fn prepare_table_writes(
     wb: &Workbook,
     sheet_index: usize,

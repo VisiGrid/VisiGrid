@@ -85,6 +85,8 @@ mod table_filter_ui;
 mod table_edit;
 #[cfg(test)]
 mod table_outside_edit_tests;
+#[cfg(test)]
+mod table_outside_fill_tests;
 mod table_cut;
 #[cfg(test)]
 mod table_rewind_tests;

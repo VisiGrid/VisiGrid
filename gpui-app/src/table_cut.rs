@@ -1,44 +1,23 @@
 //! Cut captures the old projection, then clears visible source records atomically.
 //! Paste is a separate operation, matching the ordinary clipboard contract.
 use crate::{
-    app::{Spreadsheet, NUM_ROWS},
+    app::Spreadsheet,
     clipboard::InternalClipboard,
-    table_edit::TableCellWrite,
+    table_edit::{view_safe_selection_rows, TableCellWrite},
 };
 use gpui::{ClipboardItem, Context};
-use visigrid_engine::sheet::Sheet;
+use visigrid_engine::{filter::RowView, sheet::Sheet};
 
 type Rect = ((usize, usize), (usize, usize));
 
-fn plan_cut(sheet: &Sheet, rect: Rect) -> Result<(InternalClipboard, Vec<TableCellWrite>), String> {
-    let view = sheet
-        .build_saved_table_view(NUM_ROWS.min(sheet.rows))?
-        .ok_or("Select a sorted or filtered Table body before cutting.")?;
-    let ((r0, c0), (r1, c1)) = rect;
-    let range = view.range();
-    if r0 > r1
-        || c0 > c1
-        || r0 <= range.start_row
-        || r1 > range.end_row
-        || c0 < range.start_col
-        || c1 > range.end_col
-    {
-        return Err("Cut must stay inside the Table body. Nothing was cut.".into());
-    }
-    let rows: Vec<_> = view
-        .rows()
-        .visible_rows()
-        .iter()
-        .copied()
-        .filter(|r| *r >= r0 && *r <= r1)
-        .map(|r| view.rows().view_to_data(r))
-        .collect();
-    let source_row = *rows
-        .first()
-        .ok_or("Select at least one visible Table record.")?;
-    if rows.len().saturating_mul(c1 - c0 + 1) > 100_000 {
-        return Err("Cut at most 100,000 visible Table cells at once.".into());
-    }
+pub(crate) fn plan_cut(
+    sheet: &Sheet,
+    view: &RowView,
+    rect: Rect,
+) -> Result<(InternalClipboard, Vec<TableCellWrite>), String> {
+    let ((_, c0), (_, c1)) = rect;
+    let rows = view_safe_selection_rows(sheet, view, rect)?;
+    let source_row = rows[0];
     let mut clipboard = InternalClipboard {
         raw_tsv: String::new(),
         raw_cells: Vec::new(),
@@ -103,15 +82,16 @@ impl Spreadsheet {
         }
         self.sync_table_view(cx);
         // Only the primary selection participates, just like ordinary Cut.
-        let (clipboard, writes) = match plan_cut(self.sheet(cx), self.selection_range()) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.status_message = Some(error);
-                cx.notify();
-                return;
-            }
-        };
-        if !self.finish_table_selection_write(Ok(writes), "Cut visible Table cells", None, cx) {
+        let (clipboard, writes) =
+            match plan_cut(self.sheet(cx), &self.row_view, self.selection_range()) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.status_message = Some(error);
+                    cx.notify();
+                    return;
+                }
+            };
+        if !self.finish_table_selection_write(Ok(writes), "Cut cells", None, cx) {
             return;
         }
         // Publish the clipboard only after the guarded candidate succeeds. A
@@ -141,6 +121,14 @@ mod tests {
         table_edit::{prepare_table_writes, tests::fixture},
     };
     use visigrid_engine::cell::CellComment;
+    fn view(sheet: &Sheet) -> RowView {
+        sheet
+            .build_saved_table_view(sheet.rows)
+            .unwrap()
+            .unwrap()
+            .rows()
+            .clone()
+    }
 
     #[test]
     fn cut_captures_display_order_and_clears_only_visible_records() {
@@ -156,7 +144,12 @@ mod tests {
         let mut format = before.active_sheet().get_format(5, 2).clone();
         format.bold = true;
         before.active_sheet_mut().set_format(5, 2, format.clone());
-        let (ic, writes) = plan_cut(before.active_sheet(), ((3, 2), (6, 3))).unwrap();
+        let (ic, writes) = plan_cut(
+            before.active_sheet(),
+            &view(before.active_sheet()),
+            ((3, 2), (6, 3)),
+        )
+        .unwrap();
         assert_eq!(ic.source_rows, vec![5, 3, 6]);
         assert_eq!(ic.raw_tsv, "20\t=C6*2\n30\t=C4*2\n40\t=C7*2");
         assert!(ic.formats[0][0].bold);
@@ -191,7 +184,12 @@ mod tests {
     #[test]
     fn cutting_filter_keys_can_hide_every_record_and_undo_restores_them() {
         let before = fixture(true);
-        let (ic, writes) = plan_cut(before.active_sheet(), ((3, 1), (6, 1))).unwrap();
+        let (ic, writes) = plan_cut(
+            before.active_sheet(),
+            &view(before.active_sheet()),
+            ((3, 1), (6, 1)),
+        )
+        .unwrap();
         let mut after = prepare_table_writes(&before, 0, &writes).unwrap();
         let view = after
             .active_sheet()
@@ -229,11 +227,16 @@ mod tests {
             ((3, 1), (7, 2)),
             ((3, 1), (4, 4)),
         ] {
-            assert!(plan_cut(wb.active_sheet(), rect).is_err());
+            assert!(plan_cut(wb.active_sheet(), &view(wb.active_sheet()), rect).is_err());
         }
         // Clearing C4 would expand an adjacent array through the Table body.
         wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(31-C4)");
-        let (_, writes) = plan_cut(wb.active_sheet(), ((3, 2), (6, 2))).unwrap();
+        let (_, writes) = plan_cut(
+            wb.active_sheet(),
+            &view(wb.active_sheet()),
+            ((3, 2), (6, 2)),
+        )
+        .unwrap();
         let revision = wb.revision();
         assert!(prepare_table_writes(&wb, 0, &writes).is_err());
         assert_eq!(wb.revision(), revision);
@@ -254,7 +257,12 @@ mod tests {
                 author: String::new(),
             }),
         );
-        let (ic, writes) = plan_cut(wb.active_sheet(), ((4, 3), (6, 3))).unwrap();
+        let (ic, writes) = plan_cut(
+            wb.active_sheet(),
+            &view(wb.active_sheet()),
+            ((4, 3), (6, 3)),
+        )
+        .unwrap();
         assert_eq!(
             ic.raw_cells,
             vec![vec!["001\t=hello\nworld"], vec!["=C4*2"], vec![""]]
@@ -281,7 +289,12 @@ mod tests {
                 author: "A".into(),
             }),
         );
-        let (ic, writes) = plan_cut(before.active_sheet(), ((4, 3), (6, 3))).unwrap();
+        let (ic, writes) = plan_cut(
+            before.active_sheet(),
+            &view(before.active_sheet()),
+            ((4, 3), (6, 3)),
+        )
+        .unwrap();
         let cut = prepare_table_writes(&before, 0, &writes).unwrap();
         let cut_commit = TableCellsCommit::capture(
             before.active_sheet(),

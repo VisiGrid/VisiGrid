@@ -10,7 +10,7 @@ use visigrid_engine::{
 };
 
 pub(crate) const TABLE_VIEW_EDIT_MESSAGE: &str =
-    "Clear Table sorting and filters before this operation. Safe cell edits and pastes, Table-body fills, and header-name paste are supported.";
+    "Clear Table sorting and filters before this operation. Safe cell edits, cut, paste, fill and header-name paste are supported.";
 const VALUE_LIMIT: usize = 500;
 
 pub(crate) fn has_table_criteria(wb: &Workbook) -> bool {

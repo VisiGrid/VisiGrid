@@ -2,14 +2,14 @@
 use crate::{
     app::{FillAxis, Spreadsheet},
     series_fill::{self, DetectedSource, FillIntent, FillPattern},
-    table_edit::TableCellWrite,
+    table_edit::{view_safe_selection_rows, TableCellWrite},
 };
 use gpui::Context;
 use visigrid_engine::{
     cell::{interchange_number, ValueRef},
+    filter::RowView,
     formula::{eval::Value, parser::adjust_formula_refs},
     sheet::Sheet,
-    table_view::TableView,
 };
 
 type Position = (usize, usize);
@@ -18,29 +18,6 @@ const LIMIT: usize = 100_000;
 
 fn normalized(a: Position, b: Position) -> Rect {
     ((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)))
-}
-
-fn body_rows(view: &TableView, rect: Rect) -> Result<Vec<usize>, String> {
-    let ((r0, c0), (r1, c1)) = rect;
-    let range = view.range();
-    if r0 <= range.start_row || r1 > range.end_row || c0 < range.start_col || c1 > range.end_col {
-        return Err("Fill must stay inside the Table body, including its source cells.".into());
-    }
-    let rows: Vec<_> = view
-        .rows()
-        .visible_rows()
-        .iter()
-        .copied()
-        .filter(|r| *r >= r0 && *r <= r1)
-        .map(|r| view.rows().view_to_data(r))
-        .collect();
-    if rows.is_empty() {
-        return Err("Select at least one visible Table record.".into());
-    }
-    if rows.len().saturating_mul(c1 - c0 + 1) > LIMIT {
-        return Err("Fill at most 100,000 visible Table cells at once.".into());
-    }
-    Ok(rows)
 }
 
 fn copy_cell(sheet: &Sheet, source: Position, target: Position) -> TableCellWrite {
@@ -63,29 +40,32 @@ fn copy_cell(sheet: &Sheet, source: Position, target: Position) -> TableCellWrit
     write
 }
 
-fn plan_direction(
+pub(crate) fn plan_direction(
     sheet: &Sheet,
-    view: &TableView,
+    view: &RowView,
     rect: Rect,
     down: bool,
 ) -> Result<Vec<TableCellWrite>, String> {
-    let rows = body_rows(view, rect)?;
+    let rows = view_safe_selection_rows(sheet, view, rect)?;
     let ((_, c0), (_, c1)) = rect;
     let mut writes = Vec::new();
     if down {
         let source = if rows.len() == 1 {
-            let slot = view.rows().data_to_view(rows[0]).unwrap();
-            view.rows()
-                .visible_rows()
+            let slot = view.data_to_view(rows[0]).unwrap();
+            view.visible_rows()
                 .iter()
                 .copied()
                 .rev()
-                .find(|r| *r < slot && *r > view.range().start_row)
-                .map(|r| view.rows().view_to_data(r))
-                .ok_or("No visible Table record above to fill from.")?
+                .find(|r| *r < slot)
+                .map(|r| view.view_to_data(r))
+                .ok_or("No visible row above to fill from.")?
         } else {
             rows[0]
         };
+        let source_slot = view
+            .data_to_view(source)
+            .ok_or("The source is no longer visible.")?;
+        view_safe_selection_rows(sheet, view, ((source_slot, c0), rect.1))?;
         for row in rows.into_iter().filter(|r| *r != source) {
             for col in c0..=c1 {
                 writes.push(copy_cell(sheet, (source, col), (row, col)));
@@ -94,11 +74,11 @@ fn plan_direction(
     } else {
         let source = if c0 == c1 {
             c0.checked_sub(1)
-                .filter(|c| *c >= view.range().start_col)
-                .ok_or("No Table field to the left to fill from.")?
+                .ok_or("No column to the left to fill from.")?
         } else {
             c0
         };
+        view_safe_selection_rows(sheet, view, ((rect.0 .0, source), rect.1))?;
         for row in rows {
             for col in source + 1..=c1 {
                 writes.push(copy_cell(sheet, (row, source), (row, col)));
@@ -108,22 +88,22 @@ fn plan_direction(
     Ok(writes)
 }
 
-fn plan_broadcast(
+pub(crate) fn plan_broadcast(
     sheet: &Sheet,
-    view: &TableView,
+    view: &RowView,
     source: Position,
     rects: &[Rect],
     edit: Option<&str>,
 ) -> Result<Vec<TableCellWrite>, String> {
-    body_rows(view, (source, source))?;
-    let source = (view.rows().view_to_data(source.0), source.1);
+    view_safe_selection_rows(sheet, view, (source, source))?;
+    let source = (view.view_to_data(source.0), source.1);
     let mut targets = std::collections::BTreeSet::new();
     for &rect in rects {
-        for row in body_rows(view, rect)? {
+        for row in view_safe_selection_rows(sheet, view, rect)? {
             for col in rect.0 .1..=rect.1 .1 {
                 targets.insert((row, col));
                 if targets.len() > LIMIT {
-                    return Err("Fill at most 100,000 visible Table cells at once.".into());
+                    return Err("Fill at most 100,000 visible cells at once.".into());
                 }
             }
         }
@@ -240,22 +220,22 @@ fn fill_line(
     }
 }
 
-fn plan_handle(
+pub(crate) fn plan_handle(
     sheet: &Sheet,
-    view: &TableView,
+    view: &RowView,
     source: Rect,
     end: Position,
     vertical: bool,
     ctrl: bool,
 ) -> Result<Vec<TableCellWrite>, String> {
     let ((r0, c0), (r1, c1)) = source;
-    let source_rows = body_rows(view, source)?;
+    let source_rows = view_safe_selection_rows(sheet, view, source)?;
     let combined = if vertical {
         ((r0.min(end.0), c0), (r1.max(end.0), c1))
     } else {
         ((r0, c0.min(end.1)), (r1, c1.max(end.1)))
     };
-    body_rows(view, combined)?;
+    view_safe_selection_rows(sheet, view, combined)?;
     let mut writes = Vec::new();
     if vertical {
         if (r0..=r1).contains(&end.0) {
@@ -263,12 +243,11 @@ fn plan_handle(
         }
         let backwards = end.0 < r0;
         let mut target_rows: Vec<_> = view
-            .rows()
             .visible_rows()
             .iter()
             .copied()
             .filter(|r| *r >= combined.0 .0 && *r <= combined.1 .0 && !(*r >= r0 && *r <= r1))
-            .map(|r| view.rows().view_to_data(r))
+            .map(|r| view.view_to_data(r))
             .collect();
         if backwards {
             target_rows.reverse();
@@ -309,19 +288,15 @@ fn plan_handle(
 }
 
 impl Spreadsheet {
-    fn fill_table_view(&mut self, cx: &mut Context<Self>) -> Result<TableView, String> {
+    fn fill_table_view(&mut self, cx: &mut Context<Self>) -> Result<RowView, String> {
         if self.block_if_previewing_only(cx) {
             return Err(
                 "Fill is unavailable while viewing a read-only workbook or preview.".into(),
             );
         }
         self.sync_table_view(cx);
-        self.sheet(cx)
-            .build_saved_table_view(crate::app::NUM_ROWS.min(self.sheet(cx).rows))?
-            .ok_or(
-                "Select an active Table body, or clear the Table views before filling other cells."
-                    .into(),
-            )
+        self.validate_saved_view_layout(self.wb(cx))?;
+        Ok(self.row_view.clone())
     }
 
     pub(crate) fn finish_table_selection_write(
@@ -397,11 +372,7 @@ impl Spreadsheet {
             .and_then(|view| plan_direction(self.sheet(cx), &view, self.selection_range(), down));
         self.finish_table_selection_write(
             result,
-            if down {
-                "Filled down through visible Table records"
-            } else {
-                "Filled right through visible Table records"
-            },
+            if down { "Filled down" } else { "Filled right" },
             None,
             cx,
         );
@@ -432,8 +403,7 @@ impl Spreadsheet {
             let source = if editing {
                 let (_, row, col, _) = self.table_edit_target.unwrap();
                 (
-                    view.rows()
-                        .data_to_view(row)
+                    view.data_to_view(row)
                         .ok_or("The source record is no longer visible.")?,
                     col,
                 )
@@ -448,9 +418,7 @@ impl Spreadsheet {
                 editing.then_some(self.edit_value.as_str()),
             )
         });
-        if self.finish_table_selection_write(result, "Filled visible Table selection", None, cx)
-            && editing
-        {
+        if self.finish_table_selection_write(result, "Filled selection", None, cx) && editing {
             self.formula_edit_cell = None;
             self.cancel_edit(cx);
             self.maybe_show_cycle_banner(cx);
@@ -458,9 +426,9 @@ impl Spreadsheet {
     }
 
     pub(crate) fn start_table_fill(&mut self, cx: &mut Context<Self>) -> bool {
-        let result = self
-            .fill_table_view(cx)
-            .and_then(|view| body_rows(&view, self.selection_range()));
+        let result = self.fill_table_view(cx).and_then(|view| {
+            view_safe_selection_rows(self.sheet(cx), &view, self.selection_range())
+        });
         if let Err(error) = result {
             self.status_message = Some(error);
             cx.notify();
@@ -505,12 +473,7 @@ impl Spreadsheet {
                 (source.1 .0, source.1 .1.max(end.1)),
             )
         };
-        self.finish_table_selection_write(
-            result,
-            "Filled visible Table records",
-            Some(selection),
-            cx,
-        );
+        self.finish_table_selection_write(result, "Filled cells", Some(selection), cx);
     }
 }
 
@@ -521,8 +484,13 @@ mod tests {
         table_cell_history::TableCellsCommit,
         table_edit::{prepare_table_writes, tests::fixture},
     };
-    fn view(sheet: &Sheet) -> TableView {
-        sheet.build_saved_table_view(30).unwrap().unwrap()
+    fn view(sheet: &Sheet) -> RowView {
+        sheet
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap()
+            .rows()
+            .clone()
     }
 
     #[test]
@@ -530,7 +498,10 @@ mod tests {
         let wb = fixture(true);
         let sheet = wb.active_sheet();
         let view = view(sheet);
-        assert_eq!(view.visible_body_rows(4, 3).unwrap(), vec![5, 3, 6]);
+        assert_eq!(
+            view_safe_selection_rows(sheet, &view, ((4, 2), (6, 2))).unwrap(),
+            vec![5, 3, 6]
+        );
         let writes = plan_direction(sheet, &view, ((4, 3), (6, 3)), true).unwrap();
         assert_eq!(
             writes
@@ -615,7 +586,7 @@ mod tests {
         .unwrap();
         assert_eq!(writes.len(), 3);
         let mut after = prepare_table_writes(&wb, 0, &writes).unwrap();
-        assert_eq!(view(after.active_sheet()).rows().visible_count(), 26);
+        assert_eq!(view(after.active_sheet()).visible_count(), 26);
         assert_eq!(after.active_sheet().get_raw(4, 1), "East");
         let commit = TableCellsCommit::capture(
             s,
@@ -624,7 +595,12 @@ mod tests {
         );
         commit.replay(&mut after, true).unwrap();
         assert_eq!(
-            view(after.active_sheet()).visible_body_rows(4, 3).unwrap(),
+            view_safe_selection_rows(
+                after.active_sheet(),
+                &view(after.active_sheet()),
+                ((4, 2), (6, 2))
+            )
+            .unwrap(),
             vec![5, 3, 6]
         );
         let writes =
@@ -637,7 +613,7 @@ mod tests {
             s,
             &v,
             (4, 3),
-            &[((4, 3), (6, 3)), ((8, 1), (8, 1))],
+            &[((4, 3), (6, 3)), ((2, 1), (2, 1))],
             Some("99")
         )
         .is_err());

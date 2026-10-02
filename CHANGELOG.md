@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Cut and fill around filtered Tables.** Cut, Fill Down/Right, Ctrl+Enter and the fill handle now work in safe cells above/below Tables and on other sheets. They preserve visible-row mapping, formula offsets and dependent filter/sort updates, with atomic rejection and sparse undo/redo.
+
 - **Edit around filtered Tables.** Type, clear or paste into titles, notes, totals and cells on other sheets without clearing Table filters/sorts. Dependent filters and sort order update after recalculation. Unsafe targets or spills reject the complete change, and sparse undo/redo and history rewind preserve the saved views.
 
 - **Paste Table headers together.** Paste one row of names into a Table header to rename several columns or swap names atomically. Formulas, calculated-column rules and saved filter/sort bindings follow the same column identities. Paste Values can use copied formula results as names; invalid names or a paste extending beyond the header are refused without changes. One undo restores the complete schema change.

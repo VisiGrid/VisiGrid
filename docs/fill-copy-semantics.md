@@ -85,6 +85,13 @@ Fill & copy semantics define what happens when data is replicated, propagated, o
 
 ---
 
+
+## Cut and fill with saved Table criteria
+
+Cut, Fill Down/Right, Ctrl+Enter and the fill handle can operate in safe cells above/below a filtered Table or on another sheet. Resolve source and destination rows from the pre-edit projection, preserve canonical formula offsets, and skip hidden rows. A continuous cut/fill rectangle cannot cross the projected Table body boundary. Validate sources as well as targets; merged cells, headers, pivot output and spill receivers are refused. A failed cut leaves the clipboard unchanged. Each successful operation recalculates dependent Table views and uses one sparse guarded undo step; paste after cut remains a separate step. See [Table semantics](table-semantics.md#filling-visible-records) for limits and the existing Ctrl+Enter/series-fill extensions.
+
+---
+
 ## Paste Operation
 
 ### Ctrl+V / Edit → Paste
