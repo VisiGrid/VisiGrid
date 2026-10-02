@@ -600,6 +600,9 @@ impl Spreadsheet {
         undo: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::table_header_paste::is_header_rename(commit) {
+            return self.replay_table_headers(commit, undo, cx);
+        }
         match self
             .workbook
             .update(cx, |wb, _| wb.apply_table_commit(commit, undo))

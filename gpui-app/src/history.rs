@@ -1658,7 +1658,13 @@ impl History {
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
-                workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
+                if crate::table_header_paste::is_header_rename(commit) {
+                    let candidate = crate::table_header_paste::prepare_header_replay(workbook, commit, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
+                } else {
+                    workbook.apply_table_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
+                }
                 if commit.inserted_header_row().is_some() {
                     if let Some(view) = view_state.per_sheet.get_mut(*sheet_index) {
                         view.row_order = None;

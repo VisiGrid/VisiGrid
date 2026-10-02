@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Paste Table headers together.** Paste one row of names into a Table header to rename several columns or swap names atomically. Formulas, calculated-column rules and saved filter/sort bindings follow the same column identities. Paste Values can use copied formula results as names; invalid names or a paste extending beyond the header are refused without changes. One undo restores the complete schema change.
+
 - **Structured-reference editing.** Formula suggestions now include Tables, columns and supported section selectors. Tab/Enter or a click inserts an escaped reference; Escape dismisses suggestions before cancelling the edit. Selected suggestions preview their cells, and structured references use matching formula/grid colors with the correct sheet and filtered record coordinates. Keyboard selection remains visible in long suggestion lists.
 
 - **Excel Tables import/export.** `.xlsx` files preserve supported Table names, bounds, headers, row banding, structured references and calculated-column rules, including blank/value/formula overrides. Import reports unsupported metadata; export reviews lost filter/sort criteria and pivot definitions before writing. Header-only Tables require an empty record before export. Excel's long `#This Row` selector is now supported.

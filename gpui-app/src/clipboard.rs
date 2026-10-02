@@ -753,6 +753,8 @@ impl Spreadsheet {
     /// Full paste. `with_formats` also copies the source formatting, which only
     /// an internal clipboard carries.
     fn paste_contents(&mut self, with_formats: bool, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
+        if self.paste_table_headers(if with_formats { TablePasteKind::All } else { TablePasteKind::Contents }, cx) { return; }
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
             self.paste_table_view(if with_formats { TablePasteKind::All } else { TablePasteKind::Contents }, cx);
             return;
@@ -1321,6 +1323,8 @@ impl Spreadsheet {
     /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
     /// When filtered, pastes to consecutive visible rows only.
     pub fn paste_values(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
+        if self.paste_table_headers(TablePasteKind::Values, cx) { return; }
         // Block during preview mode
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
             self.paste_table_view(TablePasteKind::Values, cx);

@@ -43,6 +43,7 @@ impl Spreadsheet {
             }
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(&entry.action, UndoAction::TableCellsChanged { .. })
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && self.block_table_view_edit(cx) {
                 self.history.redo(); return;
@@ -1260,6 +1261,7 @@ impl Spreadsheet {
             }
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(&entry.action, UndoAction::TableCellsChanged { .. })
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && self.block_table_view_edit(cx) {
                 self.history.undo(); return;
