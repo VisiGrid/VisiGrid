@@ -79,6 +79,7 @@ impl PdfExportState {
 
 impl Spreadsheet {
     pub fn show_pdf_export(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         if self.pdf_export.as_ref().is_some_and(|s| s.busy) {
             return;
         }

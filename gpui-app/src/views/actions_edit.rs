@@ -310,6 +310,12 @@ pub(crate) fn bind(
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
                 Mode::CloudOpen => this.cloud_open_selected(cx),
                 Mode::ExportPdf => this.confirm_pdf_action(cx),
+                Mode::CsvImport => {
+                    if this.csv_dialog.as_ref().is_some_and(|s| s.preview.is_ok()) {
+                        this.csv_dialog_apply(cx);
+                    }
+                }
+                Mode::PasteSpecial => this.apply_paste_special(cx),
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
@@ -387,6 +393,10 @@ pub(crate) fn bind(
                 this.dismiss_import_overlay(cx);
                 return;
             }
+            // CSV banner: Esc backs out of the review step, then closes it
+            if this.open_menu.is_none() && this.mode == Mode::Navigation && this.csv_banner_escape(cx) {
+                return;
+            }
             if this.open_menu.is_some() {
                 this.close_menu(cx);
             } else if this.mode == Mode::Command {
@@ -407,6 +417,10 @@ pub(crate) fn bind(
                 this.cloud_picker_cancel(cx);
             } else if this.mode == Mode::ExportPdf {
                 this.close_pdf_export(cx);
+            } else if this.mode == Mode::CsvImport {
+                this.close_csv_import_dialog(cx);
+            } else if this.mode == Mode::PasteSpecial {
+                this.hide_paste_special(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
             } else if this.mode == Mode::RenameSymbol {
@@ -485,6 +499,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabNext") { return; }
+            if this.mode == Mode::CsvImport { this.csv_dialog_focus(1, cx); return; }
             if this.mode == Mode::ExportPdf {
                 if let Some(state) = this.pdf_export.as_mut() { state.focus_option((state.focus + 1) % 12); }
                 cx.notify();
@@ -533,6 +548,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
             if this.guard_terminal_focus(window, cx, "TabPrev") { return; }
+            if this.mode == Mode::CsvImport { this.csv_dialog_focus(-1, cx); return; }
             if this.mode == Mode::ExportPdf {
                 if let Some(state) = this.pdf_export.as_mut() { state.focus_option((state.focus + 11) % 12); }
                 cx.notify();

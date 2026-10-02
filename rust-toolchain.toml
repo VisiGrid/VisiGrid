@@ -1,11 +1,11 @@
-# Minimum toolchain for the gpui (Zed v1.12.0) dependency, which uses
-# std::hint::cold_path — stabilized in Rust 1.95.0. Zed pins the same
-# version in its own rust-toolchain.toml. rustup-managed machines pick
-# this up automatically; distro-packaged toolchains (no rustup) need
-# rustc >= 1.95 on their own.
+# Minimum toolchain for the gpui dependency (Zed v1.22.0), which needs
+# Rust 1.98.1. Keep this equal to the channel in Zed's own
+# rust-toolchain.toml at the tag gpui-app/Cargo.toml pins. rustup-managed
+# machines pick this up automatically; distro-packaged toolchains (no
+# rustup) need rustc >= 1.98.1 on their own.
 [toolchain]
-channel = "1.95.0"
+channel = "1.98.1"
 # CI runs clippy against this pinned toolchain, not the `stable` the
 # workflow installs, so the component has to be declared here or the
-# Clippy step fails with "'cargo-clippy' is not installed for 1.95.0".
+# Clippy step fails with "'cargo-clippy' is not installed for 1.98.1".
 components = ["clippy"]

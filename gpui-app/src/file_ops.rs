@@ -86,6 +86,25 @@ impl Spreadsheet {
     }
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        self.load_file_with_recovery(path, false, cx);
+    }
+
+    pub(crate) fn confirm_table_recovery(&mut self, cx: &mut Context<Self>) {
+        if let Some((path, _)) = self.pending_table_recovery.take() {
+            self.load_file_with_recovery(&path, true, cx);
+        }
+    }
+
+    pub(crate) fn block_read_only_recovery(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.recovery_warning.is_some() {
+            self.status_message = Some("Read-only recovery: editing, Save, Save As and export are disabled. Close this window to leave recovery.".into());
+            cx.notify();
+            true
+        } else { false }
+    }
+
+    fn load_file_with_recovery(&mut self, path: &PathBuf, recovery: bool, cx: &mut Context<Self>) {
         if self.comment_editor.is_some() {
             self.status_message = Some("Save or cancel the comment before opening another workbook".into());
             cx.notify();
@@ -113,12 +132,29 @@ impl Spreadsheet {
         let load_start = Instant::now();
         let result: Result<Workbook, String> = match ext_lower.as_str() {
             // .vgrid is the advertised native extension; same container.
-            "sheet" | "vgrid" => native::load_workbook(path),
+            "sheet" | "vgrid" => {
+                if recovery {
+                    native::load_workbook_for_recovery(path).map(|(wb, _)| wb)
+                } else {
+                    match native::load_workbook(path) {
+                        Ok(wb) => Ok(wb),
+                        Err(error) => {
+                            if let Ok((_, Some(issue))) = native::load_workbook_for_recovery(path) {
+                                self.pending_table_recovery = Some((path.clone(), issue));
+                                cx.notify();
+                                return;
+                            }
+                            Err(error)
+                        }
+                    }
+                }
+            },
             _ => Err(format!("Unknown file type: {}", extension)),
         };
 
         match result {
             Ok(workbook) => {
+                self.recovery_warning = workbook.read_only_reason().map(str::to_owned);
                 self.wb_mut(cx, |wb| *wb = workbook);
                 // Rebuild dependency graph and recompute all formulas
                 // This ensures formula cells have computed values, not just raw text
@@ -128,8 +164,10 @@ impl Spreadsheet {
                 // somebody pressed F9, and this pass also discarded the values
                 // the loader had kept precisely because they could not be
                 // recomputed.
-                self.wb_mut(cx, |wb| wb.rebuild_dep_graph());
-                self.recompute_with_custom_fns(cx);
+                if self.recovery_warning.is_none() {
+                    self.wb_mut(cx, |wb| wb.rebuild_dep_graph());
+                    self.recompute_with_custom_fns(cx);
+                }
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
                 self.capture_base_workbook(cx); // Capture base state for replay
@@ -161,7 +199,7 @@ impl Spreadsheet {
                 }
 
                 // Wire calculation settings to engine
-                let auto = self.doc_settings.calculation.mode
+                let auto = self.recovery_warning.is_none() && self.doc_settings.calculation.mode
                     .resolve(crate::settings::CalculationMode::Automatic)
                     != crate::settings::CalculationMode::Manual;
                 let iterative = self.doc_settings.calculation.enable_iterative_calc.resolve(false);
@@ -418,6 +456,23 @@ impl Spreadsheet {
 
     /// Start background CSV/TSV/Parquet import with delayed overlay
     fn start_csv_import(&mut self, path: &PathBuf, ext: &str, cx: &mut Context<Self>) {
+        self.start_delimited_import(path, ext, None, None, cx);
+    }
+
+    /// Re-import a CSV/TSV with explicit settings (the import dialog, the
+    /// banner's "Evaluate formulas"). None: saved settings for its columns,
+    /// else the defaults.
+    ///
+    /// `approved_formulas`: the formulas the user approved (a
+    /// `CsvImport::formulas_digest`). Formulas are evaluated only when the
+    /// file's formulas are exactly those; otherwise they stay text and the
+    /// banner asks again.
+    pub fn start_csv_import_with(&mut self, path: &PathBuf, options: Option<csv::CsvOptions>, approved_formulas: Option<u64>, cx: &mut Context<Self>) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv").to_lowercase();
+        self.start_delimited_import(path, &ext, options, approved_formulas, cx);
+    }
+
+    fn start_delimited_import(&mut self, path: &PathBuf, ext: &str, explicit: Option<csv::CsvOptions>, approved_formulas: Option<u64>, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
@@ -457,23 +512,44 @@ impl Spreadsheet {
                     // A Parquet file bigger than a sheet loads what fits;
                     // the note says so rather than letting rows vanish.
                     // So does a CSV: what it kept as text, and what did not fit.
-                    let (sheet, note) = match ext.as_str() {
+                    let (sheet, note, csv_doc) = match ext.as_str() {
                         "parquet" => {
                             let imported = parquet::import(&path_for_import)?;
                             let note = imported.truncation_message();
-                            (imported.sheet, note)
+                            (imported.sheet, note, None)
                         }
                         _ => {
-                            let delimiter = (ext == "tsv").then_some(b'\t');
-                            let imported = csv::import_report(&path_for_import, delimiter, csv::CsvOptions::default())?;
-                            let note = imported.message();
-                            (imported.sheet, note)
+                            // Explicit settings, else ones saved for these
+                            // column names, else the defaults
+                            let (options, saved) = match explicit {
+                                Some(options) => (options, false),
+                                None => match crate::csv_import_ui::saved_options_for(&path_for_import) {
+                                    Some(options) => (options, true),
+                                    None => (csv::CsvOptions { delimiter: (ext == "tsv").then_some(b'\t'), ..Default::default() }, false),
+                                },
+                            };
+                            let mut options = options;
+                            let mut imported = csv::import_report(&path_for_import, &options)?;
+                            // Evaluate only the formulas the user approved. If the
+                            // file now holds others, read it again with them as text.
+                            let formulas_changed = options.evaluate_formulas
+                                && approved_formulas != Some(imported.formulas_digest);
+                            if formulas_changed {
+                                options.evaluate_formulas = false;
+                                imported = csv::import_report(&path_for_import, &options)?;
+                            }
+                            let doc = crate::csv_import_ui::CsvDocState::new(
+                                path_for_import.clone(), options, &imported, saved, approved_formulas, formulas_changed,
+                            );
+                            // The banner carries the details; the status bar the summary
+                            let note = Some(doc.summary.clone());
+                            (imported.sheet, note, Some(doc))
                         }
                     };
                     let mut workbook = Workbook::from_sheets(vec![sheet], 0);
                     workbook.rebuild_dep_graph();
                     workbook.recompute_full_ordered();
-                    Ok::<(Workbook, Option<String>), String>((workbook, note))
+                    Ok::<(Workbook, Option<String>, Option<crate::csv_import_ui::CsvDocState>), String>((workbook, note, csv_doc))
                 })
                 .await;
 
@@ -487,8 +563,10 @@ impl Spreadsheet {
                     .unwrap_or(0);
 
                 match import_result {
-                    Ok((workbook, note)) => {
+                    Ok((workbook, note, csv_doc)) => {
                         if this.block_if_previewing(cx) { return; }
+                        let is_csv = csv_doc.is_some();
+                        this.csv_doc = csv_doc;
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
@@ -510,6 +588,10 @@ impl Spreadsheet {
 
                         this.finalize_load(&path_for_recent);
                         this.request_title_refresh(cx);
+                        // A CSV whose rows did not all fit must never be written over
+                        if let Some(doc) = this.csv_doc.as_ref().filter(|d| d.truncated()) {
+                            this.csv_protected_source = Some((doc.path.clone(), doc.rows_in_file - doc.rows_loaded));
+                        }
 
                         // Clear hub link (CSV/Parquet have no hub metadata)
                         this.hub_link = None;
@@ -525,6 +607,7 @@ impl Spreadsheet {
                             format!("{}ms", duration_ms)
                         };
                         this.status_message = Some(match note {
+                            Some(note) if is_csv => format!("Opened {} in {} · {}", filename_for_completion, duration_str, note),
                             Some(note) => format!("Opened {} in {}. {}", filename_for_completion, duration_str, note),
                             None => format!("Opened {} in {}", filename_for_completion, duration_str),
                         });
@@ -806,6 +889,7 @@ impl Spreadsheet {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
@@ -829,6 +913,7 @@ impl Spreadsheet {
     /// Returns true if file was saved (has existing path), false if Save As dialog is needed.
     /// Used by close-with-save flow to know if window can be closed immediately.
     pub fn save_and_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.block_read_only_recovery(cx) { return false; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
@@ -853,6 +938,7 @@ impl Spreadsheet {
     }
 
     pub fn save_as(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
 
@@ -932,6 +1018,12 @@ impl Spreadsheet {
     }
 
     fn save_to_path(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> bool {
+        if self.block_read_only_recovery(cx) { return false; }
+        if let Some(refusal) = self.csv_overwrite_refusal(path) {
+            self.status_message = Some(refusal);
+            cx.notify();
+            return false;
+        }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("sheet");
 
         // Persist pivots' stale flags, so a reopened workbook never claims
@@ -1034,20 +1126,24 @@ impl Spreadsheet {
     }
 
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         self.export_delimited(cx, "csv", csv::export);
     }
 
     pub fn export_tsv(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         self.export_delimited(cx, "tsv", csv::export_tsv);
     }
 
     pub fn export_json(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         self.export_delimited(cx, "json", json::export);
     }
 
     /// Export workbook to Excel (.xlsx) format
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         if self.wb(cx).tables().next().is_some() {
             self.status_message = Some("Excel export does not preserve Tables yet. Save as .sheet, or convert Tables to ranges before exporting.".into()); cx.notify(); return;
         }
@@ -1078,6 +1174,7 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
+                    if this.block_read_only_recovery(cx) { return; }
                     // Rebuild layouts in case data changed
                     let layouts = this.build_export_layouts(cx);
 
@@ -1125,6 +1222,7 @@ impl Spreadsheet {
     /// Export history as a deterministic Lua provenance script.
     /// Phase 9A: allows history to be replayed, audited, or shared.
     pub fn export_provenance(&mut self, cx: &mut Context<Self>) {
+        if self.block_read_only_recovery(cx) { return; }
         use crate::provenance::{export_script, ExportOptions};
 
         let directory = self.current_file.as_ref()
@@ -1258,6 +1356,12 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
                 let _ = this.update(cx, |this, cx| {
+                    if this.block_read_only_recovery(cx) { return; }
+                    if let Some(refusal) = this.csv_overwrite_refusal(&path) {
+                        this.status_message = Some(refusal);
+                        cx.notify();
+                        return;
+                    }
                     match export_fn(this.sheet(cx), &path) {
                         Ok(()) => {
                             let note = if this.sheet(cx).tables().is_empty() { "" } else { " · values only; save .sheet to preserve Tables" };

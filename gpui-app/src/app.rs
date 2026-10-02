@@ -463,6 +463,8 @@ pub struct Spreadsheet {
     pub comment_search: Entity<crate::comment_sidebar::CommentSearch>,
     pub comment_list_scroll: gpui::ScrollHandle,
     pub goto_input: String,
+    pub recovery_warning: Option<String>,
+    pub pending_table_recovery: Option<(std::path::PathBuf, visigrid_io::table_recovery::TableLoadIssue)>,
     pub find_input: String,
     pub find_results: Vec<MatchHit>,
     pub find_index: usize,
@@ -575,6 +577,10 @@ pub struct Spreadsheet {
 
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
+    /// Auto-scroll while a drag is outside the grid (see drag_autoscroll.rs)
+    pub(crate) drag_autoscroll_task: Option<gpui::Task<()>>,
+    pub(crate) drag_autoscroll_pointer: Option<(f32, f32)>,
+    pub(crate) drag_last_cell: Option<(usize, usize)>,
 
     // Fill handle drag state
     pub fill_drag: FillDrag,
@@ -829,6 +835,15 @@ pub struct Spreadsheet {
 
     // Import report state (for Excel imports)
     pub import_result: Option<visigrid_io::xlsx::ImportResult>,
+    /// What the last CSV import decided (banner, status line, settings dialog).
+    pub csv_doc: Option<crate::csv_import_ui::CsvDocState>,
+    /// The CSV import settings dialog, while open.
+    pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
+    /// A CSV whose rows did not all fit, and how many were left out: no save
+    /// or export may write over it. Kept after Save As, cleared on the next load.
+    pub csv_protected_source: Option<(PathBuf, usize)>,
+    /// Re-checks the open CSV on disk when the window is focused.
+    csv_activation_subscription: Option<gpui::Subscription>,
     pub import_report_details_expanded: bool,
     pub import_filename: Option<String>,         // Original filename for display
     pub import_source_dir: Option<PathBuf>,      // Original directory for Save As default
@@ -1134,6 +1149,13 @@ impl Spreadsheet {
 
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
 
+        // Coming back to the window: has the open CSV changed on disk?
+        let csv_activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.check_csv_on_disk(cx);
+            }
+        });
+
         // Session server channel: requests from TCP server → GUI thread
         let (session_tx, session_rx) = std::sync::mpsc::channel();
         let session_server = crate::session_server::SessionServer::new();
@@ -1181,6 +1203,8 @@ impl Spreadsheet {
             comment_search,
             comment_list_scroll: gpui::ScrollHandle::new(),
             goto_input: String::new(),
+            recovery_warning: None,
+            pending_table_recovery: None,
             find_input: String::new(),
             find_results: Vec::new(),
             find_index: 0,
@@ -1257,6 +1281,9 @@ impl Spreadsheet {
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             dragging_selection: false,
+            drag_autoscroll_task: None,
+            drag_autoscroll_pointer: None,
+            drag_last_cell: None,
             fill_drag: FillDrag::None,
             dragging_row_header: false,
             dragging_col_header: false,
@@ -1387,6 +1414,10 @@ impl Spreadsheet {
             extract_focus: CreateNameFocus::default(),
 
             import_result: None,
+            csv_doc: None,
+            csv_dialog: None,
+            csv_protected_source: None,
+            csv_activation_subscription: Some(csv_activation_subscription),
             import_report_details_expanded: false,
             import_filename: None,
             import_source_dir: None,
@@ -2445,6 +2476,8 @@ impl Spreadsheet {
             CommandId::SaveAs => self.save_as(cx),
             CommandId::ExportCsv => self.export_csv(cx),
             CommandId::ExportPdf => self.show_pdf_export(cx),
+            CommandId::CsvImportSettings => self.show_csv_import_dialog(cx),
+            CommandId::CsvImportNotes => self.show_csv_banner(cx),
             CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
@@ -3876,9 +3909,10 @@ impl Spreadsheet {
     ///
     /// This is the single source of truth for grid_body_origin.y and visible_rows().
     pub fn top_chrome_height(&self, cx: &App) -> f32 {
+        let recovery_h = if self.recovery_warning.is_some() { 56.0 } else { 0.0 };
         if self.zen_mode {
-            // Zen hides menu, formula bar, format bar — only column headers remain
-            return self.metrics.header_h;
+            // Recovery remains visible even when normal chrome is hidden.
+            return self.metrics.header_h + recovery_h;
         }
         let titlebar_h = if cfg!(target_os = "macos") { MACOS_TITLEBAR_HEIGHT } else { 0.0 };
         let menu_h = if cfg!(target_os = "macos") { 0.0 } else { MENU_BAR_HEIGHT };
@@ -3891,7 +3925,7 @@ impl Spreadsheet {
             }
         };
         let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
-        titlebar_h + menu_h + formula_h + format_h + table_h + self.metrics.header_h
+        titlebar_h + menu_h + formula_h + format_h + table_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {
@@ -4267,7 +4301,7 @@ impl Spreadsheet {
 
     /// Check if editing is allowed (blocked during preview)
     pub fn can_edit(&self) -> bool {
-        !self.is_previewing() && self.review_mode.is_none()
+        self.recovery_warning.is_none() && !self.is_previewing() && self.review_mode.is_none()
     }
 
 

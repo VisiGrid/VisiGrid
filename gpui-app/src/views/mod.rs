@@ -5,6 +5,7 @@ mod color_picker;
 pub mod command_palette;
 pub(crate) mod context_menu;
 mod cycle_banner;
+mod csv_import_view;
 mod hub_dialogs;
 mod pairing_dialog;
 mod export_report_dialog;
@@ -53,6 +54,7 @@ mod f1_help;
 mod cf_rules_panel;
 mod pivot_panel;
 mod table_controls;
+mod table_recovery;
 mod problems_panel;
 mod cond_format_dialog;
 mod named_range_dialogs;
@@ -112,6 +114,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_rewind_success = app.rewind_success.visible;
     let show_pairing_prompt = app.pairing_prompt.is_some();
     let show_cycle_banner = app.cycle_banner.visible;
+    // The cycle banner wins the same spot; a CSV import rarely has cycles
+    let show_csv_banner = !show_cycle_banner
+        && app.mode != Mode::CsvImport
+        && app.current_csv().is_some_and(|c| c.banner_visible);
     let show_merge_confirm = app.merge_confirm.visible;
     let show_close_confirm = app.close_confirm_visible;
     let show_approval_confirm = app.approval_confirm_visible;
@@ -219,6 +225,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }))
         // Mouse move for resize and header selection dragging
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            // Keep a drag going past the grid's edge (selection, fill, headers)
+            this.update_drag_autoscroll(event, cx);
             if this
                 .review_mode
                 .as_ref()
@@ -298,7 +306,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         // Mouse up to end resize and header selection drag
-        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        // Released outside the window, e.g. after dragging past the grid's edge
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, cx| {
+            this.release_drag_off_grid(event.modifiers.control || event.modifiers.platform, cx);
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, cx| {
+            // A release off the grid still finishes a selection or fill drag
+            this.release_drag_off_grid(event.modifiers.control || event.modifiers.platform, cx);
             if let Some(state) = this.review_mode.as_mut() {
                 if state.card_is_dragging() {
                     state.end_card_drag();
@@ -572,6 +586,10 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         }, |div| {
             div.child(format_bar::render_format_bar(app, window, cx))
         })
+        .when(app.recovery_warning.is_some(), |d| d.child(div().h(px(56.0)).flex_shrink_0().px_4().flex().flex_col().justify_center().overflow_hidden()
+            .bg(app.token(crate::theme::TokenKey::PanelBg)).text_color(app.token(crate::theme::TokenKey::TextPrimary))
+            .child(div().text_size(px(12.0)).child("READ-ONLY RECOVERY · Table definitions are unavailable"))
+            .child(div().text_size(px(12.0)).child("Saved formula results may be stale or unavailable. Editing, recalculation, Save, Save As and export are disabled."))))
         .when(app.show_table_controls(cx), |d| d.child(table_controls::render_table_controls(app, cx)))
         .child(headers::render_column_headers(app, cx))
         // Split view: render two grids side-by-side, or single grid
@@ -752,6 +770,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(app.pivot_panel.is_some(), |d| {
             d.child(pivot_panel::render_pivot_panel(app, cx))
         })
+        .when(app.pending_table_recovery.is_some(), |d| d.child(table_recovery::render(app, cx)))
         .when(app.table_dialog.is_some(), |d| d.child(table_controls::render_table_dialog(app, cx)))
         // Profiler panel (right-side drawer, mutually exclusive with inspector)
         .when(show_profiler, |d| {
@@ -870,6 +889,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_cycle_banner, |div| {
             div.child(cycle_banner::render_cycle_banner(app, cx))
         })
+        .when(show_csv_banner, |div| {
+            div.child(csv_import_view::render_csv_banner(app, cx))
+        })
         .when(show_hub_paste_token, |div| {
             div.child(hub_dialogs::render_paste_token_dialog(app, cx))
         })
@@ -884,6 +906,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(app.mode == Mode::ExportPdf, |div| {
             div.child(pdf_export_dialog::render(app, cx))
+        })
+        .when(app.mode == Mode::CsvImport, |div| {
+            div.child(csv_import_view::render_csv_import_dialog(app, cx))
         })
         .when(show_export_report, |div| {
             div.child(export_report_dialog::render_export_report_dialog(app, cx))

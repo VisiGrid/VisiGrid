@@ -119,7 +119,7 @@ fn table_invalid_metadata_is_rejected_instead_of_silently_dropped() {
         .unwrap();
     assert!(native::load_workbook(&path)
         .unwrap_err()
-        .contains("Tables metadata"));
+        .contains("Table metadata is corrupt"));
 }
 
 #[test]

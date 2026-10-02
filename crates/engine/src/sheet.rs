@@ -360,6 +360,9 @@ pub struct Sheet {
     /// Editable Tables. Mutation goes through workbook-level schema commits.
     #[serde(default)]
     pub(crate) data_tables: Vec<crate::table::DataTable>,
+    /// Cells recovered without their Table definitions. Never save this view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_reason: Option<String>,
     #[serde(default)]
     pub(crate) table_id_high_water: u64,
     #[serde(default)]
@@ -561,6 +564,7 @@ impl Sheet {
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             data_tables: Vec::new(),
+            read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
             edit_generation: 0,
@@ -594,6 +598,7 @@ impl Sheet {
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             data_tables: Vec::new(),
+            read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
             edit_generation: 0,

@@ -469,6 +469,7 @@ pub fn validate_structure_op(
 /// GUI hosts route through their own methods instead, so view state — row
 /// views, row heights, undo entries — stays consistent.
 pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, String> {
+    wb.ensure_writable()?;
     let active = wb.active_sheet_index();
     let target = structure_target_sheet(op, active);
     use visigrid_engine::structural::Axis;
@@ -564,6 +565,12 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
         format_patches: HashMap::new(),
         changed_cells: Vec::new(),
     };
+
+    if let Err(message) = wb.ensure_writable() {
+        return reject(Some(ApplyOpsError::OpFailed(OpError {
+            code: "read_only".into(), message, op_index: 0, suggestion: None,
+        })), req.ops.len());
+    }
 
     // Optimistic concurrency check
     if let Some(expected) = req.expected_revision {
@@ -815,6 +822,22 @@ pub fn inspect(wb: &Workbook, req: &InspectRequest, title: &str) -> InspectRespo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_recovery_rejects_session_writes() {
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().read_only_reason = Some("Upgrade VisiGrid".into());
+        let rev = wb.revision();
+        let req = ApplyOpsRequest {
+            request_id: String::new(), batch_name: String::new(), atomic: true,
+            expected_revision: None, client: None,
+            ops: vec![Op::SetCellValue { sheet: 0, row: 1, col: 0, value: "99".into() }],
+        };
+        let outcome = apply_ops(&mut wb, &req);
+        assert!(matches!(outcome.response.error, Some(ApplyOpsError::OpFailed(error)) if error.code == "read_only"));
+        assert_eq!(wb.revision(), rev);
+        assert_eq!(wb.active_sheet().get_raw(1, 0), "");
+    }
 
     #[test]
     fn table_header_write_rejects_entire_session_batch() {
