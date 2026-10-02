@@ -52,6 +52,7 @@ pub struct FormatPatch {
 /// change lists (keyed by sheet index) for undo recording and broadcast.
 #[derive(Debug)]
 pub struct ApplyOutcome {
+    pub guarded_commit: Option<visigrid_engine::workbook::GuardedStructureCommit>,
     pub response: ApplyOpsResponse,
     pub value_changes: HashMap<usize, Vec<ValueChange>>,
     pub format_patches: HashMap<usize, Vec<FormatPatch>>,
@@ -480,6 +481,17 @@ pub fn validate_structure_op(
 /// views, row heights, undo entries — stays consistent.
 pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, String> {
     wb.ensure_writable()?;
+    if wb.has_table_criteria()
+        && !matches!(
+            op,
+            StructureOp::InsertRows { .. }
+                | StructureOp::DeleteRows { .. }
+                | StructureOp::InsertCols { .. }
+                | StructureOp::DeleteCols { .. }
+        )
+    {
+        return Err("Clear Table criteria before sheet or pivot automation.".into());
+    }
     let active = wb.active_sheet_index();
     let target = structure_target_sheet(op, active);
     use visigrid_engine::structural::Axis;
@@ -488,7 +500,21 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
     // validations, and named ranges follow the moved cells — and so an
     // insert that would push data off the grid is refused, not silent.
     let span = |axis: Axis, at: usize, count: usize, delete: bool, wb: &mut Workbook| {
-        wb.structural_edit(target, axis, at, count, delete)
+        if wb.has_table_criteria() {
+            let (candidate, _) = wb.prepare_guarded_structure(
+                target,
+                vec![visigrid_engine::workbook::StructureStep {
+                    axis,
+                    at,
+                    count,
+                    delete,
+                }],
+            )?;
+            wb.restore_snapshot_monotonic(&candidate);
+            Ok(Vec::new())
+        } else {
+            wb.structural_edit(target, axis, at, count, delete)
+        }
     };
 
     Ok(match op {
@@ -498,34 +524,36 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
                 Err(e) => return Err(e),
             }
         }
-        StructureOp::DeleteRows { at, count, .. } => {
-            match span(Axis::Row, *at, *count, true, wb) {
-                Ok(_) => format!("Deleted {} row(s) at row {}", count, at + 1),
-                Err(e) => return Err(e),
-            }
-        }
+        StructureOp::DeleteRows { at, count, .. } => match span(Axis::Row, *at, *count, true, wb) {
+            Ok(_) => format!("Deleted {} row(s) at row {}", count, at + 1),
+            Err(e) => return Err(e),
+        },
         StructureOp::InsertCols { at, count, .. } => {
             match span(Axis::Col, *at, *count, false, wb) {
                 Ok(_) => format!("Inserted {} column(s) at column {}", count, at + 1),
                 Err(e) => return Err(e),
             }
         }
-        StructureOp::DeleteCols { at, count, .. } => {
-            match span(Axis::Col, *at, *count, true, wb) {
-                Ok(_) => format!("Deleted {} column(s) at column {}", count, at + 1),
-                Err(e) => return Err(e),
-            }
-        }
+        StructureOp::DeleteCols { at, count, .. } => match span(Axis::Col, *at, *count, true, wb) {
+            Ok(_) => format!("Deleted {} column(s) at column {}", count, at + 1),
+            Err(e) => return Err(e),
+        },
         StructureOp::AddSheet { name } => {
             let idx = match name {
-                Some(n) => wb.add_sheet_named(n.trim()).unwrap_or_else(|| wb.add_sheet()),
+                Some(n) => wb
+                    .add_sheet_named(n.trim())
+                    .unwrap_or_else(|| wb.add_sheet()),
                 None => wb.add_sheet(),
             };
             wb.bump_revision_for_structure();
             format!("Added sheet \"{}\"", wb.sheets()[idx].name)
         }
         StructureOp::RenameSheet { name, .. } => {
-            let old = wb.sheets().get(target).map(|s| s.name.clone()).unwrap_or_default();
+            let old = wb
+                .sheets()
+                .get(target)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
             wb.rename_sheet(target, name.trim());
             wb.bump_revision_for_structure();
             format!("Renamed sheet \"{}\" to \"{}\"", old, name.trim())
@@ -533,21 +561,44 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
         StructureOp::CreatePivot { .. } => {
             let (source, definition) = resolve_create_pivot(op, wb).map_err(|(_, m)| m)?;
             let (id, idx) = wb.create_pivot(source, definition)?;
-            let name = wb.find_pivot(id).map(|(_, t)| t.name.clone()).unwrap_or_default();
-            let (rows, cols) = wb.find_pivot(id).and_then(|(_, t)| t.extent).unwrap_or((0, 0));
-            format!("Created {} on sheet \"{}\" (index {}): {} × {}", name, wb.sheets()[idx].name, idx, rows, cols)
+            let name = wb
+                .find_pivot(id)
+                .map(|(_, t)| t.name.clone())
+                .unwrap_or_default();
+            let (rows, cols) = wb
+                .find_pivot(id)
+                .and_then(|(_, t)| t.extent)
+                .unwrap_or((0, 0));
+            format!(
+                "Created {} on sheet \"{}\" (index {}): {} × {}",
+                name,
+                wb.sheets()[idx].name,
+                idx,
+                rows,
+                cols
+            )
         }
         StructureOp::RefreshPivot { pivot } => {
             let ids = resolve_refresh_pivots(pivot.as_deref(), wb).map_err(|(_, m)| m)?;
             let mut done = Vec::new();
             for id in ids {
-                let name = wb.find_pivot(id).map(|(_, t)| t.name.clone()).unwrap_or_default();
+                let name = wb
+                    .find_pivot(id)
+                    .map(|(_, t)| t.name.clone())
+                    .unwrap_or_default();
                 match wb.refresh_pivot(id) {
                     Ok((rows, cols)) => done.push(format!("{} ({} × {})", name, rows, cols)),
                     // Earlier pivots stay refreshed (each is valid on its own);
                     // say which, as the desktop does.
                     Err(m) if done.is_empty() => return Err(format!("{}: {}", name, m)),
-                    Err(m) => return Err(format!("{}: {} (already refreshed: {})", name, m, done.join(", "))),
+                    Err(m) => {
+                        return Err(format!(
+                            "{}: {} (already refreshed: {})",
+                            name,
+                            m,
+                            done.join(", ")
+                        ))
+                    }
                 }
             }
             format!("Refreshed {}", done.join(", "))
@@ -560,10 +611,114 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
 /// entire request (regardless of `atomic`) before anything is applied — by
 /// the time we touch the workbook, no op can fail, so a success response
 /// never lies. One batch = one recalc = one revision increment.
+/// Table-aware requests stage every operation and postflight before publication.
 pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
+    if !wb.has_table_criteria() {
+        return apply_ops_inner(wb, req);
+    }
+    let reject = |code: &str, message: String, op_index: usize| ApplyOutcome {
+        guarded_commit: None,
+        response: ApplyOpsResponse {
+            applied: 0,
+            total: req.ops.len(),
+            current_revision: wb.revision(),
+            error: Some(ApplyOpsError::OpFailed(OpError {
+                code: code.into(),
+                message,
+                op_index,
+                suggestion: None,
+            })),
+            warnings: vec![],
+        },
+        value_changes: HashMap::new(),
+        format_patches: HashMap::new(),
+        changed_cells: vec![],
+    };
+    // Preserve protocol errors (including revision mismatch) before view checks.
+    if req.expected_revision.is_some_and(|r| r != wb.revision())
+        || wb.ensure_writable().is_err()
+        || req.ops.is_empty()
+    {
+        return apply_ops_inner(wb, req);
+    }
+    if let Err(e) = wb.validate_saved_table_views() {
+        return reject("table_view_unsafe", e, 0);
+    }
+    let mut targets = Vec::new();
+    let mut count = 0usize;
+    for (i, op) in req.ops.iter().enumerate() {
+        if let Some((code, message, _)) = validate_session_op(op, wb.sheet_count()) {
+            return reject(code, message, i);
+        }
+        let (sheet, sr, sc, er, ec, values) = match op {
+            Op::SetCellValue {
+                sheet, row, col, ..
+            }
+            | Op::SetCellFormula {
+                sheet, row, col, ..
+            }
+            | Op::ClearCell { sheet, row, col } => (*sheet, *row, *col, *row, *col, true),
+            Op::SetStyle {
+                sheet,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            }
+            | Op::SetNumberFormat {
+                sheet,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } => (*sheet, *start_row, *start_col, *end_row, *end_col, false),
+        };
+        let range = visigrid_engine::validation::CellRange {
+            start_row: sr,
+            start_col: sc,
+            end_row: er,
+            end_col: ec,
+        };
+        count = count.saturating_add((er - sr + 1).saturating_mul(ec - sc + 1));
+        if count > 100_000 {
+            return reject(
+                "cells_limit_exceeded",
+                "A Table-aware batch may target at most 100,000 cells.".into(),
+                i,
+            );
+        }
+        if let Err(e) = wb.validate_automation_range(sheet, range, values) {
+            return reject("table_view_unsafe", e, i);
+        }
+        targets.push((sheet, range, values));
+    }
+    let mut candidate = wb.clone();
+    let mut outcome = apply_ops_inner(&mut candidate, req);
+    if outcome.response.error.is_some() {
+        return outcome;
+    }
+    for (i, &(sheet, range, values)) in targets.iter().enumerate() {
+        if let Err(e) = candidate.validate_automation_range(sheet, range, values) {
+            return reject("table_view_unsafe", e, i);
+        }
+    }
+    let commit = match wb.capture_guarded_batch(&candidate) {
+        Ok(commit) => commit,
+        Err(e) => return reject("table_view_unsafe", e, req.ops.len() - 1),
+    };
+    wb.restore_snapshot_monotonic(&candidate);
+    outcome.response.current_revision = wb.revision();
+    outcome.guarded_commit = Some(commit);
+    outcome
+}
+
+fn apply_ops_inner(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
     let current_rev = wb.revision();
 
     let reject = |error: Option<ApplyOpsError>, total: usize| ApplyOutcome {
+        guarded_commit: None,
         response: ApplyOpsResponse {
             applied: 0,
             total,
@@ -772,6 +927,7 @@ pub fn apply_ops(wb: &mut Workbook, req: &ApplyOpsRequest) -> ApplyOutcome {
         .collect();
 
     ApplyOutcome {
+        guarded_commit: None,
         response: ApplyOpsResponse {
             applied,
             total: req.ops.len(),
@@ -849,6 +1005,68 @@ mod tests {
         assert_eq!(wb.active_sheet().get_raw(1, 0), "");
     }
 
+    #[test]
+    fn filtered_session_structure_uses_canonical_rows_and_guards_final_layout() {
+        use visigrid_engine::{
+            filter::SortDirection,
+            sheet::{Sheet, SheetId},
+            table::TableRange,
+            table_view::{TableSort, TableViewSpec},
+        };
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(7), 30, 8)], 0);
+        wb.set_cell_value_tracked(0, 2, 1, "Amount");
+        wb.set_cell_value_tracked(0, 3, 1, "30");
+        wb.set_cell_value_tracked(0, 4, 1, "10");
+        let id = wb
+            .create_table(
+                SheetId(7),
+                TableRange {
+                    start_row: 2,
+                    start_col: 1,
+                    end_row: 4,
+                    end_col: 1,
+                },
+                "Sales",
+            )
+            .unwrap()
+            .table_id();
+        let mut spec = TableViewSpec::new(id);
+        spec.sort = Some(TableSort {
+            column: wb.table(id).unwrap().1.columns[0].id,
+            direction: SortDirection::Ascending,
+        });
+        wb.set_table_view_spec(SheetId(7), Some(spec)).unwrap();
+        apply_structure(
+            &mut wb,
+            &StructureOp::DeleteRows {
+                sheet: None,
+                at: 3,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.active_sheet().get_raw(3, 1), "10");
+        let rev = wb.revision();
+        assert!(apply_structure(
+            &mut wb,
+            &StructureOp::DeleteCols {
+                sheet: None,
+                at: 1,
+                count: 1
+            }
+        )
+        .is_err());
+        assert!(apply_structure(
+            &mut wb,
+            &StructureOp::DeleteRows {
+                sheet: None,
+                at: 2,
+                count: 1
+            }
+        )
+        .is_err());
+        assert_eq!(wb.revision(), rev);
+    }
     #[test]
     fn table_header_write_rejects_entire_session_batch() {
         let mut wb = Workbook::new();

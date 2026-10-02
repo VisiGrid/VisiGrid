@@ -224,6 +224,7 @@ pub enum UndoAction {
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    TableBatchChanged { sheet_index: usize, commit: Box<visigrid_engine::workbook::GuardedStructureCommit>, description: String },
     TableStructureChanged {
         sheet_index: usize,
         history: Box<crate::table_structure::TableStructureHistory>,
@@ -489,7 +490,7 @@ impl UndoAction {
             }
             UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
-            UndoAction::TableStructureChanged { description, .. }
+            UndoAction::TableBatchChanged { description, .. } | UndoAction::TableStructureChanged { description, .. }
             | UndoAction::TableViewChanged { description, .. }
             | UndoAction::TableCellsChanged { description, .. } => description.clone(),
             UndoAction::TableCommit { description, .. } => description.clone(),
@@ -1202,7 +1203,7 @@ impl History {
                 let range = Self::bounding_box(&cells);
                 (Some(*sheet_index), cells, range)
             }
-            UndoAction::TableStructureChanged { sheet_index, .. } => {
+            UndoAction::TableBatchChanged { sheet_index, .. } | UndoAction::TableStructureChanged { sheet_index, .. } => {
                 (Some(*sheet_index), vec![], None)
             }
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
@@ -1733,6 +1734,9 @@ impl History {
                 workbook.recompute_full_ordered();
                 workbook.apply_table_view_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
+            UndoAction::TableBatchChanged { commit, .. } => {
+                commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
+            }
             UndoAction::TableStructureChanged {
                 sheet_index,
                 history,
@@ -1981,6 +1985,7 @@ pub enum UndoActionKind {
     TableViewChanged,
     TableCellsChanged,
     TableStructureChanged,
+    TableBatchChanged,
     RowsInserted,
     RowsDeleted,
     ColsInserted,
@@ -2024,6 +2029,7 @@ impl UndoActionKind {
             UndoActionKind::TableViewChanged => true,
             UndoActionKind::TableCellsChanged => true,
             UndoActionKind::TableStructureChanged => true,
+            UndoActionKind::TableBatchChanged => true,
             UndoActionKind::PivotCommit => true,
             UndoActionKind::RowsInserted => true,
             UndoActionKind::RowsDeleted => true,
@@ -2074,6 +2080,7 @@ impl UndoActionKind {
             UndoActionKind::TableViewChanged => "Table view",
             UndoActionKind::TableCellsChanged => "Table cells",
             UndoActionKind::TableStructureChanged => "Table structure",
+            UndoActionKind::TableBatchChanged => "Table batch",
             UndoActionKind::PivotCommit => "Pivot table",
             UndoActionKind::RowsInserted => "Insert rows",
             UndoActionKind::RowsDeleted => "Delete rows",
@@ -2117,6 +2124,7 @@ impl UndoActionKind {
             UndoActionKind::TableViewChanged => 0x20,
             UndoActionKind::TableCellsChanged => 0x21,
             UndoActionKind::TableStructureChanged => 0x22,
+            UndoActionKind::TableBatchChanged => 0x23,
             UndoActionKind::PivotCommit => 0x1C,
             UndoActionKind::RowsInserted => 0x08,
             UndoActionKind::RowsDeleted => 0x09,
@@ -2160,6 +2168,7 @@ impl UndoAction {
             UndoAction::TableViewChanged { .. } => UndoActionKind::TableViewChanged,
             UndoAction::TableCellsChanged { .. } => UndoActionKind::TableCellsChanged,
             UndoAction::TableStructureChanged { .. } => UndoActionKind::TableStructureChanged,
+            UndoAction::TableBatchChanged { .. } => UndoActionKind::TableBatchChanged,
             UndoAction::PivotCommit { .. } => UndoActionKind::PivotCommit,
             UndoAction::RowsInserted { .. } => UndoActionKind::RowsInserted,
             UndoAction::RowsDeleted { .. } => UndoActionKind::RowsDeleted,
@@ -2710,6 +2719,7 @@ mod tests {
             UndoActionKind::TableViewChanged,
             UndoActionKind::TableCellsChanged,
             UndoActionKind::TableStructureChanged,
+            UndoActionKind::TableBatchChanged,
             UndoActionKind::PivotCommit,
             UndoActionKind::RowsInserted,
             UndoActionKind::RowsDeleted,

@@ -489,7 +489,7 @@ fn process_action(
             // Full-workbook snapshot actions are atomic and are not expanded
             // into the legacy cell-oriented diff model.
         }
-        UndoAction::TableStructureChanged { .. }
+        UndoAction::TableBatchChanged { .. } | UndoAction::TableStructureChanged { .. }
         | UndoAction::TableCellsChanged { .. }
         | UndoAction::TableViewChanged { .. }
         | UndoAction::TableCommit { .. }

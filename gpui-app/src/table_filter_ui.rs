@@ -615,7 +615,7 @@ mod tests {
         ];
         let error =
             crate::views::lua_console::apply_captured_lua_ops(&mut wb, 0, &ops).unwrap_err();
-        assert_eq!(error, TABLE_VIEW_EDIT_MESSAGE);
+        assert!(error.contains("Script operation 2"));
         assert_eq!(wb.revision(), revision);
         assert_eq!(wb.active_sheet().get_raw(0, 0), "");
         assert_eq!(wb.active_sheet().get_raw(2, 1), "Amount");

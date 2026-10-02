@@ -10,6 +10,8 @@ mod table_ops;
 mod table_refs;
 #[path = "workbook_guarded_structure.rs"]
 mod guarded_structure;
+#[path = "workbook_automation.rs"]
+mod automation;
 pub use guarded_structure::{shift_structure_index, GuardedStructureCommit, StructureStep};
 #[path = "workbook_table_view.rs"]
 mod table_view_ops;

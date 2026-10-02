@@ -280,6 +280,24 @@ impl Workbook {
             return Err(format!("Structural recalculation failed: {error:?}"));
         }
         validate_views(&candidate)?;
+        let mut commit = self.capture_guarded_batch(&candidate)?;
+        commit.sheet = before.id;
+        commit.steps = steps;
+        Ok((candidate, commit))
+    }
+}
+impl Workbook {
+    /// Capture an already materialized, validated batch for atomic history.
+    /// The host must preflight targets and validate its own presentation state.
+    pub fn capture_guarded_batch(
+        &self,
+        candidate: &Workbook,
+    ) -> Result<GuardedStructureCommit, String> {
+        self.ensure_writable()?;
+        if identity(self) != identity(candidate) || views(self) != views(candidate) {
+            return Err("A guarded batch cannot change sheets or saved Table criteria.".into());
+        }
+        validate_views(candidate)?;
         let mut cells = Vec::new();
         let mut metadata = Vec::new();
         for (b, a) in self.sheets.iter().zip(&candidate.sheets) {
@@ -293,7 +311,7 @@ impl Workbook {
                 let after = image(a, row, col);
                 if signature(&before) != signature(&after) {
                     if cells.len() >= 100_000 {
-                        return Err("This structural edit changes more than 100,000 stored cells. Use a smaller selection or clear Table views first.".into());
+                        return Err("This transaction changes more than 100,000 stored cells. Use a smaller selection or clear Table views first.".into());
                     }
                     cells.push(CellPatch {
                         sheet: b.id,
@@ -318,8 +336,8 @@ impl Workbook {
             != serde_json::to_value(&candidate.named_ranges).unwrap())
         .then(|| (self.named_ranges.clone(), candidate.named_ranges.clone()));
         let commit = GuardedStructureCommit {
-            sheet: before.id,
-            steps,
+            sheet: self.active_sheet_id(),
+            steps: Vec::new(),
             cells,
             metadata,
             names,
@@ -328,10 +346,14 @@ impl Workbook {
             sheets: identity(self),
             views: views(self),
         };
-        Ok((candidate, commit))
+        Ok(commit)
     }
 }
+
 impl GuardedStructureCommit {
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty() && self.metadata.is_empty() && self.names.is_none()
+    }
     pub fn changed_cell_count(&self) -> usize {
         self.cells.len()
     }

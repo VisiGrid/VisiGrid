@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Run script and session batches with Table filters active.** Lua console/debug cell writes, CLI workbook scripts and session batches use canonical worksheet addresses, including explicitly addressed hidden records. Unsafe writes and late spills reject the complete batch. Multi-sheet desktop batches have one guarded undo/redo/rewind entry; session row/column commands retain structural protections and agent attribution. Failed Lua runs no longer apply collected writes.
+
 - **Insert and delete rows/columns with Table filters active.** Row deletion skips filtered-out records; sorted selections are resolved before one atomic edit. Table identities, formulas, calculated columns and criteria survive supported movement, with guarded undo/redo and history rewind. Deleting a column used by a filter or sort requires clearing that criterion first.
 
 - **Cut and fill around filtered Tables.** Cut, Fill Down/Right, Ctrl+Enter and the fill handle now work in safe cells above/below Tables and on other sheets. They preserve visible-row mapping, formula offsets and dependent filter/sort updates, with atomic rejection and sparse undo/redo.

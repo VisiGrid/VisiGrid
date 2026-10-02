@@ -945,14 +945,18 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
     let sheet_index = app.sheet_index(cx);
 
     // Compute selection bounds (normalize to start <= end)
+    app.sync_table_view(cx);
     let (anchor_row, anchor_col) = app.view_state.selected;
     let (end_row, end_col) = app.view_state.selection_end.unwrap_or(app.view_state.selected);
-    let selection = (
-        anchor_row.min(end_row),
-        anchor_col.min(end_col),
-        anchor_row.max(end_row),
-        anchor_col.max(end_col),
-    );
+    let selection = if app.wb(cx).has_table_criteria() {
+        match crate::table_batch::canonical_script_selection(&app.row_view, (anchor_row,anchor_col), (end_row,end_col)) {
+            Ok(selection) => selection,
+            Err(error) => { app.lua_console.push_output(OutputEntry::error(error)); cx.notify(); return; }
+        }
+    } else { (
+        anchor_row.min(end_row), anchor_col.min(end_col),
+        anchor_row.max(end_row), anchor_col.max(end_col),
+    ) };
 
     // Compute fingerprint before execution (for run records)
     let fingerprint_before = visigrid_io::native::compute_semantic_fingerprint(app.wb(cx));
@@ -991,7 +995,8 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
         app.lua_console.push_output(OutputEntry::error(
             "Row deletion requires the AI Lua Review preview so it can be applied atomically.",
         ));
-    } else if result.has_mutations() {
+    } else if result.has_mutations() && result.error.is_none() {
+        let guarded = app.wb(cx).has_table_criteria();
         let (changes, format_patches) = match apply_lua_ops(app, sheet_index, &result.ops, cx) {
                 Ok(result) => result,
                 Err(error) => { app.lua_console.push_output(OutputEntry::error(error)); cx.notify(); return; }
@@ -1008,7 +1013,8 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
             );
         }
 
-        if has_values && has_formats {
+        // Guarded publication already recorded the complete transaction.
+        if !guarded && has_values && has_formats {
             use crate::history::{UndoAction, FormatActionKind};
             let group = UndoAction::Group {
                 actions: vec![
@@ -1024,10 +1030,10 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
             };
             app.history.record_action_with_provenance(group, None);
             app.is_modified = true;
-        } else if has_values {
+        } else if !guarded && has_values {
             app.history.record_batch(sheet_index, changes);
             app.is_modified = true;
-        } else if has_formats {
+        } else if !guarded && has_formats {
             app.history.record_format(
                 sheet_index,
                 format_patches,
@@ -1136,18 +1142,103 @@ pub(crate) fn apply_lua_ops(
     sheet_index: usize,
     ops: &[LuaOp],
     cx: &mut gpui::Context<Spreadsheet>,
-) -> Result<(Vec<crate::history::CellChange>, Vec<crate::history::CellFormatPatch>), String> {
+) -> Result<
+    (
+        Vec<crate::history::CellChange>,
+        Vec<crate::history::CellFormatPatch>,
+    ),
+    String,
+> {
     if ops.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
 
-    app.workbook.update(cx, |wb, _| apply_captured_lua_ops(wb, sheet_index, ops))
+    if crate::table_filter_ui::has_table_criteria(app.wb(cx)) {
+        if app.block_if_previewing_only(cx) {
+            return Err(app.status_message.clone().unwrap_or_default());
+        }
+        let mut candidate = app.wb(cx).clone();
+        let result = apply_captured_lua_ops(&mut candidate, sheet_index, ops)?;
+        let commit = app.wb(cx).capture_guarded_batch(&candidate)?;
+        app.publish_table_batch(
+            candidate,
+            commit,
+            "Lua script".into(),
+            crate::history::MutationSource::Human,
+            cx,
+        )?;
+        Ok(result)
+    } else {
+        app.workbook
+            .update(cx, |wb, _| apply_captured_lua_ops(wb, sheet_index, ops))
+    }
 }
 
 /// Commit already-materialized operations. There is intentionally no script,
 /// path, or Lua runtime in this interface: Apply cannot re-execute producer
 /// code and therefore commits the exact values/formulas that were previewed.
 pub(crate) fn apply_captured_lua_ops(
+    workbook: &mut visigrid_engine::workbook::Workbook,
+    sheet_index: usize,
+    ops: &[LuaOp],
+) -> Result<
+    (
+        Vec<crate::history::CellChange>,
+        Vec<crate::history::CellFormatPatch>,
+    ),
+    String,
+> {
+    if !workbook.has_table_criteria() {
+        return apply_captured_lua_ops_inner(workbook, sheet_index, ops);
+    }
+    workbook.validate_saved_table_views()?;
+    let mut targets = Vec::new();
+    let mut count = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        let (sr, sc, er, ec, values) = match op {
+            LuaOp::SetValue { row, col, .. }
+            | LuaOp::SetFormula { row, col, .. }
+            | LuaOp::ClearCell { row, col } => (*row, *col, *row, *col, true),
+            LuaOp::SetCellStyle { r1, c1, r2, c2, .. } => (*r1, *c1, *r2, *c2, false),
+            LuaOp::DeleteRows { .. } => return Err(
+                "Row deletion requires the AI Lua Review preview so it can be applied atomically."
+                    .into(),
+            ),
+            _ => continue,
+        };
+        let range = visigrid_engine::validation::CellRange {
+            start_row: sr as usize,
+            start_col: sc as usize,
+            end_row: er as usize,
+            end_col: ec as usize,
+        };
+        workbook
+            .validate_automation_range(sheet_index, range, values)
+            .map_err(|e| format!("Script operation {}: {e}", i + 1))?;
+        count = count.saturating_add(
+            (er as usize - sr as usize + 1).saturating_mul(ec as usize - sc as usize + 1),
+        );
+        if count > 100_000 {
+            return Err("A Table-aware script may target at most 100,000 cells.".into());
+        }
+        targets.push((i, range, values));
+    }
+    let mut candidate = workbook.clone();
+    let result = apply_captured_lua_ops_inner(&mut candidate, sheet_index, ops)?;
+    for (i, range, values) in targets {
+        candidate
+            .validate_automation_range(sheet_index, range, values)
+            .map_err(|e| format!("Script operation {}: {e}", i + 1))?;
+    }
+    if let Some(e) = candidate.take_incremental_errors().first() {
+        return Err(format!("Script recalculation failed: {e:?}"));
+    }
+    candidate.validate_saved_table_views()?;
+    workbook.restore_snapshot_monotonic(&candidate);
+    Ok(result)
+}
+
+fn apply_captured_lua_ops_inner(
     workbook: &mut visigrid_engine::workbook::Workbook,
     sheet_index: usize,
     ops: &[LuaOp],
@@ -1161,9 +1252,6 @@ pub(crate) fn apply_captured_lua_ops(
     }
 
     workbook.ensure_writable()?;
-    if crate::table_filter_ui::has_table_criteria(workbook) {
-        return Err(crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into());
-    }
     let sheet = workbook.sheet(sheet_index).ok_or("Script sheet no longer exists")?;
     for (index, op) in ops.iter().enumerate() {
         match op {
@@ -1260,6 +1348,8 @@ pub(crate) fn apply_captured_lua_ops(
                             .map(|s| s.get_format(row, col))
                             .unwrap_or_default();
                         if before != after {
+                            let id = guard.sheet(sheet_index).unwrap().id;
+                            guard.note_format_changed(visigrid_engine::cell_id::CellId::new(id,row,col));
                             format_patches.push(CellFormatPatch { row, col, before, after });
                         }
                     }
@@ -1414,6 +1504,7 @@ pub fn pump_debug_events(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>) {
                     .push_output_ungrouped(OutputEntry::error(format!("[debug] {}", msg)));
                 app.lua_console.debug_session = None;
                 app.lua_console.debug_snapshot = None;
+                app.lua_console.debug_source_revision = None;
             }
             DebugEventPayload::FrameVars { frame_index, locals, upvalues } => {
                 app.lua_console.frame_vars_cache.insert(frame_index, (locals, upvalues));
@@ -1433,6 +1524,12 @@ fn handle_debug_completed(
     result: LuaEvalResult,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if !result.cancelled && result.error.is_none() && app.lua_console.debug_source_revision.is_some_and(|revision| revision != app.wb(cx).revision()) && result.has_mutations() {
+        app.lua_console.push_output_ungrouped(OutputEntry::error("[debug] workbook changed while the script was running; rerun the script. Nothing was applied."));
+        app.lua_console.stop_debug_session();
+        cx.notify();
+        return;
+    }
     if result.cancelled {
         app.lua_console
             .push_output_ungrouped(OutputEntry::system("[debug] session stopped"));
@@ -1472,15 +1569,22 @@ fn handle_debug_completed(
             app.lua_console.push_output_ungrouped(OutputEntry::error(
                 "[debug] row deletion requires the AI Lua Review preview",
             ));
-        } else if result.has_mutations() {
+        } else if result.has_mutations() && result.error.is_none() {
+            let guarded = app.wb(cx).has_table_criteria();
             let (changes, format_patches) = match apply_lua_ops(app, target_index, &result.ops, cx) {
                 Ok(result) => result,
-                Err(error) => { app.lua_console.push_output(OutputEntry::error(error)); cx.notify(); return; }
+                Err(error) => {
+                    app.lua_console.push_output(OutputEntry::error(error));
+                    app.lua_console.stop_debug_session();
+                    cx.notify();
+                    return;
+                }
             };
             let has_values = !changes.is_empty();
             let has_formats = !format_patches.is_empty();
 
-            if has_values && has_formats {
+            // Guarded publication already recorded the complete transaction.
+            if !guarded && has_values && has_formats {
                 use crate::history::{FormatActionKind, UndoAction};
                 let group = UndoAction::Group {
                     actions: vec![
@@ -1499,10 +1603,10 @@ fn handle_debug_completed(
                 };
                 app.history.record_action_with_provenance(group, None);
                 app.is_modified = true;
-            } else if has_values {
+            } else if !guarded && has_values {
                 app.history.record_batch(target_index, changes);
                 app.is_modified = true;
-            } else if has_formats {
+            } else if !guarded && has_formats {
                 app.history.record_format(
                     target_index,
                     format_patches,
@@ -1523,6 +1627,7 @@ fn handle_debug_completed(
 
     app.lua_console.debug_session = None;
     app.lua_console.debug_snapshot = None;
+    app.lua_console.debug_source_revision = None;
 }
 
 /// Start a debug session from the current console input.
@@ -1534,17 +1639,21 @@ pub fn start_debug_session(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>)
 
     let snapshot = SheetSnapshot::from_sheet(app.sheet(cx));
     let sheet_index = app.sheet_index(cx);
+    app.sync_table_view(cx);
     let (anchor_row, anchor_col) = app.view_state.selected;
     let (end_row, end_col) = app
         .view_state
         .selection_end
         .unwrap_or(app.view_state.selected);
-    let selection = (
-        anchor_row.min(end_row),
-        anchor_col.min(end_col),
-        anchor_row.max(end_row),
-        anchor_col.max(end_col),
-    );
+    let selection = if app.wb(cx).has_table_criteria() {
+        match crate::table_batch::canonical_script_selection(&app.row_view, (anchor_row,anchor_col), (end_row,end_col)) {
+            Ok(selection) => selection,
+            Err(error) => { app.lua_console.push_output(OutputEntry::error(error)); cx.notify(); return; }
+        }
+    } else { (
+        anchor_row.min(end_row), anchor_col.min(end_col),
+        anchor_row.max(end_row), anchor_col.max(end_col),
+    ) };
 
     let config = DebugConfig {
         code: input,
@@ -1555,6 +1664,7 @@ pub fn start_debug_session(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>)
 
     let session = spawn_debug_session(config);
     app.lua_console.start_debug_session(session, sheet_index);
+    app.lua_console.debug_source_revision = Some(app.wb(cx).revision());
     app.lua_console
         .push_output_ungrouped(OutputEntry::system("[debug] session started"));
     cx.notify();

@@ -44,7 +44,7 @@ impl Spreadsheet {
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(
                     &entry.action,
-                    UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. }
+                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. }
                 )
                 && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
@@ -176,6 +176,10 @@ impl Spreadsheet {
                         self.history.redo();
                         return;
                     }
+                    self.status_message = Some(format!("Undo: {description}"));
+                }
+                UndoAction::TableBatchChanged { commit, description, .. } => {
+                    if !self.replay_table_batch(&commit, true, cx) { self.history.redo(); return; }
                     self.status_message = Some(format!("Undo: {description}"));
                 }
                 UndoAction::TableCellsChanged { commit, description, .. } => {
@@ -653,6 +657,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
+            UndoAction::TableBatchChanged { commit, .. } => { self.replay_table_batch(&commit, true, cx); }
             UndoAction::TableStructureChanged { history, .. } => {
                 self.replay_table_structure(&history, true, cx);
             }
@@ -1063,6 +1068,7 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
+            UndoAction::TableBatchChanged { commit, .. } => { if !self.replay_table_batch(&commit, false, cx) { return false; } }
             UndoAction::TableStructureChanged { history, .. } => {
                 if !self.replay_table_structure(&history, false, cx) {
                     return false;
@@ -1310,7 +1316,7 @@ impl Spreadsheet {
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(
                     &entry.action,
-                    UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. }
+                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. }
                 )
                 && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
@@ -1443,6 +1449,10 @@ impl Spreadsheet {
                         self.history.undo();
                         return;
                     }
+                    self.status_message = Some(format!("Redo: {description}"));
+                }
+                UndoAction::TableBatchChanged { commit, description, .. } => {
+                    if !self.replay_table_batch(&commit, false, cx) { self.history.undo(); return; }
                     self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::TableCellsChanged { commit, description, .. } => {
