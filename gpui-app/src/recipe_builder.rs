@@ -31,7 +31,7 @@ pub enum Pane {
 }
 
 /// Source settings in the left column, in focus order.
-pub const SOURCE_ROWS: [&str; 5] = ["File", "Delimiter", "Encoding", "Header line", "Decimal mark"];
+pub const SOURCE_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
 
 /// The kinds of step "Add step" offers, in menu order.
 pub const ADD_KINDS: [(&str, &str); 7] = [
@@ -562,14 +562,17 @@ impl RecipeBuilder {
 
     /// Left/Right/Space on a source setting.
     pub fn change_source(&mut self, row: usize, back: bool) {
+        if row == 1 {
+            return self.toggle_pattern();
+        }
         let src = source_mut(&mut self.recipe);
         match row {
-            1 => {
+            2 => {
                 let all: [Option<&str>; 5] = [None, Some(","), Some(";"), Some("tab"), Some("|")];
                 let current = all.iter().position(|d| delimiter_value(&d.map(String::from)) == delimiter_value(&src.delimiter)).unwrap_or(0);
                 src.delimiter = cycle(&[0usize, 1, 2, 3, 4], current, back).pipe(|i| all[i].map(String::from));
             }
-            2 => {
+            3 => {
                 let all: [Option<&str>; 4] = [None, Some("utf-8"), Some("windows-1252"), Some("utf-16")];
                 let current = all
                     .iter()
@@ -577,12 +580,30 @@ impl RecipeBuilder {
                     .unwrap_or(0);
                 src.encoding = cycle(&[0usize, 1, 2, 3], current, back).pipe(|i| all[i].map(String::from));
             }
-            3 => {
+            4 => {
                 src.header_row = if back { src.header_row.saturating_sub(1) } else { (src.header_row + 1).min(50) };
             }
-            4 => src.decimal_comma = !src.decimal_comma,
+            5 => src.decimal_comma = !src.decimal_comma,
             _ => return,
         }
+        self.changed();
+    }
+
+    /// Switch between reading this file and the newest file like it
+    /// (`export-2026-09.csv` <-> `export-*-*.csv`, in the same folder).
+    pub fn toggle_pattern(&mut self) {
+        let stored = source(&self.recipe).path.clone();
+        let current = Path::new(&stored);
+        let name = if self.recipe.source_is_pattern() {
+            self.source_path.file_name().and_then(|n| n.to_str()).map(str::to_string)
+        } else {
+            self.source_path.file_name().and_then(|n| n.to_str()).and_then(recipe::suggest_pattern)
+        };
+        let Some(name) = name else {
+            self.error = Some("This file's name has no date or number to match next month's by.".into());
+            return;
+        };
+        source_mut(&mut self.recipe).path = current.with_file_name(name).display().to_string();
         self.changed();
     }
 
@@ -591,19 +612,36 @@ impl RecipeBuilder {
         let src = source(&self.recipe);
         let info = self.info.as_ref();
         match row {
-            0 => (
-                self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
-                self.source_path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
-            ),
-            1 => match delimiter_value(&src.delimiter) {
+            0 => {
+                let dir = self.source_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
+                let dir = match dir.strip_prefix(&home) {
+                    Some(rest) if !home.is_empty() => format!("~{rest}"),
+                    _ => dir,
+                };
+                (self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(), dir)
+            }
+            1 => {
+                let file = self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if self.recipe.source_is_pattern() {
+                    let pattern = Path::new(&src.path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    (format!("Newest {pattern}"), format!("Picks up next month's export by itself. Now: {file}."))
+                } else {
+                    match recipe::suggest_pattern(file) {
+                        Some(p) => ("This file only".into(), format!("Or the newest file like {p}.")),
+                        None => ("This file only".into(), String::new()),
+                    }
+                }
+            }
+            2 => match delimiter_value(&src.delimiter) {
                 None => (format!("Detected · {}", info.map_or("Comma", |i| delimiter_name(i.delimiter))), "Read from the header line down.".into()),
                 Some(d) => (delimiter_name(d).into(), String::new()),
             },
-            2 => match src.encoding.as_deref() {
+            3 => match src.encoding.as_deref() {
                 None => (format!("Detected · {}", info.map_or("UTF-8", |i| i.encoding.label())), String::new()),
                 Some(e) => (Encoding::parse(e).map_or(e, |e| e.label()).to_string(), String::new()),
             },
-            3 => {
+            4 => {
                 if src.header_row == 0 {
                     ("None".into(), "No header; columns are named by letter.".into())
                 } else {
@@ -680,7 +718,8 @@ impl Spreadsheet {
             }
         };
         let dir = recipe_path.parent().unwrap_or(Path::new("."));
-        let source_path = recipe.source_path(dir, None);
+        // A pattern opens on the file it matches now
+        let source_path = recipe.resolve_source(dir, None).unwrap_or_else(|_| recipe.source_path(dir, None));
         self.recipe_blocked = None;
         self.recipe_builder = Some(RecipeBuilder::new(recipe, Some(recipe_path.to_path_buf()), source_path, link));
         self.mode = Mode::RecipeBuilder;
@@ -820,7 +859,17 @@ impl Spreadsheet {
         let Some(b) = self.recipe_builder.as_mut() else { return };
         // A recipe not yet named stores its source relative to where it lands
         if b.recipe_path.as_ref() != Some(&path) {
-            source_mut(&mut b.recipe).path = stored_source_path(&b.source_path, path.parent());
+            let stored = stored_source_path(&b.source_path, path.parent());
+            source_mut(&mut b.recipe).path = if b.recipe.source_is_pattern() {
+                // Keep the pattern; only where it is looked for changes
+                let pattern = Path::new(&source(&b.recipe).path).file_name().map(|n| n.to_os_string());
+                match pattern {
+                    Some(p) => Path::new(&stored).with_file_name(p).display().to_string(),
+                    None => stored,
+                }
+            } else {
+                stored
+            };
         }
         // The columns drift is checked against next time
         if !b.file_columns.is_empty() {
@@ -1101,11 +1150,30 @@ mod tests {
     }
 
     #[test]
+    fn toggles_between_this_file_and_the_newest_like_it() {
+        let mut b = builder("ID\n1\n", vec![]);
+        // builder() names the file orders.csv: no digits, nothing to match by
+        b.toggle_pattern();
+        assert!(b.error.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("export-2026-09.csv");
+        std::fs::write(&file, "ID\n1\n").unwrap();
+        b.source_path = file.clone();
+        b.recipe.source = Source::Csv(CsvSource { path: file.display().to_string(), delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: vec![] });
+        b.change_source(1, false);
+        assert!(b.recipe.source_is_pattern());
+        assert!(b.source_value(1).0.contains("export-*-*.csv"));
+        b.change_source(1, false);
+        assert!(!b.recipe.source_is_pattern());
+        assert_eq!(super::source(&b.recipe).path, file.display().to_string());
+    }
+
+    #[test]
     fn source_settings_and_stored_paths() {
         let mut b = builder("Title\nID;Amount\n1;5\n2;6\n", vec![]);
-        b.change_source(3, false); // header line 2
+        b.change_source(4, false); // header line 2
         assert_eq!(b.file_columns, ["ID", "Amount"]);
-        assert!(b.source_value(3).1.contains("Title"));
+        assert!(b.source_value(4).1.contains("Title"));
         assert_eq!(stored_source_path(Path::new("/d/x.csv"), Some(Path::new("/d"))), "x.csv");
         assert_eq!(stored_source_path(Path::new("/e/x.csv"), Some(Path::new("/d"))), "/e/x.csv");
         assert_eq!(cli_line(Some(Path::new("/d/my orders.recipe.toml")), Path::new("x.csv")), "vgrid recipe run 'my orders.recipe.toml' -o 'my orders.csv'");

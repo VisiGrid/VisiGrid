@@ -150,6 +150,12 @@ pub(crate) fn render_recipe_strip(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 .text_color(if blocked_here { c.warn } else { c.muted })
                 .child(format!("from recipe {} · {detail}", file_name(&source.recipe))),
         )
+        .child({
+            let path = recipe_path.clone();
+            action("recipe-strip-choose", "Choose file…", false, &c, cx, move |this, cx| {
+                this.recipe_choose_source(path.clone(), RecipeTarget::Table(table_id), cx)
+            })
+        })
         .child(action("recipe-strip-edit", "Edit recipe", false, &c, cx, move |this, cx| {
             this.open_recipe_builder(&edit_path, Some(table_id), cx)
         }))
@@ -469,6 +475,12 @@ pub(crate) fn render_recipe_banner(app: &Spreadsheet, cx: &mut Context<Spreadshe
                     .text_color(c.muted)
                     .child("Each fix is saved into the recipe and retried against the same copy of the file, so what you checked is what gets loaded. From the command line the same run exits with code 70."),
             )
+            .child({
+                let (path, target) = (b.recipe_path.clone(), b.target);
+                action("recipe-choose", "Choose file…", false, &c, cx, move |this, cx| {
+                    this.recipe_choose_source(path.clone(), target, cx)
+                })
+            })
             .child(action("recipe-retry", "Read the file again", false, &c, cx, |this, cx| this.recipe_retry(cx))),
     );
 

@@ -23,7 +23,9 @@ pub(crate) fn cmd_recipe_run(
 ) -> Result<(), CliError> {
     let recipe = Recipe::load(&recipe_path).map_err(|e| CliError { code: EXIT_RECIPE_INVALID, message: e, hint: None })?;
     let recipe_dir = recipe_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let source_path = recipe.source_path(recipe_dir, source.as_deref());
+    let source_path = recipe.resolve_source(recipe_dir, source.as_deref()).map_err(|e| {
+        CliError::io(e).with_hint("the pattern is matched in the recipe's folder; pass --source to read a given file")
+    })?;
     check_paths(&recipe_path, &source_path, output.as_deref(), report_path.as_deref())?;
     let snapshot = Snapshot::read(&source_path).map_err(|e| {
         CliError::io(e).with_hint("the path is relative to the recipe file; pass --source to read another file")

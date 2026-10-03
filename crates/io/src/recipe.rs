@@ -393,6 +393,44 @@ impl Recipe {
         })
     }
 
+    /// Whether the source names a pattern (`export-*.csv`) rather than a file.
+    pub fn source_is_pattern(&self) -> bool {
+        let Source::Csv(src) = &self.source;
+        is_pattern(Path::new(&src.path).file_name().and_then(|n| n.to_str()).unwrap_or(""))
+    }
+
+    /// The file a run reads: `over` if given; else the recipe's path, or for
+    /// a pattern (`*` and `?` in the file name) the most recently modified
+    /// file it matches, so next month's export is picked up by itself.
+    pub fn resolve_source(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<PathBuf, String> {
+        let path = self.source_path(recipe_dir, over);
+        if over.is_some() {
+            return Ok(path);
+        }
+        let Some(pattern) = path.file_name().and_then(|n| n.to_str()).filter(|n| is_pattern(n)) else {
+            return Ok(path);
+        };
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mut best: Option<(std::time::SystemTime, String, PathBuf)> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !wildcard_match(pattern, &name) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            // Newest first; the same time goes to the later name (…-10 over …-09)
+            if best.as_ref().map_or(true, |(t, n, _)| (modified, &name) > (*t, n)) {
+                best = Some((modified, name, entry.path()));
+            }
+        }
+        best.map(|(_, _, p)| p).ok_or_else(|| format!("no file in {} matches {pattern}", dir.display()))
+    }
+
     /// The source file: `over` if given, else the recipe's path, relative
     /// paths resolved against `recipe_dir`.
     pub fn source_path(&self, recipe_dir: &Path, over: Option<&Path>) -> PathBuf {
@@ -407,6 +445,57 @@ impl Recipe {
             recipe_dir.join(p)
         }
     }
+}
+
+fn is_pattern(name: &str) -> bool {
+    name.contains('*') || name.contains('?')
+}
+
+/// `*` any run of characters, `?` one character; case-insensitive, since
+/// exports land on case-insensitive disks as often as not.
+pub fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let n: Vec<char> = name.to_lowercase().chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ni;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+/// A pattern for a dated export's name: each run of digits becomes `*`
+/// (`export-2026-09.csv` -> `export-*-*.csv`). None without digits.
+pub fn suggest_pattern(file_name: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_digits = false;
+    let mut any = false;
+    for c in file_name.chars() {
+        if c.is_ascii_digit() {
+            if !in_digits {
+                out.push('*');
+                any = true;
+            }
+            in_digits = true;
+        } else {
+            out.push(c);
+            in_digits = false;
+        }
+    }
+    any.then_some(out)
 }
 
 /// `text`, `number`, `auto`, `date:ymd|dmy|mdy` (or `date`, meaning YMD).
@@ -1677,5 +1766,39 @@ columns = { Amount = "number" }
         let info = source_info(&src, &s);
         assert_eq!(info.delimiter, b',');
         assert_eq!(info.first_lines[0], "Acme export");
+    }
+
+    #[test]
+    fn patterns_pick_the_newest_matching_export() {
+        assert!(wildcard_match("export-*-*.csv", "Export-2026-10.CSV"));
+        assert!(!wildcard_match("export-*-*.csv", "export-2026.csv"));
+        assert!(wildcard_match("a?c*", "abcdef"));
+        assert_eq!(suggest_pattern("export-2026-09.csv").as_deref(), Some("export-*-*.csv"));
+        assert_eq!(suggest_pattern("orders.csv"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, secs: u64| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "a\n1\n").unwrap();
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        };
+        write("export-2026-08.csv", 1_000);
+        write("export-2026-10.csv", 3_000);
+        write("export-2026-09.csv", 2_000);
+        write("other-2026-11.csv", 9_000);
+        let text = r#"
+version = 1
+[source]
+kind = "csv"
+path = "export-*-*.csv"
+"#;
+        let r = Recipe::from_toml(text).unwrap();
+        assert!(r.source_is_pattern());
+        assert_eq!(r.resolve_source(dir.path(), None).unwrap(), dir.path().join("export-2026-10.csv"));
+        let over = dir.path().join("export-2026-08.csv");
+        assert_eq!(r.resolve_source(dir.path(), Some(&over)).unwrap(), over);
+        let empty = tempfile::tempdir().unwrap();
+        assert!(r.resolve_source(empty.path(), None).unwrap_err().contains("no file in"));
     }
 }

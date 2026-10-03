@@ -62,7 +62,16 @@ fn run_job(recipe_path: &Path, recipe: Option<Recipe>, snapshot: Option<Snapshot
         None => Recipe::load(recipe_path)?,
     };
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
-    let source_path = recipe.source_path(dir, None);
+    let source_path = match &snapshot {
+        Some(s) => s.path.clone(),
+        None => match recipe.resolve_source(dir, None) {
+            Ok(p) => p,
+            Err(e) => {
+                let report = RunReport::unreadable(&recipe.source_path(dir, None), e);
+                return Ok(RunOutcome { recipe, snapshot: None, output: RecipeOutput::empty(), report, source_path: dir.to_path_buf() });
+            }
+        },
+    };
     let snapshot = match snapshot {
         Some(s) => Some(s),
         None => match Snapshot::read(&source_path) {
@@ -315,6 +324,61 @@ impl Spreadsheet {
         let Some(b) = self.recipe_blocked.as_ref() else { return };
         let (target, path) = (b.target, b.recipe_path.clone());
         self.start_recipe_run(target, path, None, None, cx);
+    }
+
+    /// "Choose file…": read another file with this recipe. A file its
+    /// pattern already matches is read once without changing the recipe;
+    /// any other file becomes the recipe's source (saved), then it runs.
+    pub fn recipe_choose_source(&mut self, recipe_path: PathBuf, target: RecipeTarget, cx: &mut Context<Self>) {
+        let future = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose the file to read".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = future.await else { return };
+            let Some(chosen) = paths.first().cloned() else { return };
+            let _ = this.update(cx, |this, cx| {
+                let mut recipe = match Recipe::load(&recipe_path) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        this.status_message = Some(format!("Couldn't open the recipe: {e}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                let dir = recipe_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+                let pattern_path = recipe.source_path(&dir, None);
+                let matches_pattern = recipe.source_is_pattern()
+                    && chosen.parent() == pattern_path.parent()
+                    && chosen.file_name().and_then(|n| n.to_str()).zip(pattern_path.file_name().and_then(|n| n.to_str()))
+                        .is_some_and(|(n, p)| recipe::wildcard_match(p, n));
+                if !matches_pattern {
+                    let visigrid_io::recipe::Source::Csv(src) = &mut recipe.source;
+                    src.path = match chosen.parent() {
+                        Some(p) if p == dir => chosen.file_name().unwrap().to_string_lossy().into_owned(),
+                        _ => chosen.display().to_string(),
+                    };
+                    if let Err(e) = recipe.save(&recipe_path) {
+                        this.status_message = Some(format!("Couldn't save the recipe: {e}"));
+                        cx.notify();
+                        return;
+                    }
+                }
+                let snapshot = match Snapshot::read(&chosen) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        this.status_message = Some(format!("Couldn't read {}: {e}", chosen.display()));
+                        cx.notify();
+                        return;
+                    }
+                };
+                this.recipe_blocked = None;
+                this.start_recipe_run(target, recipe_path.clone(), Some(recipe), Some(snapshot), cx);
+            });
+        })
+        .detach();
     }
 
     /// Open the recipe file in the system's editor for TOML.
