@@ -659,6 +659,7 @@ impl Spreadsheet {
 
         // Commit any pending edit before switching sheets
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
         if self.activate_sheet(index, cx) {
             self.clear_selection_state();
             // Clear history highlight unless it's for the new sheet
@@ -921,6 +922,7 @@ impl Spreadsheet {
         // Commit edit if in edit mode (save value, stay in place — don't move cursor)
         if self.mode.is_editing() {
             self.commit_pending_edit(cx);
+            if self.mode.is_editing() { return; }
         }
         // Cancel format painter if active
         if self.mode == crate::mode::Mode::FormatPainter {
@@ -1098,6 +1100,7 @@ pub fn install_close_guard(
     window.on_window_should_close(cx, move |_window, cx| {
         entity.update(cx, |this, cx| {
             this.commit_pending_edit(cx);
+            if this.mode.is_editing() { return false; }
             if !this.is_modified && !this.is_dirty() {
                 // Clean: allow the close, with the same bookkeeping as Cmd+W.
                 this.prepare_close(cx);

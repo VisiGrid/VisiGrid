@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Typing immediately below a sorted or filtered Table now appends a row, fills calculated columns and preserves criteria. The value, Percent format and row growth undo together; rejected edits stay open and stop save/close/navigation from discarding them.
+
 - Bulk paste can extend a sorted or filtered Table: existing visible records receive the first rows, overflow appends new records, and calculated columns fill automatically. The whole paste supports one-step undo/redo and reports new rows hidden by filters.
 
 - Add Table rows without clearing saved sort/filter criteria, using Add row or Tab from the last visible record. Calculated columns fill automatically; hidden new rows are explained, and a pending Tab edit plus append undo together.

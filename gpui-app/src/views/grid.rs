@@ -1658,6 +1658,7 @@ fn render_cell(
                 let active = this.active_view_state().selected;
                 if (target_row, target_col) != active {
                     this.commit_pending_edit(cx);
+                    if this.mode.is_editing() { return; }
                 }
             }
 
@@ -2787,6 +2788,7 @@ fn render_merge_div(
                 let active = this.active_view_state().selected;
                 if (target_row, target_col) != active {
                     this.commit_pending_edit(cx);
+                    if this.mode.is_editing() { return; }
                 }
             }
 

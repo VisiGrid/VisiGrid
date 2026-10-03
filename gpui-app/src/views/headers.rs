@@ -232,6 +232,7 @@ fn render_column_header(
             // If editing, commit before selecting column
             if this.mode.is_editing() {
                 this.commit_pending_edit(cx);
+                if this.mode.is_editing() { return; }
             }
 
             if event.modifiers.shift {
@@ -369,6 +370,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
             // If editing, commit before selecting row
             if this.mode.is_editing() {
                 this.commit_pending_edit(cx);
+                if this.mode.is_editing() { return; }
             }
 
             if event.modifiers.shift {

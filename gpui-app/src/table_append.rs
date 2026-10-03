@@ -80,7 +80,7 @@ fn prepare_append(
 }
 
 impl TableAppendHistory {
-    pub(crate) fn from_paste(
+    pub(crate) fn with_appended_writes(
         table: TableCommit,
         paste: TableCellsCommit,
         view: Option<TableViewSpec>,
@@ -160,7 +160,117 @@ fn append_focus(rows: &RowView, range: TableRange) -> (usize, bool) {
     }
 }
 
+/// Typing grows only the immediately adjacent row, within the Table's width.
+/// Blank edits, existing body cells, side cells and gaps retain ordinary editing.
+fn typed_append_target(
+    wb: &Workbook,
+    index: usize,
+    write: &TableCellWrite,
+) -> Result<Option<TableId>, String> {
+    if write
+        .value
+        .as_ref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Ok(None);
+    }
+    let sheet = wb.sheet(index).ok_or("The sheet no longer exists.")?;
+    wb.table_append_target(
+        sheet.id,
+        TableRange {
+            start_row: write.row,
+            end_row: write.row,
+            start_col: write.col,
+            end_col: write.col,
+        },
+    )
+}
+
 impl Spreadsheet {
+    /// Some(false) leaves the editor open after a refused growth operation.
+    /// Some(true) commits growth; the caller handles ordinary edit completion.
+    pub(crate) fn try_typed_table_append(
+        &mut self,
+        write: &TableCellWrite,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let id = match typed_append_target(self.wb(cx), self.sheet_index(cx), write) {
+            Ok(None) => return None,
+            Ok(Some(id)) => id,
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                return Some(false);
+            }
+        };
+        if self.block_if_previewing_only(cx) {
+            return Some(false);
+        }
+        if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered())
+        {
+            self.status_message = Some(
+                "Clear this sheet's worksheet sorting and filters before appending Table rows."
+                    .into(),
+            );
+            cx.notify();
+            return Some(false);
+        }
+        let result = self
+            .validate_saved_view_layout(self.wb(cx))
+            .and_then(|_| {
+                crate::table_bulk_append::prepare_append_writes(
+                    self.wb(cx),
+                    id,
+                    1,
+                    std::slice::from_ref(write),
+                )
+            })
+            .and_then(|(candidate, history)| {
+                self.validate_saved_view_layout(&candidate)?;
+                Ok((candidate, history))
+            });
+        Some(match result {
+            Ok((candidate, history)) => {
+                let range = history.table.after_table().unwrap().range;
+                let index = candidate
+                    .sheet_index_by_id(history.table.sheet_id())
+                    .unwrap();
+                self.workbook
+                    .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                self.table_filter_dropdown = None;
+                self.sync_table_view(cx);
+                let (row, hidden) = append_focus(&self.row_view, range);
+                self.view_state.select_cell(row, write.col);
+                self.view_state.additional_selections.clear();
+                self.ensure_visible(cx);
+                self.history.record_action_with_provenance(
+                    UndoAction::TableAppend {
+                        sheet_index: index,
+                        history: Box::new(history),
+                        description: "Type and append Table row".into(),
+                    },
+                    None,
+                );
+                self.bump_cells_rev();
+                self.is_modified = true;
+                self.clipboard_visual_range = None;
+                self.status_message = Some(if hidden {
+                    "Added 1 Table row, hidden by the current filter. Clear filters to see it."
+                        .into()
+                } else {
+                    "Added 1 Table row.".into()
+                });
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                false
+            }
+        })
+    }
+
     pub(crate) fn append_table_row_in_view(
         &mut self,
         id: TableId,
@@ -644,5 +754,231 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(view.rows().data_to_view(7).is_none());
+    }
+    fn typed(
+        wb: &Workbook,
+        write: TableCellWrite,
+    ) -> Result<(Workbook, TableAppendHistory), String> {
+        let id = typed_append_target(wb, 0, &write)?.ok_or("No append target")?;
+        crate::table_bulk_append::prepare_append_writes(wb, id, 1, &[write])
+    }
+
+    #[test]
+    fn typed_growth_requires_nonblank_value_immediately_below_within_width() {
+        let (wb, id) = book(true);
+        assert_eq!(
+            typed_append_target(&wb, 0, &TableCellWrite::value(7, 1, "West".into())).unwrap(),
+            Some(id)
+        );
+        for (row, col, value) in [
+            (7, 1, ""),
+            (7, 1, "  "),
+            (8, 1, "West"),
+            (7, 0, "West"),
+            (7, 4, "West"),
+            (6, 1, "West"),
+        ] {
+            assert!(
+                typed_append_target(&wb, 0, &TableCellWrite::value(row, col, value.into()))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn typing_below_filter_grows_fills_and_replays_without_touching_hidden_records() {
+        let (before, id) = book(true);
+        let (after, history) = typed(&before, TableCellWrite::value(7, 1, "West".into())).unwrap();
+        assert_eq!(after.table(id).unwrap().1.range.end_row, 7);
+        assert_eq!(after.active_sheet().get_raw(7, 1), "West");
+        assert_eq!(after.active_sheet().get_raw(7, 3), "=[@Amount]*2");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        assert_eq!(
+            after.active_sheet().table_view_spec(),
+            before.active_sheet().table_view_spec()
+        );
+        let view = after
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range);
+        assert!(!hidden);
+        assert_eq!(view.rows().view_to_data(focus), 7);
+        let undo = history.replay(&after, true).unwrap();
+        assert_eq!(undo.table(id).unwrap().1.range.end_row, 6);
+        assert_eq!(undo.active_sheet().get_raw(7, 1), "");
+        assert_eq!(undo.active_sheet().get_raw(7, 3), "");
+        assert_eq!(
+            history
+                .replay(&undo, false)
+                .unwrap()
+                .active_sheet()
+                .get_raw(7, 1),
+            "West"
+        );
+    }
+
+    #[test]
+    fn typed_percentage_hidden_by_filter_restores_its_value_and_format_together() {
+        let (before, id) = book(true);
+        let mut write = TableCellWrite::value(7, 2, "25%".into());
+        let mut format = before.active_sheet().get_format(7, 2);
+        format.number_format = NumberFormat::Percent { decimals: 0 };
+        write.format = Some(format.clone());
+        let (after, history) = typed(&before, write).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 2), "0.25");
+        assert_eq!(
+            after.active_sheet().get_computed_value(7, 3),
+            visigrid_engine::formula::eval::Value::Number(0.5)
+        );
+        let view = after
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap();
+        assert!(append_focus(view.rows(), after.table(id).unwrap().1.range).1);
+        let undo = history.replay(&after, true).unwrap();
+        assert_eq!(
+            undo.active_sheet().get_format(7, 2),
+            before.active_sheet().get_format(7, 2)
+        );
+        assert_eq!(undo.active_sheet().get_raw(7, 2), "");
+        let redo = history.replay(&undo, false).unwrap();
+        assert_eq!(redo.active_sheet().get_format(7, 2), format);
+        assert_eq!(
+            redo.active_sheet().get_computed_value(7, 3),
+            visigrid_engine::formula::eval::Value::Number(0.5)
+        );
+    }
+
+    #[test]
+    fn typed_formula_is_an_override_without_replacing_the_column_rule() {
+        let (before, id) = book(true);
+        let (after, history) = typed(
+            &before,
+            TableCellWrite::value(7, 3, "=SUM(Sales[Amount])".into()),
+        )
+        .unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 3), "100");
+        assert_eq!(
+            after.table(id).unwrap().1.columns,
+            before.table(id).unwrap().1.columns
+        );
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        assert_eq!(
+            history
+                .replay(&after, true)
+                .unwrap()
+                .active_sheet()
+                .get_raw(7, 3),
+            ""
+        );
+    }
+
+    #[test]
+    fn typed_append_refuses_occupied_stripe_and_unsafe_recalculation_atomically() {
+        for case in 0..3 {
+            let (mut before, id) = book(true);
+            match case {
+                0 => {
+                    before.set_cell_value_tracked(0, 7, 3, "Existing note");
+                }
+                1 => {
+                    before.set_cell_value_tracked(0, 7, 5, "Beside Table");
+                }
+                _ => {
+                    before.set_cell_value_tracked(
+                        0,
+                        0,
+                        0,
+                        "=IF(SUM(Sales[Amount])>100,SEQUENCE(5),0)",
+                    );
+                }
+            }
+            let revision = before.revision();
+            assert!(typed(&before, TableCellWrite::value(7, 2, "50".into())).is_err());
+            assert_eq!(before.revision(), revision);
+            assert_eq!(before.table(id).unwrap().1.range.end_row, 6);
+            assert_eq!(before.active_sheet().get_raw(7, 2), "");
+        }
+    }
+
+    #[test]
+    fn typed_append_into_header_only_table_and_on_other_sheet() {
+        let (mut before, _) = book(true);
+        let index = before.add_sheet_named("Other").unwrap();
+        let sid = before.sheet(index).unwrap().id;
+        before.set_cell_value_tracked(index, 0, 0, "Value");
+        let id = before
+            .create_table(
+                sid,
+                TableRange {
+                    start_row: 0,
+                    end_row: 0,
+                    start_col: 0,
+                    end_col: 0,
+                },
+                "OtherTable",
+            )
+            .unwrap()
+            .table_id();
+        let write = TableCellWrite::value(1, 0, "First record".into());
+        assert_eq!(
+            typed_append_target(&before, index, &write).unwrap(),
+            Some(id)
+        );
+        let (after, history) =
+            crate::table_bulk_append::prepare_append_writes(&before, id, 1, &[write]).unwrap();
+        assert_eq!(after.sheet(index).unwrap().get_raw(1, 0), "First record");
+        assert_eq!(
+            after.sheet(0).unwrap().table_view_spec(),
+            before.sheet(0).unwrap().table_view_spec()
+        );
+        assert_eq!(
+            history
+                .replay(&after, true)
+                .unwrap()
+                .table(id)
+                .unwrap()
+                .1
+                .range
+                .data_rows(),
+            0
+        );
+    }
+
+    #[test]
+    fn typed_append_has_one_replayable_history_entry_and_persists() {
+        let (before, id) = book(true);
+        let (after, commit) = typed(&before, TableCellWrite::value(7, 1, "West".into())).unwrap();
+        let mut history = History::new();
+        history.record_action_with_provenance(
+            UndoAction::TableAppend {
+                sheet_index: 0,
+                history: Box::new(commit),
+                description: "Type and append Table row".into(),
+            },
+            None,
+        );
+        assert_eq!(history.undo_count(), 1);
+        let preview = history
+            .build_workbook_before(1, Some(&before), 100, 10_000)
+            .unwrap();
+        assert_eq!(preview.workbook.table(id).unwrap().1.range.end_row, 7);
+        assert_eq!(preview.workbook.active_sheet().get_raw(7, 1), "West");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("typed.sheet");
+        visigrid_io::native::save_workbook_full(&after, &Default::default(), &[], &[], &path)
+            .unwrap();
+        let loaded = visigrid_io::native::load_workbook(&path).unwrap();
+        assert_eq!(loaded.table(id).unwrap().1, after.table(id).unwrap().1);
+        assert_eq!(loaded.active_sheet().get_raw(7, 1), "West");
+        assert_eq!(loaded.active_sheet().get_raw(7, 3), "=[@Amount]*2");
+        assert_eq!(
+            loaded.active_sheet().table_view_spec(),
+            before.active_sheet().table_view_spec()
+        );
     }
 }

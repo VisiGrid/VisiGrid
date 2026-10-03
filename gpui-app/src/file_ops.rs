@@ -892,6 +892,7 @@ impl Spreadsheet {
         if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
 
         if let Some(path) = &self.current_file.clone() {
             // Only save directly for VisiGrid native formats (.sheet, .vgrid).
@@ -916,6 +917,7 @@ impl Spreadsheet {
         if self.block_read_only_recovery(cx) { return false; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return false; }
 
         if let Some(path) = &self.current_file.clone() {
             let ext = ext_lower(path).unwrap_or_default();
@@ -941,6 +943,7 @@ impl Spreadsheet {
         if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
 
         // For directory: prefer current file location, then import source, then Documents or the home folder
         let directory = self.current_file.as_ref()
@@ -1145,6 +1148,7 @@ impl Spreadsheet {
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
         if self.block_read_only_recovery(cx) { return; }
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
         let warnings = match xlsx::table_export_warnings(self.wb(cx)) {
             Ok(warnings) => warnings,
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
@@ -1357,6 +1361,7 @@ impl Spreadsheet {
     {
         // Commit any pending edit so it's included in the export
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
 
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())

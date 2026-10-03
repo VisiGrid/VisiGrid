@@ -91,7 +91,7 @@ pub(crate) fn plan_bulk_append(
     }))
 }
 
-fn prepare_bulk_append(
+pub(crate) fn prepare_append_writes(
     wb: &Workbook,
     id: TableId,
     count: usize,
@@ -152,7 +152,7 @@ fn prepare_bulk_append(
     );
     Ok((
         candidate,
-        TableAppendHistory::from_paste(commit, patch, view),
+        TableAppendHistory::with_appended_writes(commit, patch, view),
     ))
 }
 
@@ -177,7 +177,7 @@ impl Spreadsheet {
         }
         let result = self
             .validate_saved_view_layout(self.wb(cx))
-            .and_then(|_| prepare_bulk_append(self.wb(cx), plan.id, plan.count, &writes))
+            .and_then(|_| prepare_append_writes(self.wb(cx), plan.id, plan.count, &writes))
             .and_then(|(candidate, history)| {
                 self.validate_saved_view_layout(&candidate)?;
                 Ok((candidate, history))
@@ -304,7 +304,7 @@ mod tests {
             &["East", "15"],
         ]);
         let writes = table_paste_writes(&grid, None, TablePasteKind::Contents, plan.targets);
-        let (after, history) = prepare_bulk_append(&before, id, plan.count, &writes).unwrap();
+        let (after, history) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
         assert_eq!(after.table(id).unwrap().1.range.end_row, 8);
         assert_eq!(after.active_sheet().get_raw(4, 2), "10");
         assert_eq!(after.active_sheet().get_raw(4, 3), "999");
@@ -348,7 +348,7 @@ mod tests {
             TablePasteKind::Values,
             plan.targets,
         );
-        let (after, history) = prepare_bulk_append(&before, id, 2, &writes).unwrap();
+        let (after, history) = prepare_append_writes(&before, id, 2, &writes).unwrap();
         let view = after
             .active_sheet()
             .build_saved_table_view(30)
@@ -386,7 +386,7 @@ mod tests {
         let mut format = before.active_sheet().get_format(7, 1);
         format.number_format = NumberFormat::Custom("@".into());
         writes[0].format = Some(format.clone());
-        let (after, history) = prepare_bulk_append(&before, id, 1, &writes).unwrap();
+        let (after, history) = prepare_append_writes(&before, id, 1, &writes).unwrap();
         assert_eq!(after.active_sheet().get_display(7, 1), "=not a formula");
         assert_eq!(after.active_sheet().get_raw(7, 3), "");
         assert_eq!(after.active_sheet().get_format(7, 1), format);
@@ -428,7 +428,7 @@ mod tests {
             TablePasteKind::Formulas,
             plan.targets,
         );
-        let (after, history) = prepare_bulk_append(&before, id, 2, &writes).unwrap();
+        let (after, history) = prepare_append_writes(&before, id, 2, &writes).unwrap();
         assert_eq!(after.active_sheet().get_display(6, 3), "120");
         assert_eq!(after.active_sheet().get_raw(7, 3), "=C8*3");
         assert_eq!(after.active_sheet().get_raw(8, 3), "=C9*3");
@@ -473,7 +473,7 @@ mod tests {
                 TableCellWrite::value(8, 2, "55".into()),
             ];
             let rev = before.revision();
-            assert!(prepare_bulk_append(&before, id, 2, &writes).is_err());
+            assert!(prepare_append_writes(&before, id, 2, &writes).is_err());
             assert_eq!(before.revision(), rev);
             assert_eq!(before.active_sheet().get_raw(6, 2), "40");
             assert_eq!(before.table(id).unwrap().1.range.end_row, 6);
@@ -484,11 +484,11 @@ mod tests {
     fn hidden_existing_target_and_duplicate_targets_are_refused() {
         let (before, id) = book();
         assert!(
-            prepare_bulk_append(&before, id, 1, &[TableCellWrite::value(4, 2, "99".into())])
+            prepare_append_writes(&before, id, 1, &[TableCellWrite::value(4, 2, "99".into())])
                 .is_err()
         );
         let w = TableCellWrite::value(7, 2, "99".into());
-        assert!(prepare_bulk_append(&before, id, 1, &[w.clone(), w]).is_err());
+        assert!(prepare_append_writes(&before, id, 1, &[w.clone(), w]).is_err());
     }
 
     #[test]
@@ -498,7 +498,7 @@ mod tests {
             TableCellWrite::value(7, 1, "West".into()),
             TableCellWrite::value(7, 2, "12".into()),
         ];
-        let (after, commit) = prepare_bulk_append(&before, id, 1, &writes).unwrap();
+        let (after, commit) = prepare_append_writes(&before, id, 1, &writes).unwrap();
         let mut history = History::new();
         history.record_action_with_provenance(
             UndoAction::TableAppend {
@@ -530,7 +530,7 @@ mod tests {
     fn changed_view_and_stale_paste_cells_block_replay() {
         let (before, id) = book();
         let (mut after, commit) =
-            prepare_bulk_append(&before, id, 1, &[TableCellWrite::value(7, 2, "12".into())])
+            prepare_append_writes(&before, id, 1, &[TableCellWrite::value(7, 2, "12".into())])
                 .unwrap();
         after.set_cell_value_tracked(0, 7, 2, "99");
         assert!(commit.replay(&after, true).is_err());
@@ -550,7 +550,7 @@ mod tests {
             TableCellWrite::value(7, 1, "West".into()),
             TableCellWrite::value(7, 2, "100".into()),
         ];
-        assert!(prepare_bulk_append(&before, id, 1, &writes).is_err());
+        assert!(prepare_append_writes(&before, id, 1, &writes).is_err());
         assert_eq!(before.table(id).unwrap().1.range.end_row, 6);
         assert_eq!(before.active_sheet().get_display(0, 0), "0");
     }
@@ -574,7 +574,7 @@ mod tests {
             TablePasteKind::Contents,
             plan.targets,
         );
-        let (after, history) = prepare_bulk_append(&before, id, 2, &writes).unwrap();
+        let (after, history) = prepare_append_writes(&before, id, 2, &writes).unwrap();
         assert_eq!(after.active_sheet().get_display(3, 3), "10");
         assert_eq!(after.active_sheet().get_display(4, 3), "14");
         assert_eq!(
@@ -627,7 +627,7 @@ mod tests {
             TablePasteKind::Values,
             plan.targets,
         );
-        let (after, history) = prepare_bulk_append(&before, id, 2, &writes).unwrap();
+        let (after, history) = prepare_append_writes(&before, id, 2, &writes).unwrap();
         assert_eq!(after.table(id).unwrap().1.range.end_row, 16);
         assert_eq!(after.active_sheet().get_raw(16, 1), "3");
         assert_eq!(after.active_sheet().get_raw(4, 3), "999");

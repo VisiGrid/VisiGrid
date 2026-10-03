@@ -1288,6 +1288,7 @@ pub(crate) fn try_quit(cx: &mut gpui::App) {
         let needs_prompt = h
             .update(cx, |this, window, cx| {
                 this.commit_pending_edit(cx);
+                if this.mode.is_editing() { window.activate_window(); cx.notify(); return true; }
                 let dirty = !this.quit_discarded && (this.is_modified || this.is_dirty());
                 if dirty {
                     this.close_confirm_visible = true;

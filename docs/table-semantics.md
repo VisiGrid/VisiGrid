@@ -36,7 +36,7 @@ Desktop entry points without active Table criteria:
 - A rectangular paste starting in the body or immediately below it, contained within its width and extending below the bottom, appends through the pasted last row. Represented blank records count. Existing body writes and new bounds share one undo entry.
 - A paste crossing both side and bottom boundaries refuses with Resize guidance. Writes separated by a blank row or entirely to the right do not imply growth. Single-cell paste broadcast/fill across a selected range retains existing fill behavior.
 - Tab from the last body cell appends one empty row and selects its first column. An in-progress edit in that last cell joins the append commit. A header-only Table uses the **Add row** control; that control is also available for nonempty Tables.
-- Clearing cell values retains membership. Whole-row edits use the guarded structural path below. With saved Table criteria active, Add row, Tab and bulk paste use the guarded paths below; typing below a Table does not yet infer growth through a view.
+- Clearing cell values retains membership. Whole-row edits use the guarded structural path below. With saved Table criteria active, Add row, Tab, typing and bulk paste use the guarded paths below.
 
 Normal paste, Paste Values and Paste Formulas share append preflight. An internal normal paste carrying merges/comments (or replacing destination comments) refuses growth with guidance to use Paste Values or resize first; it never silently drops those objects. Omitted cells in calculated columns receive their rule; supplied values/formulas, including explicit blank cells, take priority.
 
@@ -304,7 +304,15 @@ The saved sort and filters remain unchanged and are reapplied after recalculatio
 
 The edit and append are staged together. Existing data/comments, merges, spills, pivot output, another Table or the sheet boundary block growth. The expanded Table must satisfy view-layout rules, including neighboring content, row heights, manual hiding and frozen-pane boundaries. Recalculated views on every sheet are checked before publishing. A refused append leaves the pending edit and workbook intact. Recovery, Review Mode and history-preview guards remain in force.
 
-Undo/redo and rewind retain a sparse pending-cell patch and engine Table commit, without retaining a workbook snapshot. Replay checks the original view, schema and owned values and validates the resulting workbook before publication. Typing below a Table remains outside this append slice; bulk paste uses the guarded path below.
+Undo/redo and rewind retain a sparse pending-cell patch and engine Table commit, without retaining a workbook snapshot. Replay checks the original view, schema and owned values and validates the resulting workbook before publication. Typing below a Table and bulk paste use the guarded paths below.
+
+### Typing below a Table with active criteria
+
+Committing a nonempty typed value immediately below a Table, within its columns, appends one canonical row. The pending edit keeps its original worksheet address even when the view is sorted. Empty/whitespace edits, existing body edits, cells beside the Table and writes separated by a gap retain ordinary editing behavior. Header-only Tables and Tables on another sheet while criteria are active elsewhere use the same intent detection.
+
+The new row receives existing calculated-column rules, with the typed value/formula taking precedence in its own cell. A new typed formula does not install a rule across existing hidden records. Automatic Percent formatting, the typed value and the Table growth share one sparse undo/redo/rewind entry. Criteria remain unchanged. Visible records follow their sorted positions and normal Enter/Tab movement; a filtered-out new row produces an explicit message and leaves focus within the Table without a second navigation step.
+
+Occupied cells/comments, layout conflicts, boundaries, unsafe dependent recalculation or stale edit revisions refuse before publication and leave the editor open. The user can correct the value or press Escape. Save/Save As/export, close/quit and navigation paths that commit the pending edit stop if it remains uncommitted; a failed append cannot be silently omitted from a saved file or discarded by those actions. Successful commits hidden by a filter still complete normally.
 
 ### Bulk paste through Table criteria
 
@@ -318,7 +326,7 @@ One sparse history entry owns the append plus pasted values, literal types, form
 
 ## Phase 3 backlog
 
-1. Create and resize Tables while criteria are active; extend the implemented explicit/bulk append paths to typing below a Table.
+1. Create and resize Tables while criteria are active; preserve canonical bounds and workbook-wide view safety.
 2. Copy reviewed results to another sheet while criteria are active.
 3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
@@ -342,6 +350,8 @@ Existing PivotTables remain a separate feature.
 ## Verification
 
 Phase 3 metadata scope, 2026-10-02: 745 desktop tests passed (3 existing ignores), plus 28 focused engine Table-view/state tests and 8 Table-view I/O tests. New regressions cover history target sheets, grouped refusal, percentage-text conversion preflight, freeze-pane undo/redo and rewind alongside structural history, and metadata on an inactive Table view followed by editing a different filtered Table. Recovery, Review Mode and rewind guards remain covered by the desktop suite. The native debug build passed. Linux native QA verified formatting and Paste Format on an unaffected sheet, numeric Percent formatting, comments, conditional-format predicates, freeze panes, cross-sheet formatting/freeze/conditional-format undo and redo, and history hold-to-preview with live-state restoration. Percentage-text conversion through F4, metadata formatting on the filtered sheet, merge conversion and an unsafe cross-sheet spill were refused. Saved SQLite checks confirmed unchanged Table criteria, formulas, hidden records and the rejected spill control. QA found and fixed conditional-format rules missing from the desktop full-save path; the added regression and all 41 native persistence tests passed (1 existing ignore). The rebuilt app preserved rules, comments, formatting and frozen panes after a fresh save/reopen ([screenshot](images/tables/phase3-metadata-reopened.png)). macOS/Windows live UI remains untested; cleared/button-only specs and grouped/structural rewind combinations have automated coverage rather than live coverage in this pass. The history/palette Space-key follow-up found during this pass is resolved below.
+
+Typed Table append, 2026-10-03: all 777 desktop tests passed (3 existing ignores), including seven new regressions for exact append intent, calculated fill and hidden-record preservation, filtered-out percentage values and format replay, typed formula overrides, collision/recalculation refusal, header-only/another-sheet append, rewind and native full-save roundtrip. The native debug build and diff checks passed. Save/close/quit and commit-before-navigation paths now stop when an edit remains open after refusal; these UI paths still need live keyboard QA. Live Linux interaction remains pending after the earlier focus loss, and macOS/Windows live UI remains untested.
 
 Bulk Table paste, 2026-10-03: all 770 desktop tests passed (3 existing ignores), including 12 new regressions for visible-record mapping plus overflow, below-Table and header-only append, hidden-row preservation, calculated fill and explicit blank overrides, canonical formula rebasing, literal text/comments/format replay, boundary and collision refusal, unsafe recalculation, another Table outside the active projection, stale history, rewind and native full-save roundtrip. The native debug build and diff checks passed. Live keyboard QA remains pending after the earlier QA window lost focus; macOS/Windows live UI remains untested.
 
