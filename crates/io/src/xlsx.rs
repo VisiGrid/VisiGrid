@@ -756,7 +756,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     result.warnings.extend(notes.warnings);
     result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
 
-    crate::xlsx_tables::import(path, &mut workbook, &mut result, options.values_only);
+    let table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, options.values_only);
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)
@@ -927,6 +927,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         }
     }
 
+    crate::xlsx_table_filters::finish_import(table_views, &mut workbook, &mut result);
     Ok((workbook, result))
 }
 
@@ -1557,6 +1558,7 @@ fn build_export(
             result.hidden_rows_exported += layout.hidden_rows.len();
         }
 
+        crate::xlsx_table_filters::write_hidden_rows(sheet, worksheet, &mut result)?;
         result.sheets_exported += 1;
     }
 
@@ -1569,7 +1571,7 @@ fn build_export(
 }
 
 /// Convert column index to Excel column letter (0 = A, 25 = Z, 26 = AA, etc.)
-fn col_to_letter(col: usize) -> String {
+pub(super) fn col_to_letter(col: usize) -> String {
     let mut result = String::new();
     let mut n = col;
     loop {

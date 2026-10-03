@@ -317,8 +317,14 @@ fn xml_escaping_and_at_signs_in_headers_and_literals_survive() {
         true,
     )
     .unwrap();
-    wb.set_table_style(id, TableStyle { banded_rows: false })
-        .unwrap();
+    wb.set_table_style(
+        id,
+        TableStyle {
+            banded_rows: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     xlsx::export(&wb, &file, None).unwrap();
     let (loaded, report) = xlsx::import(&file).unwrap();
     assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
@@ -332,7 +338,7 @@ fn xml_escaping_and_at_signs_in_headers_and_literals_survive() {
 }
 
 #[test]
-fn filter_losses_are_reported_and_all_stored_records_survive() {
+fn sort_loss_is_reported_but_checkbox_filters_import_and_all_records_survive() {
     use visigrid_engine::{
         filter::SortDirection,
         table_view::{TableSort, TableViewSpec},
@@ -357,20 +363,23 @@ fn filter_losses_are_reported_and_all_stored_records_survive() {
         .contains("every record"));
     rewrite(&file, &changed, |name, data| {
         (name.into(),match name {
-        "xl/tables/table1.xml"=>data.replace("<autoFilter ref=\"B3:D8\"/>","<autoFilter ref=\"B3:D8\"><filterColumn colId=\"0\"><filters><filter val=\"2\"/></filters></filterColumn></autoFilter>"),
+        "xl/tables/table1.xml"=>data.replace("<autoFilter ref=\"B3:D8\"></autoFilter>","<autoFilter ref=\"B3:D8\"><filterColumn colId=\"0\"><filters><filter val=\"2\"/></filters></filterColumn></autoFilter>"),
         "xl/worksheets/sheet1.xml"=>data.replace("<row r=\"5\"", "<row hidden=\"1\" r=\"5\""),
         _=>data,
     })
     });
     let (loaded, report) = xlsx::import(&changed).unwrap();
     assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains("All records are shown")),
-        "{:?}",
-        report.warnings
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(
+        loaded
+            .sheet(0)
+            .unwrap()
+            .table_view_spec()
+            .unwrap()
+            .filters
+            .len(),
+        1
     );
     assert!(!report.imported_layouts[0].hidden_rows.contains(&4));
     for r in 3..8 {
@@ -440,4 +449,580 @@ fn blank_first_record_keeps_rule_and_values_only_keeps_offset_cells() {
     assert!(values.table_by_name("Sales").unwrap().1.columns[2]
         .formula
         .is_none());
+}
+
+fn select_values(wb: &mut Workbook, id: TableId, column: usize, rows: &[usize], buttons: bool) {
+    use visigrid_engine::{
+        filter::{ColumnFilter, FilterKey},
+        table_view::{TableFilter, TableViewSpec},
+    };
+    let (sid, table) = wb.table(id).unwrap();
+    let sheet = wb.sheet_by_id(sid).unwrap();
+    let keys = rows
+        .iter()
+        .map(|r| {
+            FilterKey::from_value(&sheet.get_computed_value(*r, table.range.start_col + column))
+                .normalized()
+        })
+        .collect();
+    let mut spec = TableViewSpec::new(id);
+    spec.show_filter_buttons = buttons;
+    spec.filters.push(TableFilter {
+        column: table.columns[column].id,
+        criteria: ColumnFilter {
+            selected: Some(keys),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+}
+
+#[test]
+fn builtin_styles_and_flags_survive_excel_native_excel_and_old_native_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("styles.xlsx");
+    let native_file = dir.path().join("styles.sheet");
+    let (mut wb, id) = book();
+    let old: TableStyle = serde_json::from_str(r#"{"banded_rows":false}"#).unwrap();
+    assert!(!old.banded_rows);
+    assert_eq!(old.excel_style.as_deref(), Some("TableStyleMedium2"));
+    for name in [
+        None,
+        Some("TableStyleLight1"),
+        Some("TableStyleLight21"),
+        Some("TableStyleMedium28"),
+        Some("TableStyleDark11"),
+    ] {
+        let style = TableStyle {
+            excel_style: name.map(str::to_owned),
+            banded_rows: false,
+            banded_columns: true,
+            first_column: true,
+            last_column: true,
+        };
+        wb.set_table_style(id, style.clone()).unwrap();
+        xlsx::export(&wb, &file, None).unwrap();
+        let meta = xml(&file, "xl/tables/table1.xml");
+        assert!(meta.contains("showColumnStripes=\"1\""));
+        assert!(meta.contains("showFirstColumn=\"1\""));
+        assert!(meta.contains("showLastColumn=\"1\""));
+        let (loaded, report) = xlsx::import(&file).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(loaded.table_by_name("Sales").unwrap().1.style, style);
+        native::save_workbook(&loaded, &native_file).unwrap();
+        let native_copy = native::load_workbook(&native_file).unwrap();
+        assert_eq!(native_copy.table_by_name("Sales").unwrap().1.style, style);
+        xlsx::export(&native_copy, &file, None).unwrap();
+        let (again, _) = xlsx::import(&file).unwrap();
+        assert_eq!(again.table_by_name("Sales").unwrap().1.style, style);
+    }
+    for name in [
+        "TableStyleLight0",
+        "TableStyleDark12",
+        "TableStyleMedium29",
+        "TableStyleLight01",
+        "CustomStyle",
+    ] {
+        assert!(!TableStyle::is_builtin_excel_style(name));
+        assert!(wb
+            .set_table_style(
+                id,
+                TableStyle {
+                    excel_style: Some(name.into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+    }
+}
+
+#[test]
+fn independent_excel_styles_and_uniform_hidden_buttons_are_retained() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("external-style.xlsx");
+    let out = dir.path().join("returned.xlsx");
+    let mut external = rust_xlsxwriter::Workbook::new();
+    let ws = external.add_worksheet();
+    ws.write_number(1, 0, 10).unwrap();
+    ws.add_table(
+        0,
+        0,
+        2,
+        1,
+        &rust_xlsxwriter::Table::new()
+            .set_name("External")
+            .set_style(rust_xlsxwriter::TableStyle::Dark7)
+            .set_banded_columns(true)
+            .set_first_column(true)
+            .set_last_column(true)
+            .set_autofilter(false),
+    )
+    .unwrap();
+    external.save(&file).unwrap();
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert_eq!(report.tables_imported, 1);
+    let table = loaded.table_by_name("External").unwrap().1;
+    assert_eq!(table.style.excel_style.as_deref(), Some("TableStyleDark7"));
+    assert!(table.style.banded_columns && table.style.first_column && table.style.last_column);
+    assert!(
+        !loaded
+            .sheet(0)
+            .unwrap()
+            .table_view_spec()
+            .unwrap()
+            .show_filter_buttons
+    );
+    xlsx::export(&loaded, &out, None).unwrap();
+    assert!(!xml(&out, "xl/tables/table1.xml").contains("autoFilter"));
+    assert!(xml(&out, "xl/tables/table1.xml").contains("name=\"TableStyleDark7\""));
+}
+
+#[test]
+fn numeric_and_formula_checkbox_filters_roundtrip_with_hidden_rows_and_buttons() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("filtered.xlsx");
+    let native_file = dir.path().join("filtered.sheet");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 2, &[3, 5], false); // formula result 20 and blank
+    let expected = wb.sheet(0).unwrap().table_view_spec().unwrap().clone();
+    for pass in 0..2 {
+        if pass == 1 {
+            wb.sheet_mut(0).unwrap().tab_color = Some([0x12, 0x34, 0x56, 255]);
+        }
+        let report = xlsx::export(&wb, &file, None).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.hidden_rows_exported, 3);
+        let meta = xml(&file, "xl/tables/table1.xml");
+        assert!(
+            meta.contains("<filters blank=\"1\"><filter val=\"20\"/></filters>"),
+            "{meta}"
+        );
+        assert_eq!(meta.matches("hiddenButton=\"1\"").count(), 3);
+        let sheet = xml(&file, "xl/worksheets/sheet1.xml");
+        assert_eq!(sheet.matches("hidden=\"1\"").count(), 3);
+        assert_eq!(sheet.matches("<sheetPr ").count(), 1);
+        assert!(sheet.contains("filterMode=\"1\""));
+        if pass == 1 {
+            assert!(sheet.contains("<tabColor rgb=\"FF123456\"/>"));
+        }
+        let (loaded, imported) = xlsx::import(&file).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        assert_eq!(loaded.sheet(0).unwrap().table_view_spec(), Some(&expected));
+        assert!(imported.imported_layouts[0].hidden_rows.is_empty());
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(5, 3), "");
+        assert_eq!(loaded.sheet(1).unwrap().get_display(0, 0), "860");
+        native::save_workbook(&loaded, &native_file).unwrap();
+        wb = native::load_workbook(&native_file).unwrap();
+        assert_eq!(wb.sheet(0).unwrap().table_view_spec(), Some(&expected));
+    }
+}
+
+#[test]
+fn checkbox_text_variants_escaping_and_multiple_columns_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("text.xlsx");
+    let (mut wb, id) = book();
+    for (r, text) in [
+        (3, "West & <south>"),
+        (4, "WEST & <SOUTH>"),
+        (5, " West & <south> "),
+        (6, "East"),
+        (7, "East"),
+    ] {
+        wb.set_cell_value_tracked(0, r, 1, text);
+    }
+    select_values(&mut wb, id, 0, &[3], true);
+    let mut spec = wb.sheet(0).unwrap().table_view_spec().unwrap().clone();
+    spec.filters.push(visigrid_engine::table_view::TableFilter {
+        column: wb.table(id).unwrap().1.columns[2].id,
+        criteria: visigrid_engine::filter::ColumnFilter {
+            selected: Some(
+                [visigrid_engine::filter::NormalizedFilterKey::Blank]
+                    .into_iter()
+                    .collect(),
+            ),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(SheetId(1), Some(spec.clone()))
+        .unwrap();
+    let report = xlsx::export(&wb, &file, None).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.hidden_rows_exported, 4);
+    let before = xml(&file, "xl/tables/table1.xml");
+    assert!(before.contains("West &amp; &lt;south&gt;"));
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(0).unwrap().table_view_spec(), Some(&spec));
+    xlsx::export(&loaded, &file, None).unwrap();
+    assert_eq!(xml(&file, "xl/tables/table1.xml"), before);
+}
+
+#[test]
+fn unsupported_or_malformed_filters_keep_whole_table_and_never_apply_partial_criteria() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("base.xlsx");
+    let changed = dir.path().join("unsupported.xlsx");
+    let (wb, _) = book();
+    xlsx::export(&wb, &file, None).unwrap();
+    for bad in [
+        "<filterColumn colId=\"1\"><dynamicFilter type=\"aboveAverage\"/></filterColumn>",
+        "<filterColumn colId=\"1\"><filters><dateGroupItem year=\"2026\" dateTimeGrouping=\"year\"/></filters></filterColumn>",
+        "<filterColumn colId=\"1\"><customFilters><customFilter operator=\"greaterThan\" val=\"3\"/></customFilters></filterColumn>",
+        "<filterColumn colId=\"99\"><filters><filter val=\"1\"/></filters></filterColumn>",
+        "<filterColumn colId=\"0\"><filters><filter val=\"3\"/></filters></filterColumn>",
+    ] {
+        rewrite(&file, &changed, |name, data| (name.into(), if name == "xl/tables/table1.xml" {
+            data.replace("</autoFilter>", &format!("<filterColumn colId=\"0\"><filters><filter val=\"2\"/></filters></filterColumn>{bad}</autoFilter>"))
+        } else if name == "xl/worksheets/sheet1.xml" { data.replace("<row r=\"5\"", "<row hidden=\"1\" r=\"5\"") } else { data }));
+        let (loaded, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(report.tables_skipped, 0);
+        assert!(loaded.sheet(0).unwrap().table_view_spec().is_none());
+        assert!(report.warnings.iter().any(|w| w.contains("saved filters/button settings were not imported")), "{:?}", report.warnings);
+        assert!(report.imported_layouts[0].hidden_rows.is_empty());
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+    }
+}
+
+#[test]
+fn unsupported_export_filters_warn_and_do_not_leave_hidden_rows_without_criteria() {
+    use visigrid_engine::filter::{TextFilter, TextFilterMode};
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unsupported-export.xlsx");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 0, &[3], true);
+    for mode in 0..3 {
+        let mut spec = wb.sheet(0).unwrap().table_view_spec().unwrap().clone();
+        spec.filters[0].criteria.text_filter = None;
+        if mode == 0 {
+            spec.filters[0].criteria.text_filter = Some(TextFilter {
+                mode: TextFilterMode::Contains,
+                value: "2".into(),
+                case_sensitive: false,
+            });
+        }
+        if mode == 1 {
+            spec.filters[0].criteria.selected = Some(Default::default());
+        }
+        if mode == 2 {
+            spec.filters[0].criteria.selected = Some(
+                [visigrid_engine::filter::NormalizedFilterKey::Number(
+                    2.0.into(),
+                )]
+                .into_iter()
+                .collect(),
+            );
+            wb.sheet_mut(0).unwrap().set_text(4, 1, "2"); // same Excel filter text, different type
+        }
+        wb.set_table_view_spec(SheetId(1), Some(spec)).unwrap();
+        let expected = xlsx::table_export_warnings(&wb).unwrap();
+        let report = xlsx::export(&wb, &file, None).unwrap();
+        assert_eq!(report.warnings, expected);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("filter criteria are not exported")),
+            "mode {mode}: {:?}",
+            report.warnings
+        );
+        assert_eq!(report.hidden_rows_exported, 0);
+        assert!(!xml(&file, "xl/tables/table1.xml").contains("<filters"));
+        assert!(!xml(&file, "xl/worksheets/sheet1.xml").contains("hidden=\"1\""));
+    }
+}
+
+#[test]
+fn importing_filters_respects_adjacent_cells_row_heights_and_freeze_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("layout.xlsx");
+    let changed = dir.path().join("blocked.xlsx");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 0, &[3], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    for mode in 0..3 {
+        rewrite(&file, &changed, |name, data| {
+            (
+                name.into(),
+                if name == "xl/worksheets/sheet1.xml" {
+                    match mode {
+                0 => {
+                    let start = data.find("<row r=\"4\"").unwrap();
+                    let end = start + data[start..].find("</row>").unwrap();
+                    let mut data = data;
+                    data.insert_str(end, "<c r=\"F4\" t=\"inlineStr\"><is><t>Keep me</t></is></c>");
+                    data
+                },
+                1 => data.replace("<row r=\"4\"", "<row ht=\"24\" customHeight=\"1\" r=\"4\""),
+                _ => data.replace("workbookViewId=\"0\"/>", "workbookViewId=\"0\"><pane ySplit=\"4\" topLeftCell=\"A5\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView>"),
+            }
+                } else {
+                    data
+                },
+            )
+        });
+        let (loaded, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(
+            report.tables_imported, 1,
+            "mode {mode}: {:?}",
+            report.warnings
+        );
+        assert!(
+            loaded.sheet(0).unwrap().table_view_spec().is_none(),
+            "mode {mode}"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("saved filters/button settings were not imported")),
+            "mode {mode}: {:?}",
+            report.warnings
+        );
+    }
+}
+
+#[test]
+fn overlong_table_names_refuse_before_touching_export_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("existing.xlsx");
+    std::fs::write(&file, b"untouched").unwrap();
+    let (mut wb, id) = book();
+    wb.rename_table(id, &"Long".repeat(64)).unwrap();
+    assert!(xlsx::export(&wb, &file, None)
+        .unwrap_err()
+        .contains("255-character"));
+    assert!(xlsx::export_to_buffer(&wb, None).is_err());
+    assert_eq!(std::fs::read(file).unwrap(), b"untouched");
+}
+
+#[test]
+fn multiple_excel_filter_owners_fall_back_without_arbitrarily_choosing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("two-tables.xlsx");
+    let changed = dir.path().join("two-views.xlsx");
+    let mut external = rust_xlsxwriter::Workbook::new();
+    let ws = external.add_worksheet();
+    for (row, name) in [(0, "First"), (5, "OtherData")] {
+        ws.write_number(row + 1, 0, 1).unwrap();
+        ws.write_number(row + 2, 0, 2).unwrap();
+        ws.add_table(
+            row,
+            0,
+            row + 2,
+            0,
+            &rust_xlsxwriter::Table::new().set_name(name),
+        )
+        .unwrap();
+        ws.set_row_hidden(row + 2).unwrap();
+    }
+    external.save(&file).unwrap();
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name.starts_with("xl/tables/") {
+                let pos = data.find("<autoFilter ").unwrap();
+                let end = pos + data[pos..].find("/>").unwrap();
+                let mut out = data;
+                out.replace_range(end..end + 2, "><filterColumn colId=\"0\"><filters><filter val=\"1\"/></filters></filterColumn></autoFilter>");
+                out
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 2, "{:?}", report.warnings);
+    assert!(loaded.sheet(0).unwrap().table_view_spec().is_none());
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("More than one Table"))
+            .count(),
+        2
+    );
+    assert!(report.imported_layouts[0].hidden_rows.is_empty());
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(7, 0), "2");
+}
+
+#[test]
+fn mixed_buttons_and_custom_styles_have_precise_warnings_without_losing_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("base.xlsx");
+    let changed = dir.path().join("mixed.xlsx");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 0, &[3], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name == "xl/tables/table1.xml" {
+                data.replace("TableStyleMedium2", "CompanyCustomStyle")
+                    .replace("colId=\"0\"", "colId=\"0\" showButton=\"0\"")
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 1);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("Custom Excel Table styles")));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("mixed per-column")));
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec(),
+        wb.sheet(0).unwrap().table_view_spec()
+    );
+}
+
+#[test]
+fn boolean_and_error_values_and_values_only_import_keep_filter_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("typed.xlsx");
+    let (mut wb, id) = book();
+    wb.set_cell_value_tracked(0, 3, 1, "=1=1");
+    wb.set_cell_value_tracked(0, 4, 1, "=1/0");
+    select_values(&mut wb, id, 0, &[3, 4], true);
+    let expected = wb.sheet(0).unwrap().table_view_spec().unwrap().clone();
+    let report = xlsx::export(&wb, &file, None).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(xml(&file, "xl/tables/table1.xml").contains("val=\"#DIV/0!\""));
+    let (loaded, _) = xlsx::import(&file).unwrap();
+    assert_eq!(loaded.sheet(0).unwrap().table_view_spec(), Some(&expected));
+    // Values-only imports use the writer's cached formula results. Verify
+    // that criteria survive without assuming those caches contain live results.
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 2, &[3, 5], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    let (loaded, report) = xlsx::import_with_options(
+        &file,
+        &xlsx::ImportOptions {
+            values_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec(),
+        wb.sheet(0).unwrap().table_view_spec(),
+        "{:?}",
+        report.warnings
+    );
+    assert!(loaded.table_by_name("Sales").unwrap().1.columns[2]
+        .formula
+        .is_none());
+}
+
+#[test]
+fn excel_string_escape_sequences_in_filter_values_are_decoded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("escapes.xlsx");
+    let changed = dir.path().join("encoded.xlsx");
+    let (mut wb, id) = book();
+    wb.set_cell_value_tracked(0, 3, 1, "_x0041_");
+    wb.set_cell_value_tracked(0, 4, 1, "A");
+    select_values(&mut wb, id, 0, &[3], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    assert!(xml(&file, "xl/tables/table1.xml").contains("val=\"_x005F_x0041_\""));
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec(),
+        wb.sheet(0).unwrap().table_view_spec(),
+        "{:?}",
+        report.warnings
+    );
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name == "xl/tables/table1.xml" {
+                data.replace("_x005F_x0041_", "_x0041_")
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, _) = xlsx::import(&changed).unwrap();
+    let selected = loaded.sheet(0).unwrap().table_view_spec().unwrap().filters[0]
+        .criteria
+        .selected
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        selected,
+        &[visigrid_engine::filter::NormalizedFilterKey::Text(
+            "a".into()
+        )]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[test]
+fn imported_filter_warns_before_revealing_manually_hidden_matching_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("base.xlsx");
+    let changed = dir.path().join("manual-hidden.xlsx");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 0, &[3], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name == "xl/worksheets/sheet1.xml" {
+                data.replace("<row r=\"4\"", "<row hidden=\"1\" r=\"4\"")
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec(),
+        wb.sheet(0).unwrap().table_view_spec()
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("manually hidden or stale hidden")),
+        "{:?}",
+        report.warnings
+    );
+    assert!(report.imported_layouts[0].hidden_rows.is_empty());
+}
+
+#[test]
+fn numeric_filter_spellings_match_numbers_even_with_a_matching_text_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("numbers.xlsx");
+    let changed = dir.path().join("decimal-filter.xlsx");
+    let (mut wb, id) = book();
+    wb.sheet_mut(0).unwrap().set_text(4, 1, "2.0");
+    select_values(&mut wb, id, 0, &[3, 4], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name == "xl/tables/table1.xml" {
+                data.replace("<filter val=\"2\"/>", "")
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec(),
+        wb.sheet(0).unwrap().table_view_spec(),
+        "{:?}",
+        report.warnings
+    );
 }

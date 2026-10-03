@@ -2347,7 +2347,7 @@ mod tests {
         let style = workbook
             .set_table_style(
                 id,
-                visigrid_engine::table::TableStyle { banded_rows: false },
+                visigrid_engine::table::TableStyle { banded_rows: false, ..Default::default() },
             )
             .unwrap();
         let mut replay = base;

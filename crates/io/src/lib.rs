@@ -11,6 +11,7 @@ pub mod truth;
 pub mod xlsx;
 mod xlsx_comments;
 mod xlsx_tables;
+mod xlsx_table_filters;
 pub mod xlsx_styles;
 pub mod xlsx_validation;
 
