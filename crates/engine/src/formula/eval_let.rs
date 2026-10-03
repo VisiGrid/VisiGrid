@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::eval::{evaluate, Array2D, CellLookup, EvalResult, NamedRangeResolution, Value};
+use super::eval::{evaluate, Array2D, CellLookup, EvalResult, NamedRangeResolution};
 use crate::sheet::SheetRef;
 use super::parser::{BoundExpr, Expr, ARRAY_LITERAL, INVOKE};
 
