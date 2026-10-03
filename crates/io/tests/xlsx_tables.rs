@@ -1751,3 +1751,178 @@ fn already_sorted_tables_and_unsorted_workbooks_do_not_trigger_materialization_g
         xml(&sorted, "xl/worksheets/sheet2.xml")
     );
 }
+
+#[test]
+fn stored_order_export_keeps_cells_formulas_comments_filters_and_saved_sort_metadata() {
+    use xlsx::ExportOrder;
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain.xlsx");
+    let stored = dir.path().join("stored.xlsx");
+    let buffered = dir.path().join("buffer.xlsx");
+    for buttons in [false, true] {
+        let (mut wb, id) = book();
+        select_values(&mut wb, id, 0, &[3, 7], buttons);
+        xlsx::export(&wb, &plain, None).unwrap();
+        set_saved_sort(&mut wb, id, 0, true, buttons);
+        let before = authored_snapshot(&wb);
+        let report = xlsx::export_with_order(&wb, &stored, None, ExportOrder::Stored).unwrap();
+        assert_eq!(
+            report.warnings,
+            xlsx::table_export_warnings_with_order(&wb, None, ExportOrder::Stored).unwrap()
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("use Reapply") && w.contains("stored coordinates")));
+        let (bytes, other) =
+            xlsx::export_to_buffer_with_order(&wb, None, ExportOrder::Stored).unwrap();
+        std::fs::write(&buffered, bytes).unwrap();
+        assert_eq!(report.warnings, other.warnings);
+        for part in [
+            "xl/worksheets/sheet1.xml",
+            "xl/worksheets/sheet2.xml",
+            "xl/comments1.xml",
+        ] {
+            assert_eq!(xml(&plain, part), xml(&stored, part));
+            assert_eq!(xml(&stored, part), xml(&buffered, part));
+        }
+        assert!(xml(&stored, "xl/tables/table1.xml").contains("<sortState"));
+        let (loaded, report) = xlsx::import(&stored).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(
+            loaded.sheet(0).unwrap().table_view_spec(),
+            wb.sheet(0).unwrap().table_view_spec()
+        );
+        for r in 3..8 {
+            assert_eq!(loaded.sheet(0).unwrap().get_raw(r, 1), (r - 1).to_string());
+        }
+        assert_eq!(
+            loaded.sheet(0).unwrap().comment(4, 3).unwrap().text,
+            "Manual override"
+        );
+        assert_eq!(authored_snapshot(&wb), before);
+    }
+}
+
+#[test]
+fn stored_order_is_explicit_fallback_for_unsupported_materialization_with_loss_warnings() {
+    use visigrid_engine::{
+        cell::CellStyle,
+        cond_format::CondStyle,
+        validation::{CellRange, ValidationRule},
+    };
+    use xlsx::ExportOrder;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("stored.xlsx");
+    for mode in 0..4 {
+        let (mut wb, id) = book();
+        match mode {
+            0 => {
+                wb.set_cell_value_tracked(1, 1, 0, "=ROW(Sheet1!B4)");
+            }
+            1 => {
+                wb.sheet_mut(0).unwrap().cond_formats.add(
+                    vec![CellRange::single(3, 1)],
+                    "=B4>0",
+                    CondStyle::Named(CellStyle::Success),
+                );
+            }
+            2 => {
+                wb.sheet_mut(0).unwrap().set_cell_validation(
+                    3,
+                    1,
+                    ValidationRule::list_inline(vec!["2".into()]),
+                );
+            }
+            _ => {
+                wb.define_name_for_cell("FirstQty", 0, 3, 1).unwrap();
+                wb.set_cell_value_tracked(1, 1, 0, "=FirstQty");
+            }
+        }
+        set_saved_sort(&mut wb, id, 0, true, true);
+        let before = authored_snapshot(&wb);
+        assert!(xlsx::export(&wb, &file, None).is_err());
+        let report = xlsx::export_with_order(&wb, &file, None, ExportOrder::Stored).unwrap();
+        if mode == 1 {
+            assert!(report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Conditional formatting")));
+        }
+        if mode == 3 {
+            assert!(report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Named-range definitions")));
+        }
+        let (loaded, _) = xlsx::import(&file).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "2");
+        if mode == 0 {
+            assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "=ROW(Sheet1!B4)");
+        }
+        if mode == 2 {
+            assert!(loaded.sheet(0).unwrap().has_validation(3, 1));
+        }
+        if mode == 3 {
+            assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "=FirstQty");
+        }
+        assert_eq!(authored_snapshot(&wb), before);
+    }
+}
+
+#[test]
+fn stored_order_preserves_host_layout_that_cannot_move_with_a_sort() {
+    use xlsx::ExportOrder;
+    let (mut wb, id) = book();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    let mut layout = xlsx::ExportLayout::default();
+    layout.row_heights.insert(4, 30.0);
+    layout.hidden_rows.push(4);
+    layout.frozen_rows = 4;
+    let layouts = [layout];
+    assert!(
+        xlsx::table_export_warnings_with_order(&wb, Some(&layouts), ExportOrder::Sorted).is_err()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("layout.xlsx");
+    xlsx::export_with_order(&wb, &file, Some(&layouts), ExportOrder::Stored).unwrap();
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "2");
+    // ExportLayout uses pixels; imported OOXML row heights are points.
+    assert_eq!(report.imported_layouts[0].row_heights.get(&4), Some(&22.5));
+    assert!(report.imported_layouts[0].hidden_rows.contains(&4));
+    assert_eq!(report.imported_layouts[0].frozen_rows, 4);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("saved sort/filter/button settings were not imported")));
+}
+
+#[test]
+fn stored_order_does_not_bypass_table_writer_refusals() {
+    use xlsx::ExportOrder;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("keep.xlsx");
+    std::fs::write(&file, b"untouched").unwrap();
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "Key");
+    wb.create_table(
+        SheetId(1),
+        TableRange {
+            start_row: 0,
+            end_row: 0,
+            start_col: 0,
+            end_col: 0,
+        },
+        "EmptyTable",
+    )
+    .unwrap();
+    assert!(
+        xlsx::table_export_warnings_with_order(&wb, None, ExportOrder::Stored)
+            .unwrap_err()
+            .contains("only headers")
+    );
+    assert!(xlsx::export_with_order(&wb, &file, None, ExportOrder::Stored).is_err());
+    assert!(xlsx::export_to_buffer_with_order(&wb, None, ExportOrder::Stored).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), b"untouched");
+}

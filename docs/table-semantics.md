@@ -381,21 +381,37 @@ Validation: all 364 IO, 83 session-host and 818 desktop tests passed (1,265 tota
 
 ### Phase 3 — materialized Excel sort export
 
-Normal XLSX file and buffer exports now write Table records in the current saved sort order. The plan includes hidden records, preserves stable ties and blanks-last ordering from the VisiGrid view, and handles independent sorted Tables on separate sheets together. Filtering is then written against the new stored positions. Header cells, Table bounds, saved criteria, button visibility and style metadata stay intact. Clearing criteria after reopening the exported file does not restore the original VisiGrid record order; this consequence is explained in the export review.
+The default XLSX file/buffer API and the desktop **Export sorted** choice write Table records in the current saved sort order. The explicit stored-order mode below provides a fallback. The plan includes hidden records, preserves stable ties and blanks-last ordering from the VisiGrid view, and handles independent sorted Tables on separate sheets together. Filtering is then written against the new stored positions. Header cells, Table bounds, saved criteria, button visibility and style metadata stay intact. Clearing criteria after reopening the exported file does not restore the original VisiGrid record order; this consequence is explained in the export review.
 
 Only a temporary copy is changed. Direct relative/absolute/mixed A1 references follow moved records across the whole workbook, including formulas on other sheets. Local this-row structured references and supported scalar functions remain formulas. Rectangular references must retain ordered shape; direct aggregate arguments may preserve rectangular membership in a different order when their row anchors agree. Split ranges, positional Table-array use, mixed-anchor reorderings and cross-Table this-row references that would change records refuse. Calculated-column rules are rebased to the first record and checked against every existing body row; nonuniform rules refuse. Blank/value/formula overrides, comments and explicit cell formats move with their records.
 
 This is a deliberately bounded formula subset. Materialization refuses malformed/unresolved and named-range formulas, unsupported functions (including coordinate functions, INDIRECT/OFFSET, lookups, volatile/custom functions), spills and circular calculations. The allowlist includes common scalar arithmetic/text/date functions and direct SUM/AVERAGE/COUNT/COUNTA/COUNTBLANK/MIN/MAX/PRODUCT/AND/OR aggregates. Because coordinate dependencies may cross sheets, validation and conditional-format metadata anywhere in a workbook that needs materialization currently refuse as well. Moved body rows cannot have inherited row formatting, manual hidden rows, custom host row heights or a freeze boundary; worksheet AutoFilter on the sorted sheet refuses. Existing Table-view layout checks also apply.
 
-The copy is recalculated and every formula result is compared with its original record's cached result. A changed result, including a stale source cache, refuses rather than silently exporting a different calculation. The error advises clearing Table sorting or saving the native workbook. Preflight checks run before the desktop destination chooser where possible; host-layout checks run again at export. Every refusal completes before the destination file is touched, including buffer exports. No-sort and already-ordered workbooks avoid materialization and its additional restrictions. Large-workbook planning/recalculation performance has not been measured.
+The copy is recalculated and every formula result is compared with its original record's cached result. A changed result, including a stale source cache, refuses rather than silently exporting a different calculation. The error advises choosing stored-order export or saving the native workbook. Preflight checks run before the desktop destination chooser where possible; host-layout checks run again at export. Every refusal completes before the destination file is touched, including buffer exports. No-sort and already-ordered workbooks avoid materialization and its additional restrictions. Large-workbook planning/recalculation performance has not been measured.
 
 Eleven new regressions plus updated saved-sort fixtures cover raw worksheet order, both directions, hidden records and buttons, mixed absolute/cross-sheet references and parentheses, aggregate membership, two sorted sheets, stable ties/types/blanks, cell formatting/comments, calculated-column exceptions and append after native reopen, file/buffer equivalence, source/cache nonmutation, and refusal without overwriting an existing file. Live desktop and Microsoft Excel verification remain deferred. The Excel-client pass must verify sorted order immediately on open, no repair prompt, formulas/overrides/hidden rows, clearing and reapplying criteria, append behavior, and save/reimport.
 
 Validation: all 375 IO, 83 session-host and 818 desktop tests passed (1,276 total, zero failures; 12 existing ignores). The native debug build passed.
 
-## Phase 3 backlog
+### Phase 3 — stored-order Excel export
 
-1. Remaining XLSX fidelity: broaden the formula/metadata subset for materialized sorting, multi-column/custom sorts, advanced predicates, custom styles/themes and Excel-client verification. Guarded materialized export, single-column saved sorting, built-in style metadata and checkbox filters are implemented locally.
+The desktop export review offers **Export sorted** and **Keep stored order** whenever a Table has saved sorting. Sorted is selected when its preflight succeeds. Otherwise that choice is disabled with the reason visible, and stored order is selected for explicit confirmation. The action button names the chosen mode. Enter confirms; Cancel/Escape dismiss the review. The selection applies only to this export and is carried through the destination chooser without silently switching modes. Workbook/layout checks and compatibility warnings are checked again before writing; newly unsafe sorted exports or changed warning details require another review.
+
+Stored order retains the original cell/formula coordinates, comments, supported filters/button visibility and layout, while writing the saved sort definition. Its review and export report explain Excel Reapply and possible text/mixed-type comparison differences. This bypasses materialization checks only: recovery, schema and writer refusals still apply before touching a destination. Existing limitations remain visible, including newly disclosed loss of conditional formatting and named-range definitions. Native saves retain those features. Choosing stored order does not make an unsafe sort layout compatible on reimport; the existing import warning/fallback still applies.
+
+The IO API exposes `ExportOrder::{Sorted, Stored}`, `export_with_order`, `export_to_buffer_with_order` and `table_export_warnings_with_order`. Existing entry points (including current CLI callers) keep their sorted default. Neither path changes the original workbook. The workbook has no persisted export-order preference.
+
+Validation: all 379 IO, 83 session-host and 824 desktop tests passed (1,286 total, zero failures; 12 existing ignores). The native debug build passed. Four new IO and six desktop regressions plus expanded recovery tests cover stored-cell/formula/comment preservation, sort/filter metadata, host layouts, explicit mode choice, disabled sorting and rechecks after review. Live chooser/keyboard/rendering and Microsoft Excel QA remain deferred.
+
+## Phase 3 release boundary — 2026-10-03
+
+Robert approved stored-order export as the final Phase 3 feature. Scope is frozen: sheet-scoped metadata/history, the history Space-key fix, formula-bar/conditional-format UI polish, explicit/bulk/typed append, resize, creation and reviewed-sheet copying under criteria, built-in Excel styles/checkbox filters, saved sorting, guarded sorted exports and the stored-order fallback are included.
+
+Feature scope is complete locally; this is not a release claim. PR/review, CI, native platform smoke tests, deferred append/resize/create/review-copy/export UI QA, and real Excel open/save verification remain Phase 3 release checks. Confirmed safety/correctness regressions must be fixed before shipping. Excel verification must cover no repair prompt, both export orders, formulas/calculated exceptions, comments/styles, hidden records/buttons, Reapply, clearing criteria, append, and save/reimport. macOS/Windows live QA remains outstanding. No PR, push, tag or deployment is implied by this cutoff.
+
+## Phase 4 backlog
+
+1. Remaining XLSX fidelity: broaden the formula/metadata subset for materialized sorting, multi-column/custom sorts, advanced predicates and custom styles/themes. Real Excel verification of the shipped subset stays a Phase 3 release check. Guarded materialized export, single-column saved sorting, built-in style metadata and checkbox filters are implemented locally.
 2. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
 3. Named saved views and richer mixed-layout support beyond the current saved criteria.
 4. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
@@ -403,13 +419,13 @@ Validation: all 375 IO, 83 session-host and 818 desktop tests passed (1,276 tota
 
 Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.
 
-### PR #83 review follow-ups
+### Inherited PR #83 follow-ups for Phase 4
 
 - Inspect worksheet relationships before reading worksheet XML for Tables, so the 32 MB Table-parser limit does not reject unrelated large sheets or produce a misleading warning.
 - Bound Table counts and reduce repeated import validation to prevent pathological import times from many tiny Tables.
 - Confirm the recovery export policy: XLSX salvage is currently blocked along with other exports; any future salvage path must explicitly describe lost definitions and potentially stale values.
 - Document automation boundaries for agent users: direct MCP/session writes use canonical addresses and may explicitly change hidden records without a desktop approval step. Reviewed proposals and Lua row-deletion reviews use their separate approval flow.
-- Enforce Excel's 255-character Table-name limit at interchange boundaries and make saved filter-value ordering deterministic.
+- Make native/full-JSON filter-value ordering deterministic. Excel's 255-character Table-name limit and deterministic XLSX filter values are already implemented in Phase 3.
 - Disclose that older readers can drop all pivot definitions on a sheet containing a Table-backed pivot, retaining output values. Verify exported this-row references (`[@Col]`) in Microsoft Excel.
 
 Existing PivotTables remain a separate feature.

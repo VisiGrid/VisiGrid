@@ -453,7 +453,10 @@ fn read_tables(
     Ok(())
 }
 
-pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
+pub(crate) fn export_warnings(
+    wb: &Workbook,
+    order: super::xlsx::ExportOrder,
+) -> Result<Vec<String>, String> {
     wb.validate_table_view_specs()?;
     let mut warnings = Vec::new();
     for (sheet_id, table) in wb.tables() {
@@ -472,7 +475,10 @@ pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
             .filter(|v| v.table == table.id)
         {
             if view.sort.is_some() {
-                warnings.push(format!("Table {}: Excel export places every record in the saved sort order, including filtered-out records, and updates supported formula references. Clearing the sort in the exported copy keeps that order. Reapplying it in Excel may change text or mixed-type ordering.", table.name));
+                warnings.push(match order {
+                    super::xlsx::ExportOrder::Sorted => format!("Table {}: Excel export places every record in the saved sort order, including filtered-out records, and updates supported formula references. Clearing the sort in the exported copy keeps that order. Reapplying it in Excel may change text or mixed-type ordering.", table.name),
+                    super::xlsx::ExportOrder::Stored => format!("Table {}: Every record stays in stored order and formulas keep their stored coordinates. The saved sort is included; use Reapply in Excel to display that order. Text and mixed-type ordering may differ from VisiGrid.", table.name),
+                });
             }
             if let Err(reason) =
                 super::xlsx_table_filters::export_filters(wb.sheet_by_id(sheet_id).unwrap(), table)
@@ -480,6 +486,15 @@ pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
                 warnings.push(format!("Table {}: filter criteria are not exported ({reason}). All records are shown in Excel.", table.name));
             }
         }
+    }
+    if wb.sheets().iter().any(|s| !s.cond_formats.is_empty()) {
+        warnings.push(
+            "Conditional formatting is not exported to Excel. Explicit cell formatting is kept."
+                .into(),
+        );
+    }
+    if !wb.named_ranges().is_empty() {
+        warnings.push("Named-range definitions are not exported to Excel. Formulas using those names may show errors in the exported copy.".into());
     }
     if !wb.pivots().is_empty() {
         warnings.push("Pivot results are exported as cells. Pivot definitions and Table-source bindings are not exported to Excel.".into());

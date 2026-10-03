@@ -255,6 +255,10 @@ pub(crate) fn bind(
                 this.menu_execute_highlighted(window, cx);
                 return;
             }
+            if this.mode == Mode::ExportReport && this.pending_xlsx_export.is_some() {
+                this.confirm_xlsx_export(cx);
+                return;
+            }
             // Format bar editing consumes actions before Spreadsheet editing.
             // gpui dispatches keybinding actions before on_key_down, so the
             // format bar's own key handler never sees Enter/Esc/Backspace.

@@ -876,7 +876,7 @@ pub struct Spreadsheet {
     // Export report state (for Excel exports with warnings)
     pub pdf_export: Option<crate::pdf_export::PdfExportState>,
     pub export_result: Option<visigrid_io::xlsx::ExportResult>,
-    pub pending_xlsx_export: Option<Vec<String>>, // Losses awaiting review before the save chooser
+    pub pending_xlsx_export: Option<crate::xlsx_export::ExportReview>, // Order and losses awaiting review
     pub export_filename: Option<String>,  // Exported filename for display
 
     // Keyboard hints state (Vimium-style jump)

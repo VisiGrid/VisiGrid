@@ -1,5 +1,5 @@
 use visigrid_engine::{table::TableRange, workbook::Workbook};
-use visigrid_io::{json, native};
+use visigrid_io::{json, native, xlsx};
 
 fn fixture() -> Workbook {
     let mut wb = Workbook::new();
@@ -52,6 +52,12 @@ fn native_future_and_corrupt_tables_offer_non_destructive_read_only_recovery() {
         assert!(native::save(wb.active_sheet(), &copy).is_err());
         assert!(json::export_workbook(&wb, &[], 0).is_err());
         assert!(json::export_full(wb.active_sheet()).is_err());
+        for order in [xlsx::ExportOrder::Sorted, xlsx::ExportOrder::Stored] {
+            assert!(xlsx::table_export_warnings_with_order(&wb, None, order).is_err());
+            assert!(xlsx::export_with_order(&wb, &copy, None, order).is_err());
+            assert!(xlsx::export_to_buffer_with_order(&wb, None, order).is_err());
+            assert!(!copy.exists());
+        }
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

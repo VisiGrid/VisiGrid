@@ -1412,60 +1412,87 @@ fn pixels_to_excel_height(px: f32) -> f64 {
     (px * 0.75) as f64
 }
 
-/// Export a VisiGrid workbook to XLSX format
-///
-/// # Arguments
-/// * `workbook` - The VisiGrid workbook to export
-/// * `path` - Path to write the XLSX file
-/// * `layouts` - Optional per-sheet layout information (column widths, row heights, frozen panes)
-///
-/// # Returns
-/// * `Ok(ExportResult)` - Export statistics
-/// * `Err(String)` - Error message if export failed
+/// Row order used for Table records in the exported copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportOrder {
+    /// Materialize saved Table sorting, rewriting supported references.
+    #[default]
+    Sorted,
+    /// Preserve stored cells/formula coordinates and save sorting as metadata.
+    Stored,
+}
+
+/// Export a workbook in saved sort order. Unsupported materialization refuses.
 pub fn export(
     workbook: &Workbook,
     path: &Path,
     layouts: Option<&[ExportLayout]>,
 ) -> Result<ExportResult, String> {
+    export_with_order(workbook, path, layouts, ExportOrder::Sorted)
+}
+
+/// Export with an explicit row-order choice. Neither mode changes the source.
+pub fn export_with_order(
+    workbook: &Workbook,
+    path: &Path,
+    layouts: Option<&[ExportLayout]>,
+    order: ExportOrder,
+) -> Result<ExportResult, String> {
     let start_time = Instant::now();
-    workbook.ensure_writable()?;
-    crate::xlsx_tables::export_warnings(workbook)?;
-    let prepared = crate::xlsx_sorted_export::prepare(workbook, layouts)?;
-    let workbook = prepared.as_ref();
-    let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
-    let bytes = xlsx_workbook.save_to_buffer().map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
-    let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
-    let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
+    let (bytes, mut result) = export_to_buffer_with_order(workbook, layouts, order)?;
     std::fs::write(path, bytes).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok(result)
 }
 
-/// Export to an in-memory XLSX byte buffer (for stdout / HTTP responses).
+/// Export to an in-memory XLSX byte buffer in saved sort order.
 pub fn export_to_buffer(
     workbook: &Workbook,
     layouts: Option<&[ExportLayout]>,
 ) -> Result<(Vec<u8>, ExportResult), String> {
+    export_to_buffer_with_order(workbook, layouts, ExportOrder::Sorted)
+}
+
+pub fn export_to_buffer_with_order(
+    workbook: &Workbook,
+    layouts: Option<&[ExportLayout]>,
+    order: ExportOrder,
+) -> Result<(Vec<u8>, ExportResult), String> {
     let start_time = Instant::now();
     workbook.ensure_writable()?;
-    crate::xlsx_tables::export_warnings(workbook)?;
-    let prepared = crate::xlsx_sorted_export::prepare(workbook, layouts)?;
+    crate::xlsx_tables::export_warnings(workbook, order)?;
+    let prepared = match order {
+        ExportOrder::Sorted => crate::xlsx_sorted_export::prepare(workbook, layouts)?,
+        ExportOrder::Stored => std::borrow::Cow::Borrowed(workbook),
+    };
     let workbook = prepared.as_ref();
-    let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
-    let bytes = xlsx_workbook
-        .save_to_buffer()
-        .map_err(|e| format!("Failed to serialize XLSX: {}", e))?;
+    let (mut xlsx_workbook, mut result) = build_export(workbook, layouts, order)?;
+    let bytes = xlsx_workbook.save_to_buffer()
+        .map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
     let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
 }
 
-/// Table-specific losses reported before desktop export and in every host's
-/// export result. Fatal cases are rejected before the destination is written.
+/// Compatibility review for the default, sorted export.
 pub fn table_export_warnings(workbook: &Workbook) -> Result<Vec<String>, String> {
-    let warnings = crate::xlsx_tables::export_warnings(workbook)?;
-    crate::xlsx_sorted_export::prepare(workbook, None)?;
+    table_export_warnings_with_order(workbook, None, ExportOrder::Sorted)
+}
+
+/// Preflight the selected mode, including host layouts when available.
+/// Stored order skips only materialization checks; recovery/schema/export
+/// refusals and compatibility warnings still apply.
+pub fn table_export_warnings_with_order(
+    workbook: &Workbook,
+    layouts: Option<&[ExportLayout]>,
+    order: ExportOrder,
+) -> Result<Vec<String>, String> {
+    workbook.ensure_writable()?;
+    let warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
+    if order == ExportOrder::Sorted {
+        crate::xlsx_sorted_export::prepare(workbook, layouts)?;
+    }
     Ok(warnings)
 }
 
@@ -1473,10 +1500,11 @@ pub fn table_export_warnings(workbook: &Workbook) -> Result<Vec<String>, String>
 fn build_export(
     workbook: &Workbook,
     layouts: Option<&[ExportLayout]>,
+    order: ExportOrder,
 ) -> Result<(XlsxWorkbook, ExportResult), String> {
     workbook.ensure_writable()?;
     let mut result = ExportResult::default();
-    result.warnings = crate::xlsx_tables::export_warnings(workbook)?;
+    result.warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
 
     let mut xlsx_workbook = XlsxWorkbook::new();
 
