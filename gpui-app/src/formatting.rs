@@ -203,7 +203,7 @@ impl Spreadsheet {
 
     /// Set bold on all selected cells (explicit value, not toggle)
     pub fn set_bold(&mut self, value: bool, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Bold(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -230,7 +230,7 @@ impl Spreadsheet {
 
     /// Set italic on all selected cells (explicit value, not toggle)
     pub fn set_italic(&mut self, value: bool, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Italic(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -257,7 +257,7 @@ impl Spreadsheet {
 
     /// Set underline on all selected cells (explicit value, not toggle)
     pub fn set_underline(&mut self, value: bool, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Underline(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -284,7 +284,7 @@ impl Spreadsheet {
 
     /// Set strikethrough on all selected cells (explicit value, not toggle)
     pub fn set_strikethrough(&mut self, value: bool, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Strikethrough(value));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -311,7 +311,7 @@ impl Spreadsheet {
 
     /// Set font family on all selected cells
     pub fn set_font_family_selection(&mut self, font: Option<String>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::FontFamily(font.clone()));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -339,7 +339,7 @@ impl Spreadsheet {
 
     /// Set horizontal alignment on all selected cells
     pub fn set_alignment_selection(&mut self, alignment: Alignment, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Alignment(alignment));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -376,7 +376,7 @@ impl Spreadsheet {
     /// The merge-free alternative to Merge & Center — sorting, filtering,
     /// and formulas keep working because no cells are actually merged.
     pub fn center_across_selection_toggle(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         // On merged titles, the useful answer is the conversion: same look,
         // and the sheet sorts and filters again.
         if !self.single_row_merges_in(Some(self.all_selection_ranges()), cx).is_empty() {
@@ -453,6 +453,7 @@ impl Spreadsheet {
     }
 
     fn convert_merge_regions(&mut self, targets: Vec<visigrid_engine::sheet::MergedRegion>, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         self.merge_block_offer = None;
         if targets.is_empty() {
             let multi = self.sheet(cx).merged_regions.len();
@@ -534,7 +535,7 @@ impl Spreadsheet {
 
     /// Set vertical alignment on all selected cells
     pub fn set_vertical_alignment_selection(&mut self, valign: VerticalAlignment, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::VerticalAlignment(valign));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -566,7 +567,7 @@ impl Spreadsheet {
 
     /// Set text overflow on all selected cells
     pub fn set_text_overflow_selection(&mut self, overflow: TextOverflow, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
@@ -597,7 +598,8 @@ impl Spreadsheet {
 
     /// Set number format on all selected cells
     pub fn set_number_format_selection(&mut self, format: NumberFormat, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
+        if self.block_number_format_conversion(&format, cx) { return; }
         self.set_repeat(RepeatAction::NumberFormat(format.clone()));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -606,13 +608,8 @@ impl Spreadsheet {
                     // Safety net: convert text "X%" to number when applying Percent format
                     if matches!(format, NumberFormat::Percent { .. }) && self.sheet(cx).table_header_at(row,col).is_none() {
                         let raw = self.sheet(cx).get_raw(row, col);
-                        if let Some(pct) = raw.strip_suffix('%') {
-                            let clean: String = pct.chars()
-                                .filter(|c| !c.is_whitespace() && *c != ',')
-                                .collect();
-                            if let Ok(n) = clean.parse::<f64>() {
-                                self.set_cell_value(row, col, &(n / 100.0).to_string(), cx);
-                            }
+                        if let Some(value) = crate::table_command_scope::percent_format_value(&raw) {
+                            self.set_cell_value(row, col, &value, cx);
                         }
                     }
                     let before = self.sheet(cx).get_format(row, col);
@@ -678,7 +675,7 @@ impl Spreadsheet {
 
     /// Adjust decimal places on selected cells - uses DecimalPlaces kind for coalescing
     pub fn adjust_decimals_selection(&mut self, delta: i8, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
@@ -721,7 +718,7 @@ impl Spreadsheet {
 
     /// Set background color on all selected cells
     pub fn set_background_color(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::BackgroundColor(color));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -748,7 +745,7 @@ impl Spreadsheet {
 
     /// Set font size on all selected cells
     pub fn set_font_size_selection(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::FontSize(size));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -779,7 +776,7 @@ impl Spreadsheet {
 
     /// Set font color on all selected cells
     pub fn set_font_color_selection(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::FontColor(color));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -805,7 +802,7 @@ impl Spreadsheet {
     }
 
     pub fn set_cell_style_selection(&mut self, style: CellStyle, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::CellStyle(style));
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -843,13 +840,13 @@ impl Spreadsheet {
 
     /// Start Format Painter (single-shot): capture the active cell's format.
     pub fn start_format_painter(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.start_format_painter_inner(false, cx);
     }
 
     /// Start Format Painter in locked mode: stays active until Esc.
     pub fn start_format_painter_locked(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.start_format_painter_inner(true, cx);
     }
 
@@ -877,7 +874,7 @@ impl Spreadsheet {
 
     /// Paste the format copied with Ctrl+Shift+C onto the selection (Ctrl+Shift+V right after it).
     pub fn paste_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let snapshot = match &self.format_painter {
             Some(state) => state.snapshot.clone(),
             None => {
@@ -895,7 +892,7 @@ impl Spreadsheet {
 
     /// Apply Format Painter: set captured format on current selection.
     pub fn apply_format_painter(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let (snapshot, locked) = match &self.format_painter {
             Some(state) => (state.snapshot.clone(), state.locked),
             None => return,
@@ -950,7 +947,7 @@ impl Spreadsheet {
     /// Clear all formatting on selected cells, resetting to CellFormat::default().
     /// Records a single undo step regardless of cell count.
     pub fn clear_formatting_selection(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::ClearFormatting);
         let mut patches = Vec::new();
         let default = CellFormat::default();
@@ -983,7 +980,7 @@ impl Spreadsheet {
     /// Canonicalization: UI commands set BOTH sides of every shared edge they touch
     /// to prevent conflicting border states from normal use.
     pub fn apply_borders(&mut self, mode: BorderApplyMode, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Borders(mode));
         // Use current_border_color if set, otherwise None (Automatic = theme default)
         let thin = CellBorder {

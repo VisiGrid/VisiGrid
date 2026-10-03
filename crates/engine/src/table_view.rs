@@ -57,9 +57,13 @@ impl TableViewSpec {
         }
     }
 
+    pub fn has_criteria(&self) -> bool {
+        self.sort.is_some() || !self.filters.is_empty()
+    }
+
     /// Default controls with no criteria need no persisted view or format bump.
     pub(crate) fn requires_persistence(&self) -> bool {
-        self.sort.is_some() || !self.filters.is_empty() || !self.show_filter_buttons
+        self.has_criteria() || !self.show_filter_buttons
     }
 
     pub fn clear_sort(&mut self) {

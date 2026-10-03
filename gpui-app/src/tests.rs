@@ -2989,6 +2989,13 @@ fn review_mode_workbook_mutators_are_guarded() {
         assert_contains_near(source, function, "block_if_previewing(cx)");
     }
 
+    assert_contains_near(include_str!("table_command_scope.rs"), "block_sheet_metadata_edit", "block_if_previewing_only(cx)");
+    let metadata_scope = include_str!("table_command_scope.rs");
+    assert_contains_near(metadata_scope, "block_active_sheet_metadata_edit", "block_sheet_metadata_edit(");
+    for function in ["freeze_top_row", "freeze_first_column", "freeze_panes", "unfreeze_panes"] {
+        assert_contains_near(include_str!("sheet_ops.rs"), function, "block_active_sheet_metadata_edit(cx)");
+    }
+    assert_contains_near(include_str!("comments.rs"), "change_comment", "block_sheet_metadata_edit(sheet_index, cx)");
     let conditional_formats = include_str!("cond_format_ui.rs");
     for function in [
         "show_add_cond_format",
@@ -3002,7 +3009,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "move_cf_rule",
         "edit_cf_rule",
     ] {
-        assert_guarded(conditional_formats, function);
+        assert_contains_near(conditional_formats, function, "block_active_sheet_metadata_edit(cx)");
     }
 
     let validations = include_str!("dialogs.rs");

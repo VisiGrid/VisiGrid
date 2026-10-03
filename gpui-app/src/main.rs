@@ -6,6 +6,7 @@ mod toolbar;
 mod desktop_keytips;
 mod pivot_ui;
 mod table_ui;
+mod table_command_scope;
 mod table_header_paste;
 mod ai;
 mod ai_cli;

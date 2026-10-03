@@ -4097,98 +4097,31 @@ impl Spreadsheet {
 
     // Formatting (applies to all discontiguous selection ranges)
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_bold(row, col));
-                }
-            }
-        }
-        // A toggle over a mixed selection has no single "new value", so the
-        // repeat slot takes the ACTIVE cell's resolved state — that is the
-        // one the user was looking at when they pressed the key.
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).bold;
-        self.set_repeat(RepeatAction::Bold(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_bold(!self.sheet(cx).get_format(r, c).bold, cx);
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_italic(row, col));
-                }
-            }
-        }
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).italic;
-        self.set_repeat(RepeatAction::Italic(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_italic(!self.sheet(cx).get_format(r, c).italic, cx);
     }
 
     pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_underline(row, col));
-                }
-            }
-        }
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).underline;
-        self.set_repeat(RepeatAction::Underline(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_underline(!self.sheet(cx).get_format(r, c).underline, cx);
     }
 
     pub fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_strikethrough(row, col));
-                }
-            }
-        }
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).strikethrough;
-        self.set_repeat(RepeatAction::Strikethrough(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_strikethrough(!self.sheet(cx).get_format(r, c).strikethrough, cx);
     }
 
     pub fn format_currency(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::currency(2)));
-                }
-            }
-        }
-        self.set_repeat(RepeatAction::NumberFormat(NumberFormat::currency(2)));
-        self.is_modified = true;
-        cx.notify();
+        self.set_number_format_selection(NumberFormat::currency(2), cx);
     }
 
     pub fn format_percent(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::Percent { decimals: 2 }));
-                }
-            }
-        }
-        self.set_repeat(RepeatAction::NumberFormat(NumberFormat::Percent { decimals: 2 }));
-        self.is_modified = true;
-        cx.notify();
+        self.set_number_format_selection(NumberFormat::Percent { decimals: 2 }, cx);
     }
 
     pub fn format_date_shortcut(&mut self, cx: &mut Context<Self>) {

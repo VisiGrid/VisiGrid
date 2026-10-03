@@ -415,7 +415,7 @@ impl Spreadsheet {
             return false;
         };
         let sheet = self.wb(cx).sheet(index).unwrap();
-        if let Some(spec) = sheet.table_view_spec() {
+        if let Some(spec) = sheet.table_view_spec().filter(|v| v.has_criteria()) {
             if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table) {
                 if let Some(error) = crate::table_filter_ui::desktop_layout_error(
                     table,

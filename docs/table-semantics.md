@@ -280,7 +280,19 @@ Phase 2 feature scope is frozen. It includes saved Table criteria and header con
 
 Feature-complete does not mean released. Merge review/CI, release builds, platform smoke tests and fixes for confirmed safety or correctness defects remain Phase 2 release work. Linux live coverage and dated test results are recorded below; macOS/Windows live UI verification is outstanding. Advertise XLSX as the documented interoperability subset. Do not claim lossless Excel parity or unmeasured large-data performance.
 
-Phase 2 retains the workbook-wide criteria guard for unsupported commands, including formatting, conditional formatting, comments, Find/Replace, named ranges, freeze panes, merging and worksheet sort/AutoFilter, plus unrelated legacy history. The refusal explicitly names this workbook-wide scope, including Tables on other sheets. Supported edits/history use the guarded paths documented above. Narrowing restrictions needs dependency-aware validation: an edit on another sheet can change a Table's formulas or create an unsafe spill. Candidate workbooks use copy-on-write storage, but validation/recalculation costs still need measurement.
+The Phase 2 release retains the workbook-wide criteria guard for unsupported commands, including formatting, conditional formatting, comments, Find/Replace, named ranges, freeze panes, merging and worksheet sort/AutoFilter, plus unrelated legacy history. The refusal explicitly names this workbook-wide scope, including Tables on other sheets. Supported edits/history use the guarded paths documented above. Narrowing restrictions needs dependency-aware validation: an edit on another sheet can change a Table's formulas or create an unsafe spill. Candidate workbooks use copy-on-write storage, but validation/recalculation costs still need measurement.
+
+## Phase 3: sheet-scoped metadata commands
+
+Cell formatting (including Format Painter, Paste Format and F4), conditional formatting, comments and freeze panes are available on sheets without active Table sort/filter criteria, even when another sheet has a filtered Table. A Table with only hidden filter buttons does not block these commands. A cleared spec or button-only spec has no row projection and does not enforce active-view layout restrictions; reactivating criteria validates its layout before publication. Affected-sheet criteria still refuse the operation, including suspended views. Recovery, Review Mode and rewind-preview protections remain in force.
+
+Percent formatting that would coerce percentage text into numbers is refused before any writes while any Table criteria exist; formatting existing numbers remains available on unaffected sheets. Merge-to-Center-Across conversion also keeps its original guard.
+
+These metadata operations do not change cell values or recalculate dependent Tables, so they do not require candidate workbook copies. Undo/redo checks the history target sheet rather than the displayed sheet, and checks all children of a grouped action before applying any. This exemption admits only the documented metadata actions; legacy value changes and mixed value/metadata groups retain their existing guard. Standard cell edits continue through the dependency-aware Table path.
+
+Freeze-pane history records a stable sheet ID, so switching tabs before undo/redo cannot change another sheet's frozen panes. Rewind reconstructs freeze settings alongside formatting, comments, conditional formats and guarded structural history. Formatting shortcuts use the same undoable setters as the toolbar.
+
+Merging/unmerging, named-range changes, Replace, worksheet sort/AutoFilter, row/column sizing/visibility and other unsupported mutation surfaces retain the workbook-wide criteria guard in this slice. Find itself remains available. Enabling these requires their own coordinate and dependency checks; merging can erase values and is not a formatting-only operation.
 
 ## Phase 3 backlog
 
@@ -289,7 +301,7 @@ Phase 2 retains the workbook-wide criteria guard for unsupported commands, inclu
 3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
 5. Named saved views and richer mixed-layout support beyond the current saved criteria.
-6. Narrow workbook-wide command/history restrictions where safe, and measure candidate validation/recalculation on large workbooks before optimizing.
+6. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
 7. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
 
 Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.
@@ -306,6 +318,8 @@ Web/cloud preservation and authoring remain deferred to the separate frontend re
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+Phase 3 metadata scope, 2026-10-02: 745 desktop tests passed (3 existing ignores), plus 28 focused engine Table-view/state tests and 8 Table-view I/O tests. New regressions cover history target sheets, grouped refusal, percentage-text conversion preflight, freeze-pane undo/redo and rewind alongside structural history, and metadata on an inactive Table view followed by editing a different filtered Table. Recovery, Review Mode and rewind guards remain covered by the desktop suite. The native debug build passed. Live UI/platform QA remains pending.
 
 PR #83 review fixes, 2026-10-02: all 27 engine Table-view/state tests, 8 Table-view I/O tests and 12 desktop outside-edit tests passed. Regressions cover merged-title undo/redo/rewind with criteria on another sheet, preserved merges and covered-cell refusal, independent criterion clearing back to catalog version 1/2 across four native save paths and both JSON exporters, and hidden-button-only version 3 persistence. These fixes do not narrow the workbook-wide command guard.
 

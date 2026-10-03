@@ -402,6 +402,7 @@ pub enum UndoAction {
     },
     /// Freeze panes changed (for undo: restore previous freeze state)
     FreezePanesChanged {
+        sheet_id: visigrid_engine::sheet::SheetId,
         old_frozen_rows: usize,
         old_frozen_cols: usize,
         new_frozen_rows: usize,
@@ -1554,6 +1555,7 @@ impl History {
                     let view = &mut view_state.per_sheet[sheet_index];
                     if view.structure_layout.is_none() {
                         let mut layout = history.before.clone();
+                        let mut frozen = history.source_frozen;
                         for earlier in self.undo_stack[i..index].iter().rev() {
                             match &earlier.action {
                                 UndoAction::ColumnWidthSet {
@@ -1588,12 +1590,15 @@ impl History {
                                         else { layout.hidden_cols.insert(*col); }
                                     }
                                 }
+                                UndoAction::FreezePanesChanged { sheet_id, old_frozen_rows, old_frozen_cols, .. }
+                                    if *sheet_id == history.commit.sheet => {
+                                    frozen = Some((*old_frozen_rows, *old_frozen_cols));
+                                }
                                 UndoAction::RowsInserted { .. }
                                 | UndoAction::RowsDeleted { .. }
                                 | UndoAction::ColsInserted { .. }
                                 | UndoAction::ColsDeleted { .. }
                                 | UndoAction::WorkbookSnapshot { .. }
-                                | UndoAction::FreezePanesChanged { .. }
                                 | UndoAction::Group { .. } => {
                                     return Err(PreviewBuildError::InvariantViolation("Cannot reconstruct layout across older structural history.".into()));
                                 }
@@ -1601,7 +1606,7 @@ impl History {
                             }
                         }
                         view.structure_layout = Some(layout);
-                        if let Some(frozen) = history.source_frozen {
+                        if let Some(frozen) = frozen {
                             workbook.sheet_mut(sheet_index).unwrap().frozen_panes = frozen;
                         }
                     }
@@ -1648,7 +1653,7 @@ impl History {
         if view_state.per_sheet.iter().any(|v| v.structure_layout.is_some())
             && matches!(action, UndoAction::RowsInserted { .. } | UndoAction::RowsDeleted { .. }
                 | UndoAction::ColsInserted { .. } | UndoAction::ColsDeleted { .. }
-                | UndoAction::WorkbookSnapshot { .. } | UndoAction::FreezePanesChanged { .. })
+                | UndoAction::WorkbookSnapshot { .. })
         {
             return Err(PreviewBuildError::InvariantViolation(
                 "Cannot reconstruct layout across older structural history.".into()));
@@ -1892,11 +1897,9 @@ impl History {
                     }
                 }
             }
-            UndoAction::FreezePanesChanged { .. } => {
-                // Column/row sizing and visibility are stored at the app level (Spreadsheet), not in Workbook.
-                // For preview purposes, we skip these - the preview shows correct data values
-                // even if column widths or visibility differ from the historical state.
-                // This is acceptable because sizing/visibility is visual-only, not computational.
+            UndoAction::FreezePanesChanged { sheet_id, new_frozen_rows, new_frozen_cols, .. } => {
+                crate::table_command_scope::restore_freeze_panes(workbook, *sheet_id, (*new_frozen_rows, *new_frozen_cols))
+                    .map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::SortApplied { sheet_index, new_row_order, new_sort_state, .. } => {
                 // Validate sheet exists
@@ -2058,7 +2061,8 @@ impl UndoActionKind {
             // View-only changes (not serialized to file) - skip for replay
             UndoActionKind::RowVisibilityChanged => false,
             UndoActionKind::ColVisibilityChanged => false,
-            UndoActionKind::FreezePanesChanged => false,
+            // Freeze panes now carry a stable sheet identity and replay into Workbook.
+            UndoActionKind::FreezePanesChanged => true,
 
             // Merge topology changes are replay-supported
             UndoActionKind::SetMerges => true,

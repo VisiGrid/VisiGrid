@@ -36,6 +36,9 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
+            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
                 if let Err(error) = self.preflight_pivot_history(&entry.action, true, cx) {
                     self.history.redo(); self.status_message = Some(error); cx.notify(); return;
@@ -48,6 +51,7 @@ impl Spreadsheet {
                 )
                 && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
+                && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
                 self.history.redo(); return;
             }
@@ -527,10 +531,8 @@ impl Spreadsheet {
                     let action = if hidden { "hide" } else { "unhide" };
                     self.status_message = Some(format!("Undo: {} {} column(s)", action, cols.len()));
                 }
-                UndoAction::FreezePanesChanged { old_frozen_rows, old_frozen_cols, .. } => {
-                    self.view_state.frozen_rows = old_frozen_rows;
-                    self.view_state.frozen_cols = old_frozen_cols;
-                    self.clamp_scroll_to_freeze(cx);
+                UndoAction::FreezePanesChanged { sheet_id, old_frozen_rows, old_frozen_cols, .. } => {
+                    self.restore_sheet_freeze_panes(sheet_id, (old_frozen_rows, old_frozen_cols), cx);
                     if old_frozen_rows == 0 && old_frozen_cols == 0 {
                         self.status_message = Some("Undo: freeze panes".to_string());
                     } else {
@@ -954,10 +956,8 @@ impl Spreadsheet {
                 self.bump_cells_rev();
                 self.revalidate_range(&range, cx);
             }
-            UndoAction::FreezePanesChanged { old_frozen_rows, old_frozen_cols, .. } => {
-                self.view_state.frozen_rows = old_frozen_rows;
-                self.view_state.frozen_cols = old_frozen_cols;
-                self.clamp_scroll_to_freeze(cx);
+            UndoAction::FreezePanesChanged { sheet_id, old_frozen_rows, old_frozen_cols, .. } => {
+                self.restore_sheet_freeze_panes(sheet_id, (old_frozen_rows, old_frozen_cols), cx);
             }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be undone
@@ -1278,10 +1278,8 @@ impl Spreadsheet {
                 self.bump_cells_rev();
                 self.revalidate_range(&range, cx);
             }
-            UndoAction::FreezePanesChanged { new_frozen_rows, new_frozen_cols, .. } => {
-                self.view_state.frozen_rows = new_frozen_rows;
-                self.view_state.frozen_cols = new_frozen_cols;
-                self.clamp_scroll_to_freeze(cx);
+            UndoAction::FreezePanesChanged { sheet_id, new_frozen_rows, new_frozen_cols, .. } => {
+                self.restore_sheet_freeze_panes(sheet_id, (new_frozen_rows, new_frozen_cols), cx);
             }
             UndoAction::Rewind { .. } => {
                 // Rewind is audit-only - cannot be redone
@@ -1308,6 +1306,9 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
+            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
                 if let Err(error) = self.preflight_pivot_history(&entry.action, false, cx) {
                     self.history.undo(); self.status_message = Some(error); cx.notify(); return;
@@ -1320,6 +1321,7 @@ impl Spreadsheet {
                 )
                 && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
+                && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
                 self.history.undo(); return;
             }
@@ -1612,10 +1614,8 @@ impl Spreadsheet {
                     self.revalidate_range(&range, cx);
                     self.status_message = Some(format!("Redo: clear exclusions ({} cells)", range.cell_count()));
                 }
-                UndoAction::FreezePanesChanged { new_frozen_rows, new_frozen_cols, .. } => {
-                    self.view_state.frozen_rows = new_frozen_rows;
-                    self.view_state.frozen_cols = new_frozen_cols;
-                    self.clamp_scroll_to_freeze(cx);
+                UndoAction::FreezePanesChanged { sheet_id, new_frozen_rows, new_frozen_cols, .. } => {
+                    self.restore_sheet_freeze_panes(sheet_id, (new_frozen_rows, new_frozen_cols), cx);
                     self.status_message = Some("Redo: freeze panes".to_string());
                 }
                 UndoAction::Rewind { .. } => {

@@ -24,7 +24,7 @@ impl Spreadsheet {
 
     /// Freeze the top row (row 0)
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
-        if self.block_read_only_recovery(cx) || self.block_table_view_edit(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let old_rows = self.view_state.frozen_rows;
         let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 1;
@@ -32,6 +32,7 @@ impl Spreadsheet {
         self.clamp_scroll_to_freeze(cx);
         self.history.record_action_with_provenance(
             crate::history::UndoAction::FreezePanesChanged {
+                sheet_id: self.sheet(cx).id,
                 old_frozen_rows: old_rows, old_frozen_cols: old_cols,
                 new_frozen_rows: 1, new_frozen_cols: 0,
             }, None);
@@ -41,7 +42,7 @@ impl Spreadsheet {
 
     /// Freeze the first column (column A)
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
-        if self.block_read_only_recovery(cx) || self.block_table_view_edit(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let old_rows = self.view_state.frozen_rows;
         let old_cols = self.view_state.frozen_cols;
         self.view_state.frozen_rows = 0;
@@ -49,6 +50,7 @@ impl Spreadsheet {
         self.clamp_scroll_to_freeze(cx);
         self.history.record_action_with_provenance(
             crate::history::UndoAction::FreezePanesChanged {
+                sheet_id: self.sheet(cx).id,
                 old_frozen_rows: old_rows, old_frozen_cols: old_cols,
                 new_frozen_rows: 0, new_frozen_cols: 1,
             }, None);
@@ -59,7 +61,7 @@ impl Spreadsheet {
     /// Freeze panes at the current selection
     /// Freezes all rows above and all columns to the left of the active cell
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_read_only_recovery(cx) || self.block_table_view_edit(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         let (row, col) = self.view_state.selected;
         if row == 0 && col == 0 {
             // Nothing to freeze - show message
@@ -74,6 +76,7 @@ impl Spreadsheet {
         self.clamp_scroll_to_freeze(cx);
         self.history.record_action_with_provenance(
             crate::history::UndoAction::FreezePanesChanged {
+                sheet_id: self.sheet(cx).id,
                 old_frozen_rows: old_rows, old_frozen_cols: old_cols,
                 new_frozen_rows: row, new_frozen_cols: col,
             }, None);
@@ -88,7 +91,7 @@ impl Spreadsheet {
 
     /// Remove all freeze panes
     pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_read_only_recovery(cx) || self.block_table_view_edit(cx) { return; }
+        if self.block_active_sheet_metadata_edit(cx) { return; }
         if self.view_state.frozen_rows == 0 && self.view_state.frozen_cols == 0 {
             self.status_message = Some("No frozen panes to unfreeze".to_string());
             cx.notify();
@@ -101,6 +104,7 @@ impl Spreadsheet {
         self.clamp_scroll_to_freeze(cx);
         self.history.record_action_with_provenance(
             crate::history::UndoAction::FreezePanesChanged {
+                sheet_id: self.sheet(cx).id,
                 old_frozen_rows: old_rows, old_frozen_cols: old_cols,
                 new_frozen_rows: 0, new_frozen_cols: 0,
             }, None);

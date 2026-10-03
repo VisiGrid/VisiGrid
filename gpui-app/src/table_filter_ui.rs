@@ -54,7 +54,7 @@ pub(crate) fn desktop_layout_error(
 impl Spreadsheet {
     pub(crate) fn validate_saved_view_layout(&self, wb: &Workbook) -> Result<(), String> {
         for sheet in wb.sheets() {
-            if let Some(spec) = sheet.table_view_spec() {
+            if let Some(spec) = sheet.table_view_spec().filter(|v| v.has_criteria()) {
                 if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table) {
                     if let Some(error) = crate::table_filter_ui::desktop_layout_error(
                         table,
@@ -167,7 +167,7 @@ impl Spreadsheet {
         let has_spec = sheet.table_view_spec().is_some();
         if has_spec || self.table_view_installed {
             let result = (|| {
-                if let Some(spec) = sheet.table_view_spec() {
+                if let Some(spec) = sheet.table_view_spec().filter(|v| v.has_criteria()) {
                     if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table) {
                         self.table_layout_check(table)?;
                     }
@@ -325,7 +325,7 @@ impl Spreadsheet {
                 );
                 return false;
             }
-            if let Some(table) = self.sheet(cx).tables().iter().find(|t| t.id == spec.table) {
+            if let Some(table) = self.sheet(cx).tables().iter().find(|t| t.id == spec.table).filter(|_| spec.has_criteria()) {
                 if let Err(error) = self.table_layout_check(table) {
                     self.table_filter_error(error, cx);
                     return false;
@@ -480,11 +480,11 @@ impl Spreadsheet {
         undo: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(spec) = if undo {
+        if let Some(spec) = (if undo {
             commit.before()
         } else {
             commit.after()
-        } {
+        }).filter(|v| v.has_criteria()) {
             if let Some(table) = self
                 .wb(cx)
                 .sheet_by_id(commit.sheet_id())
