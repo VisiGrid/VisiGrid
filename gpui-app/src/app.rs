@@ -854,6 +854,9 @@ pub struct Spreadsheet {
     pub import_result: Option<visigrid_io::xlsx::ImportResult>,
     /// What the last CSV import decided (banner, status line, settings dialog).
     pub csv_doc: Option<crate::csv_import_ui::CsvDocState>,
+    /// A recipe run that did not publish, and the fixes it offers.
+    pub recipe_blocked: Option<crate::recipe_ui::RecipeBlocked>,
+    pub recipe_run_in_progress: bool,
     /// The CSV import settings dialog, while open.
     pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
     /// A CSV whose rows did not all fit, and how many were left out: no save
@@ -1488,6 +1491,8 @@ impl Spreadsheet {
 
             import_result: None,
             csv_doc: None,
+            recipe_blocked: None,
+            recipe_run_in_progress: false,
             csv_dialog: None,
             csv_protected_source: None,
             csv_activation_subscription: Some(csv_activation_subscription),
@@ -2547,6 +2552,19 @@ impl Spreadsheet {
             CommandId::ExportPdf => self.show_pdf_export(cx),
             CommandId::CsvImportSettings => self.show_csv_import_dialog(cx),
             CommandId::CsvImportNotes => self.show_csv_banner(cx),
+            CommandId::RefreshRecipeTable => {
+                if !self.refresh_recipe_table(cx) {
+                    self.status_message = Some("No recipe-backed Table on this sheet. Open a .recipe.toml to load one".into());
+                    cx.notify();
+                }
+            }
+            CommandId::EditRecipe => match self.recipe_strip_table(cx).and_then(|t| t.source) {
+                Some(source) => self.edit_recipe_file(std::path::Path::new(&source.recipe), cx),
+                None => {
+                    self.status_message = Some("No recipe-backed Table on this sheet".into());
+                    cx.notify();
+                }
+            },
             CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
@@ -4010,6 +4028,7 @@ impl Spreadsheet {
     ///   macOS titlebar (MACOS_TITLEBAR_HEIGHT, macOS only)
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
     ///   Formula / command surface (order and height from toolbar_geometry)
+    ///   Recipe strip   (RECIPE_STRIP_HEIGHT, when the sheet has a recipe-backed Table)
     ///   Table controls (TABLE_CONTROLS_HEIGHT, when the active cell is in a Table)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
@@ -4021,7 +4040,8 @@ impl Spreadsheet {
             return self.metrics.header_h + recovery_h;
         }
         let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
-        self.toolbar_geometry(cx).bottom + table_h + recovery_h + self.metrics.header_h
+        let recipe_h = if self.show_recipe_strip(cx) { crate::recipe_ui::RECIPE_STRIP_HEIGHT } else { 0.0 };
+        self.toolbar_geometry(cx).bottom + table_h + recipe_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {

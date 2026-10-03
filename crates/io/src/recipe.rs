@@ -1108,6 +1108,11 @@ impl RecipeOutput {
 }
 
 impl RecipeOutput {
+    /// No columns, no rows: what a run that never read its source produces.
+    pub fn empty() -> RecipeOutput {
+        RecipeOutput { columns: Vec::new(), rows: Vec::new(), decimal_comma: false }
+    }
+
     /// Write one value of column `col` at (`row`, `at_col`), typed the way
     /// [`to_sheet`](Self::to_sheet) types it. An empty value writes nothing.
     pub(crate) fn write_value(&self, sheet: &mut Sheet, row: usize, at_col: usize, col: usize, value: &str) {
@@ -1145,6 +1150,23 @@ impl RecipeOutput {
 }
 
 impl RunReport {
+    /// A run that could not read its source at all.
+    pub fn unreadable(source: &Path, error: String) -> RunReport {
+        RunReport {
+            ok: false,
+            source: source.display().to_string(),
+            snapshot: String::new(),
+            source_rows: 0,
+            rows: 0,
+            columns: 0,
+            drift: Drift::default(),
+            steps: Vec::new(),
+            failures: vec![error],
+            errors: Vec::new(),
+            error_count: 0,
+        }
+    }
+
     /// A plain-text summary for the CLI and logs.
     pub fn summary(&self) -> String {
         let mut out = String::new();

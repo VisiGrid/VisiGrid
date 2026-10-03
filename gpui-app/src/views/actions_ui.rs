@@ -668,7 +668,10 @@ pub(crate) fn bind(
             this.insert_pivot_table(cx);
         }))
         .on_action(cx.listener(|this, _: &RefreshPivot, _, cx| {
-            this.refresh_pivot(cx);
+            // A recipe-backed Table under the cursor refreshes from its recipe
+            if !this.table_under_cursor(cx).is_some_and(|t| t.source.is_some()) || !this.refresh_recipe_table(cx) {
+                this.refresh_pivot(cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &RefreshAllPivots, _, cx| {
             this.refresh_all_pivots(cx);

@@ -121,6 +121,12 @@ impl Spreadsheet {
             return;
         }
 
+        // An import recipe opens as the Table it produces
+        if ext_lower == "toml" {
+            self.open_recipe(path, cx);
+            return;
+        }
+
         // Excel files import in the background, for everyone. The
         // synchronous path froze the window for the length of the import and
         // told the user to buy a licence to stop it.

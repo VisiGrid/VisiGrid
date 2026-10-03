@@ -489,9 +489,12 @@ mod tests {
         Sheet::new(SheetId(1), 10_000, 20)
     }
     fn fields(plan: &Plan<'_>) -> Vec<Vec<Field>> {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        plan.write_path(file.path()).unwrap();
-        let reader = SerializedFileReader::new(std::fs::File::open(file.path()).unwrap()).unwrap();
+        // A path in a temp folder, not an open NamedTempFile: Windows
+        // refuses to replace a file that is still open
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.parquet");
+        plan.write_path(&path).unwrap();
+        let reader = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
         reader
             .get_row_iter(None)
             .unwrap()
