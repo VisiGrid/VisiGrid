@@ -479,6 +479,8 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
     let mut rows = div().flex().flex_col();
     for (r, row) in b.editor_rows().iter().enumerate() {
         let on = focused && b.editor_focus == r;
+        // A checkbox for keep/remove/trim/dedupe rows: Some(checked)
+        let mut checkbox: Option<bool> = None;
         let (label, value, value_is_text): (String, String, bool) = match (row, step) {
             (EditorRow::Column { name, present }, Step::Rename { .. }) => {
                 let new = b.row_text(row).unwrap_or_default();
@@ -489,8 +491,8 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
                 (column_label(name, *present), type_label(&t), false)
             }
             (EditorRow::Column { name, present }, _) => {
-                let checked = b.column_checked(name);
-                (format!("{}  {}", if checked { "☑" } else { "☐" }, column_label(name, *present)), String::new(), false)
+                checkbox = Some(b.column_checked(name));
+                (column_label(name, *present), String::new(), false)
             }
             (EditorRow::FilterColumn, Step::Filter { column, .. }) => ("Column".into(), column.clone(), false),
             (EditorRow::FilterOp, Step::Filter { op, .. }) => ("Condition".into(), filter_op_label(*op).into(), false),
@@ -513,7 +515,32 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
                 .rounded(px(4.0))
                 .when(on, |d| d.bg(accent.opacity(0.12)))
                 .cursor_pointer()
-                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(12.0)).text_color(text).child(label))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .when_some(checkbox, |d, checked| {
+                            // Drawn, not a glyph: the bundled UI font has no ballot boxes
+                            d.child(
+                                div()
+                                    .size(px(13.0))
+                                    .flex_shrink_0()
+                                    .rounded(px(3.0))
+                                    .border_1()
+                                    .border_color(if checked { accent } else { muted })
+                                    .when(checked, |d| d.bg(accent))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(10.0))
+                                    .text_color(c.inverse)
+                                    .when(checked, |d| d.child("✓")),
+                            )
+                        })
+                        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(12.0)).text_color(text).child(label)),
+                )
                 .when(!value.is_empty() || caret, |d| {
                     d.child(
                         div()
@@ -527,7 +554,10 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
                             .text_size(px(12.0))
                             .text_color(if value == "—" { muted } else { text })
                             .when(caret && b.text_selected && !value.is_empty(), |d| d.bg(accent.opacity(0.25)))
-                            .child(if caret { format!("{value}▏") } else if value_is_text { value } else { format!("{value} ›") }),
+                            .flex()
+                            .items_center()
+                            .child(if value_is_text || caret { value } else { format!("{value} ›") })
+                            .when(caret, |d| d.child(div().ml(px(1.0)).w(px(1.0)).h(px(14.0)).bg(accent))),
                     )
                 })
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {

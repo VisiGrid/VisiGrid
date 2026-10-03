@@ -277,6 +277,22 @@ fn render_findings(
             .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(c.text).child(format!("Opened {}", doc.file_name())))
             .child(div().text_size(px(12.0)).text_color(c.muted).child(detail))
             .child(div().flex_1())
+            .child({
+                // Clean this file the same way every time it is exported
+                let (accent, path, options) = (c.accent, doc.path.clone(), doc.options.clone());
+                div()
+                    .id("csv-make-recipe")
+                    .text_size(px(12.0))
+                    .text_color(accent)
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .child("Make a recipe…")
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_csv_banner(cx);
+                        this.new_recipe_from_file(&path, Some(&options), cx);
+                    }))
+            })
             .child(dismiss_button("csv-banner-dismiss", c, cx, false)),
     );
 

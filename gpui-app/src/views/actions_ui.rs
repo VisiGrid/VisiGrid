@@ -673,6 +673,15 @@ pub(crate) fn bind(
                 this.refresh_pivot(cx);
             }
         }))
+        .on_action(cx.listener(|this, _: &NewImportRecipe, window, cx| {
+            this.dispatch_command(crate::search::CommandId::NewRecipe, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &EditImportRecipe, window, cx| {
+            this.dispatch_command(crate::search::CommandId::EditRecipe, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &RefreshRecipeTable, window, cx| {
+            this.dispatch_command(crate::search::CommandId::RefreshRecipeTable, window, cx);
+        }))
         .on_action(cx.listener(|this, _: &RefreshAllPivots, _, cx| {
             this.refresh_all_pivots(cx);
         }))
