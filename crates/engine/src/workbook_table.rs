@@ -977,7 +977,9 @@ impl Workbook {
 
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
-            version: if self.sheets.iter().any(|s| s.table_view_spec().is_some()) {
+            version: if self.sheets.iter().any(|s| {
+                s.table_view_spec().is_some_and(|v| v.requires_persistence())
+            }) {
                 3
             } else if self
                 .tables()
@@ -997,7 +999,7 @@ impl Workbook {
                     sheet: i,
                     tables: s.tables().to_vec(),
                     column_allocators: s.table_column_allocators.clone(),
-                    view: s.table_view_spec.clone(),
+                    view: s.table_view_spec.clone().filter(|v| v.requires_persistence()),
                 })
                 .collect(),
         }

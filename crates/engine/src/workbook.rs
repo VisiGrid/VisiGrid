@@ -2142,7 +2142,7 @@ impl Workbook {
         let sheet = self.sheets.get_mut(sheet_index).ok_or("Sheet no longer exists.")?;
         if row >= sheet.rows || col >= sheet.cols { return Err("Cell is outside the sheet.".into()); }
         if let Some(error) = sheet.table_value_write_error(row, col) { return Err(error); }
-        if sheet.is_pivot_owned(row,col) || sheet.get_merge(row,col).is_some() || sheet.is_spill_receiver(row,col) {
+        if sheet.is_pivot_owned(row,col) || sheet.get_merge(row,col).is_some_and(|m| m.start != (row,col)) || sheet.is_spill_receiver(row,col) {
             return Err("Cannot restore a protected, merged or spilled cell.".into());
         }
         let id = sheet.id;

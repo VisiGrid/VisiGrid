@@ -143,7 +143,7 @@ Whole-row projection is eligible only when the Table's body row band has no mean
 
 Each Sheet owns at most one saved `TableViewSpec`. `Workbook::set_table_view_spec` validates bindings and layout, refuses owner switches until cleared, and returns a sparse `TableViewCommit`. `apply_table_view_commit` supports undo/redo with an exact current-criteria precondition and fresh validation of the target. Failure leaves the document and revision unchanged. A real view change increments the workbook revision once, without recalculating cells or bumping the sheet's data generation; a no-op does not dirty the document. Recovery workbooks refuse these changes too. The desktop history stack records these criteria commits for undo/redo.
 
-Native save variants and full JSON preserve the criteria in **Tables catalog version 3**, alongside each sheet's Table definitions. Table and field IDs survive saved-sheet ID remapping. Versions 1 and 2 remain readable and are still emitted when there are no saved views (depending on calculated rules). Clearing the last view therefore does not force a newer format forever. VisiGrid 0.42's version-2 reader treats view-bearing files as future-format files and offers read-only recovery. The outer full-JSON version remains 3.
+Native save variants and full JSON preserve the criteria in **Tables catalog version 3**, alongside each sheet's Table definitions. Table and field IDs survive saved-sheet ID remapping. Versions 1 and 2 remain readable and are still emitted when no sort, filter or hidden filter-button setting remains (depending on calculated rules). An empty spec with visible buttons is omitted on save, including after independent Clear sort/Clear filters actions; clearing the last criterion therefore does not force a newer format forever. Hidden buttons alone still require version 3. VisiGrid 0.42's version-2 reader treats view-bearing files as future-format files and offers read-only recovery. The outer full-JSON version remains 3.
 
 Only intent is persisted: never cached row order, visibility masks or computed filter menus. `Sheet::build_saved_table_view` resolves current bounds/IDs and builds from current computed values after loading/calculation. View criteria do not affect semantic fingerprints or aggregate membership. Unknown view fields, missing IDs, duplicate criteria, nonfinite numeric criteria, invalid schema bounds, version mismatches and two competing JSON view owners are refused. Restore validates the entire catalog before replacing any Table/view metadata; current-format corruption and future versions retain their distinct recovery paths. Save entry points validate bindings before writing.
 
@@ -171,7 +171,7 @@ The name box, Go To and formula point-picking use canonical cell addresses. A1 r
 
 While Table sort/filter criteria are saved, direct entry, F2, formula-bar/IME edits, Delete, and ordinary Paste/Paste Special can also edit safe cells above or below a Table and on other sheets. A sheet does not need a Table of its own. Source and destination coordinates are resolved through the current row projection before writes. A paste beginning in a Table body remains bounded to that body; a paste beginning outside uses consecutive visible worksheet rows. One-cell paste broadcasts through the visible selection. Table growth, schema changes and calculated-column rule changes are not inferred from these cell edits.
 
-The entire batch is checked before mutation. Table headers, hidden Table records, PivotTable output, spill receivers, covered merged cells, out-of-bounds cells and cells beside a Table's body are protected. A merged cell's top-left cell can be edited. Any invalid target rejects the complete batch, including mixed selections. Merged clipboard sources remain unsupported. The 100,000-cell limit applies.
+The entire batch is checked before mutation. Table headers, hidden Table records, PivotTable output, spill receivers, covered merged cells, out-of-bounds cells and cells beside a Table's body are protected. A merged cell's top-left cell can be edited and restored by undo/redo and rewind; its merge stays intact. Any invalid target rejects the complete batch, including mixed selections. Merged clipboard sources remain unsupported. The 100,000-cell limit applies.
 
 Recalculation runs on a candidate workbook, then every saved Table view and its desktop layout are validated. Cross-sheet precedents can change filter membership and sort order; each projection refreshes from the new computed values without clearing criteria. A new spill that consumes another paste target or makes any saved Table layout unsafe rejects the edit. The edit buffer remains available for correction after a failed direct edit.
 
@@ -280,6 +280,8 @@ Phase 2 feature scope is frozen. It includes saved Table criteria and header con
 
 Feature-complete does not mean released. Merge review/CI, release builds, platform smoke tests and fixes for confirmed safety or correctness defects remain Phase 2 release work. Linux live coverage and dated test results are recorded below; macOS/Windows live UI verification is outstanding. Advertise XLSX as the documented interoperability subset. Do not claim lossless Excel parity or unmeasured large-data performance.
 
+Phase 2 retains the workbook-wide criteria guard for unsupported commands, including formatting, conditional formatting, comments, Find/Replace, named ranges, freeze panes, merging and worksheet sort/AutoFilter, plus unrelated legacy history. The refusal explicitly names this workbook-wide scope, including Tables on other sheets. Supported edits/history use the guarded paths documented above. Narrowing restrictions needs dependency-aware validation: an edit on another sheet can change a Table's formulas or create an unsafe spill. Candidate workbooks use copy-on-write storage, but validation/recalculation costs still need measurement.
+
 ## Phase 3 backlog
 
 1. Create, resize and append Tables while criteria are active; start with appending records and filling calculated columns without clearing filters.
@@ -287,13 +289,25 @@ Feature-complete does not mean released. Merge review/CI, release builds, platfo
 3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
 5. Named saved views and richer mixed-layout support beyond the current saved criteria.
-6. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
+6. Narrow workbook-wide command/history restrictions where safe, and measure candidate validation/recalculation on large workbooks before optimizing.
+7. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
 
 Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.
+
+### PR #83 review follow-ups
+
+- Inspect worksheet relationships before reading worksheet XML for Tables, so the 32 MB Table-parser limit does not reject unrelated large sheets or produce a misleading warning.
+- Bound Table counts and reduce repeated import validation to prevent pathological import times from many tiny Tables.
+- Confirm the recovery export policy: XLSX salvage is currently blocked along with other exports; any future salvage path must explicitly describe lost definitions and potentially stale values.
+- Document automation boundaries for agent users: direct MCP/session writes use canonical addresses and may explicitly change hidden records without a desktop approval step. Reviewed proposals and Lua row-deletion reviews use their separate approval flow.
+- Enforce Excel's 255-character Table-name limit at interchange boundaries and make saved filter-value ordering deterministic.
+- Disclose that older readers can drop all pivot definitions on a sheet containing a Table-backed pivot, retaining output values. Verify exported this-row references (`[@Col]`) in Microsoft Excel.
 
 Existing PivotTables remain a separate feature.
 
 ## Verification
+
+PR #83 review fixes, 2026-10-02: all 27 engine Table-view/state tests, 8 Table-view I/O tests and 12 desktop outside-edit tests passed. Regressions cover merged-title undo/redo/rewind with criteria on another sheet, preserved merges and covered-cell refusal, independent criterion clearing back to catalog version 1/2 across four native save paths and both JSON exporters, and hidden-button-only version 3 persistence. These fixes do not narrow the workbook-wide command guard.
 
 Table-backed pivots, 2026-10-02: the combined engine, I/O, session-host and desktop run passed 2,002 tests (27 existing ignores), including 628 desktop tests. Native QA then exposed a pre-existing omission in the desktop full-save writer; after adding pivot metadata to that path, all 322 I/O tests passed (9 existing ignores), including the new full-save regression for Table and range sources. The final launchable desktop build passed. Linux UI verification covered keyboard source selection, creation from a filtered Table including hidden records, creation/refresh undo and redo while criteria remain active, source edits, stale feedback, column rename, appended-row inclusion, and desktop save/reopen followed by another source edit and successful refresh. SQLite inspection confirmed persisted Table/column IDs and output values. Automated cases additionally cover missing/reused identities, structural column movement, empty sources, source-generation invalidation, native/full-JSON roundtrips, and atomic rejection of a refresh that would spill beside a filtered Table on another sheet. macOS/Windows live UI remains untested.
 

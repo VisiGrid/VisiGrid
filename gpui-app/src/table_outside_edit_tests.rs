@@ -351,3 +351,53 @@ fn replay_compares_schema_by_identity_after_an_intervening_rename_is_undone() {
     history.replay(&mut after, false).unwrap();
     assert_eq!(after.active_sheet().get_raw(10, 0), "note");
 }
+
+#[test]
+fn merged_title_edits_support_undo_redo_and_rewind_with_table_criteria() {
+    let mut before = with_controls();
+    before.set_active_sheet(1);
+    before.set_cell_value_tracked(1, 8, 0, "Original title");
+    before
+        .sheet_mut(1)
+        .unwrap()
+        .add_merge(MergedRegion {
+            start: (8, 0),
+            end: (8, 2),
+        })
+        .unwrap();
+    let writes = vec![TableCellWrite::value(8, 0, "Revised title".into())];
+    let mut after = prepare_table_writes(&before, 1, &writes).unwrap();
+    let edit = commit(&before, &after, 1, &writes);
+    edit.replay(&mut after, true).unwrap();
+    assert_eq!(after.sheet(1).unwrap().get_raw(8, 0), "Original title");
+    edit.replay(&mut after, false).unwrap();
+    assert_eq!(after.sheet(1).unwrap().get_raw(8, 0), "Revised title");
+    assert_eq!(after.sheet(1).unwrap().get_merge(8, 0).unwrap().end, (8, 2));
+    assert!(after.restore_cell_tracked(1, 8, 1, None).is_err());
+    assert_eq!(records(&after), records(&before));
+    let mut history = History::new();
+    history.record_action_with_provenance(
+        UndoAction::TableCellsChanged {
+            sheet_index: 1,
+            commit: Box::new(edit),
+            description: "Edit merged title".into(),
+        },
+        None,
+    );
+    for (position, title) in [(0, "Original title"), (1, "Revised title")] {
+        let rebuilt = history
+            .build_workbook_before(position, Some(&before), 100, 10_000)
+            .unwrap();
+        assert_eq!(rebuilt.workbook.sheet(1).unwrap().get_raw(8, 0), title);
+        assert_eq!(
+            rebuilt
+                .workbook
+                .sheet(1)
+                .unwrap()
+                .get_merge(8, 0)
+                .unwrap()
+                .end,
+            (8, 2)
+        );
+    }
+}

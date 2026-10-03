@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Editing a merged title while Table criteria are active now supports undo, redo and history rewind without blocking earlier history.
+- Clearing the last Table sort/filter now saves the older compatible Table catalog format when filter buttons are visible. Hidden buttons still require catalog version 3.
+- Unsupported commands now explain that active Table sorting/filtering restricts them across the workbook, including sheets without Tables. Narrower restrictions remain planned.
+
 - **Clearer change review.** The Review card has full-width Before/After comparisons with scrollable formulas, a separate worksheet-preview control, a contained filter notice, and larger Apply/Discard actions. Card clicks keep keyboard focus in Review without selecting cells underneath; Enter and Escape now reach the Review actions.
 
 - **Review Lua changes with Table filters active.** Review reveals source worksheet rows, including filtered records, and supports guarded cell edits and row-deletion previews. Apply restores the saved view and records one undoable transaction with row layout preserved. Session proposals still require approval in the desktop; stale plans and unsafe candidates leave the workbook unchanged.

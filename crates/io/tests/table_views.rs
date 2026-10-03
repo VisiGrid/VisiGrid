@@ -129,25 +129,92 @@ fn json_single_and_multi_sheet_roundtrips_owner_after_sheet_id_remapping() {
         assert_ne!(loaded.active_sheet().id, SheetId(77));
     }
     let loaded = json::import_any(&multi).unwrap().0;
-    assert_eq!(loaded.sheet(1).unwrap().table_view_spec(), Some(&other));
+    assert!(loaded.sheet(1).unwrap().table_view_spec().is_none());
 }
 
 #[test]
-fn cleared_views_keep_legacy_catalog_versions_and_calculated_rules() {
-    let (mut wb, spec) = fixture();
+fn clearing_last_criterion_omits_empty_views_on_every_save_path() {
+    for calculated in [false, true] {
+        for clear_sort_first in [false, true] {
+            let (mut wb, mut spec) = fixture();
+            spec.show_filter_buttons = true;
+            if calculated {
+                wb.set_calculated_column(spec.table, 1, 3, "=ROW()", true)
+                    .unwrap();
+            }
+            wb.set_table_view_spec(SheetId(77), Some(spec.clone()))
+                .unwrap();
+            if clear_sort_first {
+                spec.clear_sort();
+            } else {
+                spec.clear_filters();
+            }
+            wb.set_table_view_spec(SheetId(77), Some(spec.clone()))
+                .unwrap();
+            assert_eq!(wb.saved_tables().version, 3, "remaining criterion needs v3");
+            spec.clear_sort();
+            spec.clear_filters();
+            // Clear sort/filters leave Some(empty), unlike the Clear view action.
+            wb.set_table_view_spec(SheetId(77), Some(spec.clone()))
+                .unwrap();
+            assert!(wb.active_sheet().table_view_spec().is_some());
+            let expected_version = if calculated { 2 } else { 1 };
+            assert_eq!(wb.saved_tables().version, expected_version);
+            assert!(wb.saved_tables().sheets[0].view.is_none());
+            let check_cleared = |loaded: Workbook| {
+                assert!(loaded.read_only_reason().is_none());
+                assert!(loaded.active_sheet().table_view_spec().is_none());
+                assert_eq!(loaded.saved_tables().version, expected_version);
+                assert_eq!(
+                    loaded.table(spec.table).unwrap().1.columns[0]
+                        .formula
+                        .is_some(),
+                    calculated
+                );
+            };
+            for raw in [
+                json::export_full(wb.active_sheet()).unwrap(),
+                json::export_workbook(&wb, &[], 0).unwrap(),
+            ] {
+                let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(doc["table_catalog"]["version"], expected_version);
+                check_cleared(json::import_any(&raw).unwrap().0);
+            }
+            let dir = tempfile::tempdir().unwrap();
+            for mode in 0..4 {
+                let path = dir.path().join(format!("cleared-{mode}.sheet"));
+                match mode {
+                    0 => native::save_workbook(&wb, &path).unwrap(),
+                    1 => native::save_workbook_with_metadata(&wb, &Default::default(), &path)
+                        .unwrap(),
+                    2 => native::save_workbook_full(&wb, &Default::default(), &[], &[], &path)
+                        .unwrap(),
+                    _ => native::save(wb.active_sheet(), &path).unwrap(),
+                }
+                check_cleared(native::load_workbook(&path).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_filter_buttons_without_criteria_still_require_version_three() {
+    let (mut wb, mut spec) = fixture();
+    spec.clear_sort();
+    spec.clear_filters();
     wb.set_table_view_spec(SheetId(77), Some(spec.clone()))
         .unwrap();
-    wb.set_table_view_spec(SheetId(77), None).unwrap();
-    assert_eq!(wb.saved_tables().version, 1);
-    wb.set_calculated_column(spec.table, 1, 3, "=ROW()", true)
-        .unwrap();
-    assert_eq!(wb.saved_tables().version, 2);
+    assert_eq!(wb.saved_tables().version, 3);
     let raw = json::export_workbook(&wb, &[], 0).unwrap();
-    let loaded = json::import_any(&raw).unwrap().0;
-    assert!(loaded.active_sheet().table_view_spec().is_none());
-    assert!(loaded.table(spec.table).unwrap().1.columns[0]
-        .formula
-        .is_some());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hidden-buttons.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    for loaded in [
+        json::import_any(&raw).unwrap().0,
+        native::load_workbook(&path).unwrap(),
+    ] {
+        assert_eq!(loaded.active_sheet().table_view_spec(), Some(&spec));
+    }
 }
 
 #[test]
