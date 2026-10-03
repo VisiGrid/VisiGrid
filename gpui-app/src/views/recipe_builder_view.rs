@@ -226,11 +226,13 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
 fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let focused = b.pane == Pane::Steps;
     let report = b.full.as_ref();
-    let mut list = div().flex().flex_col().gap(px(4.0));
+    // Direct children of the scroll container, so scroll_to_item can keep
+    // the selected step and the add menu in view
+    let mut list: Vec<AnyElement> = Vec::new();
 
     // The source itself, as "step 0": preview straight from the file
     let on = b.selected.is_none();
-    list = list.child(step_row(
+    list.push(step_row(
         "recipe-step-source".into(),
         "0".into(),
         "Read the file".into(),
@@ -242,7 +244,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
         c,
         cx,
         None,
-    ));
+    ).into_any_element());
     for (i, step) in b.recipe.steps.iter().enumerate() {
         let r = report.and_then(|r| r.steps.get(i));
         let meta = match r {
@@ -270,7 +272,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
                 r.note.clone()
             }
         });
-        list = list.child(step_row(
+        list.push(step_row(
             format!("recipe-step-{i}"),
             (i + 1).to_string(),
             step.describe(),
@@ -282,7 +284,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
             c,
             cx,
             Some(i),
-        ));
+        ).into_any_element());
     }
 
     let mut add = div()
@@ -302,12 +304,16 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
         .child("+ Add step")
         .child(div().text_color(c.muted).child("A"))
         .on_mouse_down(MouseButton::Left, cx.listener(with_builder(|b| {
-            b.add_menu = if b.add_menu.is_some() { None } else { Some(0) };
+            if b.add_menu.is_some() {
+                b.add_menu = None;
+            } else {
+                b.open_add_menu();
+            }
         })));
     if b.full.is_none() {
         add = add.opacity(0.5);
     }
-    list = list.child(add);
+    list.push(add.into_any_element());
     if let Some(sel) = b.add_menu {
         let mut menu = div().p(px(4.0)).rounded(px(6.0)).border_1().border_color(c.border).bg(c.grid_bg).flex().flex_col();
         for (k, (label, help)) in ADD_KINDS.iter().enumerate() {
@@ -330,7 +336,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
                     .on_mouse_down(MouseButton::Left, cx.listener(with_builder(move |b| b.add_step(k)))),
             );
         }
-        list = list.child(menu);
+        list.push(menu.into_any_element());
     }
 
     div()
@@ -360,7 +366,11 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
                 .overflow_y_scroll()
                 .track_scroll(&b.steps_scroll)
                 .px(px(10.0))
-                .child(list),
+                .pb(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .children(list),
         )
         .child(
             div()

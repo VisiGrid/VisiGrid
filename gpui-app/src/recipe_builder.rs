@@ -503,6 +503,7 @@ impl RecipeBuilder {
         let at = self.selected.map_or(0, |i| i + 1);
         self.recipe.steps.insert(at, step);
         self.selected = Some(at);
+        self.reveal_selected();
         self.add_menu = None;
         self.pane = Pane::Editor;
         self.editor_focus = 0;
@@ -534,12 +535,26 @@ impl RecipeBuilder {
         if let Some(j) = j {
             self.recipe.steps.swap(i, j);
             self.selected = Some(j);
+            self.reveal_selected();
             self.changed();
         }
     }
 
+    /// Keep the selected step (row 0 is the source) in view.
+    pub fn reveal_selected(&self) {
+        self.steps_scroll.scroll_to_item(self.selected.map_or(0, |i| i + 1));
+    }
+
+    /// Open the add-step menu and scroll it into view (it follows the
+    /// source row, every step and the "+ Add step" button).
+    pub fn open_add_menu(&mut self) {
+        self.add_menu = Some(0);
+        self.steps_scroll.scroll_to_item(self.recipe.steps.len() + 2);
+    }
+
     pub fn select(&mut self, step: Option<usize>) {
         self.selected = step.filter(|i| *i < self.recipe.steps.len());
+        self.reveal_selected();
         self.editor_focus = 0;
         self.text_selected = false;
         self.recompute();
@@ -939,7 +954,7 @@ impl Spreadsheet {
                         b.pane = Pane::Editor;
                         b.editor_focus = 0;
                     }
-                    "a" | "+" => b.add_menu = Some(0),
+                    "a" | "+" => b.open_add_menu(),
                     "delete" | "backspace" => b.remove_step(),
                     _ => {}
                 }
