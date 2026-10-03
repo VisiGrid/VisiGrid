@@ -1867,17 +1867,13 @@ impl Workbook {
         // (INDIRECT, OFFSET) have no edge from the receivers they read, so
         // the graph cannot find them. They are re-evaluated in every round
         // that placed something, the same way Phase 3 evaluates them last.
-        let dynamic_readers: Vec<CellId> = self
-            .dep_graph
-            .formula_cells()
-            .filter(|cell_id| {
-                self.sheet_by_id(cell_id.sheet)
-                    .and_then(|sheet| sheet.get_cell_opt(cell_id.row, cell_id.col))
-                    .and_then(|cell| cell.value().formula_ast())
-                    .map(crate::formula::analyze::has_dynamic_deps)
-                    .unwrap_or(false)
-            })
-            .collect();
+        //
+        // Found lazily, on the first round that placed or cleared something.
+        // Finding them reads every formula in the workbook, and most calls
+        // place nothing: an ordinary edit with no array in reach used to pay
+        // that scan anyway, which was 60 ms of a one-dependent edit on 200k
+        // formulas (the ordering itself was already confined to the dirty set).
+        let mut dynamic_readers: Option<Vec<CellId>> = None;
         // What each cell was given this recalc. A dynamic formula is
         // re-evaluated every round, and one that returns an array queues that
         // array every time; placing the same array again is not a change, and
@@ -1984,6 +1980,18 @@ impl Workbook {
             // formulas the graph cannot see.
             // The dynamic readers are seeds, not an afterthought: what reads
             // an INDIRECT that just changed is as stale as the INDIRECT.
+            let dynamic_readers: &Vec<CellId> = dynamic_readers.get_or_insert_with(|| {
+                self.dep_graph
+                    .formula_cells()
+                    .filter(|cell_id| {
+                        self.sheet_by_id(cell_id.sheet)
+                            .and_then(|sheet| sheet.get_cell_opt(cell_id.row, cell_id.col))
+                            .and_then(|cell| cell.value().formula_ast())
+                            .map(crate::formula::analyze::has_dynamic_deps)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            });
             let mut readers: FxHashSet<CellId> = dynamic_readers.iter().copied().collect();
             let mut stack: Vec<CellId> = touched.into_iter().chain(dynamic_readers.iter().copied()).collect();
             while let Some(cell) = stack.pop() {
@@ -3406,6 +3414,25 @@ mod tests {
         wb.rebuild_dep_graph();
         wb.recompute_full_ordered_with_custom_fns(&spill_handler);
         assert_eq!(wb.active_sheet().get_display(0, 2), "3");
+    }
+
+    /// The incremental path finds dynamic readers lazily (only once a round
+    /// places something). An edit that grows a spill must still reach a cell
+    /// that reads a new receiver through INDIRECT, and its dependents.
+    #[test]
+    fn test_incremental_edit_settles_dynamic_reader_of_a_grown_spill() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 1, "2");
+        wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(B1)");
+        wb.set_cell_value_tracked(0, 0, 2, "=INDIRECT(\"A3\")");
+        wb.set_cell_value_tracked(0, 0, 3, "=C1*10");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "", "A3 is empty while the array has two rows");
+        wb.set_cell_value_tracked(0, 0, 1, "3");
+        assert_eq!(wb.active_sheet().get_display(2, 0), "3", "the array grew");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "3", "INDIRECT sees the new receiver");
+        assert_eq!(wb.active_sheet().get_display(0, 3), "30", "and its dependent follows");
+        wb.set_cell_value_tracked(0, 0, 1, "1");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "", "shrinking clears the receiver it read");
     }
 
     #[test]

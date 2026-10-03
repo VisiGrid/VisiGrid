@@ -1730,6 +1730,81 @@ mod tests {
         assert_eq!(order, vec![b, c]);
     }
 
+    /// The incremental recalc orders only the dirty set. Across chain, diamond,
+    /// fan-out, cross-sheet and mixed shapes, starting from every source, the
+    /// order must hold exactly the forward closure and respect every edge
+    /// inside it; and it must agree with the full order restricted to the same
+    /// cells wherever the full order is forced (a chain has only one order).
+    #[test]
+    fn topo_order_subset_is_a_valid_order_of_the_forward_closure() {
+        fn graph_of(edges: &[(CellId, &[CellId])]) -> DepGraph {
+            let mut g = DepGraph::new();
+            for (formula, preds) in edges {
+                g.replace_edges(*formula, preds.iter().copied().collect());
+            }
+            g
+        }
+        fn closure(g: &DepGraph, from: CellId) -> FxHashSet<CellId> {
+            let mut seen: FxHashSet<CellId> = FxHashSet::default();
+            let mut stack = vec![from];
+            while let Some(c) = stack.pop() {
+                for d in g.dependents(c) {
+                    if seen.insert(d) {
+                        stack.push(d);
+                    }
+                }
+            }
+            seen
+        }
+        let c = |s: u64, r: usize| cell(s, r, 0);
+        let shapes: Vec<(&str, Vec<(CellId, Vec<CellId>)>)> = vec![
+            ("chain", (1..12).map(|r| (c(1, r), vec![c(1, r - 1)])).collect()),
+            ("diamond", vec![
+                (c(1, 1), vec![c(1, 0)]),
+                (c(1, 2), vec![c(1, 0)]),
+                (c(1, 3), vec![c(1, 1), c(1, 2)]),
+                (c(1, 4), vec![c(1, 3), c(1, 0)]),
+            ]),
+            ("fan-out", (1..40).map(|r| (c(1, r), vec![c(1, 0)])).chain([(c(1, 40), (1..40).map(|r| c(1, r)).collect())]).collect()),
+            ("cross-sheet", vec![
+                (c(2, 0), vec![c(1, 0)]),
+                (c(1, 1), vec![c(2, 0)]),
+                (c(3, 0), vec![c(1, 1), c(2, 0)]),
+                (c(1, 2), vec![c(3, 0)]),
+            ]),
+            ("mixed", (1..60).map(|r| (c(1, r), (0..r).filter(|p| (r * 7 + p * 3) % 5 == 0 || *p == r - 1).map(|p| c(1, p)).collect())).collect()),
+        ];
+        for (name, edges) in &shapes {
+            let borrowed: Vec<(CellId, &[CellId])> = edges.iter().map(|(f, p)| (*f, p.as_slice())).collect();
+            let g = graph_of(&borrowed);
+            let full = g.topo_order_all_formulas().expect("acyclic");
+            let mut sources: FxHashSet<CellId> = edges.iter().flat_map(|(_, p)| p.iter().copied()).collect();
+            sources.extend(edges.iter().map(|(f, _)| *f));
+            for source in sources {
+                let dirty = closure(&g, source);
+                if dirty.is_empty() {
+                    continue;
+                }
+                let order = g.topo_order_subset(&dirty).expect("acyclic subset");
+                let ordered: FxHashSet<CellId> = order.iter().copied().collect();
+                assert_eq!(ordered, dirty, "{name}: order must hold exactly the dirty set");
+                assert_eq!(order.len(), dirty.len(), "{name}: no cell twice");
+                let position: FxHashMap<CellId, usize> = order.iter().enumerate().map(|(i, c)| (*c, i)).collect();
+                for (formula, preds) in edges {
+                    for pred in preds {
+                        if let (Some(&pf), Some(&pp)) = (position.get(formula), position.get(pred)) {
+                            assert!(pp < pf, "{name}: {pred:?} must come before its dependent {formula:?}");
+                        }
+                    }
+                }
+                if *name == "chain" {
+                    let restricted: Vec<CellId> = full.iter().copied().filter(|c| dirty.contains(c)).collect();
+                    assert_eq!(order, restricted, "{name}: the only valid order");
+                }
+            }
+        }
+    }
+
     #[test]
     fn topo_order_subset_reports_only_a_cycle_inside_the_set() {
         // X <-> Y is a live cycle; Z is an unrelated acyclic formula. Ordering
