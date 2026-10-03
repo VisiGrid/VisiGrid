@@ -557,7 +557,7 @@ mod tests {
             .unwrap();
         let mut history = History::new();
         history.record_action_with_provenance(
-            UndoAction::TableCommit {
+            UndoAction::TableCommit { header_layout: None,
                 sheet_index: 0,
                 commit: Box::new(commit),
                 description: "Paste headers".into(),

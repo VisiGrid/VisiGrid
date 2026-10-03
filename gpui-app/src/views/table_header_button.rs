@@ -8,7 +8,6 @@ use visigrid_engine::{
 
 #[derive(Clone, Copy)]
 enum Mark {
-    Chevron,
     Ascending,
     Descending,
     Filter,
@@ -21,11 +20,6 @@ fn mark(kind: Mark, color: Hsla, zoom: f32) -> impl IntoElement {
             let p = |x, y| bounds.origin + point(px(x * zoom), px(y * zoom));
             let mut path = PathBuilder::stroke(px(1.4 * zoom));
             match kind {
-                Mark::Chevron => {
-                    path.move_to(p(2.5, 4.5));
-                    path.line_to(p(6.0, 8.0));
-                    path.line_to(p(9.5, 4.5));
-                }
                 Mark::Ascending | Mark::Descending => {
                     let (tip, tail) = if matches!(kind, Mark::Ascending) {
                         (2.0, 10.0)
@@ -186,7 +180,7 @@ pub(super) fn render(
             ))
         })
         .when(filtered, |d| d.child(mark(Mark::Filter, color, zoom)))
-        .child(mark(Mark::Chevron, color, zoom))
+        .child(super::chevron::render(color, zoom, false))
 }
 
 struct HeaderTooltip {

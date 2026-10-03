@@ -80,11 +80,47 @@ fn formula_origin_is_default(value: &usize) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableStyle {
     pub banded_rows: bool,
+    /// Built-in OOXML style identity, retained for Excel round trips. None is
+    /// Excel's explicit "no style". Native rendering still uses the app theme.
+    #[serde(default = "default_excel_style")]
+    pub excel_style: Option<String>,
+    #[serde(default)]
+    pub banded_columns: bool,
+    #[serde(default)]
+    pub first_column: bool,
+    #[serde(default)]
+    pub last_column: bool,
+}
+
+fn default_excel_style() -> Option<String> {
+    Some("TableStyleMedium2".into())
+}
+
+impl TableStyle {
+    pub fn is_builtin_excel_style(name: &str) -> bool {
+        [
+            ("TableStyleLight", 21),
+            ("TableStyleMedium", 28),
+            ("TableStyleDark", 11),
+        ]
+        .iter()
+        .any(|(prefix, max)| {
+            name.strip_prefix(prefix)
+                .and_then(|n| n.parse::<u8>().ok().map(|v| (n, v)))
+                .is_some_and(|(n, v)| v > 0 && v <= *max && n == v.to_string())
+        })
+    }
 }
 
 impl Default for TableStyle {
     fn default() -> Self {
-        Self { banded_rows: true }
+        Self {
+            banded_rows: true,
+            excel_style: default_excel_style(),
+            banded_columns: false,
+            first_column: false,
+            last_column: false,
+        }
     }
 }
 
@@ -147,6 +183,14 @@ impl DataTable {
     pub fn validate(&self, rows: usize, cols: usize) -> Result<(), String> {
         self.range.validate(rows, cols)?;
         validate_table_name(&self.name)?;
+        if self
+            .style
+            .excel_style
+            .as_deref()
+            .is_some_and(|name| !TableStyle::is_builtin_excel_style(name))
+        {
+            return Err("Unsupported Excel Table style identity.".into());
+        }
         if self.id.0 == 0 || self.id.0 == u64::MAX || self.columns.len() != self.range.width() {
             return Err("Invalid table identity or column count.".into());
         }

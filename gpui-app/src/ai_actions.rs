@@ -1217,6 +1217,8 @@ sheet:cols()
 
         // Store preview
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
+            source_layout: self.structure_layout(self.wb(cx).sheet(source_sheet_index).unwrap().id),
+            source_frozen: if source_sheet_index == self.sheet_index(cx) { (self.view_state.frozen_rows, self.view_state.frozen_cols) } else { self.wb(cx).sheet(source_sheet_index).unwrap().frozen_panes },
             script_path,
             script_hash,
             cells_written,
@@ -1333,6 +1335,8 @@ sheet:cols()
             });
 
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
+            source_layout: self.structure_layout(self.wb(cx).sheet(source_sheet_index).unwrap().id),
+            source_frozen: if source_sheet_index == self.sheet_index(cx) { (self.view_state.frozen_rows, self.view_state.frozen_cols) } else { self.wb(cx).sheet(source_sheet_index).unwrap().frozen_panes },
             script_path: path,
             script_hash,
             cells_written,
@@ -1353,85 +1357,26 @@ sheet:cols()
     }
     /// Apply the pending Lua preview to a new sheet.
     pub fn apply_lua_to_new_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_table_view_edit(cx) { return; }
+        if self.block_read_only_recovery(cx) || self.is_previewing() { return; }
         use crate::terminal::state::PendingResult;
-
-        let preview = match self.terminal.pending_result.take() {
-            Some(PendingResult::LuaPreview(data)) => data,
-            other => {
-                self.terminal.pending_result = other;
-                return;
+        let Some(PendingResult::LuaPreview(preview)) = self.terminal.pending_result.as_ref() else { return; };
+        let result = (|| {
+            if preview.error.is_some() { return Err("Cannot copy: Lua script had errors.".to_string()); }
+            let prepared = preview.prepared_plan.as_ref().ok_or("Cannot copy: complete materialized preview is unavailable.")?;
+            let hash_prefix: String = preview.script_hash.chars().take(8).collect();
+            crate::review_copy::prepare_copy(self.wb(cx), prepared, &preview.source_layout, preview.source_frozen, &format!("AI Result - {hash_prefix}"))
+        })();
+        match result.and_then(|(candidate, history)| {
+            let name = history.sheet.name.clone();
+            self.publish_review_copy(candidate, history, cx)?;
+            Ok(name)
+        }) {
+            Ok(name) => {
+                self.terminal.pending_result = None;
+                self.status_message = Some(format!("Copied reviewed sheet to '{name}', including hidden records. Formulas remain live."));
             }
-        };
-
-        // Refuse if preview had error
-        if preview.error.is_some() {
-            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
-            self.status_message = Some("Cannot apply: Lua script had errors.".into());
-            cx.notify();
-            return;
+            Err(error) => self.status_message = Some(error),
         }
-
-        let Some(prepared) = preview.prepared_plan.as_ref() else {
-            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
-            self.status_message = Some("Cannot copy: complete materialized preview is unavailable.".into());
-            cx.notify();
-            return;
-        };
-        let Some(preview_sheet) = prepared
-            .preview_workbook()
-            .sheet_by_id(prepared.plan().source_sheet_id)
-            .cloned()
-        else {
-            self.terminal.pending_result = Some(PendingResult::LuaPreview(preview));
-            self.status_message = Some("Cannot copy: preview source sheet is unavailable.".into());
-            cx.notify();
-            return;
-        };
-
-        let hash_prefix = if preview.script_hash.len() >= 8 {
-            &preview.script_hash[..8]
-        } else {
-            &preview.script_hash
-        };
-        let base_name = format!("AI Result - {}", hash_prefix);
-        let before_workbook = self.wb(cx).clone();
-        let before_row_view = self.row_view.clone();
-
-        // Copy the complete materialized preview, not just changed operations.
-        // This remains honest even when the original source has gone stale.
-        let (sheet_name, sheet_idx) = self.workbook.update(cx, |wb, _| {
-            let name = crate::structured_results::unique_sheet_name(wb, &base_name);
-            let idx = wb
-                .add_sheet_clone_named(&preview_sheet, &name)
-                .expect("unique preview sheet name must be accepted");
-            (name, idx)
-        });
-
-        self.review_mode = None;
-        let activated = self.activate_sheet(sheet_idx, cx);
-        debug_assert!(activated);
-        self.row_view = visigrid_engine::filter::RowView::new(crate::app::NUM_ROWS);
-        self.clear_selection_state();
-
-        let after_workbook = self.wb(cx).clone();
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::WorkbookSnapshot {
-                commit: Box::new(crate::history::WorkbookSnapshotCommit::new(
-                    format!("Copy reviewed result to '{}'", sheet_name),
-                    before_workbook,
-                    after_workbook,
-                )),
-                before_row_view,
-                after_row_view: self.row_view.clone(),
-            },
-            None,
-        );
-        self.is_modified = true;
-
-        self.status_message = Some(format!(
-            "Applied AI Lua to new sheet '{}'.", sheet_name
-        ));
         cx.notify();
     }
     /// Apply the pending Lua preview to the current (source) sheet.

@@ -320,24 +320,35 @@ pub(crate) fn handle_key_down(
         return;
     }
 
-    // Space hold-to-peek: preview workbook state before selected history entry
-    if event.keystroke.key == "space"
-        && !this.mode.is_editing()
-        && !this.is_previewing()
-        && this.selected_history_id.is_some()
-    {
-        if let Err(e) = this.enter_preview(cx) {
-            this.status_message = Some(format!("Preview failed: {}", e));
-            cx.notify();
+    // History selection survives closing the inspector and opening dialogs.
+    // Only the visible History tab owns these keys, with worksheet focus;
+    // text fields, inline sheet renaming and modified Space keep their input.
+    let history_keys_active = this.mode == Mode::Navigation
+        && this.inspector_visible
+        && this.inspector_tab == InspectorTab::History
+        && this.focus_handle.is_focused(window)
+        && this.renaming_sheet.is_none()
+        && !this.name_box_editing
+        && !event.keystroke.modifiers.modified();
+
+    // Space hold-to-peek. Consume key repeats too, so holding Space cannot
+    // fall through to the cell editor after the preview has started.
+    if history_keys_active && event.keystroke.key == "space" && this.selected_history_id.is_some() {
+        if !this.is_previewing() {
+            if let Err(e) = this.enter_preview(cx) {
+                this.status_message = Some(format!("Preview failed: {}", e));
+                cx.notify();
+            }
         }
+        cx.stop_propagation();
         return;
     }
 
-    // Space+Arrow scrubbing: while previewing, Up/Down navigates history entries
-    // Makes the feature visceral: "scrub the timeline"
-    if this.is_previewing() && (event.keystroke.key == "up" || event.keystroke.key == "down") {
+    // Space+Arrow scrubbing uses the same context as hold-to-peek.
+    if history_keys_active && this.is_previewing() && (event.keystroke.key == "up" || event.keystroke.key == "down") {
         let direction = if event.keystroke.key == "up" { -1i32 } else { 1 };
         this.scrub_preview(direction, cx);
+        cx.stop_propagation();
         return;
     }
 

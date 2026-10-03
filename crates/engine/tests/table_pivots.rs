@@ -175,8 +175,15 @@ fn pivot_placement_through_filtered_body_band_is_atomic() {
     p.id = wb.next_pivot_id();
     p.anchor_col = 5;
     p.extent = None;
-    wb.set_table_view_spec(source.sheet_id, Some(TableViewSpec::new(id)))
-        .unwrap();
+    let mut spec = TableViewSpec::new(id);
+    spec.filters.push(TableFilter {
+        column: wb.table(id).unwrap().1.columns[0].id,
+        criteria: ColumnFilter {
+            selected: Some([FilterKey::Text("west".into()).normalized()].into_iter().collect()),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(source.sheet_id, Some(spec)).unwrap();
     let (p, snapshot, generation) = wb.pivot_snapshot(&p).unwrap();
     let output = visigrid_engine::pivot::aggregate(&p.definition, &snapshot).unwrap();
     let commit = wb
@@ -228,8 +235,15 @@ fn refresh_rejects_recalculation_that_would_break_a_view_on_another_sheet() {
     let (mut wb, id, source, def) = fixture();
     let (pivot, _) = wb.create_pivot(source, def).unwrap();
     wb.set_cell_value_tracked(0, 0, 4, "=IF(Pivot!B4>35,SEQUENCE(3,1),0)");
-    wb.set_table_view_spec(source.sheet_id, Some(TableViewSpec::new(id)))
-        .unwrap();
+    let mut spec = TableViewSpec::new(id);
+    spec.filters.push(TableFilter {
+        column: wb.table(id).unwrap().1.columns[0].id,
+        criteria: ColumnFilter {
+            selected: Some([FilterKey::Text("west".into()).normalized()].into_iter().collect()),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(source.sheet_id, Some(spec)).unwrap();
     wb.set_cell_value_tracked(0, 2, 1, "40");
     let revision = wb.revision();
     assert!(

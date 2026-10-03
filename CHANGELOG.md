@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Headless XLSX export (`vgrid convert` and recipe output) now falls back to stored row order when saved sorting cannot safely be materialized, with a warning on stderr and Excel Reapply guidance. Recovery, schema and serialization errors still refuse before writing; output failures are not retried.
+
+- Excel export now offers **Export sorted** or **Keep stored order**. When sorted export is unsupported, stored order remains available with a clear Excel Reapply notice. The selected mode is checked again before writing and never silently changed. Both choices retain recovery/schema protections; the review now also discloses loss of conditional formatting and named-range definitions.
+
+- Excel Tables now retain saved single-column ascending/descending sorts through XLSX and native round trips, including with filters or hidden header controls. Export now writes records in the saved sort order using an isolated copy, keeps filtered-out records, moves formatting/comments with records, and rewrites supported formula references. No Reapply step is needed to display that order. Explicit sorted exports refuse unsupported formulas, metadata/layouts or changed calculation results before writing; the source workbook remains unchanged. Unsupported or unsafe sorts warn without partially applying their keys; supported filter metadata is handled separately.
+
+- Excel Table round trips now preserve built-in style identities, stripe/emphasis options, checkbox-value filters and uniform filter-button visibility, including through native saves. Export hides records that fail supported filters while retaining their cells and formulas. Unsupported or ambiguous filters and unsafe import layouts produce explicit warnings; custom styles/themes remain limited. Table names over Excel's 255-character limit refuse export before writing.
+
+- Copy a complete reviewed sheet without clearing Table sorting/filtering, including hidden records. Copied Tables and pivots get fresh identities, internal structured references follow the copies, and row layout follows reviewed deletions. The copy has atomic validation, one-step undo/redo and history rewind; external formulas remain live.
+
+- Create Tables above/below filtered or sorted Tables and on other sheets without clearing saved criteria. Both existing and generated headers are supported; header insertion, row layout and freeze panes undo together, with atomic validation and history rewind.
+
+- Resize Tables without clearing saved sorting or filters. Existing records and column identities are preserved, unsafe changes are refused atomically, and one-step undo/redo and history rewind restore the bounds and dependent formulas. Clear a column’s sort/filter before removing it.
+
+- Typing immediately below a sorted or filtered Table now appends a row, fills calculated columns and preserves criteria. The value, Percent format and row growth undo together; rejected edits stay open and stop save/close/navigation from discarding them.
+
+- Bulk paste can extend a sorted or filtered Table: existing visible records receive the first rows, overflow appends new records, and calculated columns fill automatically. The whole paste supports one-step undo/redo and reports new rows hidden by filters.
+
+- Add Table rows without clearing saved sort/filter criteria, using Add row or Tab from the last visible record. Calculated columns fill automatically; hidden new rows are explained, and a pending Tab edit plus append undo together.
+
+- History hold-to-preview now requires a visible History tab and worksheet focus. A previously selected history entry no longer steals spaces from the command palette, dialogs or sheet renaming; modified Space shortcuts retain their normal behavior.
+- The formula bar uses the same drawn chevron as Table controls, with a rounded hover target and an expanded state. The conditional-formatting dialog has clearer rule guidance, a separate live-preview/error area, and visible Cancel and Add/Save buttons.
+- Formatting, conditional formatting, comments and freeze panes now work on sheets without active Table criteria while another sheet has a sorted/filtered Table. Their undo/redo follows the target sheet; grouped history is checked before applying. Percent formatting that converts text to numbers retains the workbook-wide guard. Cleared criteria and hidden-button settings no longer enforce an active Table row projection.
+- Freeze-pane undo/redo now restores the sheet where the command ran, even after switching tabs. History rewind also restores frozen panes, including alongside Table structural changes.
+- Desktop native saves now preserve conditional-formatting rules on every sheet; the full-save path previously omitted them.
+
 ### Import recipes
 
 - **Clean an export once, refresh it every month.** An import recipe records how a CSV is cleaned: keep, remove and rename columns, declare types that are checked on every run, trim, filter rows and remove duplicates. Start one from **Data → New Import Recipe…**, the command palette, or **Make a recipe…** on the CSV banner. The builder shows the source settings (including the header line below title rows), each step's rows in and out, and a preview after any step with whole-file counts. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))

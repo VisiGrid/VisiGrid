@@ -2133,7 +2133,8 @@ impl Spreadsheet {
         self.sync_table_view(cx);
         let result = self.plan_table_paste(kind, cx);
         match result {
-            Ok(writes) => {
+            Ok((writes, Some(plan))) => self.paste_and_append_table(plan, writes, cx),
+            Ok((writes, None)) => {
                 self.apply_table_cell_writes(writes, "Paste cells", cx);
             }
             Err(error) => {
@@ -2147,7 +2148,7 @@ impl Spreadsheet {
         &self,
         kind: TablePasteKind,
         cx: &App,
-    ) -> Result<Vec<crate::table_edit::TableCellWrite>, String> {
+    ) -> Result<(Vec<crate::table_edit::TableCellWrite>, Option<crate::table_bulk_append::BulkAppendPlan>), String> {
         let item = cx.read_from_clipboard();
         let text = item.as_ref().and_then(|i| i.text());
         let metadata = item.as_ref().and_then(|i| i.metadata());
@@ -2196,6 +2197,7 @@ impl Spreadsheet {
         }
         let (start, col) = self.view_state.selected;
         let broadcast = grid.len() == 1 && width == 1 && self.is_multi_selection();
+        let mut append = None;
         let targets: Vec<(usize, usize, usize, usize)> = if broadcast {
             self.table_selection_targets(cx)?
                 .into_iter()
@@ -2205,15 +2207,20 @@ impl Spreadsheet {
             if !self.view_state.additional_selections.is_empty() {
                 return Err("Select one destination for a multi-cell paste.".into());
             }
-            crate::table_edit::view_safe_paste_targets(
-                self.sheet(cx),
-                &self.row_view,
-                (start, col),
-                grid.len(),
-                width,
-            )?
+            if kind != TablePasteKind::Formats {
+                append = crate::table_bulk_append::plan_bulk_append(
+                    self.sheet(cx), &self.row_view, (start, col), grid.len(), width,
+                )?;
+            }
+            if let Some(plan) = &append {
+                plan.targets.clone()
+            } else {
+                crate::table_edit::view_safe_paste_targets(
+                    self.sheet(cx), &self.row_view, (start, col), grid.len(), width,
+                )?
+            }
         };
-        Ok(table_paste_writes_for_sheet(self.sheet(cx), &grid, ic, kind, targets))
+        Ok((table_paste_writes_for_sheet(self.sheet(cx), &grid, ic, kind, targets), append))
     }
 }
 

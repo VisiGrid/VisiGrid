@@ -6,6 +6,11 @@ mod toolbar;
 mod desktop_keytips;
 mod pivot_ui;
 mod table_ui;
+mod table_append;
+mod table_resize;
+mod table_create;
+mod table_bulk_append;
+mod table_command_scope;
 mod table_header_paste;
 mod ai;
 mod ai_cli;
@@ -35,6 +40,7 @@ mod diff_actions;
 mod diff_view;
 mod editing;
 mod file_ops;
+mod xlsx_export;
 mod csv_import_ui;
 mod recipe_ui;
 mod recipe_builder;
@@ -94,6 +100,7 @@ mod table_edit;
 mod table_structure;
 mod table_batch;
 mod table_review;
+mod review_copy;
 #[cfg(test)]
 mod table_outside_edit_tests;
 #[cfg(test)]
@@ -1289,6 +1296,7 @@ pub(crate) fn try_quit(cx: &mut gpui::App) {
         let needs_prompt = h
             .update(cx, |this, window, cx| {
                 this.commit_pending_edit(cx);
+                if this.mode.is_editing() { window.activate_window(); cx.notify(); return true; }
                 let dirty = !this.quit_discarded && (this.is_modified || this.is_dirty());
                 if dirty {
                     this.close_confirm_visible = true;

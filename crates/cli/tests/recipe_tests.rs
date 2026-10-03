@@ -133,3 +133,16 @@ fn colliding_paths_are_refused_before_anything_is_written() {
     assert_eq!(o.status.code(), Some(2));
     assert!(std::fs::read_to_string(&recipe).unwrap().starts_with("version = 1"));
 }
+
+#[test]
+fn recipe_xlsx_output_uses_shared_headless_writer() {
+    let d = setup("xlsx_output");
+    let path = d.join("orders.xlsx");
+    let result = vgrid(&["recipe", "run", s(&d.join("orders.recipe.toml")), "-o", s(&path), "--quiet"]);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(result.stdout.is_empty());
+    let (wb, _) = visigrid_io::xlsx::import(&path).unwrap();
+    assert_eq!(wb.active_sheet().get_raw(1, 0), "00042");
+    assert_eq!(wb.active_sheet().get_raw(1, 1), "120.5");
+    assert_eq!(wb.active_sheet().get_raw(2, 0), "");
+}

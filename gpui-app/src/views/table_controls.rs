@@ -89,7 +89,7 @@ pub(crate) fn render_table_controls(
                 }
             }
             if view_only {
-                controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Editing visible records · clear view to change Table structure").into_any_element());
+                controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Editing visible records").into_any_element());
             }
             if !view_only && column.formula.is_some() {
                 let exception = app.sheet(cx).is_calculated_exception(row, col);
@@ -157,7 +157,7 @@ pub(crate) fn render_table_controls(
             }
             controls
         })
-        .when(!view_only, |d| d.child(button(
+        .child(button(
             "table-add-row",
             "Add row",
             app,
@@ -165,17 +165,17 @@ pub(crate) fn render_table_controls(
             cx,
         ))
         .child(button(
-            "table-rename",
-            "Rename",
-            app,
-            move |s, cx| s.open_table_dialog(TableDialogKind::Rename(id), cx),
-            cx,
-        ))
-        .child(button(
             "table-resize",
             "Resize",
             app,
             move |s, cx| s.open_table_dialog(TableDialogKind::Resize(id), cx),
+            cx,
+        ))
+        .when(!view_only, |d| d.child(button(
+            "table-rename",
+            "Rename",
+            app,
+            move |s, cx| s.open_table_dialog(TableDialogKind::Rename(id), cx),
             cx,
         ))
         .child(button(
@@ -308,6 +308,9 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .text_color(muted);
     match d.kind {
         TableDialogKind::Create => {
+            if crate::table_filter_ui::has_table_criteria(app.wb(cx)) {
+                preview = preview.child("Ranges use worksheet addresses. Existing Table sorting and filters stay active.");
+            }
             match parse_range(&d.range).and_then(|r| app.wb(cx)
                 .preview_table_creation(d.sheet, r, d.has_headers).map(|(result, headers)| (r, result, headers))) {
                 Ok((source, range, headers)) => {
@@ -364,7 +367,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             }
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
-        TableDialogKind::Resize(_)=>preview=preview.child("Keep the top-left cell fixed. Cells released by shrinking stay in place; references to removed columns become #REF!."),
+        TableDialogKind::Resize(_)=>preview=preview.child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Shrinking removes records from the Table by stored row position, not the displayed sort order. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),
         TableDialogKind::ColumnFormula(id,col,replace) => {
             if let Some((sheet,table)) = app.wb(cx).table(id) {
                 let sheet = app.wb(cx).sheet_by_id(sheet).unwrap();

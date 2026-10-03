@@ -940,6 +940,7 @@ impl Spreadsheet {
         if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
 
         if let Some(path) = &self.current_file.clone() {
             // Only save directly for VisiGrid native formats (.sheet, .vgrid).
@@ -964,6 +965,7 @@ impl Spreadsheet {
         if self.block_read_only_recovery(cx) { return false; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return false; }
 
         if let Some(path) = &self.current_file.clone() {
             let ext = ext_lower(path).unwrap_or_default();
@@ -989,6 +991,7 @@ impl Spreadsheet {
         if self.block_read_only_recovery(cx) { return; }
         // Commit any pending edit so it's included in the save
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
 
         // For directory: prefer current file location, then import source, then Documents or the home folder
         let directory = self.current_file.as_ref()
@@ -1193,27 +1196,34 @@ impl Spreadsheet {
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
         if self.block_read_only_recovery(cx) { return; }
         self.commit_pending_edit(cx);
-        let warnings = match xlsx::table_export_warnings(self.wb(cx)) {
-            Ok(warnings) => warnings,
+        if self.mode.is_editing() { return; }
+        let layouts = self.build_export_layouts(cx);
+        let review = match crate::xlsx_export::ExportReview::new(self.wb(cx), &layouts) {
+            Ok(review) => review,
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };
-        if warnings.is_empty() {
-            self.export_xlsx_reviewed(warnings, cx);
+        if !review.needs_review() {
+            self.export_xlsx_reviewed(review, cx);
             return;
         }
-        self.pending_xlsx_export = Some(warnings);
+        self.pending_xlsx_export = Some(review);
         self.lua_console.visible = false;
         self.mode = crate::mode::Mode::ExportReport;
         cx.notify();
     }
 
     pub(crate) fn confirm_xlsx_export(&mut self, cx: &mut Context<Self>) {
-        let Some(warnings) = self.pending_xlsx_export.take() else { return; };
+        let Some(review) = self.pending_xlsx_export.take() else { return; };
         self.hide_export_report(cx);
-        self.export_xlsx_reviewed(warnings, cx);
+        self.export_xlsx_reviewed(review, cx);
     }
 
-    fn export_xlsx_reviewed(&mut self, reviewed_warnings: Vec<String>, cx: &mut Context<Self>) {
+    pub(crate) fn select_xlsx_export_order(&mut self, order: xlsx::ExportOrder, cx: &mut Context<Self>) {
+        if let Some(review) = &mut self.pending_xlsx_export { review.select(order); }
+        cx.notify();
+    }
+
+    fn export_xlsx_reviewed(&mut self, review: crate::xlsx_export::ExportReview, cx: &mut Context<Self>) {
         self.pending_xlsx_export = None;
         if self.block_read_only_recovery(cx) { return; }
         let directory = self.current_file.as_ref()
@@ -1241,13 +1251,11 @@ impl Spreadsheet {
                     // Rebuild layouts in case data changed
                     let layouts = this.build_export_layouts(cx);
 
-                    match xlsx::table_export_warnings(this.wb(cx)) {
-                        Ok(warnings) if warnings == reviewed_warnings => {},
-                        Ok(_) => { this.status_message = Some("The workbook's export details changed. Export again to review them.".into()); cx.notify(); return; }
-                        Err(error) => { this.status_message = Some(error); cx.notify(); return; }
+                    if let Err(error) = review.check_current(this.wb(cx), &layouts) {
+                        this.status_message = Some(error); cx.notify(); return;
                     }
 
-                    match xlsx::export(this.wb(cx), &path, Some(&layouts)) {
+                    match xlsx::export_with_order(this.wb(cx), &path, Some(&layouts), review.order()) {
                         Ok(result) => {
                             let filename = path.file_name()
                                 .and_then(|n| n.to_str())
@@ -1405,6 +1413,7 @@ impl Spreadsheet {
     {
         // Commit any pending edit so it's included in the export
         self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
 
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())

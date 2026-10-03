@@ -363,3 +363,24 @@ fn nonfinite_filter_numbers_are_rejected_before_state_changes() {
     assert_eq!(wb.revision(), revision);
     assert!(wb.active_sheet().table_view_spec().is_none());
 }
+
+#[test]
+fn cleared_criteria_and_hidden_buttons_do_not_enforce_a_row_projection() {
+    let (mut wb, original) = fixture();
+    wb.set_table_view_spec(SheetId(7), Some(original.clone())).unwrap();
+    let mut cleared = original.clone();
+    cleared.clear_sort();
+    cleared.clear_filters();
+    cleared.show_filter_buttons = false;
+    wb.set_table_view_spec(SheetId(7), Some(cleared.clone())).unwrap();
+    wb.active_sheet_mut().set_bold(3, 6, true);
+    wb.active_sheet_mut().frozen_panes = (4, 0);
+    assert!(wb.active_sheet().build_saved_table_view(30).unwrap().is_none());
+    // Turning criteria back on still validates the layout before publishing.
+    assert!(wb.set_table_view_spec(SheetId(7), Some(original)).is_err());
+    assert_eq!(wb.active_sheet().table_view_spec(), Some(&cleared));
+    let commit = wb.set_table_view_spec(SheetId(7), None).unwrap();
+    wb.apply_table_view_commit(&commit, true).unwrap();
+    assert_eq!(wb.active_sheet().table_view_spec(), Some(&cleared));
+    assert_eq!(wb.saved_tables().version, 3, "hidden buttons still persist");
+}

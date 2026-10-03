@@ -2799,6 +2799,7 @@ fn write_workbook_full(
 
     save_sheet_defaults(conn, workbook)?;
 
+    save_cond_formats(conn, workbook)?;
     save_pivots(conn, workbook)?;
     save_tables(conn, workbook)?;
 
@@ -4034,6 +4035,39 @@ mod tests {
         save_workbook(&wb2, temp_file2.path()).expect("Save should succeed");
         let loaded2 = load_workbook(temp_file2.path()).expect("Load should succeed");
         assert!(loaded2.active_sheet().cond_formats.is_empty());
+    }
+
+    #[test]
+    fn test_full_save_preserves_cond_formats_on_inactive_sheets() {
+        use visigrid_engine::cond_format::CondStyle;
+        use visigrid_engine::validation::CellRange;
+
+        let file = NamedTempFile::with_suffix(".sheet").unwrap();
+        let mut wb = Workbook::new();
+        let report = wb.add_sheet();
+        let sheet = wb.sheet_mut(report).unwrap();
+        sheet.set_value(0, 0, "5");
+        sheet.set_value(1, 0, "15");
+        sheet.cond_formats.add(
+            vec![CellRange { start_row: 0, start_col: 0, end_row: 1, end_col: 0 }],
+            "=A1>10",
+            CondStyle::Named(CellStyle::Warning),
+        );
+        wb.set_active_sheet(0);
+
+        save_workbook_full(&wb, &CellMetadata::new(), &[], &[], file.path()).unwrap();
+        let loaded = load_workbook(file.path()).unwrap();
+        assert!(loaded.sheet(0).unwrap().cond_formats.is_empty());
+        let sheet = loaded.sheet(report).unwrap();
+        assert_eq!(sheet.cond_formats.len(), 1);
+        assert!(!sheet.has_cond_format(0, 0));
+        assert!(sheet.has_cond_format(1, 0));
+
+        // Re-saving after rules are removed must not retain stale metadata.
+        wb.sheet_mut(report).unwrap().cond_formats = Default::default();
+        save_workbook_full(&wb, &CellMetadata::new(), &[], &[], file.path()).unwrap();
+        let loaded = load_workbook(file.path()).unwrap();
+        assert!(loaded.sheet(report).unwrap().cond_formats.is_empty());
     }
 
     #[test]

@@ -66,7 +66,7 @@ impl Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.mode.is_navigation() || self.block_if_previewing(cx) {
+        if !self.mode.is_navigation() || self.block_active_sheet_metadata_edit(cx) {
             return;
         }
         self.comment_reader = None;
@@ -139,7 +139,7 @@ impl Spreadsheet {
         self.close_comment(cx);
     }
     pub fn delete_comment(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) {
+        if self.block_active_sheet_metadata_edit(cx) {
             return;
         }
         let (index, row, col) = if let Some(editor) = &self.comment_editor {
@@ -175,6 +175,7 @@ impl Spreadsheet {
         after: Option<CellComment>,
         cx: &mut Context<Self>,
     ) {
+        if self.block_sheet_metadata_edit(sheet_index, cx) { return; }
         let before = self
             .wb(cx)
             .sheet(sheet_index)
@@ -890,7 +891,7 @@ impl Spreadsheet {
     }
 
     pub fn navigate_comment(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) {
+        if self.block_active_sheet_metadata_edit(cx) {
             return;
         }
         if !self.mode.is_navigation() && self.mode != Mode::Command {
@@ -941,7 +942,7 @@ impl Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_previewing(cx)
+        if self.block_sheet_metadata_edit(sheet, cx)
             || (!self.mode.is_navigation() && self.mode != Mode::Command)
         {
             return;

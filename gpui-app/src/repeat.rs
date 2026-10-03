@@ -66,6 +66,14 @@ pub enum RepeatAction {
 }
 
 impl RepeatAction {
+    fn is_cell_format(&self) -> bool {
+        matches!(self, Self::Bold(_) | Self::Italic(_) | Self::Underline(_)
+            | Self::Strikethrough(_) | Self::Alignment(_) | Self::VerticalAlignment(_)
+            | Self::NumberFormat(_) | Self::CellStyle(_) | Self::BackgroundColor(_)
+            | Self::FontColor(_) | Self::FontFamily(_) | Self::FontSize(_)
+            | Self::Borders(_) | Self::ClearFormatting)
+    }
+
     /// Menu-style label, shown in the status message when F4 fires.
     pub fn label(&self) -> String {
         match self {
@@ -122,7 +130,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         };
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) && !action.is_cell_format() {
             use visigrid_engine::{structural::Axis, workbook::StructureStep};
             let (axis, count, delete) = match action {
                 RepeatAction::InsertRows(n) => (Axis::Row, n, false),
@@ -173,8 +181,14 @@ impl Spreadsheet {
             }
             return;
         }
-        if self.block_if_previewing(cx) {
-            return;
+        let blocked = if action.is_cell_format() {
+            self.block_active_sheet_metadata_edit(cx)
+        } else {
+            self.block_if_previewing(cx)
+        };
+        if blocked { return; }
+        if let RepeatAction::NumberFormat(format) = &action {
+            if self.block_number_format_conversion(format, cx) { return; }
         }
 
         // Re-applying must not overwrite the slot with itself — otherwise a

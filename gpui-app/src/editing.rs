@@ -1513,7 +1513,11 @@ impl Spreadsheet {
             format.number_format = visigrid_engine::cell::NumberFormat::Percent { decimals: 0 };
             write.format = Some(format);
         }
-        if !self.apply_table_cell_writes(vec![write], "Edit cell", cx) { return false; }
+        match self.try_typed_table_append(&write, cx) {
+            Some(false) => return false,
+            Some(true) => {},
+            None => { if !self.apply_table_cell_writes(vec![write], "Edit cell", cx) { return false; } }
+        }
         let still_visible = self.row_view.data_to_view(row).is_some_and(|r| self.row_view.is_view_row_visible(r));
         self.formula_edit_cell = None;
         let tab_origin = self.tab_chain_origin_col;

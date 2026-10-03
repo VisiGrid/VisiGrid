@@ -18,7 +18,7 @@ use visigrid_engine::{
 };
 
 const MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
-fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, String> {
+pub(super) fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, String> {
     for a in e.attributes() {
         let a = a.map_err(|e| e.to_string())?;
         if a.key.local_name().as_ref() == key {
@@ -102,7 +102,7 @@ fn relationships(xml: &str, source: &str) -> Result<HashMap<String, Rel>, String
     }
     Ok(rels)
 }
-fn range(input: &str) -> Result<TableRange, String> {
+pub(super) fn range(input: &str) -> Result<TableRange, String> {
     fn cell(s: &str) -> Option<(usize, usize)> {
         let s = s.replace('$', "");
         let n = s.find(|c: char| c.is_ascii_digit())?;
@@ -136,7 +136,7 @@ fn range(input: &str) -> Result<TableRange, String> {
 }
 struct ImportedTable {
     table: DataTable,
-    filtered: bool,
+    view: Result<super::xlsx_table_filters::ImportedView, String>,
     warnings: Vec<String>,
 }
 fn parse_table(xml: &str) -> Result<ImportedTable, String> {
@@ -148,9 +148,11 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
     let mut table = None;
     let mut columns = Vec::<TableColumn>::new();
     let mut column_ids = HashSet::new();
-    let mut banded_rows = false;
-    let mut filtered = false;
-    let mut autofilter = false;
+    let mut style = TableStyle {
+        banded_rows: false,
+        excel_style: None,
+        ..Default::default()
+    };
     let mut warnings = Vec::new();
     let mut in_formula = false;
     let mut formula = String::new();
@@ -253,40 +255,31 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
                     }
                 }
                 b"tableStyleInfo" => {
-                    banded_rows = attr(&e, b"showRowStripes")?
+                    style.banded_rows =
+                        super::xlsx_table_filters::boolean(&e, b"showRowStripes", false)?;
+                    style.banded_columns =
+                        super::xlsx_table_filters::boolean(&e, b"showColumnStripes", false)?;
+                    style.first_column =
+                        super::xlsx_table_filters::boolean(&e, b"showFirstColumn", false)?;
+                    style.last_column =
+                        super::xlsx_table_filters::boolean(&e, b"showLastColumn", false)?;
+                    style.excel_style = attr(&e, b"name")?.filter(|name| !name.is_empty());
+                    if style
+                        .excel_style
                         .as_deref()
-                        .is_some_and(|s| s == "1" || s == "true");
-                    if attr(&e, b"name")?
-                        .as_deref()
-                        .is_some_and(|s| s != "TableStyleMedium2")
-                        || [
-                            b"showColumnStripes".as_slice(),
-                            b"showFirstColumn",
-                            b"showLastColumn",
-                        ]
-                        .iter()
-                        .any(|key| {
-                            attr(&e, key)
-                                .ok()
-                                .flatten()
-                                .is_some_and(|s| s == "1" || s == "true")
-                        })
+                        .is_some_and(|name| !TableStyle::is_builtin_excel_style(name))
                     {
-                        warnings.push("Row banding is preserved using VisiGrid's Table style; Excel theme colors and other Table style options are not preserved.".into());
+                        warnings.push("Custom Excel Table styles are not supported; the Table uses the default style on export.".into());
+                        style.excel_style = TableStyle::default().excel_style;
+                    }
+                    if style.excel_style != TableStyle::default().excel_style
+                        || style.banded_columns
+                        || style.first_column
+                        || style.last_column
+                    {
+                        warnings.push("Excel Table style options are retained for export; VisiGrid displays its own theme. Custom workbook theme colors are not retained.".into());
                     }
                 }
-                b"autoFilter" => autofilter = true,
-                b"filterColumn" => {
-                    filtered = true;
-                    if attr(&e, b"hiddenButton")?
-                        .as_deref()
-                        .is_some_and(|s| s == "1" || s == "true")
-                    {
-                        warnings
-                            .push("Per-column filter-button visibility is not preserved.".into());
-                    }
-                }
-                b"sortState" => filtered = true,
                 b"extLst" | b"xmlColumnPr" => {
                     warnings.push("Extended Excel Table metadata is not preserved.".into())
                 }
@@ -332,40 +325,43 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
         range,
         columns,
         next_column_id,
-        style: TableStyle { banded_rows },
+        style,
         source: None,
     };
     table.validate(
         visigrid_engine::sheet::NUM_ROWS,
         visigrid_engine::sheet::NUM_COLS,
     )?;
-    if !autofilter {
-        warnings.push(
-            "Filter buttons are shown in VisiGrid; Excel's hidden-button setting is not preserved."
-                .into(),
-        );
-    }
     warnings.sort();
     warnings.dedup();
+    let view = super::xlsx_table_filters::parse(xml, &table);
     Ok(ImportedTable {
         table,
-        filtered,
+        view,
         warnings,
     })
 }
 
 /// Tables are installed before dependency binding/recalculation. Invalid or
 /// unsupported definitions leave their cells untouched and produce a warning.
-pub(crate) fn import(path: &Path, wb: &mut Workbook, result: &mut ImportResult, values_only: bool) {
-    if let Err(error) = read_tables(path, wb, result, values_only) {
+pub(crate) fn import(
+    path: &Path,
+    wb: &mut Workbook,
+    result: &mut ImportResult,
+    values_only: bool,
+) -> Vec<super::xlsx_table_filters::PendingView> {
+    let mut views = Vec::new();
+    if let Err(error) = read_tables(path, wb, result, values_only, &mut views) {
         result.warnings.push(format!("Excel Table metadata could not be read: {error}. Cells were kept; formulas referencing skipped Tables may show errors."));
     }
+    views
 }
 fn read_tables(
     path: &Path,
     wb: &mut Workbook,
     result: &mut ImportResult,
     values_only: bool,
+    views: &mut Vec<super::xlsx_table_filters::PendingView>,
 ) -> Result<(), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let Ok(mut zip) = zip::ZipArchive::new(file) else {
@@ -442,10 +438,7 @@ fn read_tables(
                         wb.restore_tables(catalog)?;
                         result.tables_imported += 1;
                         for warning in imported.warnings { result.warnings.push(format!("Table {}: {warning}", t.name)); }
-                        if imported.filtered {
-                            if let Some(layout) = result.imported_layouts.get_mut(si) { layout.hidden_rows.retain(|r| *r <= t.range.start_row || *r > t.range.end_row); }
-                            result.warnings.push(format!("Table {}: saved sort/filter criteria were not imported. All records are shown in their stored order; hidden body rows were made visible.", t.name));
-                        }
+                        views.push(super::xlsx_table_filters::PendingView { sheet: si, table: t.id, view: imported.view });
                         Ok(())
                     });
                     if let Err(error) = outcome {
@@ -461,9 +454,19 @@ fn read_tables(
     Ok(())
 }
 
-pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
+pub(crate) fn export_warnings(
+    wb: &Workbook,
+    order: super::xlsx::ExportOrder,
+) -> Result<Vec<String>, String> {
+    wb.validate_table_view_specs()?;
     let mut warnings = Vec::new();
     for (sheet_id, table) in wb.tables() {
+        if table.name.chars().count() > 255 {
+            return Err(format!(
+                "Table {} has a name longer than Excel's 255-character limit; no file was written.",
+                table.name
+            ));
+        }
         if table.range.data_rows() == 0 {
             return Err(format!("Table {} has only headers. Add an empty record before exporting it to Excel; no file was written.", table.name));
         }
@@ -472,10 +475,27 @@ pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
             .and_then(|s| s.table_view_spec())
             .filter(|v| v.table == table.id)
         {
-            if view.sort.is_some() || !view.filters.is_empty() {
-                warnings.push(format!("Table {}: Excel export includes every record in stored order. VisiGrid sort/filter criteria are not exported.", table.name));
+            if view.sort.is_some() {
+                warnings.push(match order {
+                    super::xlsx::ExportOrder::Sorted => format!("Table {}: Excel export places every record in the saved sort order, including filtered-out records, and updates supported formula references. Clearing the sort in the exported copy keeps that order. Reapplying it in Excel may change text or mixed-type ordering.", table.name),
+                    super::xlsx::ExportOrder::Stored => format!("Table {}: Every record stays in stored order and formulas keep their stored coordinates. The saved sort is included; use Reapply in Excel to display that order. Text and mixed-type ordering may differ from VisiGrid.", table.name),
+                });
+            }
+            if let Err(reason) =
+                super::xlsx_table_filters::export_filters(wb.sheet_by_id(sheet_id).unwrap(), table)
+            {
+                warnings.push(format!("Table {}: filter criteria are not exported ({reason}). All records are shown in Excel.", table.name));
             }
         }
+    }
+    if wb.sheets().iter().any(|s| !s.cond_formats.is_empty()) {
+        warnings.push(
+            "Conditional formatting is not exported to Excel. Explicit cell formatting is kept."
+                .into(),
+        );
+    }
+    if !wb.named_ranges().is_empty() {
+        warnings.push("Named-range definitions are not exported to Excel. Formulas using those names may show errors in the exported copy.".into());
     }
     if !wb.pivots().is_empty() {
         warnings.push("Pivot results are exported as cells. Pivot definitions and Table-source bindings are not exported to Excel.".into());
@@ -510,7 +530,12 @@ pub(crate) fn write(
             .set_columns(&columns)
             .set_style(rust_xlsxwriter::TableStyle::Medium2)
             .set_banded_rows(table.style.banded_rows)
-            .set_autofilter(arrows);
+            .set_autofilter(
+                arrows
+                    || sheet
+                        .table_view_spec()
+                        .is_some_and(|v| v.table == table.id && !v.filters.is_empty()),
+            );
         let r = table.range;
         ws.add_table(
             r.start_row as u32,
@@ -549,18 +574,39 @@ pub(crate) fn excel_formula(source: &str) -> String {
 /// Add calculated-column metadata without asking the writer to fill cells.
 /// Its automatic fill would overwrite blank/value/formula exceptions.
 pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
-    if !wb
-        .tables()
-        .any(|(_, t)| t.columns.iter().any(|c| c.formula.is_some()))
-    {
+    if wb.tables().next().is_none() {
         return Ok(bytes);
     }
     let mut input = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let mut written = HashSet::new();
+    // Names here belong to the package just produced by rust_xlsxwriter;
+    // imports continue resolving arbitrary worksheet relationship targets.
+    let filtered_sheets: HashSet<_> = wb
+        .sheets()
+        .iter()
+        .enumerate()
+        .filter(|(_, sheet)| super::xlsx_table_filters::has_exported_filters(sheet))
+        .map(|(i, _)| format!("xl/worksheets/sheet{}.xml", i + 1))
+        .collect();
     for i in 0..input.len() {
         let mut entry = input.by_index(i).map_err(|e| e.to_string())?;
-        if entry.name().starts_with("xl/tables/") && entry.name().ends_with(".xml") {
+        if filtered_sheets.contains(entry.name()) {
+            let name = entry.name().to_string();
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml).map_err(|e| e.to_string())?;
+            let xml = super::xlsx_table_filters::mark_filter_mode(&xml)?;
+            output
+                .start_file(
+                    name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .map_err(|e| e.to_string())?;
+            output
+                .write_all(xml.as_bytes())
+                .map_err(|e| e.to_string())?;
+        } else if entry.name().starts_with("xl/tables/") && entry.name().ends_with(".xml") {
             let name = entry.name().to_string();
             let mut xml = String::new();
             entry.read_to_string(&mut xml).map_err(|e| e.to_string())?;
@@ -574,6 +620,53 @@ pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
                     if e.local_name().as_ref() == b"table" {
                         table =
                             attr(e, b"name")?.and_then(|n| wb.table_by_name(&n).map(|(_, t)| t));
+                    }
+                    if e.local_name().as_ref() == b"tableStyleInfo" {
+                        if !matches!(event, Event::Empty(_)) {
+                            return Err("Unexpected XLSX Table style element".into());
+                        }
+                        if let Some(t) = table {
+                            let mut style = BytesStart::new("tableStyleInfo");
+                            if let Some(name) = &t.style.excel_style {
+                                style.push_attribute(("name", name.as_str()));
+                            }
+                            for (key, value) in [
+                                ("showRowStripes", t.style.banded_rows),
+                                ("showColumnStripes", t.style.banded_columns),
+                                ("showFirstColumn", t.style.first_column),
+                                ("showLastColumn", t.style.last_column),
+                            ] {
+                                style.push_attribute((key, if value { "1" } else { "0" }));
+                            }
+                            writer
+                                .write_event(Event::Empty(style))
+                                .map_err(|e| e.to_string())?;
+                            continue;
+                        }
+                    }
+                    if e.local_name().as_ref() == b"autoFilter" {
+                        if !matches!(event, Event::Empty(_)) {
+                            return Err("Unexpected XLSX Table filter element".into());
+                        }
+                        if let Some(t) = table {
+                            let (sid, _) = wb.table(t.id).ok_or("Missing exported Table")?;
+                            super::xlsx_table_filters::write_xml(
+                                wb.sheet_by_id(sid).unwrap(),
+                                t,
+                                &mut writer,
+                            )?;
+                            continue;
+                        }
+                    }
+                    if e.local_name().as_ref() == b"tableColumns" {
+                        if let Some(t) = table {
+                            let (sid, _) = wb.table(t.id).ok_or("Missing exported Table")?;
+                            super::xlsx_table_sorts::write(
+                                wb.sheet_by_id(sid).unwrap(),
+                                t,
+                                &mut writer,
+                            )?;
+                        }
                     }
                     if e.local_name().as_ref() == b"tableColumn" {
                         if let Some(t) = table {

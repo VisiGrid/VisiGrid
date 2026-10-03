@@ -70,6 +70,10 @@ impl Sheet {
                 .find(|t| t.id == spec.table)
                 .ok_or("The saved Table view's Table no longer exists.")?;
             spec.validate_schema(table)?;
+            // Button visibility and a cleared spec do not project worksheet rows.
+            if !spec.has_criteria() {
+                return Ok(None);
+            }
             // Deleting the final record suspends projection, not saved intent.
             // Direct activation of a new empty-body view remains refused.
             if table.range.data_rows() == 0 {
@@ -141,7 +145,7 @@ impl Workbook {
                 .find(|t| t.id == spec.table)
                 .ok_or("Table view's Table no longer exists.")?;
             spec.validate_schema(table)?;
-            validate_table_view_layout(sheet, spec.table)?;
+            if spec.has_criteria() { validate_table_view_layout(sheet, spec.table)?; }
         }
         if !commit.is_noop() {
             self.sheet_by_id_mut(commit.sheet).unwrap().table_view_spec = target.clone();

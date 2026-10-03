@@ -2989,6 +2989,13 @@ fn review_mode_workbook_mutators_are_guarded() {
         assert_contains_near(source, function, "block_if_previewing(cx)");
     }
 
+    assert_contains_near(include_str!("table_command_scope.rs"), "block_sheet_metadata_edit", "block_if_previewing_only(cx)");
+    let metadata_scope = include_str!("table_command_scope.rs");
+    assert_contains_near(metadata_scope, "block_active_sheet_metadata_edit", "block_sheet_metadata_edit(");
+    for function in ["freeze_top_row", "freeze_first_column", "freeze_panes", "unfreeze_panes"] {
+        assert_contains_near(include_str!("sheet_ops.rs"), function, "block_active_sheet_metadata_edit(cx)");
+    }
+    assert_contains_near(include_str!("comments.rs"), "change_comment", "block_sheet_metadata_edit(sheet_index, cx)");
     let conditional_formats = include_str!("cond_format_ui.rs");
     for function in [
         "show_add_cond_format",
@@ -3002,7 +3009,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "move_cf_rule",
         "edit_cf_rule",
     ] {
-        assert_guarded(conditional_formats, function);
+        assert_contains_near(conditional_formats, function, "block_active_sheet_metadata_edit(cx)");
     }
 
     let validations = include_str!("dialogs.rs");
@@ -3126,7 +3133,9 @@ fn review_mode_workbook_mutators_are_guarded() {
     }
 
     let ai_actions = include_str!("ai_actions.rs");
-    assert!(ai_actions.contains("add_sheet_clone_named(&preview_sheet"));
+    assert_contains_near(ai_actions, "apply_lua_to_new_sheet", "block_read_only_recovery(cx)");
+    assert!(ai_actions.contains("crate::review_copy::prepare_copy"));
+    assert!(ai_actions.contains("self.publish_review_copy(candidate, history, cx)"));
     assert_contains_near(
         ai_actions,
         "capture_ai_lua",
@@ -3137,7 +3146,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "preview_last_lua",
         "block_review_entry_for_workbook_transition(cx)",
     );
-    assert!(ai_actions.contains("UndoAction::WorkbookSnapshot"));
+    assert!(include_str!("review_copy.rs").contains("UndoAction::ReviewCopy"));
 }
 
 // =========================================================================

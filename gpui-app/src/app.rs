@@ -198,6 +198,7 @@ pub const CELL_HEIGHT: f32 = crate::settings::CellSizeDefaults::ROW_HEIGHT;
 pub const HEADER_WIDTH: f32 = 50.0;
 pub const MENU_BAR_HEIGHT: f32 = 32.0;
 pub const FORMULA_BAR_HEIGHT: f32 = 40.0;
+pub const FORMULA_BAR_EXPAND_WIDTH: f32 = 40.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 36.0;
 pub const MACOS_TITLEBAR_HEIGHT: f32 = 34.0;
@@ -886,7 +887,7 @@ pub struct Spreadsheet {
     // Export report state (for Excel exports with warnings)
     pub pdf_export: Option<crate::pdf_export::PdfExportState>,
     pub export_result: Option<visigrid_io::xlsx::ExportResult>,
-    pub pending_xlsx_export: Option<Vec<String>>, // Losses awaiting review before the save chooser
+    pub pending_xlsx_export: Option<crate::xlsx_export::ExportReview>, // Order and losses awaiting review
     pub export_filename: Option<String>,  // Exported filename for display
 
     // Keyboard hints state (Vimium-style jump)
@@ -4143,98 +4144,31 @@ impl Spreadsheet {
 
     // Formatting (applies to all discontiguous selection ranges)
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_bold(row, col));
-                }
-            }
-        }
-        // A toggle over a mixed selection has no single "new value", so the
-        // repeat slot takes the ACTIVE cell's resolved state — that is the
-        // one the user was looking at when they pressed the key.
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).bold;
-        self.set_repeat(RepeatAction::Bold(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_bold(!self.sheet(cx).get_format(r, c).bold, cx);
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_italic(row, col));
-                }
-            }
-        }
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).italic;
-        self.set_repeat(RepeatAction::Italic(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_italic(!self.sheet(cx).get_format(r, c).italic, cx);
     }
 
     pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_underline(row, col));
-                }
-            }
-        }
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).underline;
-        self.set_repeat(RepeatAction::Underline(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_underline(!self.sheet(cx).get_format(r, c).underline, cx);
     }
 
     pub fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.toggle_strikethrough(row, col));
-                }
-            }
-        }
         let (r, c) = self.view_state.active_cell();
-        let resolved = self.sheet(cx).get_format(r, c).strikethrough;
-        self.set_repeat(RepeatAction::Strikethrough(resolved));
-        self.is_modified = true;
-        cx.notify();
+        self.set_strikethrough(!self.sheet(cx).get_format(r, c).strikethrough, cx);
     }
 
     pub fn format_currency(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::currency(2)));
-                }
-            }
-        }
-        self.set_repeat(RepeatAction::NumberFormat(NumberFormat::currency(2)));
-        self.is_modified = true;
-        cx.notify();
+        self.set_number_format_selection(NumberFormat::currency(2), cx);
     }
 
     pub fn format_percent(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
-            for row in min_row..=max_row {
-                for col in min_col..=max_col {
-                    self.active_sheet_mut(cx, |s| s.set_number_format(row, col, NumberFormat::Percent { decimals: 2 }));
-                }
-            }
-        }
-        self.set_repeat(RepeatAction::NumberFormat(NumberFormat::Percent { decimals: 2 }));
-        self.is_modified = true;
-        cx.notify();
+        self.set_number_format_selection(NumberFormat::Percent { decimals: 2 }, cx);
     }
 
     pub fn format_date_shortcut(&mut self, cx: &mut Context<Self>) {
@@ -4643,7 +4577,7 @@ impl Render for Spreadsheet {
         // Update formula bar text rect for click-to-place-caret hit-testing
         // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
         let formula_bar_input_left = FORMULA_BAR_TEXT_LEFT - FORMULA_BAR_PADDING;
-        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - 28.0).max(0.0);
+        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - FORMULA_BAR_EXPAND_WIDTH).max(0.0);
         let formula_bar_y = self.toolbar_geometry(cx).formula_top;
         self.formula_bar_text_rect = gpui::Bounds {
             origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(formula_bar_y)),

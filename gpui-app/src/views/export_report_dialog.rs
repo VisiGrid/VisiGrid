@@ -13,8 +13,8 @@ use crate::ui::{modal_overlay, Button, DialogFrame, DialogSize, dialog_header_wi
 
 /// Render the Export Report dialog overlay
 pub fn render_export_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
-    if let Some(warnings) = &app.pending_xlsx_export {
-        return render_export_review(app, warnings, cx);
+    if let Some(review) = &app.pending_xlsx_export {
+        return render_export_review(app, review, cx);
     }
     let Some(export_result) = &app.export_result else {
         return div().into_any_element();
@@ -298,7 +298,9 @@ fn format_number(n: usize) -> String {
 
 /// Review losses in the app's scrollable modal instead of the platform prompt,
 /// whose Linux fallback clips long paragraphs.
-fn render_export_review(app: &Spreadsheet, warnings: &[String], cx: &mut Context<Spreadsheet>) -> AnyElement {
+fn render_export_review(app: &Spreadsheet, review: &crate::xlsx_export::ExportReview, cx: &mut Context<Spreadsheet>) -> AnyElement {
+    use visigrid_io::xlsx::ExportOrder;
+    let warnings = review.warnings();
     let panel = app.token(TokenKey::PanelBg);
     let border = app.token(TokenKey::PanelBorder);
     let text = app.token(TokenKey::TextPrimary);
@@ -309,7 +311,10 @@ fn render_export_review(app: &Spreadsheet, warnings: &[String], cx: &mut Context
     let cancel = Button::new("xlsx-review-cancel", "Cancel")
         .secondary(border, muted)
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.hide_export_report(cx)));
-    let export = Button::new("xlsx-review-export", "Continue to export…")
+    let label = if review.has_sort {
+        match review.order() { ExportOrder::Sorted => "Export sorted…", ExportOrder::Stored => "Export stored order…" }
+    } else { "Continue to export…" };
+    let export = Button::new("xlsx-review-export", label)
         .primary(app.token(TokenKey::Accent), app.token(TokenKey::TextInverse))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.confirm_xlsx_export(cx)));
     modal_overlay("xlsx-export-review", |this, cx| this.hide_export_report(cx),
@@ -319,9 +324,34 @@ fn render_export_review(app: &Spreadsheet, warnings: &[String], cx: &mut Context
             .overflow_hidden().flex().flex_col()
             .child(div().px_5().py_4().flex_shrink_0().border_b_1().border_color(border)
                 .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(text).child("Review Excel export"))
-                .child(div().mt_1().text_size(px(12.0)).text_color(muted).child("Some workbook features will change in the Excel copy.")))
+                .child(div().mt_1().text_size(px(12.0)).text_color(muted).child(if review.has_sort { "Choose how Table rows are saved and review changes to the Excel copy." } else { "Review changes to the Excel copy before choosing a destination." })))
             .child(div().id("xlsx-export-review-scroll").min_h_0().overflow_y_scroll()
                 .p_5().flex().flex_col().gap_3()
+                .when(review.has_sort, |body| body
+                    .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(text).child("Table row order"))
+                    .children([
+                        ("xlsx-order-sorted", ExportOrder::Sorted, "Export sorted", "Open with records in the current sort order. Supported formulas follow their records."),
+                        ("xlsx-order-stored", ExportOrder::Stored, "Keep stored order", "Keep cells and formulas at their stored addresses. Use Reapply in Excel to display the saved sort."),
+                    ].into_iter().map(|(id, order, title, description)| {
+                        let selected = review.order() == order;
+                        let disabled = order == ExportOrder::Sorted && review.sorted.is_err();
+                        let accent = app.token(TokenKey::Accent);
+                        div().id(id).p_3().rounded_md().border_1()
+                            .border_color(if selected { accent } else { border })
+                            .bg(if selected { accent.opacity(0.08) } else { panel })
+                            .when(disabled, |card| card.opacity(0.5))
+                            .when(!disabled, |card| card.cursor_pointer()
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.select_xlsx_export_order(order, cx))))
+                            .child(div().flex().justify_between()
+                                .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(text).child(title))
+                                .when(selected, |row| row.child(div().text_size(px(11.0)).text_color(accent).child("Selected"))))
+                            .child(div().mt_1().text_size(px(12.0)).text_color(muted).child(description))
+                    }))
+                    .when_some(review.sorted.as_ref().err(), |body, error| body.child(
+                        div().p_3().rounded_md().bg(warn.opacity(0.05))
+                            .text_size(px(12.0)).text_color(text)
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Sorted export unavailable"))
+                            .child(div().mt_1().child(error.clone())))))
                 .children(warnings.iter().map(|warning| div().p_3().rounded_md()
                     .bg(warn.opacity(0.05)).border_1().border_color(warn.opacity(0.3))
                     .text_size(px(12.0)).text_color(text).child(warning.clone()))))

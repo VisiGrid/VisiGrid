@@ -576,6 +576,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
             this.commit_pending_edit(cx);
+            if this.mode.is_editing() { return; }
             if !this.is_modified && !this.is_dirty() {
                 this.prepare_close(cx);
                 window.remove_window();
@@ -588,6 +589,7 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &Quit, window, cx| {
             // Commit any pending edit before quitting
             this.commit_pending_edit(cx);
+            if this.mode.is_editing() { return; }
             // Snapshot this window's state into session before quit
             this.update_session(window, cx);
             // Propagate to global quit handler (saves session and quits)

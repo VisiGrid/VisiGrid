@@ -9,6 +9,25 @@ use std::path::PathBuf;
 use crate::sheet_ops;
 use crate::{CliError, Format, InspectFormat, WhereClause, parse_where, resolve_where_columns, filter_row_indices, resolve_sheet};
 
+/// Shared non-interactive XLSX output. Warnings are data-fidelity notices, so
+/// they remain visible even with --quiet and never enter the binary stdout.
+pub(crate) fn write_xlsx(
+    workbook: &visigrid_engine::workbook::Workbook,
+    path: Option<&std::path::Path>,
+    layouts: Option<&[visigrid_io::xlsx::ExportLayout]>,
+) -> Result<(), CliError> {
+    let (bytes, report) = visigrid_io::xlsx::export_to_buffer_with_stored_fallback(workbook, layouts)
+        .map_err(CliError::io)?;
+    match path {
+        Some(path) => std::fs::write(path, &bytes),
+        None => io::stdout().write_all(&bytes),
+    }.map_err(|e| CliError::io(e.to_string()))?;
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
+}
+
 // ============================================================================
 // --select helpers
 // ============================================================================
@@ -243,20 +262,7 @@ pub(crate) fn cmd_convert(
             Format::Xlsx => {
                 let export_layouts: Vec<visigrid_io::xlsx::ExportLayout> =
                     layouts.iter().map(sheet_layout_to_export).collect();
-                match &output {
-                    Some(path) => {
-                        visigrid_io::xlsx::export(&wb, path, Some(&export_layouts))
-                            .map_err(CliError::io)?;
-                    }
-                    None => {
-                        let (bytes, _) =
-                            visigrid_io::xlsx::export_to_buffer(&wb, Some(&export_layouts))
-                                .map_err(CliError::io)?;
-                        io::stdout()
-                            .write_all(&bytes)
-                            .map_err(|e| CliError::io(e.to_string()))?;
-                    }
-                }
+                write_xlsx(&wb, output.as_deref(), Some(&export_layouts))?;
             }
             Format::Sheet => {
                 let path = output.as_ref().ok_or_else(|| CliError::args("sheet output requires -o FILE"))?;
@@ -435,19 +441,7 @@ pub(crate) fn cmd_convert(
                 sheet
             };
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![out_sheet], 0);
-            match output {
-                Some(path) => {
-                    visigrid_io::xlsx::export(&wb, &path, None)
-                        .map_err(CliError::io)?;
-                }
-                None => {
-                    let (bytes, _) = visigrid_io::xlsx::export_to_buffer(&wb, None)
-                        .map_err(CliError::io)?;
-                    io::stdout()
-                        .write_all(&bytes)
-                        .map_err(|e| CliError::io(e.to_string()))?;
-                }
-            }
+            write_xlsx(&wb, output.as_deref(), None)?;
             return Ok(());
         }
         Format::Sheet => {

@@ -200,9 +200,12 @@ impl Spreadsheet {
     }
 
     pub(crate) fn add_table_row(&mut self, id: TableId, cx: &mut Context<Self>) {
-        if self.mode.is_editing() || self.table_growth_blocked(cx) {
+        if self.mode.is_editing() { return; }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.append_table_row_in_view(id, None, cx);
             return;
         }
+        if self.table_growth_blocked(cx) { return; }
         self.append_table_row_and_select(id, Vec::new(), cx);
     }
 
@@ -271,9 +274,34 @@ impl Spreadsheet {
         };
         let (r, c) = self.view_state.selected;
         if table.range.data_rows() == 0
-            || (self.row_view.view_to_data(r), c) != (table.range.end_row, table.range.end_col)
+            || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c))
         {
             return false;
+        }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            let edit = if self.mode.is_editing() {
+                let row = self.row_view.view_to_data(r);
+                if self.table_edit_target != Some((self.sheet_index(cx), row, c, self.wb(cx).revision())) {
+                    self.status_message = Some("The workbook changed while editing. Cancel this edit and try again.".into());
+                    cx.notify();
+                    return true;
+                }
+                let mut value = self.edit_value.clone();
+                if value.starts_with('+') { value = format!("={}", &value[1..]); }
+                if value.starts_with('=') {
+                    let missing = value.matches('(').count().saturating_sub(value.matches(')').count());
+                    value.extend(std::iter::repeat_n(')', missing));
+                }
+                let mut write = crate::table_edit::TableCellWrite::value(row, c, value);
+                if self.edit_value.trim().ends_with('%') && matches!(self.sheet(cx).get_format(row, c).number_format, visigrid_engine::cell::NumberFormat::General) {
+                    let mut format = self.sheet(cx).get_format(row, c);
+                    format.number_format = visigrid_engine::cell::NumberFormat::Percent { decimals: 0 };
+                    write.format = Some(format);
+                }
+                Some(write)
+            } else { None };
+            self.append_table_row_in_view(table.id, edit, cx);
+            return true;
         }
         if self.table_growth_blocked(cx) {
             return true;
@@ -400,10 +428,18 @@ impl Spreadsheet {
     }
 
     pub(crate) fn create_table_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if self.row_view.is_sorted() || self.row_view.is_filtered() {
+        self.sync_table_view(cx);
+        if self.table_under_cursor(cx).is_some() {
+            self.open_table_dialog(
+                TableDialogKind::Resize(self.table_under_cursor(cx).unwrap().id),
+                cx,
+            );
+            return;
+        }
+        if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
             self.status_message = Some("Clear sorting and filters before creating a Table.".into());
             cx.notify();
             return;
@@ -413,19 +449,16 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        if self.table_under_cursor(cx).is_some() {
-            self.open_table_dialog(
-                TableDialogKind::Resize(self.table_under_cursor(cx).unwrap().id),
-                cx,
-            );
-            return;
-        }
         let ((r0, c0), (r1, c1)) = self.selection_range();
         let (r0, c0, r1, c1) = if r0 == r1 && c0 == c1 {
             crate::ai::find_current_region(self.sheet(cx), r0, c0)
         } else {
             (r0, c0, r1, c1)
         };
+        let range = TableRange { start_row: r0, start_col: c0, end_row: r1, end_col: c1 };
+        if let Err(error) = crate::table_create::creation_selection(self.wb(cx), self.sheet(cx).id, range) {
+            self.status_message = Some(error); cx.notify(); return;
+        }
         self.table_dialog = Some(TableDialog {
             kind: TableDialogKind::Create,
             sheet: self.sheet(cx).id,
@@ -446,9 +479,10 @@ impl Spreadsheet {
     }
 
     pub(crate) fn open_table_dialog(&mut self, kind: TableDialogKind, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
+        if !matches!(kind, TableDialogKind::Resize(_)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
             TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
@@ -497,20 +531,28 @@ impl Spreadsheet {
     }
 
     pub(crate) fn submit_table_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) {
+        if self.block_if_previewing_only(cx) {
             return;
         }
         let Some(draft) = self.table_dialog.clone() else {
             return;
         };
-        if draft.kind == TableDialogKind::Create && !draft.has_headers {
-            let last = self.wb(cx).sheet_by_id(draft.sheet).map(|s| s.rows - 1).unwrap_or(crate::app::NUM_ROWS - 1);
-            if self.row_heights.get(&draft.sheet).is_some_and(|h| h.contains_key(&last))
-                || self.hidden_rows.get(&draft.sheet).is_some_and(|h| h.contains(&last)) {
-                self.table_dialog.as_mut().unwrap().error = Some("Inserting a header would push row formatting off the sheet.".into());
-                cx.notify(); return;
+        if let TableDialogKind::Resize(id) = draft.kind {
+            match parse_range(&draft.range).and_then(|range| self.submit_table_resize(id, range, cx)) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
             }
+            cx.notify();
+            return;
         }
+        if draft.kind == TableDialogKind::Create {
+            match parse_range(&draft.range).and_then(|range| self.submit_table_creation(draft.sheet, range, draft.name.trim(), draft.has_headers, cx)) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify(); return;
+        }
+        if self.block_table_view_edit(cx) { return; }
         let result = self.workbook.update(cx, |wb, _| match draft.kind {
             TableDialogKind::Create => parse_range(&draft.range)
                 .and_then(|r| if draft.has_headers { wb.create_table(draft.sheet, r, draft.name.trim()) }
@@ -578,7 +620,7 @@ impl Spreadsheet {
     ) {
         self.update_header_insertion_view(&commit, false, cx);
         self.history.record_action_with_provenance(
-            UndoAction::TableCommit {
+            UndoAction::TableCommit { header_layout: None,
                 sheet_index: self
                     .wb(cx)
                     .sheet_index_by_id(commit.sheet_id())
@@ -597,9 +639,16 @@ impl Spreadsheet {
     pub(crate) fn replay_table_commit(
         &mut self,
         commit: &TableCommit,
+        header_layout: Option<&crate::table_create::HeaderLayout>,
         undo: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::table_create::is_creation(commit) {
+            return self.replay_table_creation(commit, header_layout, undo, cx);
+        }
+        if crate::table_resize::is_resize(commit) {
+            return self.replay_table_resize(commit, undo, cx);
+        }
         if crate::table_header_paste::is_header_rename(commit) {
             return self.replay_table_headers(commit, undo, cx);
         }

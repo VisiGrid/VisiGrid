@@ -143,6 +143,7 @@ impl Spreadsheet {
         for sheet in wb.sheets() {
             if let Some(table) = sheet
                 .table_view_spec()
+                .filter(|v| v.has_criteria())
                 .and_then(|s| sheet.tables().iter().find(|t| t.id == s.table))
             {
                 let (heights, hidden) = if sheet.id == id {
