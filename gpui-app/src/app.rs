@@ -830,6 +830,9 @@ pub struct Spreadsheet {
     // Spreadsheet::intercept_pivot_keys). Kept alive for the window's life.
     #[allow(dead_code)]
     pivot_key_subscription: gpui::Subscription,
+    #[allow(dead_code)]
+    duckdb_key_subscription: gpui::Subscription,
+    recipe_builder_key_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -852,6 +855,10 @@ pub struct Spreadsheet {
     pub import_result: Option<visigrid_io::xlsx::ImportResult>,
     /// What the last CSV import decided (banner, status line, settings dialog).
     pub csv_doc: Option<crate::csv_import_ui::CsvDocState>,
+    /// A recipe run that did not publish, and the fixes it offers.
+    pub recipe_blocked: Option<crate::recipe_ui::RecipeBlocked>,
+    pub recipe_run_in_progress: bool,
+    pub recipe_builder: Option<crate::recipe_builder::RecipeBuilder>,
     /// The CSV import settings dialog, while open.
     pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
     /// A CSV whose rows did not all fit, and how many were left out: no save
@@ -867,6 +874,8 @@ pub struct Spreadsheet {
     pub import_in_progress: bool,
     pub import_overlay_visible: bool,
     pub import_started_at: Option<std::time::Instant>,
+    pub duckdb_import: Option<crate::duckdb_import::ImportDialog>,
+    pub duckdb_import_id: u64,
 
     // Startup timing (cold start measurement)
     pub startup_instant: Option<std::time::Instant>,
@@ -1204,6 +1213,8 @@ impl Spreadsheet {
             }).detach();
         }
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
+        let duckdb_key_subscription = Self::intercept_duckdb_keys(window, cx);
+        let recipe_builder_key_subscription = Self::intercept_recipe_builder_keys(window, cx);
 
         // Coming back to the window: has the open CSV changed on disk?
         // Also pauses the copy border's animation while the window is inactive.
@@ -1465,6 +1476,8 @@ impl Spreadsheet {
             settings_subscription,
             appearance_subscription: Some(appearance_subscription),
             pivot_key_subscription,
+            duckdb_key_subscription,
+            recipe_builder_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -1482,6 +1495,9 @@ impl Spreadsheet {
 
             import_result: None,
             csv_doc: None,
+            recipe_blocked: None,
+            recipe_run_in_progress: false,
+            recipe_builder: None,
             csv_dialog: None,
             csv_protected_source: None,
             csv_activation_subscription: Some(csv_activation_subscription),
@@ -1492,6 +1508,8 @@ impl Spreadsheet {
             import_in_progress: false,
             import_overlay_visible: false,
             import_started_at: None,
+            duckdb_import: None,
+            duckdb_import_id: 0,
 
             startup_instant: None,
             cold_start_ms: None,
@@ -2539,6 +2557,27 @@ impl Spreadsheet {
             CommandId::ExportPdf => self.show_pdf_export(cx),
             CommandId::CsvImportSettings => self.show_csv_import_dialog(cx),
             CommandId::CsvImportNotes => self.show_csv_banner(cx),
+            CommandId::RefreshRecipeTable => {
+                if !self.refresh_recipe_table(cx) {
+                    self.status_message = Some("No recipe-backed Table on this sheet. Open a .recipe.toml to load one".into());
+                    cx.notify();
+                }
+            }
+            CommandId::NewRecipe => match self.current_csv().map(|d| (d.path.clone(), d.options.clone())) {
+                // From the open CSV, with the settings it was imported with
+                Some((path, options)) => self.new_recipe_from_file(&path, Some(&options), cx),
+                None => self.new_recipe_prompt(cx),
+            },
+            CommandId::EditRecipe => match self.recipe_strip_table(cx) {
+                Some(t) => {
+                    let path = std::path::PathBuf::from(&t.source.as_ref().unwrap().recipe);
+                    self.open_recipe_builder(&path, Some(t.id), cx)
+                }
+                None => {
+                    self.status_message = Some("No recipe-backed Table on this sheet".into());
+                    cx.notify();
+                }
+            },
             CommandId::PrintPreview => self.show_print_preview(cx),
             CommandId::ExportTsv => self.export_tsv(cx),
             CommandId::ExportJson => self.export_json(cx),
@@ -4002,6 +4041,7 @@ impl Spreadsheet {
     ///   macOS titlebar (MACOS_TITLEBAR_HEIGHT, macOS only)
     ///   Menu bar       (MENU_BAR_HEIGHT, Linux only, hidden in zen mode)
     ///   Formula / command surface (order and height from toolbar_geometry)
+    ///   Recipe strip   (RECIPE_STRIP_HEIGHT, when the sheet has a recipe-backed Table)
     ///   Table controls (TABLE_CONTROLS_HEIGHT, when the active cell is in a Table)
     ///   Column headers (metrics.header_h, always visible, scales with zoom)
     ///
@@ -4013,7 +4053,8 @@ impl Spreadsheet {
             return self.metrics.header_h + recovery_h;
         }
         let table_h = if self.show_table_controls(cx) { crate::table_ui::TABLE_CONTROLS_HEIGHT } else { 0.0 };
-        self.toolbar_geometry(cx).bottom + table_h + recovery_h + self.metrics.header_h
+        let recipe_h = if self.show_recipe_strip(cx) { crate::recipe_ui::RECIPE_STRIP_HEIGHT } else { 0.0 };
+        self.toolbar_geometry(cx).bottom + table_h + recipe_h + recovery_h + self.metrics.header_h
     }
 
     pub fn formula_bar_height(&self) -> f32 {
