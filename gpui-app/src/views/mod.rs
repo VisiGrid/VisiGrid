@@ -34,6 +34,7 @@ pub mod minimap;
 mod paste_special_dialog;
 mod convert_picker;
 mod cloud_open_dialog;
+mod duckdb_import_dialog;
 pub(crate) mod preferences_panel;
 pub mod refactor_log;
 pub(crate) mod review_card;
@@ -847,6 +848,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_cloud_open, |div| {
             div.child(cloud_open_dialog::render_cloud_open_dialog(app, cx))
+        })
+        .when(app.mode == Mode::DuckdbImport, |div| {
+            div.child(duckdb_import_dialog::render(app, cx))
         })
         .when(show_transform_preview, |div| {
             div.child(transform_diff_dialog::render_transform_diff_dialog(app, cx))

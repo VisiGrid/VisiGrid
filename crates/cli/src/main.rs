@@ -163,6 +163,14 @@ Examples:
         #[arg(long, value_name = "OLD:NEW,...")]
         rename: Option<String>,
 
+        /// Inspect Parquet/DuckDB column types and conflicts as JSON without writing data
+        #[arg(long, visible_alias = "export-plan")]
+        parquet_plan: bool,
+
+        /// Export an output column as text (Parquet or DuckDB). Repeatable; names match after rename.
+        #[arg(long, value_name = "COLUMN")]
+        text_column: Vec<String>,
+
         /// Suppress stderr notes (e.g. skipped-row counts)
         #[arg(long, short = 'q')]
         quiet: bool,
@@ -627,12 +635,13 @@ With --session, the pivot is created on a new sheet of the running workbook
         refresh: Option<String>,
     },
 
-    /// View a file in the terminal — delimited text, Parquet, Excel, ODS, .sheet/.vgrid
+    /// View a file in the terminal — delimited text, Parquet, DuckDB, Excel, ODS, .sheet/.vgrid
     #[command(after_help = "\
 Examples:
   vgrid peek data.csv                         # header row detected
   vgrid peek sales.tsv --headers              # force: first row is headers
   vgrid peek codes.csv --no-headers           # force: first row is data
+  vgrid peek warehouse.duckdb --sheet main.orders # bounded table preview
   vgrid peek orders.parquet                   # schema headers, bounded preview
   vgrid peek orders.parquet --json            # preserve numeric-looking text
   vgrid peek report.xlsx                      # Excel workbook (multi-tab)
@@ -663,7 +672,7 @@ Workbook and Parquet previews have a 10M-cell guard. Parquet also respects sheet
         file: PathBuf,
         /// First row is column headers. Delimited text detects this by default
         /// (a first row with no numbers, dates, blanks or repeats is a header);
-        /// Parquet uses schema names
+        /// Parquet and DuckDB use schema names
         #[arg(long)]
         headers: bool,
         /// First row is data (override header detection)
@@ -1544,8 +1553,10 @@ enum Format {
     Lines,
     Xlsx,
     Sheet,
-    /// Apache Parquet (read-only)
+    /// Apache Parquet
     Parquet,
+    /// Local DuckDB database
+    Duckdb,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1554,8 +1565,10 @@ enum InspectFormat {
     Xlsx,
     Csv,
     Tsv,
-    /// Apache Parquet (read-only)
+    /// Apache Parquet
     Parquet,
+    /// Local DuckDB database
+    Duckdb,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1902,11 +1915,13 @@ fn main() -> ExitCode {
             r#where: where_clauses,
             select: select_args,
             rename,
+            parquet_plan,
+            text_column,
             quiet,
             csv,
         }) => {
             csv.to_options(delimiter).and_then(|csv| {
-                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv)
+                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv, parquet_plan, text_column)
             })
         }
         Some(Commands::Calc {
@@ -2016,6 +2031,9 @@ fn main() -> ExitCode {
             let headers = if headers { Some(true) } else if no_headers { Some(false) } else { None };
             if is_parquet && (no_headers || sheet.is_some() || delimiter.is_some() || recompute) {
                 Err(CliError::args("Parquet uses schema headers and has one table with no formulas; --no-headers, --sheet, --delimiter and --recompute do not apply"))
+            } else if file.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("duckdb"))
+                && (no_headers || delimiter.is_some() || recompute) {
+                Err(CliError::args("DuckDB tables use schema headers and have no spreadsheet formulas; --no-headers, --delimiter and --recompute do not apply"))
             } else if json {
                 cmd_peek_json(file, headers, sheet, max_rows, force, delimiter, recompute)
             } else {
@@ -4310,6 +4328,11 @@ fn cmd_peek_json(
         return peek_json_output(&data);
     }
 
+    if ext == "duckdb" {
+        let sheets = tui::data::load_duckdb(&file, Some(sheet.as_deref().unwrap_or("0")), max_rows, force, 0, true)
+            .map_err(CliError::io)?;
+        return peek_json_output(&sheets[0].data);
+    }
     // Native and imported workbooks share selection and safety semantics.
     if matches!(ext.as_str(), "sheet" | "vgrid" | "xlsx" | "xls" | "xlsb" | "xlsm" | "ods") {
         let effective_max = if max_rows == 0 && !force { PEEK_FORCE_CAP + 1 } else { max_rows };
@@ -4404,7 +4427,7 @@ fn cmd_peek(
     }
 
     // xlsx/ods use the workbook import path
-    if matches!(ext.as_str(), "xlsx" | "xls" | "xlsb" | "xlsm" | "ods") {
+    if matches!(ext.as_str(), "xlsx" | "xls" | "xlsb" | "xlsm" | "ods" | "duckdb") {
         return cmd_peek_workbook(file, sheet, max_rows, force, width_scan_rows, shape, interactive, recompute);
     }
 
@@ -4429,7 +4452,7 @@ fn cmd_peek(
             "csv" | "txt" | "" => b',',
             other => {
                 return Err(CliError::args(format!(
-                    "unsupported file extension '.{}' (supported: csv, tsv, txt, parquet, xlsx, xls, xlsb, xlsm, ods, sheet, vgrid)\n\
+                    "unsupported file extension '.{}' (supported: csv, tsv, txt, parquet, duckdb, xlsx, xls, xlsb, xlsm, ods, sheet, vgrid)\n\
                      hint: use --delimiter to specify a custom delimiter for delimited text files",
                     other
                 )));
@@ -4562,8 +4585,14 @@ fn cmd_peek_workbook(
         max_rows
     };
 
-    let sheets = tui::data::load_workbook_peek(&file, effective_max, width_scan_rows, recompute, force)
-        .map_err(CliError::io)?;
+    let is_duckdb = file.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("duckdb"));
+    let sheets = if is_duckdb {
+        tui::data::load_duckdb(&file, sheet.as_deref(), max_rows, force, width_scan_rows, false)
+    } else {
+        tui::data::load_workbook_peek(&file, effective_max, width_scan_rows, recompute, force)
+    }.map_err(CliError::io)?;
+    // DuckDB resolves the selection before loading any records.
+    let sheet = if is_duckdb && sheet.is_some() { Some("0".to_string()) } else { sheet };
 
     if sheets.is_empty() {
         return Err(CliError::io("workbook has no sheets".to_string()));
@@ -4625,7 +4654,10 @@ fn cmd_peek_workbook_shape(sheets: &[tui::data::SheetData], file: &std::path::Pa
     println!("sheets:     {}", sheets.len());
     println!();
     for (i, sd) in sheets.iter().enumerate() {
-        println!("  [{}] {:?}: {} rows x {} cols", i, sd.name, sd.data.num_rows, sd.data.num_cols);
+        println!("  [{}] {:?}: {} rows x {} cols", i, sd.name, sd.data.total_data_rows(), sd.data.num_cols);
+        if sd.data.num_rows < sd.data.total_data_rows() {
+            println!("      loaded: {} rows", sd.data.num_rows);
+        }
     }
     Ok(())
 }
@@ -4684,7 +4716,7 @@ fn cmd_peek_sheet_shape(sheets: &[tui::data::SheetData], file: &std::path::Path)
 
 fn cmd_peek_shape(data: &tui::data::PeekData, file: &std::path::Path) -> Result<(), CliError> {
     let delim_name = match data.delimiter {
-        0 => "none (Parquet)",
+        0 => "none (typed table)",
         b'\t' => "tab (TSV)",
         b',' => "comma (CSV)",
         b';' => "semicolon",
@@ -5346,6 +5378,7 @@ fn cmd_sheet_inspect(
         return cmd_sheet_inspect_workbook_lightweight(&file, json);
     }
 
+    let mut sheet_arg = sheet_arg;
     // Phase B: Load workbook by format
     // Note: load_workbook() already calls rebuild_dep_graph() + recompute_full_ordered()
     // Set when a Parquet file was bigger than a sheet and only part of it loaded.
@@ -5391,6 +5424,12 @@ fn cmd_sheet_inspect(
         // Inspecting only reads, so a file bigger than a sheet shows what
         // fits, with a note, rather than refusing. --calc is the exception,
         // below: an aggregate over part of the file is a wrong answer.
+        InspectFormat::Duckdb => {
+            let selection = if sheets_mode { None } else { sheet_arg.as_deref() };
+            let wb = visigrid_io::duckdb::import(&file, selection).map_err(CliError::parse)?;
+            if selection.is_some() { sheet_arg = Some("0".into()); }
+            (wb, false, vec![], HashMap::new())
+        }
         InspectFormat::Parquet => {
             let imported = visigrid_io::parquet::import(&file)
                 .map_err(CliError::parse)?;
@@ -5494,6 +5533,7 @@ fn cmd_sheet_inspect(
             InspectFormat::Csv => "csv",
             InspectFormat::Tsv => "tsv",
             InspectFormat::Parquet => "parquet",
+            InspectFormat::Duckdb => "duckdb",
         };
         let output = sheet_ops::CalcOutput {
             format: format_name.to_string(),
@@ -5522,6 +5562,7 @@ fn cmd_sheet_inspect(
         InspectFormat::Csv => Some("csv"),
         InspectFormat::Tsv => Some("tsv"),
         InspectFormat::Parquet => Some("parquet"),
+        InspectFormat::Duckdb => Some("duckdb"),
         InspectFormat::Sheet => None,
     };
 
@@ -6118,15 +6159,16 @@ fn cmd_sheet_import(
     // 2. Validate arg combinations
     let is_single_sheet_source = matches!(fmt, InspectFormat::Csv | InspectFormat::Tsv | InspectFormat::Parquet);
     if sheet_arg.is_some() && is_single_sheet_source {
-        return Err(CliError::args("--sheet is only valid for XLSX"));
+        return Err(CliError::args("--sheet is only valid for XLSX or DuckDB"));
     }
-    if !matches!(formulas, FormulaPolicy::Values) && is_single_sheet_source {
+    if !matches!(formulas, FormulaPolicy::Values) && !matches!(fmt, InspectFormat::Xlsx) {
         return Err(CliError::args("--formulas keep/recalc only valid for XLSX"));
     }
     if delimiter.is_some() && !matches!(fmt, InspectFormat::Csv) {
         return Err(CliError::args("--delimiter is only valid for CSV"));
     }
 
+    let mut sheet_arg = sheet_arg;
     // 3. Load source
     let format_str: &str;
     let (mut workbook, import_result) = match fmt {
@@ -6161,6 +6203,12 @@ fn cmd_sheet_import(
             format_str = "parquet";
             let sheet = convert::read_parquet_whole(&source)?;
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
+            (wb, visigrid_io::xlsx::ImportResult::default())
+        }
+        InspectFormat::Duckdb => {
+            format_str = "duckdb";
+            let wb = visigrid_io::duckdb::import(&source, sheet_arg.as_deref()).map_err(CliError::parse)?;
+            if sheet_arg.is_some() { sheet_arg = Some("0".into()); }
             (wb, visigrid_io::xlsx::ImportResult::default())
         }
         InspectFormat::Sheet => unreachable!(), // already rejected

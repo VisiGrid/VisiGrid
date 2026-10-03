@@ -825,6 +825,8 @@ pub struct Spreadsheet {
     // Spreadsheet::intercept_pivot_keys). Kept alive for the window's life.
     #[allow(dead_code)]
     pivot_key_subscription: gpui::Subscription,
+    #[allow(dead_code)]
+    duckdb_key_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -862,6 +864,8 @@ pub struct Spreadsheet {
     pub import_in_progress: bool,
     pub import_overlay_visible: bool,
     pub import_started_at: Option<std::time::Instant>,
+    pub duckdb_import: Option<crate::duckdb_import::ImportDialog>,
+    pub duckdb_import_id: u64,
 
     // Startup timing (cold start measurement)
     pub startup_instant: Option<std::time::Instant>,
@@ -1198,6 +1202,7 @@ impl Spreadsheet {
             }).detach();
         }
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
+        let duckdb_key_subscription = Self::intercept_duckdb_keys(window, cx);
 
         // Coming back to the window: has the open CSV changed on disk?
         // Also pauses the copy border's animation while the window is inactive.
@@ -1454,6 +1459,7 @@ impl Spreadsheet {
             settings_subscription,
             appearance_subscription: Some(appearance_subscription),
             pivot_key_subscription,
+            duckdb_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -1481,6 +1487,8 @@ impl Spreadsheet {
             import_in_progress: false,
             import_overlay_visible: false,
             import_started_at: None,
+            duckdb_import: None,
+            duckdb_import_id: 0,
 
             startup_instant: None,
             cold_start_ms: None,

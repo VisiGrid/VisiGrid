@@ -1245,9 +1245,9 @@ impl Sheet {
     /// written as plain numbers so the file remains machine-readable.
     pub fn get_interchange_display(&self, row: usize, col: usize) -> String {
         let iso = match self.cells.get(row, col).map(|c| &c.format().number_format) {
-            Some(NumberFormat::Date { .. }) => Iso::Date,
-            Some(NumberFormat::Time) => Iso::Time,
-            Some(NumberFormat::DateTime) => Iso::DateTime,
+            Some(NumberFormat::Date { .. }) => TemporalFormat::Date,
+            Some(NumberFormat::Time) => TemporalFormat::Time,
+            Some(NumberFormat::DateTime) => TemporalFormat::DateTime,
             Some(NumberFormat::Custom(code)) => match custom_code_iso(code) {
                 Some(iso) => iso,
                 None => return self.get_display(row, col),
@@ -1288,9 +1288,9 @@ impl Sheet {
             }
         };
         match iso {
-            Iso::Date => date(),
-            Iso::Time => time(),
-            Iso::DateTime => format!("{} {}", date(), time()),
+            TemporalFormat::Date => date(),
+            TemporalFormat::Time => time(),
+            TemporalFormat::DateTime => format!("{} {}", date(), time()),
         }
     }
 
@@ -2592,17 +2592,35 @@ impl Sheet {
     }
 }
 
-enum Iso { Date, Time, DateTime }
+/// Calendar/clock semantics shared by interchange writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalFormat { Date, Time, DateTime }
 
 /// Which ISO form a custom format code's cells take in CSV/TSV.
 ///
 /// Date and time codes imported from xlsx (`d-mmm`, `h:mm AM/PM`,
 /// `m/d/yyyy h:mm`) are dates just as much as the native styles are.
 /// Elapsed codes (`[h]:mm:ss`) are durations, not times of day, and stay raw.
-fn custom_code_iso(code: &str) -> Option<Iso> {
-    use ssfmt::ast::{DatePart as P, FormatPart};
+fn custom_code_iso(code: &str) -> Option<TemporalFormat> {
     let fmt = ssfmt::NumberFormat::parse(code).ok()?;
-    let parts = &fmt.sections().first()?.parts;
+    section_temporal_format(&fmt.sections().first()?.parts)
+}
+
+/// Strict classification for typed export. All numeric sections must agree:
+/// a conditional format cannot turn half a column into unlabeled serials.
+pub fn custom_code_temporal_format(code: &str) -> Result<Option<TemporalFormat>, &'static str> {
+    let fmt = ssfmt::NumberFormat::parse(code).map_err(|_| "unsupported custom number format; simplify it or export as text")?;
+    let kinds: Vec<_> = fmt.sections().iter().take(3)
+        .map(|section| section_temporal_format(&section.parts)).collect();
+    let temporal = kinds.iter().flatten().copied().next();
+    if temporal.is_some() && kinds.iter().any(|kind| *kind != temporal) {
+        return Err("custom format mixes date/time and other sections; use one date/time format or export as text");
+    }
+    Ok(temporal)
+}
+
+fn section_temporal_format(parts: &[ssfmt::ast::FormatPart]) -> Option<TemporalFormat> {
+    use ssfmt::ast::{DatePart as P, FormatPart};
     let (mut calendar, mut clock) = (false, false);
     for part in parts {
         match part {
@@ -2615,9 +2633,9 @@ fn custom_code_iso(code: &str) -> Option<Iso> {
         }
     }
     match (calendar, clock) {
-        (true, true) => Some(Iso::DateTime),
-        (true, false) => Some(Iso::Date),
-        (false, true) => Some(Iso::Time),
+        (true, true) => Some(TemporalFormat::DateTime),
+        (true, false) => Some(TemporalFormat::Date),
+        (false, true) => Some(TemporalFormat::Time),
         (false, false) => None,
     }
 }
