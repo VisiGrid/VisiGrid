@@ -246,6 +246,7 @@ pub enum UndoAction {
         description: String,
     },
     TableCommit {
+        header_layout: Option<Box<crate::table_create::HeaderLayout>>,
         sheet_index: usize,
         commit: Box<visigrid_engine::workbook::TableCommit>,
         description: String,
@@ -1559,17 +1560,22 @@ impl History {
 
         view_state.per_sheet.resize_with(workbook.sheet_count(), PreviewSheetView::default);
         for (index, entry) in self.undo_stack.iter().enumerate().skip(i) {
-            if let UndoAction::TableStructureChanged { history, .. } = &entry.action {
-                if let Some(sheet_index) = workbook.sheet_index_by_id(history.commit.sheet) {
+            let source = match &entry.action {
+                UndoAction::TableStructureChanged { history, .. } => Some((history.commit.sheet, &history.before, history.source_frozen)),
+                UndoAction::TableCommit { commit, header_layout: Some(layout), .. } => Some((commit.sheet_id(), &layout.before, Some(layout.frozen_before))),
+                _ => None,
+            };
+            if let Some((target_sheet_id, before, source_frozen)) = source {
+                if let Some(sheet_index) = workbook.sheet_index_by_id(target_sheet_id) {
                     let view = &mut view_state.per_sheet[sheet_index];
                     if view.structure_layout.is_none() {
-                        let mut layout = history.before.clone();
-                        let mut frozen = history.source_frozen;
+                        let mut layout = before.clone();
+                        let mut frozen = source_frozen;
                         for earlier in self.undo_stack[i..index].iter().rev() {
                             match &earlier.action {
                                 UndoAction::ColumnWidthSet {
                                     sheet_id, col, old, ..
-                                } if *sheet_id == history.commit.sheet => {
+                                } if *sheet_id == target_sheet_id => {
                                     if let Some(v) = old {
                                         layout.widths.insert(*col, *v);
                                     } else {
@@ -1578,7 +1584,7 @@ impl History {
                                 }
                                 UndoAction::RowHeightSet {
                                     sheet_id, row, old, ..
-                                } if *sheet_id == history.commit.sheet => {
+                                } if *sheet_id == target_sheet_id => {
                                     if let Some(v) = old {
                                         layout.heights.insert(*row, *v);
                                     } else {
@@ -1586,21 +1592,21 @@ impl History {
                                     }
                                 }
                                 UndoAction::RowVisibilityChanged { sheet_id, rows, hidden }
-                                    if *sheet_id == history.commit.sheet => {
+                                    if *sheet_id == target_sheet_id => {
                                     for row in rows {
                                         if *hidden { layout.hidden_rows.remove(row); }
                                         else { layout.hidden_rows.insert(*row); }
                                     }
                                 }
                                 UndoAction::ColVisibilityChanged { sheet_id, cols, hidden }
-                                    if *sheet_id == history.commit.sheet => {
+                                    if *sheet_id == target_sheet_id => {
                                     for col in cols {
                                         if *hidden { layout.hidden_cols.remove(col); }
                                         else { layout.hidden_cols.insert(*col); }
                                     }
                                 }
                                 UndoAction::FreezePanesChanged { sheet_id, old_frozen_rows, old_frozen_cols, .. }
-                                    if *sheet_id == history.commit.sheet => {
+                                    if *sheet_id == target_sheet_id => {
                                     frozen = Some((*old_frozen_rows, *old_frozen_cols));
                                 }
                                 UndoAction::RowsInserted { .. }
@@ -1784,8 +1790,20 @@ impl History {
                     .map_err(PreviewBuildError::InvariantViolation)?;
                 workbook.restore_snapshot_monotonic(&candidate);
             }
-            UndoAction::TableCommit { sheet_index, commit, .. } => {
-                if crate::table_resize::is_resize(commit) {
+            UndoAction::TableCommit { sheet_index, commit, header_layout, .. } => {
+                if crate::table_create::is_creation(commit) {
+                    if let Some(layout) = header_layout {
+                        workbook.sheet_by_id_mut(commit.sheet_id())
+                            .ok_or_else(|| PreviewBuildError::InvariantViolation("Missing creation sheet".into()))?
+                            .frozen_panes = layout.frozen_before;
+                    }
+                    let candidate = crate::table_create::prepare_creation_replay(workbook, commit, header_layout.as_deref(), false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
+                    if let (Some(layout), Some(view)) = (header_layout, view_state.per_sheet.get_mut(*sheet_index)) {
+                        view.structure_layout = Some(layout.after.clone());
+                    }
+                } else if crate::table_resize::is_resize(commit) {
                     let candidate = crate::table_resize::prepare_resize_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
                     workbook.restore_snapshot_monotonic(&candidate);
@@ -2321,7 +2339,7 @@ mod tests {
         let mut replay = base;
         let mut view = crate::app::PreviewViewState::default();
         for commit in [&create, &rename, &style] {
-            let action = UndoAction::TableCommit {
+            let action = UndoAction::TableCommit { header_layout: None,
                 sheet_index: 0,
                 commit: Box::new(commit.clone()),
                 description: "Table change".into(),
@@ -2360,7 +2378,7 @@ mod tests {
             (1, 0, "3".into()), (1, 1, "=[@Column1]*10".into()),
             (2, 0, "4".into()), (2, 1, "=[@Column1]*10".into()),
         ]).unwrap();
-        let action = UndoAction::TableCommit {
+        let action = UndoAction::TableCommit { header_layout: None,
             sheet_index: 0, commit: Box::new(append), description: "Append Table rows".into(),
         };
         History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
@@ -2404,7 +2422,7 @@ mod tests {
             start_row: 0, start_col: 0, end_row: 1, end_col: 1,
         }, "Sales").unwrap();
         let id = commit.table_id();
-        let action = UndoAction::TableCommit { sheet_index: 0, commit: Box::new(commit.clone()), description: "Create Table: Sales".into() };
+        let action = UndoAction::TableCommit { header_layout: None, sheet_index: 0, commit: Box::new(commit.clone()), description: "Create Table: Sales".into() };
         History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
         assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
         assert_eq!(replay.active_sheet().get_display(1,1), "84");
@@ -2464,12 +2482,12 @@ mod tests {
         let mut replay = wb.clone();
         let mut view = crate::app::PreviewViewState::default();
         let rule = wb.set_calculated_column(id,1,1,"=A2*2",true).unwrap();
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit {sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}).unwrap();
         let before = wb.active_sheet().get_raw(2,1);
         wb.clear_cell_tracked(0,2,1);
         History::apply_action_forward(&mut replay,&mut view,&UndoAction::Values {sheet_index:0,changes:vec![CellChange {row:2,col:1,old_value:before,new_value:String::new()}]}).unwrap();
         let update = wb.set_calculated_column(id,1,1,"=A2*3",false).unwrap();
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit {sheet_index:0,commit:Box::new(update),description:"Update rule".into()}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(update),description:"Update rule".into()}).unwrap();
         assert!(replay.active_sheet().is_calculated_exception(2,1));
         assert_eq!(replay.active_sheet().get_raw(2,1),"");
         assert_eq!(replay.active_sheet().get_raw(3,1),"=A4*3");
@@ -2497,7 +2515,7 @@ mod tests {
         let rename = workbook.rename_table(create.table_id(), "Orders").unwrap();
         workbook.apply_table_commit(&rename, true).unwrap();
         workbook.rename_table(create.table_id(), "Changed").unwrap();
-        let action = UndoAction::TableCommit {
+        let action = UndoAction::TableCommit { header_layout: None,
             sheet_index: 0,
             commit: Box::new(rename),
             description: "Rename Table".into(),

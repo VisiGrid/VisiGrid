@@ -308,6 +308,9 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .text_color(muted);
     match d.kind {
         TableDialogKind::Create => {
+            if crate::table_filter_ui::has_table_criteria(app.wb(cx)) {
+                preview = preview.child("Ranges use worksheet addresses. Existing Table sorting and filters stay active.");
+            }
             match parse_range(&d.range).and_then(|r| app.wb(cx)
                 .preview_table_creation(d.sheet, r, d.has_headers).map(|(result, headers)| (r, result, headers))) {
                 Ok((source, range, headers)) => {

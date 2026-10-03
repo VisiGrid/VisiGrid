@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Create Tables above/below filtered or sorted Tables and on other sheets without clearing saved criteria. Both existing and generated headers are supported; header insertion, row layout and freeze panes undo together, with atomic validation and history rewind.
+
 - Resize Tables without clearing saved sorting or filters. Existing records and column identities are preserved, unsafe changes are refused atomically, and one-step undo/redo and history rewind restore the bounds and dependent formulas. Clear a column’s sort/filter before removing it.
 
 - Typing immediately below a sorted or filtered Table now appends a row, fills calculated columns and preserves criteria. The value, Percent format and row growth undo together; rejected edits stay open and stop save/close/navigation from discarding them.

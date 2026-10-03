@@ -431,6 +431,7 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
+        self.sync_table_view(cx);
         if self.table_under_cursor(cx).is_some() {
             self.open_table_dialog(
                 TableDialogKind::Resize(self.table_under_cursor(cx).unwrap().id),
@@ -438,8 +439,7 @@ impl Spreadsheet {
             );
             return;
         }
-        if self.block_table_view_edit(cx) { return; }
-        if self.row_view.is_sorted() || self.row_view.is_filtered() {
+        if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
             self.status_message = Some("Clear sorting and filters before creating a Table.".into());
             cx.notify();
             return;
@@ -455,6 +455,10 @@ impl Spreadsheet {
         } else {
             (r0, c0, r1, c1)
         };
+        let range = TableRange { start_row: r0, start_col: c0, end_row: r1, end_col: c1 };
+        if let Err(error) = crate::table_create::creation_selection(self.wb(cx), self.sheet(cx).id, range) {
+            self.status_message = Some(error); cx.notify(); return;
+        }
         self.table_dialog = Some(TableDialog {
             kind: TableDialogKind::Create,
             sheet: self.sheet(cx).id,
@@ -541,15 +545,14 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        if self.block_table_view_edit(cx) { return; }
-        if draft.kind == TableDialogKind::Create && !draft.has_headers {
-            let last = self.wb(cx).sheet_by_id(draft.sheet).map(|s| s.rows - 1).unwrap_or(crate::app::NUM_ROWS - 1);
-            if self.row_heights.get(&draft.sheet).is_some_and(|h| h.contains_key(&last))
-                || self.hidden_rows.get(&draft.sheet).is_some_and(|h| h.contains(&last)) {
-                self.table_dialog.as_mut().unwrap().error = Some("Inserting a header would push row formatting off the sheet.".into());
-                cx.notify(); return;
+        if draft.kind == TableDialogKind::Create {
+            match parse_range(&draft.range).and_then(|range| self.submit_table_creation(draft.sheet, range, draft.name.trim(), draft.has_headers, cx)) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
             }
+            cx.notify(); return;
         }
+        if self.block_table_view_edit(cx) { return; }
         let result = self.workbook.update(cx, |wb, _| match draft.kind {
             TableDialogKind::Create => parse_range(&draft.range)
                 .and_then(|r| if draft.has_headers { wb.create_table(draft.sheet, r, draft.name.trim()) }
@@ -617,7 +620,7 @@ impl Spreadsheet {
     ) {
         self.update_header_insertion_view(&commit, false, cx);
         self.history.record_action_with_provenance(
-            UndoAction::TableCommit {
+            UndoAction::TableCommit { header_layout: None,
                 sheet_index: self
                     .wb(cx)
                     .sheet_index_by_id(commit.sheet_id())
@@ -636,9 +639,13 @@ impl Spreadsheet {
     pub(crate) fn replay_table_commit(
         &mut self,
         commit: &TableCommit,
+        header_layout: Option<&crate::table_create::HeaderLayout>,
         undo: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::table_create::is_creation(commit) {
+            return self.replay_table_creation(commit, header_layout, undo, cx);
+        }
         if crate::table_resize::is_resize(commit) {
             return self.replay_table_resize(commit, undo, cx);
         }

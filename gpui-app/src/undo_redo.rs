@@ -49,7 +49,7 @@ impl Spreadsheet {
                     &entry.action,
                     UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. }
                 )
-                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit))
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
@@ -198,8 +198,8 @@ impl Spreadsheet {
                     if !self.replay_table_append(&history, true, cx) { self.history.redo(); return; }
                     self.status_message = Some(format!("Undo: {description}"));
                 }
-                UndoAction::TableCommit { commit, description, .. } => {
-                    if !self.replay_table_commit(&commit, true, cx) { self.history.redo(); return; }
+                UndoAction::TableCommit { commit, header_layout, description, .. } => {
+                    if !self.replay_table_commit(&commit, header_layout.as_deref(), true, cx) { self.history.redo(); return; }
                     self.status_message = Some(format!("Undo: {description}"));
                 }
                 UndoAction::PivotCommit { commit, created_sheet, description } => {
@@ -674,8 +674,8 @@ impl Spreadsheet {
                 self.replay_table_view(&commit, true, cx);
             }
             UndoAction::TableAppend { history, .. } => { self.replay_table_append(&history, true, cx); }
-            UndoAction::TableCommit { commit, .. } => {
-                self.replay_table_commit(&commit, true, cx);
+            UndoAction::TableCommit { commit, header_layout, .. } => {
+                self.replay_table_commit(&commit, header_layout.as_deref(), true, cx);
             }
             UndoAction::PivotCommit {
                 commit,
@@ -1092,8 +1092,8 @@ impl Spreadsheet {
             UndoAction::TableAppend { history, .. } => {
                 if !self.replay_table_append(&history, false, cx) { return false; }
             }
-            UndoAction::TableCommit { commit, .. } => {
-                if !self.replay_table_commit(&commit, false, cx) {
+            UndoAction::TableCommit { commit, header_layout, .. } => {
+                if !self.replay_table_commit(&commit, header_layout.as_deref(), false, cx) {
                     return false;
                 }
             }
@@ -1327,7 +1327,7 @@ impl Spreadsheet {
                     &entry.action,
                     UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. }
                 )
-                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit))
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
@@ -1477,8 +1477,8 @@ impl Spreadsheet {
                     if !self.replay_table_append(&history, false, cx) { self.history.undo(); return; }
                     self.status_message = Some(format!("Redo: {description}"));
                 }
-                UndoAction::TableCommit { commit, description, .. } => {
-                    if !self.replay_table_commit(&commit, false, cx) { self.history.undo(); return; }
+                UndoAction::TableCommit { commit, header_layout, description, .. } => {
+                    if !self.replay_table_commit(&commit, header_layout.as_deref(), false, cx) { self.history.undo(); return; }
                     self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::PivotCommit { commit, created_sheet, description } => {

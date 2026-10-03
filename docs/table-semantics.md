@@ -16,7 +16,7 @@ Table ranges cannot overlap another table, a merged region, pivot output, or an 
 
 Creation uses an explicit rectangle. With **My data has headers** enabled (the default), its first row supplies normalized text headers and keeps its explicit formatting. With headers disabled, every selected row remains data: one whole worksheet row is inserted at the selection's top boundary, and `Column1`, `Column2`, … become the new headers. Cells in all columns at or below that row move down, including adjacent data and Tables; A1 references, calculated rules and structural metadata follow the existing row operation. The preview shows the final range and record count and explicitly describes the whole-row movement. A single-cell selection still suggests its current region.
 
-Headerless creation returns a single `TableCommit` and increments the workbook revision once. It stages row insertion and creation on a temporary copy-on-write workbook, publishing only after both succeed. Undo/redo also stage both operations together: a late collision or spill cannot leave a partial insertion/removal. History retains schema, inserted-row preconditions, structural formula rewrites and print setup, without storing a workbook/body snapshot. The desktop shifts row heights and hidden-row positions and restores them on undo; rewind uses the same engine commit. Generic row insertion still governs freeze-pane positions.
+Headerless creation returns a single `TableCommit` and increments the workbook revision once. It stages row insertion and creation on a temporary copy-on-write workbook, publishing only after both succeed. Undo/redo also stage both operations together: a late collision or spill cannot leave a partial insertion/removal. History retains schema, inserted-row preconditions, structural formula rewrites and print setup, without storing a workbook/body snapshot. The desktop shifts row heights and hidden-row positions and restores them on undo; rewind uses the same engine commit. Desktop creation moves freeze-pane boundaries with the inserted header and restores them on undo.
 
 Headerless preview refuses overlapping Tables, merges, spills and pivot output, structural protection violations and insufficient space for the extra row. A last-row value, comment or explicit format also prevents insertion; the desktop additionally checks last-row height/visibility metadata. Final creation validates again after row movement, catching formulas that start spilling at their new coordinates. Stale undo refuses changes to the inserted row or captured formula sources, and failed replay retains the original workbook and history position.
 
@@ -332,19 +332,30 @@ Removing a column used by a saved sort or filter requires clearing that criterio
 
 Resize stages its schema/formula change on a candidate workbook and checks every saved view after recalculation, plus desktop row heights, manual hiding and freeze boundaries, before publication. Invalid ranges, overlapping objects, adjacent content or unsafe dependent spills leave the workbook and dialog intact. An unchanged range creates no history entry. Successful resize anchors selection at the Table header, which remains visible. Recovery, Review Mode and history preview still block mutation.
 
-Undo/redo and rewind reuse a sparse engine Table commit, without retaining a workbook snapshot. Replay validates schema/header/formula preconditions and the resulting views; it also refuses to remove a column newly used by criteria. Save/reopen retains the resized bounds and saved criteria. Creation under active criteria remains a separate follow-up.
+Undo/redo and rewind reuse a sparse engine Table commit, without retaining a workbook snapshot. Replay validates schema/header/formula preconditions and the resulting views; it also refuses to remove a column newly used by criteria. Save/reopen retains the resized bounds and saved criteria. Creation under active criteria uses the guarded path below.
 
 Resize validation, 2026-10-03: all 789 desktop tests passed (3 existing ignores), including 12 regressions for existing-record growth, hidden overrides, column identities/header normalization, row/header-only shrinking, dependent formulas, criterion removal refusal, unsafe layout/spills on other sheets, recovery/stale history, desktop row presentation, rewind and native full-save roundtrip. The native debug build passed. Live keyboard QA remains pending.
 
+## Phase 3: creation with active Table criteria
+
+Create Table works above or below an existing sorted/filtered Table and on other sheets while saved criteria remain active. Dialog ranges use canonical worksheet addresses. A selection crossing an active Table's body rows is refused rather than interpreting sorted endpoints as a new rectangle; selecting inside an existing Table still opens Resize. Worksheet sort/AutoFilter must be cleared on the source sheet. Dormant header-only criteria and button-only specs do not project rows or block adjacent creation. The existing one-active-Table-view-per-sheet rule is unchanged; creating a second Table does not transfer view ownership.
+
+Both header modes are supported. Using existing headers preserves body values and normalizes column names through the engine. Without headers, creation inserts a whole worksheet row above the selected data and generates column names. Neighboring data, formulas and existing Tables move with that insertion; existing Table and column identities and saved criteria remain intact. Row heights, manual row hiding and frozen-pane boundaries move with the header insertion. A source at the grid edge or an insertion that would lose cells or row layout is refused.
+
+Creation stages the workbook and desktop layout before publication, validates every saved view after formula binding/recalculation, and checks affected row layout. Invalid names/ranges, overlap, adjacent content, merges/spills/pivots, unsafe dependencies and recovery mode refuse without partial changes. Errors remain in the dialog for correction. Review Mode and history preview continue to block editing. Successful creation selects the new header.
+
+One sparse Table commit records schema, header values and formula changes. Headerless history additionally retains row/column presentation and frozen-pane states, not a workbook snapshot. Undo/redo and rewind restore insertion and creation together and rebuild the saved projections. Replay refuses stale schema, changed inserted-header content, conflicting view ownership, unsafe recalculation, or changed insertion layout/frozen panes. Native save/reopen retains both Tables and the original view criteria.
+
+Creation validation, 2026-10-03: all 804 desktop tests passed (3 existing ignores), including 15 regressions for same/cross-sheet creation, hidden record preservation, generated-header insertion, comments and neighboring cells, layout/freeze shifts, structured-formula binding, atomic rejection, stale replay, dormant specs, rewind and native full-save roundtrip. The native debug build passed. Live keyboard QA remains pending.
+
 ## Phase 3 backlog
 
-1. Create Tables while criteria are active; preserve canonical bounds and workbook-wide view safety.
-2. Copy reviewed results to another sheet while criteria are active.
-3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
-4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
-5. Named saved views and richer mixed-layout support beyond the current saved criteria.
-6. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
-7. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
+1. Copy reviewed results to another sheet while criteria are active.
+2. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
+3. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
+4. Named saved views and richer mixed-layout support beyond the current saved criteria.
+5. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
+6. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
 
 Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.
 
