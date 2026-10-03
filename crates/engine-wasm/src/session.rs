@@ -55,8 +55,12 @@ pub(crate) struct Delta {
     /// The workbook revision after the edit, so a caller applying deltas can
     /// tell it has not missed one.
     pub(crate) revision: u64,
-    /// The cells re-evaluated as a consequence, with their new values. Does
-    /// not include the cells written — the caller supplied those.
+    /// What the caller must repaint, with current values: first the cells
+    /// written — every written formula (its computed value is news to the
+    /// caller) and every written literal whose value, error or display
+    /// changed (a clear, a coercion such as "1e3" to 1000) — then the cells
+    /// re-evaluated as a consequence, including cells an array spilled into or
+    /// out of. Each cell appears once.
     pub(crate) cells: Vec<OutResult>,
     /// Set when a circular reference forced a full recompute, so the extent of
     /// the change is the whole workbook and `cells` is not a delta to trust.
@@ -136,11 +140,12 @@ impl Session {
         if sheet >= self.wb.sheets().len() {
             return Err(format!("no sheet at index {sheet}"));
         }
+        let before = self.snapshot(&[(sheet, row, col)]);
         let recalculated = match raw {
             Some(value) => self.wb.set_cell_value_tracked(sheet, row, col, value),
             None => self.wb.clear_cell_tracked(sheet, row, col),
         };
-        Ok(self.delta(recalculated))
+        Ok(self.delta(&before, recalculated))
     }
 
     /// Apply several edits with a single recalculation at the end.
@@ -167,6 +172,8 @@ impl Session {
             return Err(format!("no sheet at index {}", bad.sheet));
         }
 
+        let written: Vec<(usize, usize, usize)> = edits.iter().map(|e| (e.sheet, e.row, e.col)).collect();
+        let before = self.snapshot(&written);
         self.wb.begin_batch();
         for edit in edits {
             match edit.raw {
@@ -177,7 +184,7 @@ impl Session {
             };
         }
         let outcome = self.wb.end_batch_outcome();
-        Ok(self.delta(outcome.recalculated))
+        Ok(self.delta(&before, outcome.recalculated))
     }
 
     /// Every formula cell in the workbook with its current value.
@@ -206,17 +213,44 @@ impl Session {
         Delta { revision: self.wb.revision(), cells, resync: false }
     }
 
-    fn delta(&self, recalculated: Recalculated) -> Delta {
-        match recalculated {
-            Recalculated::Cells(cells) => Delta {
-                revision: self.wb.revision(),
-                cells: cells.iter().filter_map(|id| self.project(*id)).collect(),
-                resync: false,
-            },
+    /// The written cells as they stood before an edit, in edit order, once
+    /// each (a batch may write one cell twice).
+    fn snapshot(&self, written: &[(usize, usize, usize)]) -> Vec<OutResult> {
+        let mut seen = std::collections::HashSet::new();
+        written
+            .iter()
+            .filter(|w| seen.insert(**w))
+            .filter_map(|&(sheet, row, col)| self.wb.sheets().get(sheet).map(|s| out_result(sheet, s, row, col)))
+            .collect()
+    }
+
+    fn delta(&self, before: &[OutResult], recalculated: Recalculated) -> Delta {
+        let cells = match recalculated {
+            Recalculated::Cells(cells) => cells,
             Recalculated::All => {
-                Delta { revision: self.wb.revision(), cells: Vec::new(), resync: true }
+                return Delta { revision: self.wb.revision(), cells: Vec::new(), resync: true };
+            }
+        };
+        let mut out: Vec<OutResult> = Vec::with_capacity(before.len() + cells.len());
+        let mut reported = std::collections::HashSet::new();
+        for old in before {
+            let sheet = &self.wb.sheets()[old.sheet];
+            let now = out_result(old.sheet, sheet, old.row, old.col);
+            let is_formula = sheet
+                .get_cell_opt(old.row, old.col)
+                .is_some_and(|c| c.value().formula_ast().is_some());
+            let changed = now.value != old.value || now.error != old.error || now.display != old.display;
+            if is_formula || changed {
+                reported.insert((now.sheet, now.row, now.col));
+                out.push(now);
             }
         }
+        for result in cells.iter().filter_map(|id| self.project(*id)) {
+            if reported.insert((result.sheet, result.row, result.col)) {
+                out.push(result);
+            }
+        }
+        Delta { revision: self.wb.revision(), cells: out, resync: false }
     }
 
     /// `CellId` carries a `SheetId`; the wire carries an index. Linear over
@@ -265,9 +299,10 @@ mod tests {
 
         let delta = s.apply_one(0, 0, 0, Some("20")).unwrap();
 
+        // The written cell first (its value changed), then the chain.
         assert_eq!(
             reported(&delta),
-            vec![(0, 1, "40".to_string()), (0, 2, "41".to_string())]
+            vec![(0, 0, "20".to_string()), (0, 1, "40".to_string()), (0, 2, "41".to_string())]
         );
         assert!(!delta.resync);
     }
@@ -278,7 +313,8 @@ mod tests {
 
         let delta = s.apply_one(0, 4, 4, Some("hello")).unwrap();
 
-        assert!(delta.cells.is_empty());
+        // Only the written cell itself: nothing reads it.
+        assert_eq!(reported(&delta), vec![(4, 4, "hello".to_string())]);
         assert!(!delta.resync);
     }
 
@@ -288,7 +324,8 @@ mod tests {
 
         let delta = s.apply_one(0, 0, 0, None).unwrap();
 
-        assert_eq!(reported(&delta), vec![(0, 1, "0".to_string())]);
+        // The clear is visible as the cell going empty.
+        assert_eq!(reported(&delta), vec![(0, 0, String::new()), (0, 1, "0".to_string())]);
     }
 
     #[test]
@@ -323,8 +360,11 @@ mod tests {
             ])
             .unwrap();
 
-        // One entry, not one per write: B1 is dirtied by both and evaluated once.
-        assert_eq!(reported(&delta), vec![(0, 1, "30".to_string())]);
+        // The two writes, then B1 once: it is dirtied by both and evaluated once.
+        assert_eq!(
+            reported(&delta),
+            vec![(0, 0, "10".to_string()), (1, 0, "20".to_string()), (0, 1, "30".to_string())]
+        );
     }
 
     #[test]
@@ -392,8 +432,97 @@ mod tests {
 
         let delta = s.apply_one(0, 0, 0, Some("100")).unwrap();
 
+        assert_eq!(delta.cells.len(), 2);
+        assert_eq!((delta.cells[0].sheet, delta.cells[0].display.as_str()), (0, "100"), "the write");
+        assert_eq!(delta.cells[1].sheet, 1, "the dependent is on the second sheet");
+        assert_eq!(delta.cells[1].display, "110");
+    }
+
+    #[test]
+    fn a_new_formula_reports_its_own_value() {
+        // Entering a formula must not require all_results to learn its value.
+        let mut s = Session::from_sheets(&[sheet(&[(0, 0, "4")])]);
+
+        let delta = s.apply_one(0, 0, 1, Some("=A1*3")).unwrap();
+
+        assert_eq!(reported(&delta), vec![(0, 1, "12".to_string())]);
+        assert_eq!(delta.cells[0].value, Some(serde_json::json!(12.0)));
+    }
+
+    #[test]
+    fn a_formula_is_reported_even_when_its_value_did_not_change() {
+        // A literal 2 replaced by =1+1: same value, but the caller needs to
+        // know the cell is now computed by the engine.
+        let mut s = Session::from_sheets(&[sheet(&[(0, 0, "2")])]);
+
+        let delta = s.apply_one(0, 0, 0, Some("=1+1")).unwrap();
+
+        assert_eq!(reported(&delta), vec![(0, 0, "2".to_string())]);
+    }
+
+    #[test]
+    fn rewriting_a_literal_with_the_same_value_reports_nothing() {
+        let mut s = Session::from_sheets(&[sheet(&[(0, 0, "7")])]);
+
+        let delta = s.apply_one(0, 0, 0, Some("7")).unwrap();
+
+        assert!(delta.cells.is_empty(), "{:?}", reported(&delta));
+    }
+
+    #[test]
+    fn a_coerced_literal_reports_its_stored_value() {
+        let mut s = Session::from_sheets(&[sheet(&[])]);
+
+        let delta = s.apply_one(0, 0, 0, Some("1e3")).unwrap();
+
         assert_eq!(delta.cells.len(), 1);
-        assert_eq!(delta.cells[0].sheet, 1, "the dependent is on the second sheet");
-        assert_eq!(delta.cells[0].display, "110");
+        assert_eq!(delta.cells[0].value, Some(serde_json::json!(1000.0)));
+    }
+
+    #[test]
+    fn a_batch_reports_each_written_formula_once() {
+        let mut s = Session::from_sheets(&[sheet(&[(0, 0, "1")])]);
+
+        let delta = s
+            .apply_many(&[
+                InEdit { sheet: 0, row: 0, col: 1, raw: Some("=A1+1".into()) },
+                InEdit { sheet: 0, row: 0, col: 1, raw: Some("=A1+2".into()) },
+                InEdit { sheet: 0, row: 0, col: 2, raw: Some("=B1*10".into()) },
+            ])
+            .unwrap();
+
+        assert_eq!(reported(&delta), vec![(0, 1, "3".to_string()), (0, 2, "30".to_string())]);
+    }
+
+    #[test]
+    fn spilled_cells_are_in_the_delta() {
+        // An array formula's receivers change too; the delta must carry them
+        // so a caller need not fall back to all_results for spilling formulas.
+        let mut s = Session::from_sheets(&[sheet(&[(0, 0, "2")])]);
+
+        let grown = s.apply_one(0, 0, 1, Some("=SEQUENCE(A1)")).unwrap();
+        assert_eq!(reported(&grown), vec![(0, 1, "1".to_string()), (1, 1, "2".to_string())]);
+
+        let more = s.apply_one(0, 0, 0, Some("3")).unwrap();
+        assert!(reported(&more).contains(&(2, 1, "3".to_string())), "a new receiver: {:?}", reported(&more));
+
+        let fewer = s.apply_one(0, 0, 0, Some("1")).unwrap();
+        let cells = reported(&fewer);
+        assert!(cells.contains(&(1, 1, String::new())), "a retired receiver reads empty: {cells:?}");
+        assert!(cells.contains(&(2, 1, String::new())), "a retired receiver reads empty: {cells:?}");
+    }
+
+    #[test]
+    fn a_spill_in_a_batch_is_in_the_delta() {
+        let mut s = Session::from_sheets(&[sheet(&[])]);
+
+        let delta = s
+            .apply_many(&[InEdit { sheet: 0, row: 0, col: 0, raw: Some("={1;2;3}".into()) }])
+            .unwrap();
+
+        assert_eq!(
+            reported(&delta),
+            vec![(0, 0, "1".to_string()), (1, 0, "2".to_string()), (2, 0, "3".to_string())]
+        );
     }
 }
