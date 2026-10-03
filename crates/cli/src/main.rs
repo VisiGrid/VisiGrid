@@ -1386,8 +1386,10 @@ The recipe is a TOML file saved from VisiGrid (or written by hand): a source
 and an ordered list of steps. Its source path is relative to the recipe file.
 
 Diagnostics (rows in and out per step, columns that changed, values that did
-not fit their type) go to stderr. If any check fails, nothing is written and
-the exit status is 70, so an earlier output file is left as it was.
+not fit their type) go to stderr. If any check fails, the result is not
+written (a --report still is) and the exit status is 70, so an earlier output
+file is left as it was. The output and report may not be the source, the
+recipe or each other.
 
 Examples:
   vgrid recipe run orders.recipe.toml -o orders.csv

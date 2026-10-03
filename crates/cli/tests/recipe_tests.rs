@@ -112,3 +112,24 @@ fn a_broken_recipe_exits_71() {
     let o = vgrid(&["recipe", "run", s(&d.join("bad.toml"))]);
     assert_eq!(o.status.code(), Some(71));
 }
+
+#[test]
+fn colliding_paths_are_refused_before_anything_is_written() {
+    let d = setup("collide");
+    let out = d.join("orders.csv");
+    std::fs::write(&out, "previous result\n").unwrap();
+    std::fs::write(d.join("export.csv"), SEPTEMBER.replace("Order ID", "Order Number")).unwrap();
+    let recipe = d.join("orders.recipe.toml");
+    // Report on top of the output (and a run that would fail)
+    let o = vgrid(&["recipe", "run", s(&recipe), "-o", s(&out), "--report", s(&out)]);
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "previous result\n");
+    // Report on top of the source, through a relative spelling
+    let o = vgrid(&["recipe", "run", s(&recipe), "--report", s(&d.join(".").join("export.csv"))]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(std::fs::read_to_string(d.join("export.csv")).unwrap().starts_with("Acme export"));
+    // Output on top of the recipe
+    let o = vgrid(&["recipe", "run", s(&recipe), "-o", s(&recipe)]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(std::fs::read_to_string(&recipe).unwrap().starts_with("version = 1"));
+}

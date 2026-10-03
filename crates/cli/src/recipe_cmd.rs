@@ -24,6 +24,7 @@ pub(crate) fn cmd_recipe_run(
     let recipe = Recipe::load(&recipe_path).map_err(|e| CliError { code: EXIT_RECIPE_INVALID, message: e, hint: None })?;
     let recipe_dir = recipe_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let source_path = recipe.source_path(recipe_dir, source.as_deref());
+    check_paths(&recipe_path, &source_path, output.as_deref(), report_path.as_deref())?;
     let snapshot = Snapshot::read(&source_path).map_err(|e| {
         CliError::io(e).with_hint("the path is relative to the recipe file; pass --source to read another file")
     })?;
@@ -31,7 +32,7 @@ pub(crate) fn cmd_recipe_run(
     let result = recipe::run(&recipe, &snapshot);
     if let Some(path) = &report_path {
         let json = serde_json::to_string_pretty(&result.report).map_err(|e| CliError::io(e.to_string()))?;
-        std::fs::write(path, json).map_err(|e| CliError::io(format!("{}: {e}", path.display())))?;
+        write_replacing(path, |tmp| std::fs::write(tmp, &json).map_err(|e| CliError::io(e.to_string())))?;
     }
     if !quiet || !result.report.ok {
         eprint!("{}", result.report.summary());
@@ -39,7 +40,7 @@ pub(crate) fn cmd_recipe_run(
     if !result.report.ok {
         return Err(CliError {
             code: EXIT_RECIPE_FAILED,
-            message: "the recipe's checks failed; nothing was written".into(),
+            message: "the recipe's checks failed; the result was not written".into(),
             hint: Some("fix the source or the recipe, then run again".into()),
         });
     }
@@ -67,6 +68,45 @@ pub(crate) fn cmd_recipe_run(
         }
     }
     Ok(())
+}
+
+/// The output and report must not land on each other, the source or the
+/// recipe: a failed run would otherwise replace the previous output (or the
+/// source) with a JSON report. Checked before anything is read or written.
+fn check_paths(recipe: &Path, source: &Path, output: Option<&Path>, report: Option<&Path>) -> Result<(), CliError> {
+    let clash = |what: &str, a: &Path, other: &str, b: &Path| -> Result<(), CliError> {
+        if same_file(a, b) {
+            return Err(CliError::args(format!("the {what} {} is also the {other}", a.display()))
+                .with_hint("choose a different path"));
+        }
+        Ok(())
+    };
+    if let Some(out) = output {
+        clash("output", out, "source", source)?;
+        clash("output", out, "recipe", recipe)?;
+    }
+    if let Some(rep) = report {
+        clash("report", rep, "source", source)?;
+        clash("report", rep, "recipe", recipe)?;
+        if let Some(out) = output {
+            clash("report", rep, "output", out)?;
+        }
+    }
+    Ok(())
+}
+
+/// The same file, whether or not either exists yet.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| {
+        std::fs::canonicalize(p).ok().or_else(|| {
+            let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            Some(std::fs::canonicalize(parent).ok()?.join(p.file_name()?))
+        })
+    };
+    match (canon(a), canon(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 /// Write to a temporary file beside `path`, then rename it into place, so

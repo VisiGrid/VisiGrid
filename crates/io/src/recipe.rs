@@ -451,13 +451,38 @@ struct Frame {
     decimal_comma: bool,
 }
 
+/// How a column name a step uses matches the table.
+#[derive(Debug, Clone, PartialEq)]
+enum Resolve {
+    One(usize),
+    None,
+    /// More than one column has this name: never guess which.
+    Many(usize),
+}
+
 impl Frame {
+    /// Exact name first, then ignoring case (headers vary in case between
+    /// exports). Two matches at the same level are ambiguous.
+    fn resolve(&self, name: &str) -> Resolve {
+        let exact: Vec<usize> = (0..self.columns.len()).filter(|&i| self.columns[i].name == name).collect();
+        let hits = if exact.is_empty() {
+            (0..self.columns.len()).filter(|&i| self.columns[i].name.eq_ignore_ascii_case(name)).collect()
+        } else {
+            exact
+        };
+        match hits.len() {
+            0 => Resolve::None,
+            1 => Resolve::One(hits[0]),
+            n => Resolve::Many(n),
+        }
+    }
+
+    /// The column for a name that has already been checked to be unique.
     fn find(&self, name: &str) -> Option<usize> {
-        // Exact first, then case-insensitive (headers vary in case between exports)
-        self.columns
-            .iter()
-            .position(|c| c.name == name)
-            .or_else(|| self.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name)))
+        match self.resolve(name) {
+            Resolve::One(i) => Some(i),
+            _ => None,
+        }
     }
 
     fn add_blank(&mut self, name: &str) -> usize {
@@ -523,7 +548,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         let absent: Vec<String> = step
             .named_columns()
             .into_iter()
-            .filter(|c| frame.find(c).is_none())
+            .filter(|c| frame.resolve(c) == Resolve::None)
             .map(str::to_string)
             .collect();
         if !absent.is_empty() {
@@ -549,6 +574,16 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
                     }
                     note = Some(format!("{} not found; treated as empty", absent.join(", ")));
                 }
+            }
+        }
+
+        // A name matching several columns, or two names in one step reaching
+        // the same column, would silently pick or lose data: always fail
+        if !skipped {
+            if let Err(reason) = check_bindings(step, &frame) {
+                report.ok = false;
+                report.failures.push(format!("step {} ({}): {reason}", index + 1, step.describe()));
+                skipped = true;
             }
         }
 
@@ -598,7 +633,11 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
     };
     let (content, _) = decode(&snapshot.bytes, encoding);
     let delimiter = match src.delimiter.as_deref() {
-        None => sniff_delimiter(&content),
+        // Title lines above the header are not delimited data
+        None => {
+            let from_header: Vec<&str> = content.lines().skip(src.header_row.saturating_sub(1)).take(20).collect();
+            sniff_delimiter(&from_header.join("\n"))
+        }
         Some("tab") | Some("\t") => b'\t',
         Some(d) if d.len() == 1 => d.as_bytes()[0],
         Some(d) => return Err(format!("delimiter {d:?} must be one character or \"tab\"")),
@@ -651,6 +690,28 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
     })
 }
 
+/// Every name the step uses must reach exactly one column, and no column
+/// twice.
+fn check_bindings(step: &Step, frame: &Frame) -> Result<(), String> {
+    let mut seen: Vec<(usize, &str)> = Vec::new();
+    for name in step.named_columns() {
+        match frame.resolve(name) {
+            Resolve::Many(n) => {
+                return Err(format!("{n} columns are named {name}; rename them in the source so each name is unique"));
+            }
+            Resolve::One(i) => {
+                if seen.iter().any(|(j, _)| *j == i) {
+                    // Names only reach the same column through case (a, A)
+                    return Err(format!("column {name} is listed twice"));
+                }
+                seen.push((i, name));
+            }
+            Resolve::None => {} // handled by the missing-column policy
+        }
+    }
+    Ok(())
+}
+
 fn drift(saved: &[String], now: &[OutColumn]) -> Drift {
     if saved.is_empty() {
         return Drift::default();
@@ -681,7 +742,7 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
             let dropped = frame.columns.len() - idx.len();
             frame.columns = idx.iter().map(|&i| frame.columns[i].clone()).collect();
             for row in &mut frame.rows {
-                *row = idx.iter().map(|&i| std::mem::take(&mut row[i])).collect();
+                *row = idx.iter().map(|&i| row[i].clone()).collect();
             }
             (dropped > 0).then(|| format!("dropped {dropped} other column{}", plural(dropped)))
         }
@@ -695,10 +756,12 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
             None
         }
         Step::Rename { columns, .. } => {
-            for (from, to) in columns {
-                if let Some(i) = frame.find(from) {
-                    frame.columns[i].name = to.clone();
-                }
+            // Resolve every source column before renaming any, so mappings
+            // such as A→B, B→A do not interfere
+            let targets: Vec<(usize, String)> =
+                columns.iter().filter_map(|(from, to)| Some((frame.find(from)?, to.clone()))).collect();
+            for (i, to) in targets {
+                frame.columns[i].name = to;
             }
             let names: Vec<&str> = frame.columns.iter().map(|c| c.name.as_str()).collect();
             let unique: HashSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
@@ -776,7 +839,8 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
         }
         Step::Filter { column, op, value, .. } => {
             let i = frame.find(column)?;
-            let keep: Vec<bool> = frame.rows.iter().map(|row| matches(&row[i], *op, value)).collect();
+            let (rule, dc) = (frame.columns[i].rule, frame.decimal_comma);
+            let keep: Vec<bool> = frame.rows.iter().map(|row| matches(&row[i], *op, value, rule, dc)).collect();
             let removed = keep.iter().filter(|k| !**k).count();
             frame.keep_rows(&keep);
             Some(format!("removed {removed} row{}", plural(removed)))
@@ -787,12 +851,12 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
             } else {
                 columns.iter().filter_map(|c| frame.find(c)).collect()
             };
-            let mut seen = HashSet::new();
-            let keep: Vec<bool> = frame
-                .rows
-                .iter()
-                .map(|row| seen.insert(idx.iter().map(|&i| row[i].as_str()).collect::<Vec<_>>().join("\u{1f}")))
-                .collect();
+            // Compare the fields as a tuple; joining them with a separator
+            // would let different rows collide
+            let keep: Vec<bool> = {
+                let mut seen: HashSet<Vec<&str>> = HashSet::new();
+                frame.rows.iter().map(|row| seen.insert(idx.iter().map(|&i| row[i].as_str()).collect())).collect()
+            };
             let removed = keep.iter().filter(|k| !**k).count();
             frame.keep_rows(&keep);
             Some(format!("removed {removed} duplicate row{}", plural(removed)))
@@ -800,15 +864,39 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
     }
 }
 
-/// Numbers compare as numbers when both sides are numbers; otherwise text,
-/// ignoring case.
-fn matches(cell: &str, op: FilterOp, value: &str) -> bool {
+/// Compare as the column is typed. Number columns compare numerically (the
+/// cell read with the source's decimal mark, the recipe's value with either);
+/// Date columns compare as dates; Text columns compare as text, so 001 is
+/// not 1. Auto columns compare as numbers when both sides are numbers, else
+/// as text. Text comparisons ignore case. A cell that is not a number (or
+/// date) never satisfies a numeric comparison.
+fn matches(cell: &str, op: FilterOp, value: &str, rule: ColumnRule, decimal_comma: bool) -> bool {
     let c = cell.trim();
     let v = value.trim();
-    let num = |s: &str| parse_number(s, false);
-    let ord = match (num(c), num(v)) {
-        (Some(a), Some(b)) => a.partial_cmp(&b),
-        _ => Some(c.to_lowercase().cmp(&v.to_lowercase())),
+    match op {
+        FilterOp::Contains => return c.to_lowercase().contains(&v.to_lowercase()),
+        FilterOp::NotContains => return !c.to_lowercase().contains(&v.to_lowercase()),
+        FilterOp::StartsWith => return c.to_lowercase().starts_with(&v.to_lowercase()),
+        FilterOp::Empty => return c.is_empty(),
+        FilterOp::NotEmpty => return !c.is_empty(),
+        _ => {}
+    }
+    let value_number = |v: &str| parse_number(v, false).or_else(|| parse_number(v, true));
+    let text = || Some(c.to_lowercase().cmp(&v.to_lowercase()));
+    let ord = match rule {
+        ColumnRule::Number => match (parse_number(c, decimal_comma), value_number(v)) {
+            (Some(a), Some(b)) => a.partial_cmp(&b),
+            _ => None,
+        },
+        ColumnRule::Date(order) => match (parse_date(c, order), parse_date(v, order)) {
+            (Some(a), Some(b)) => a.partial_cmp(&b),
+            _ => None,
+        },
+        ColumnRule::Text | ColumnRule::Skip => text(),
+        ColumnRule::Auto => match (parse_number(c, decimal_comma), value_number(v)) {
+            (Some(a), Some(b)) if keep_as_text(c, false).is_none() => a.partial_cmp(&b),
+            _ => text(),
+        },
     };
     use std::cmp::Ordering::*;
     match op {
@@ -818,11 +906,7 @@ fn matches(cell: &str, op: FilterOp, value: &str) -> bool {
         FilterOp::Le => matches!(ord, Some(Less | Equal)),
         FilterOp::Gt => ord == Some(Greater),
         FilterOp::Ge => matches!(ord, Some(Greater | Equal)),
-        FilterOp::Contains => c.to_lowercase().contains(&v.to_lowercase()),
-        FilterOp::NotContains => !c.to_lowercase().contains(&v.to_lowercase()),
-        FilterOp::StartsWith => c.to_lowercase().starts_with(&v.to_lowercase()),
-        FilterOp::Empty => c.is_empty(),
-        FilterOp::NotEmpty => !c.is_empty(),
+        _ => unreachable!("handled above"),
     }
 }
 
@@ -1117,5 +1201,79 @@ missing = "blank"
         let r = recipe();
         assert_eq!(r.source_path(Path::new("/data/reports"), None), PathBuf::from("/data/reports/export.csv"));
         assert_eq!(r.source_path(Path::new("/data"), Some(Path::new("/tmp/next.csv"))), PathBuf::from("/tmp/next.csv"));
+    }
+
+    // ---- regressions from the first review (2026-10-02) ----
+
+    fn recipe_with(steps: &str, source_extra: &str) -> Recipe {
+        Recipe::from_toml(&format!("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n{source_extra}\n{steps}")).unwrap()
+    }
+
+    #[test]
+    fn filters_follow_the_decimal_comma_and_declared_types() {
+        // 1,50 is 1.5 with a decimal comma: not greater than 10
+        let r = recipe_with("[[step]]\nop = \"filter\"\ncolumn = \"Amount\"\nis = \">\"\nvalue = \"10\"\n", "delimiter = \";\"\ndecimal_comma = true");
+        let res = run(&r, &snap("id;Amount\n1;1,50\n2;12,00\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.rows, vec![vec!["2", "12,00"]]);
+        // A Text column compares as text: 001 is not 1
+        let r = recipe_with("[[step]]\nop = \"types\"\ncolumns = { code = \"text\" }\n[[step]]\nop = \"filter\"\ncolumn = \"code\"\nis = \"=\"\nvalue = \"1\"\n", "");
+        let res = run(&r, &snap("code\n001\n1\n"));
+        assert_eq!(res.output.rows, vec![vec!["1"]]);
+        // Auto keeps ID-like values as text when comparing too
+        let r = recipe_with("[[step]]\nop = \"filter\"\ncolumn = \"code\"\nis = \"=\"\nvalue = \"1\"\n", "");
+        assert_eq!(run(&r, &snap("code\n001\n1\n")).output.rows, vec![vec!["1"]]);
+        // A Number column: text never satisfies a numeric comparison
+        let r = recipe_with("[[step]]\nop = \"types\"\ncolumns = { n = \"number\" }\non_error = \"keep_text\"\n[[step]]\nop = \"filter\"\ncolumn = \"n\"\nis = \"<\"\nvalue = \"5\"\n", "");
+        assert_eq!(run(&r, &snap("n\nabc\n3\n")).output.rows, vec![vec!["3"]]);
+    }
+
+    #[test]
+    fn duplicate_source_headers_are_never_guessed() {
+        let r = recipe_with("[[step]]\nop = \"select\"\ncolumns = [\"Amount\"]\n", "");
+        let res = run(&r, &snap("Amount,Amount\n10,999\n"));
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("2 columns are named Amount"), "{:?}", res.report.failures);
+    }
+
+    #[test]
+    fn a_column_listed_twice_is_refused() {
+        let r = recipe_with("[[step]]\nop = \"select\"\ncolumns = [\"a\", \"a\"]\n", "");
+        let res = run(&r, &snap("a,b\nx,y\n"));
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("listed twice"), "{:?}", res.report.failures);
+        // Two spellings of one column are the same column
+        let r = recipe_with("[[step]]\nop = \"select\"\ncolumns = [\"a\", \"A\"]\n", "");
+        assert!(run(&r, &snap("a,b\nx,y\n")).report.failures[0].contains("listed twice"));
+    }
+
+    #[test]
+    fn renames_resolve_together_so_swaps_work() {
+        let r = recipe_with("[[step]]\nop = \"rename\"\ncolumns = { A = \"B\", B = \"A\" }\n", "");
+        let res = run(&r, &snap("A,B\n1,2\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        let names: Vec<&str> = res.output.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["B", "A"]);
+        assert_eq!(res.output.rows, vec![vec!["1", "2"]]);
+        // Renaming onto an existing name is a failure, not a silent merge
+        let r = recipe_with("[[step]]\nop = \"rename\"\ncolumns = { A = \"B\" }\n", "");
+        assert!(!run(&r, &snap("A,B\n1,2\n")).report.ok);
+    }
+
+    #[test]
+    fn dedupe_never_merges_distinct_rows() {
+        let r = recipe_with("[[step]]\nop = \"dedupe\"\n", "");
+        let data = "a,b\n\"x\u{1f}y\",z\nx,\"y\u{1f}z\"\nx,\"y\u{1f}z\"\n";
+        let res = run(&r, &snap(data));
+        assert_eq!(res.output.rows.len(), 2, "the two distinct rows stay; the real duplicate goes");
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("removed 1 duplicate row"));
+    }
+
+    #[test]
+    fn the_delimiter_is_detected_from_the_header_line() {
+        let r = recipe_with("[[step]]\nop = \"select\"\ncolumns = [\"Amount\"]\n", "header_row = 2");
+        let res = run(&r, &snap("Report, generated 2026-10-01, all regions\nRegion\tAmount\nNorth\t10\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.rows, vec![vec!["10"]]);
     }
 }
