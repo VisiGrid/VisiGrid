@@ -632,11 +632,36 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
         None => None,
     };
     let (content, _) = decode(&snapshot.bytes, encoding);
+
+    // header_row counts physical lines, as a text editor shows them. Cut the
+    // lines above it off before both detecting the delimiter and parsing, so
+    // blank or oddly delimited title lines cannot shift which line is the
+    // header (the CSV reader skips blank lines; counting its records would).
+    let skip = src.header_row.saturating_sub(1);
+    let mut offset = 0usize;
+    for _ in 0..skip {
+        match content[offset..].find('\n') {
+            Some(i) => offset += i + 1,
+            None => {
+                return Err(format!(
+                    "the source has fewer than {} lines; the header is set to line {}",
+                    src.header_row, src.header_row
+                ))
+            }
+        }
+    }
+    let body = &content[offset..];
+    if src.header_row > 0 && body.lines().next().map_or(true, |l| l.trim().is_empty()) {
+        return Err(format!(
+            "line {} is empty; set the header to the line that holds the column names",
+            src.header_row
+        ));
+    }
+
     let delimiter = match src.delimiter.as_deref() {
-        // Title lines above the header are not delimited data
         None => {
-            let from_header: Vec<&str> = content.lines().skip(src.header_row.saturating_sub(1)).take(20).collect();
-            sniff_delimiter(&from_header.join("\n"))
+            let sample: Vec<&str> = body.lines().take(20).collect();
+            sniff_delimiter(&sample.join("\n"))
         }
         Some("tab") | Some("\t") => b'\t',
         Some(d) if d.len() == 1 => d.as_bytes()[0],
@@ -646,7 +671,7 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
         .delimiter(delimiter)
         .has_headers(false)
         .flexible(true)
-        .from_reader(content.as_bytes());
+        .from_reader(body.as_bytes());
 
     let mut names: Vec<String> = Vec::new();
     let mut rows = Vec::new();
@@ -655,19 +680,14 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
     let mut n = 0usize;
     while reader.read_record(&mut record).map_err(|e| format!("cannot read the source: {e}"))? {
         n += 1;
-        let line = record.position().map_or(n, |p| p.line() as usize);
-        if src.header_row > 0 && n < src.header_row {
-            continue; // title lines above the header
-        }
-        if src.header_row > 0 && n == src.header_row {
+        // Line in the whole file, counting the skipped title lines
+        let line = record.position().map_or(n, |p| p.line() as usize) + skip;
+        if src.header_row > 0 && n == 1 {
             names = record.iter().map(|f| f.trim().to_string()).collect();
             continue;
         }
         rows.push(record.iter().map(str::to_string).collect::<Vec<_>>());
         lines.push(line);
-    }
-    if src.header_row > 0 && n < src.header_row {
-        return Err(format!("the source has {n} lines; the header is set to line {}", src.header_row));
     }
 
     // Name every column, including any wider than the header row
@@ -840,6 +860,11 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
         Step::Filter { column, op, value, .. } => {
             let i = frame.find(column)?;
             let (rule, dc) = (frame.columns[i].rule, frame.decimal_comma);
+            if let Err(reason) = check_filter_value(*op, value, rule) {
+                report.ok = false;
+                report.failures.push(format!("{}: {reason}", step.describe()));
+                return None;
+            }
             let keep: Vec<bool> = frame.rows.iter().map(|row| matches(&row[i], *op, value, rule, dc)).collect();
             let removed = keep.iter().filter(|k| !**k).count();
             frame.keep_rows(&keep);
@@ -864,12 +889,46 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
     }
 }
 
+/// A number as recipes write them: a point for decimals, no thousands
+/// separators, whatever the source's locale (`1.5`, `-1200`, `2e3`). One
+/// format, so a recipe means the same thing everywhere.
+fn recipe_number(v: &str) -> Option<f64> {
+    let t = v.trim();
+    if t.contains(',') {
+        return None;
+    }
+    visigrid_engine::cell::parse_finite(t)
+}
+
+/// A filter value must be readable as the column's type. `1,50` in a numeric
+/// comparison could mean 1.5 or 150, so it is refused rather than guessed.
+fn check_filter_value(op: FilterOp, value: &str, rule: ColumnRule) -> Result<(), String> {
+    let comparison = matches!(op, FilterOp::Eq | FilterOp::Ne | FilterOp::Lt | FilterOp::Le | FilterOp::Gt | FilterOp::Ge);
+    if !comparison {
+        return Ok(());
+    }
+    let v = value.trim();
+    let looks_numeric = parse_number(v, false).is_some() || parse_number(v, true).is_some();
+    let number_hint = || {
+        format!("{v:?} is not a number as recipes write them; use a point for decimals and no thousands separators, like 1.5")
+    };
+    match rule {
+        ColumnRule::Number if recipe_number(v).is_none() => Err(number_hint()),
+        ColumnRule::Date(order) if parse_date(v, order).is_none() => {
+            Err(format!("{v:?} is not a {} date", order.label()))
+        }
+        ColumnRule::Auto if recipe_number(v).is_none() && looks_numeric => Err(number_hint()),
+        _ => Ok(()),
+    }
+}
+
 /// Compare as the column is typed. Number columns compare numerically (the
-/// cell read with the source's decimal mark, the recipe's value with either);
-/// Date columns compare as dates; Text columns compare as text, so 001 is
-/// not 1. Auto columns compare as numbers when both sides are numbers, else
-/// as text. Text comparisons ignore case. A cell that is not a number (or
-/// date) never satisfies a numeric comparison.
+/// cell read with the source's decimal mark, the filter value in the recipe
+/// format); Date columns compare as dates; Text columns compare as text, so
+/// 001 is not 1. Auto columns compare as numbers only when both sides are
+/// numbers and neither is ID-like (001), else as text. Text comparisons
+/// ignore case. A cell that is not a number (or date) never satisfies a
+/// numeric comparison.
 fn matches(cell: &str, op: FilterOp, value: &str, rule: ColumnRule, decimal_comma: bool) -> bool {
     let c = cell.trim();
     let v = value.trim();
@@ -881,10 +940,9 @@ fn matches(cell: &str, op: FilterOp, value: &str, rule: ColumnRule, decimal_comm
         FilterOp::NotEmpty => return !c.is_empty(),
         _ => {}
     }
-    let value_number = |v: &str| parse_number(v, false).or_else(|| parse_number(v, true));
     let text = || Some(c.to_lowercase().cmp(&v.to_lowercase()));
     let ord = match rule {
-        ColumnRule::Number => match (parse_number(c, decimal_comma), value_number(v)) {
+        ColumnRule::Number => match (parse_number(c, decimal_comma), recipe_number(v)) {
             (Some(a), Some(b)) => a.partial_cmp(&b),
             _ => None,
         },
@@ -893,10 +951,13 @@ fn matches(cell: &str, op: FilterOp, value: &str, rule: ColumnRule, decimal_comm
             _ => None,
         },
         ColumnRule::Text | ColumnRule::Skip => text(),
-        ColumnRule::Auto => match (parse_number(c, decimal_comma), value_number(v)) {
-            (Some(a), Some(b)) if keep_as_text(c, false).is_none() => a.partial_cmp(&b),
-            _ => text(),
-        },
+        ColumnRule::Auto => {
+            let id_like = keep_as_text(c, false).is_some() || keep_as_text(v, false).is_some();
+            match (parse_number(c, decimal_comma), recipe_number(v)) {
+                (Some(a), Some(b)) if !id_like => a.partial_cmp(&b),
+                _ => text(),
+            }
+        }
     };
     use std::cmp::Ordering::*;
     match op {
@@ -1275,5 +1336,63 @@ missing = "blank"
         let res = run(&r, &snap("Report, generated 2026-10-01, all regions\nRegion\tAmount\nNorth\t10\n"));
         assert!(res.report.ok, "{}", res.report.summary());
         assert_eq!(res.output.rows, vec![vec!["10"]]);
+    }
+
+    // ---- regressions from the second review (2026-10-02) ----
+
+    #[test]
+    fn filter_numbers_have_one_format_and_ambiguous_ones_are_refused() {
+        // With a decimal comma, "1,50" could mean 1.5 or 150: refused, not guessed
+        let r = recipe_with("[[step]]\nop = \"filter\"\ncolumn = \"Amount\"\nis = \">\"\nvalue = \"1,50\"\n", "delimiter = \";\"\ndecimal_comma = true");
+        let res = run(&r, &snap("id;Amount\n1;1,50\n2;2,00\n"));
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("use a point for decimals"), "{:?}", res.report.failures);
+        // Written the recipe way, it works against decimal-comma cells
+        let r = recipe_with("[[step]]\nop = \"filter\"\ncolumn = \"Amount\"\nis = \">\"\nvalue = \"1.5\"\n", "delimiter = \";\"\ndecimal_comma = true");
+        let res = run(&r, &snap("id;Amount\n1;1,50\n2;2,00\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.rows, vec![vec!["2", "2,00"]]);
+        // A Number column refuses a value that is not a recipe number at all
+        let r = recipe_with("[[step]]\nop = \"types\"\ncolumns = { n = \"number\" }\n[[step]]\nop = \"filter\"\ncolumn = \"n\"\nis = \">\"\nvalue = \"lots\"\n", "");
+        assert!(!run(&r, &snap("n\n1\n")).report.ok);
+        // Text-like values in an Auto column are fine
+        let r = recipe_with("[[step]]\nop = \"filter\"\ncolumn = \"name\"\nis = \"=\"\nvalue = \"Smith, John\"\n", "");
+        let res = run(&r, &snap("name\n\"Smith, John\"\nDoe\n"));
+        assert!(res.report.ok);
+        assert_eq!(res.output.rows, vec![vec!["Smith, John"]]);
+    }
+
+    #[test]
+    fn id_comparisons_are_symmetric() {
+        let eq = |value: &str| {
+            let r = recipe_with(&format!("[[step]]\nop = \"filter\"\ncolumn = \"code\"\nis = \"=\"\nvalue = \"{value}\"\n"), "");
+            run(&r, &snap("code\n001\n1\n")).output.rows
+        };
+        assert_eq!(eq("1"), vec![vec!["1"]]);
+        assert_eq!(eq("001"), vec![vec!["001"]]);
+    }
+
+    #[test]
+    fn header_row_counts_physical_lines_including_blank_ones() {
+        let src = "Monthly export\n\nid,amount\n1,10\n2,20\n";
+        let r = recipe_with("[[step]]\nop = \"select\"\ncolumns = [\"id\", \"amount\"]\n", "header_row = 3");
+        let res = run(&r, &snap(src));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.rows, vec![vec!["1", "10"], vec!["2", "20"]]);
+        // The same with an explicit delimiter
+        let r = recipe_with("[[step]]\nop = \"select\"\ncolumns = [\"id\"]\n", "header_row = 3\ndelimiter = \",\"");
+        assert!(run(&r, &snap(src)).report.ok);
+        // Error lines count the skipped title lines too
+        let r = recipe_with("[[step]]\nop = \"types\"\ncolumns = { amount = \"number\" }\n", "header_row = 3");
+        let res = run(&r, &snap("Monthly export\n\nid,amount\n1,10\n2,x\n"));
+        assert_eq!(res.report.errors[0].line, 5);
+        // A header pointing at a blank line is an error, never the next row
+        let r = recipe_with("", "header_row = 2");
+        let res = run(&r, &snap(src));
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("line 2 is empty"), "{:?}", res.report.failures);
+        // Past the end of the file
+        let r = recipe_with("", "header_row = 40");
+        assert!(run(&r, &snap(src)).report.failures[0].contains("fewer than 40 lines"));
     }
 }
