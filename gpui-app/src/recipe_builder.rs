@@ -1174,7 +1174,8 @@ mod tests {
         b.recipe.source = Source::Csv(CsvSource { path: file.display().to_string(), delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: vec![] });
         b.change_source(1, false);
         assert!(b.recipe.source_is_pattern());
-        assert!(b.source_value(1).0.contains("export-*-*.csv"));
+        assert_eq!(b.source_value(1).0, "Newest match");
+        assert!(b.source_value(1).1.contains("export-*-*.csv"));
         b.change_source(1, false);
         assert!(!b.recipe.source_is_pattern());
         assert_eq!(super::source(&b.recipe).path, file.display().to_string());
