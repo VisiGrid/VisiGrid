@@ -579,6 +579,10 @@ pub fn export_full(sheet: &Sheet) -> Result<String, String> {
 /// Export a sheet as visigrid-json v1 with presentation state.
 pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<String, String> {
     if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
+    sheet.validate_table_view_spec()?;
+    if sheet.table_view_spec().is_some() && layout.filter.is_some() {
+        return Err("A sheet cannot save both a Table view and a worksheet-range filter.".into());
+    }
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
         version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
@@ -600,6 +604,10 @@ pub fn export_workbook(
     active_sheet: usize,
 ) -> Result<String, String> {
     wb.ensure_writable()?;
+    wb.validate_table_view_specs()?;
+    if wb.sheets().iter().zip(layouts).any(|(sheet, layout)| sheet.table_view_spec().is_some() && layout.filter.is_some()) {
+        return Err("A sheet cannot save both a Table view and a worksheet-range filter.".into());
+    }
     let default_layout = SheetLayout::default();
     let sheets: Vec<SheetBody> = wb
         .sheets()
@@ -916,7 +924,13 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     }
     let tables = if let Some(catalog) = &doc.table_catalog {
         if doc.version < FULL_JSON_TABLE_VERSION { return Err("Tables require visigrid-json v3.".into()); }
-        decode_catalog(&catalog.to_string()).and_then(|saved| wb.restore_tables(saved).map_err(TableLoadIssue::Corrupt))
+        decode_catalog(&catalog.to_string()).and_then(|saved| {
+            if saved.sheets.iter().any(|entry| entry.view.is_some()
+                && layouts.get(entry.sheet).is_some_and(|layout| layout.filter.is_some())) {
+                return Err(TableLoadIssue::Corrupt("A sheet has both a Table view and a worksheet-range filter.".into()));
+            }
+            wb.restore_tables(saved).map_err(TableLoadIssue::Corrupt)
+        })
     } else if doc.version == FULL_JSON_TABLE_VERSION {
         Err(TableLoadIssue::Corrupt("visigrid-json v3 is missing its table catalog".into()))
     } else { Ok(()) };
@@ -1743,12 +1757,12 @@ mod full_json_tests {
         let t = PivotTable {
             id: 7,
             name: "PivotTable1".into(),
-            source: PivotSource { sheet_id: wb.sheet(0).unwrap().id, start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
+            source: PivotSource { table_id: None, sheet_id: wb.sheet(0).unwrap().id, start_row: 0, start_col: 0, end_row: 1, end_col: 1 },
             definition: PivotDefinition {
-                rows: vec![PivotField { offset: 0, header: "K".into() }],
+                rows: vec![PivotField { column_id: None, offset: 0, header: "K".into() }],
                 column: None,
                 values: vec![PivotValueField {
-                    field: PivotField { offset: 1, header: "V".into() },
+                    field: PivotField { column_id: None, offset: 1, header: "V".into() },
                     aggregation: Aggregation::DistinctCount,
                     number_format: None,
                 }],
@@ -1760,7 +1774,7 @@ mod full_json_tests {
             stale: false,
             source_generation: None,
         };
-        let (snap, gen) = wb.pivot_snapshot(&t).unwrap();
+        let (t, snap, gen) = wb.pivot_snapshot(&t).unwrap();
         let output = aggregate(&t.definition, &snap).unwrap();
         let commit = wb.prepare_pivot_commit(out_id, t, &output, gen, 0).unwrap();
         wb.apply_pivot_state(&commit.after).unwrap();

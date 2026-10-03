@@ -112,11 +112,13 @@ impl Aggregation {
     }
 }
 
-/// A source field, identified by its column offset within the source range.
-/// The header text is recorded so a refresh can detect that the column it
-/// meant has moved or been renamed, instead of silently using a different one.
+/// Range fields use a column offset and recorded header to detect drift.
+/// Table fields use a stable column ID; offset and header are resolved caches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PivotField {
+    /// Stable identity for a Table source; range fields use offset/header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_id: Option<crate::table::TableColumnId>,
     /// 0-based column offset from the source's first column.
     pub offset: u32,
     /// Header text at definition time.
@@ -202,7 +204,7 @@ impl PivotDefinition {
             headers
                 .iter()
                 .position(|h| h.trim().to_lowercase() == want)
-                .map(|i| PivotField { offset: i as u32, header: headers[i].trim().to_string() })
+                .map(|i| PivotField { column_id: None, offset: i as u32, header: headers[i].trim().to_string() })
                 .ok_or_else(|| {
                     let known: Vec<&str> = headers.iter().map(|h| h.trim()).filter(|h| !h.is_empty()).collect();
                     format!("no column headed \"{}\" (columns: {})", name.trim(), known.join(", "))
@@ -232,12 +234,56 @@ impl PivotDefinition {
 
 /// The source rectangle, inclusive. `start_row` is the header row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "PivotSourceWire", into = "PivotSourceWire")]
 pub struct PivotSource {
+    pub table_id: Option<crate::table::TableId>,
     pub sheet_id: SheetId,
     pub start_row: u32,
     pub start_col: u32,
     pub end_row: u32,
     pub end_col: u32,
+}
+
+// Table sources deliberately have no legacy `sheet_id` at the top level.
+// Older readers reject this metadata and retain the materialized output as
+// values, rather than refreshing a Table pivot as a fixed rectangle.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum PivotSourceWire {
+    Table { table: TablePivotSourceWire },
+    Range { sheet_id: SheetId, start_row: u32, start_col: u32, end_row: u32, end_col: u32 },
+}
+
+#[derive(Serialize, Deserialize)]
+struct TablePivotSourceWire {
+    id: crate::table::TableId,
+    sheet_id: SheetId,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+}
+
+impl From<PivotSourceWire> for PivotSource {
+    fn from(wire: PivotSourceWire) -> Self {
+        match wire {
+            PivotSourceWire::Range { sheet_id, start_row, start_col, end_row, end_col } =>
+                Self { table_id: None, sheet_id, start_row, start_col, end_row, end_col },
+            PivotSourceWire::Table { table: t } => Self { table_id: Some(t.id), sheet_id: t.sheet_id,
+                start_row: t.start_row, start_col: t.start_col, end_row: t.end_row, end_col: t.end_col },
+        }
+    }
+}
+
+impl From<PivotSource> for PivotSourceWire {
+    fn from(s: PivotSource) -> Self {
+        match s.table_id {
+            Some(id) => Self::Table { table: TablePivotSourceWire { id, sheet_id: s.sheet_id,
+                start_row: s.start_row, start_col: s.start_col, end_row: s.end_row, end_col: s.end_col } },
+            None => Self::Range { sheet_id: s.sheet_id, start_row: s.start_row,
+                start_col: s.start_col, end_row: s.end_row, end_col: s.end_col },
+        }
+    }
 }
 
 impl PivotSource {
@@ -1041,7 +1087,7 @@ mod tests {
         Value::Error(s.to_string())
     }
     fn f(offset: u32, header: &str) -> PivotField {
-        PivotField { offset, header: header.to_string() }
+        PivotField { column_id: None, offset, header: header.to_string() }
     }
     fn v(offset: u32, header: &str, aggregation: Aggregation) -> PivotValueField {
         PivotValueField { field: f(offset, header), aggregation, number_format: None }
@@ -1428,7 +1474,7 @@ mod tests {
         sheet.set_value(1, 2, "12.5");
         sheet.set_value(2, 0, "East");
         sheet.set_value(2, 2, "'7"); // text, not a number
-        let source = PivotSource { sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: 2, end_col: 2 };
+        let source = PivotSource { table_id: None, sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: 2, end_col: 2 };
         let def = PivotDefinition { rows: vec![f(0, "Region")], column: None, values: vec![v(2, "Amount", Aggregation::Sum)] };
         let snap = capture_snapshot(&sheet, &source, &def);
         assert_eq!(snap.headers, vec!["Region", "Skip", "Amount"]);
@@ -1463,7 +1509,7 @@ mod tests {
                 sheet.set_value(row, 6, "x");
                 sheet.set_value(row, 7, if r % 2 == 0 { "TRUE" } else { "FALSE" });
             }
-            let source = PivotSource { sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: rows as u32, end_col: 7 };
+            let source = PivotSource { table_id: None, sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: rows as u32, end_col: 7 };
             let def = PivotDefinition {
                 rows: vec![f(0, "Region"), f(1, "Rep")],
                 column: Some(f(2, "Month")),

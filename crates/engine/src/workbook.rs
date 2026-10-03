@@ -8,6 +8,14 @@ pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot
 mod table_ops;
 #[path = "workbook_table_refs.rs"]
 mod table_refs;
+#[path = "workbook_guarded_structure.rs"]
+mod guarded_structure;
+#[path = "workbook_automation.rs"]
+mod automation;
+pub use guarded_structure::{shift_structure_index, GuardedStructureCommit, StructureStep};
+#[path = "workbook_table_view.rs"]
+mod table_view_ops;
+pub use table_view_ops::TableViewCommit;
 pub use table_ops::{SavedTableCatalog, SavedTableSheet, TableCommit, TableRowHistory, TableColumnHistory};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellFormat;
@@ -2114,6 +2122,34 @@ impl Workbook {
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
         self.note_cell_changed(cell_id)
+    }
+
+    /// Write literal text with dependency tracking, without interpreting formulas
+    /// or numeric-looking identifiers. Used by typed clipboard imports.
+    pub fn set_cell_text_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
+        let Some(sheet) = self.sheets.get_mut(sheet_index) else { return Recalculated::Cells(Vec::new()); };
+        if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
+        let sheet_id = sheet.id;
+        sheet.set_text(row, col, text);
+        self.update_cell_deps(sheet_id, row, col);
+        self.note_cell_changed(CellId::new(sheet_id, row, col))
+    }
+
+    /// Restore a sparse history image with dependency tracking. Callers must
+    /// validate the whole batch on a candidate before publishing it.
+    pub fn restore_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize, image: Option<crate::cell::Cell>) -> Result<(), String> {
+        self.ensure_writable()?;
+        let sheet = self.sheets.get_mut(sheet_index).ok_or("Sheet no longer exists.")?;
+        if row >= sheet.rows || col >= sheet.cols { return Err("Cell is outside the sheet.".into()); }
+        if let Some(error) = sheet.table_value_write_error(row, col) { return Err(error); }
+        if sheet.is_pivot_owned(row,col) || sheet.get_merge(row,col).is_some_and(|m| m.start != (row,col)) || sheet.is_spill_receiver(row,col) {
+            return Err("Cannot restore a protected, merged or spilled cell.".into());
+        }
+        let id = sheet.id;
+        sheet.restore_history_cell(row,col,image);
+        self.update_cell_deps(id,row,col);
+        self.note_cell_changed(CellId::new(id,row,col));
+        Ok(())
     }
 
     /// Clear a cell on a specific sheet with dep tracking + recalc notification.

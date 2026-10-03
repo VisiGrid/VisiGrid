@@ -1416,7 +1416,53 @@ mod tests {
 
 
 /// Preflight the entire journal before changing any cell or recording success.
-fn apply_cli_ops(workbook: &mut visigrid_engine::workbook::Workbook, ops_vec: &[CliOp]) -> Result<Vec<(usize, usize, String, String)>, String> {
+fn apply_cli_ops(
+    workbook: &mut visigrid_engine::workbook::Workbook,
+    ops_vec: &[CliOp],
+) -> Result<Vec<(usize, usize, String, String)>, String> {
+    if !workbook.has_table_criteria() {
+        return apply_cli_ops_inner(workbook, ops_vec);
+    }
+    workbook.validate_saved_table_views()?;
+    if ops_vec.len() > 100_000 {
+        return Err("A Table-aware script may target at most 100,000 cells.".into());
+    }
+    let index = workbook.active_sheet_index();
+    let mut targets = Vec::new();
+    for (i, op) in ops_vec.iter().enumerate() {
+        let (CliOp::SetValue { row, col, .. }
+        | CliOp::SetFormula { row, col, .. }
+        | CliOp::Clear { row, col }) = op;
+        let range = visigrid_engine::validation::CellRange {
+            start_row: *row,
+            end_row: *row,
+            start_col: *col,
+            end_col: *col,
+        };
+        workbook
+            .validate_automation_range(index, range, true)
+            .map_err(|e| format!("Script operation {}: {e}", i + 1))?;
+        targets.push(range);
+    }
+    let mut candidate = workbook.clone();
+    let changes = apply_cli_ops_inner(&mut candidate, ops_vec)?;
+    candidate.rebuild_dep_graph();
+    candidate.recompute_full_ordered();
+    for (i, range) in targets.into_iter().enumerate() {
+        candidate
+            .validate_automation_range(index, range, true)
+            .map_err(|e| format!("Script operation {}: {e}", i + 1))?;
+    }
+    if let Some(e) = candidate.take_incremental_errors().first() {
+        return Err(format!("Script recalculation failed: {e:?}"));
+    }
+    candidate.validate_saved_table_views()?;
+    candidate.bump_revision_for_structure();
+    workbook.restore_snapshot_monotonic(&candidate);
+    Ok(changes)
+}
+
+fn apply_cli_ops_inner(workbook: &mut visigrid_engine::workbook::Workbook, ops_vec: &[CliOp]) -> Result<Vec<(usize, usize, String, String)>, String> {
     workbook.ensure_writable()?;
     for (index, op) in ops_vec.iter().enumerate() {
         let (CliOp::SetValue { row, col, .. } | CliOp::SetFormula { row, col, .. } | CliOp::Clear { row, col }) = op;
@@ -1453,6 +1499,65 @@ fn apply_cli_ops(workbook: &mut visigrid_engine::workbook::Workbook, ops_vec: &[
 mod table_batch_tests {
     use super::{apply_cli_ops, CliOp};
     use visigrid_engine::{workbook::Workbook, table::TableRange};
+    #[test]
+    fn filtered_cli_script_uses_canonical_cells_and_rejects_late_spills() {
+        use visigrid_engine::{
+            filter::SortDirection,
+            sheet::{Sheet, SheetId},
+            table_view::{TableSort, TableViewSpec},
+        };
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(7), 30, 8)], 0);
+        wb.set_cell_value_tracked(0, 2, 1, "Amount");
+        wb.set_cell_value_tracked(0, 3, 1, "30");
+        wb.set_cell_value_tracked(0, 4, 1, "10");
+        let id = wb
+            .create_table(
+                SheetId(7),
+                TableRange {
+                    start_row: 2,
+                    start_col: 1,
+                    end_row: 4,
+                    end_col: 1,
+                },
+                "Sales",
+            )
+            .unwrap()
+            .table_id();
+        let mut spec = TableViewSpec::new(id);
+        spec.sort = Some(TableSort {
+            column: wb.table(id).unwrap().1.columns[0].id,
+            direction: SortDirection::Ascending,
+        });
+        wb.set_table_view_spec(SheetId(7), Some(spec)).unwrap();
+        apply_cli_ops(
+            &mut wb,
+            &[CliOp::SetValue {
+                row: 3,
+                col: 1,
+                value: "40".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(wb.active_sheet().get_raw(3, 1), "40");
+        assert_eq!(wb.active_sheet().get_raw(4, 1), "10");
+        let revision = wb.revision();
+        let ops = [
+            CliOp::SetValue {
+                row: 3,
+                col: 1,
+                value: "99".into(),
+            },
+            CliOp::SetFormula {
+                row: 0,
+                col: 0,
+                formula: "=SEQUENCE(6)".into(),
+            },
+        ];
+        assert!(apply_cli_ops(&mut wb, &ops).is_err());
+        assert_eq!(wb.revision(), revision);
+        assert_eq!(wb.active_sheet().get_raw(3, 1), "40");
+        assert_eq!(wb.active_sheet().get_raw(0, 0), "");
+    }
     #[test]
     fn header_write_in_middle_rejects_entire_script_batch() {
         let mut wb = Workbook::new();

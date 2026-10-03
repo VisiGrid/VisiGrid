@@ -60,6 +60,9 @@ fn structured_grammar_and_escaping_roundtrip() {
         "[@[Unit Price]]",
         "[Amount]",
         "Sales[@Qty]",
+        "Sales[[#This Row],[Qty]]",
+        "Sales[[#This Row],[Qty]:[Amount]]",
+        "[#This Row]",
         "_Sales[Amount]",
         "Sales[ [Qty]:[Amount] ]",
     ] {

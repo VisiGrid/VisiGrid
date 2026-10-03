@@ -143,6 +143,25 @@ pub(crate) fn render_pivot_panel(
         .map(|s| s.name.clone())
         .unwrap_or_else(|| "?".into());
 
+    let has_tables = app.wb(cx).tables().next().is_some();
+    let mut sources = div().flex().flex_col().gap_1().mt_2();
+    if panel.source_menu {
+        sources = sources.child(div().text_size(px(11.0)).text_color(colors.muted)
+            .child("Choose a Table. Changing sources clears the draft fields."));
+        for (index, (sheet_id, table)) in app.wb(cx).tables().enumerate() {
+            let id = table.id;
+            let name = app.wb(cx).sheet_by_id(sheet_id).map(|s| s.name.as_str()).unwrap_or("?");
+            sources = sources.child(div().id(SharedString::from(format!("pivot-source-{}", id.0)))
+                .px_2().py_2().rounded_sm().cursor_pointer().text_size(px(12.0)).text_color(colors.text)
+                .when(panel.source_cursor == index, |d| d.bg(colors.accent.opacity(0.12)))
+                .hover(|s| s.bg(colors.accent.opacity(0.08)))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation(); this.pivot_choose_table(id, cx);
+                }))
+                .child(format!("{} · {} · {} rows", table.name, name, table.range.data_rows())));
+        }
+    }
+
     let row = |id: String,
                label: String,
                detail: Option<String>,
@@ -518,8 +537,14 @@ pub(crate) fn render_pivot_panel(
                                 .mt_2()
                                 .text_size(px(12.0))
                                 .text_color(colors.text)
-                                .child(format!("{}!{}", source_sheet, panel.source_label())),
+                                .child(panel.table_name.clone().unwrap_or_else(|| format!("{}!{}", source_sheet, panel.source_label()))),
                         )
+                        .when(panel.table_name.is_some(), |d| d.child(div().mt_1().text_size(px(11.0)).text_color(colors.muted)
+                            .child("All Table records · filters ignored. Refresh includes new rows.")))
+                        .when(has_tables, |d| d.child(control(
+                            "pivot-source-chooser", if panel.source_menu { "Close source list" } else { "Choose Table…  S" },
+                            !panel.busy, colors, |p| p.source_menu = !p.source_menu, cx)))
+                        .child(sources)
                         .when(stale, |d| {
                             d.child(
                                 div()

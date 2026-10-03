@@ -306,6 +306,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                     // Ensure caret is visible
                     this.ensure_formula_bar_caret_visible(window);
                     this.reset_caret_activity();
+                    this.refresh_autocomplete_at_caret(cx);
 
                     cx.notify();
                 }))
@@ -350,6 +351,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                     // Update cursor (selection extends from anchor to cursor)
                     this.edit_cursor = byte_index;
                     this.reset_caret_activity();
+                    this.refresh_autocomplete_at_caret(cx);
 
                     cx.notify();
                 }))
@@ -603,7 +605,7 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
         for fref in formula_refs {
             // Check if this token's range overlaps with the ref's text_range
             // For exact matches or containment
-            if token_range.start >= fref.text_byte_range.start && token_range.end <= fref.text_byte_range.end {
+            if token_range.start >= fref.text_char_range.start && token_range.end <= fref.text_char_range.end {
                 return Some(rgb(REF_COLORS[fref.color_index % 8]).into());
             }
         }
@@ -614,7 +616,7 @@ fn build_formula_content(app: &Spreadsheet, window: &Window, raw_value: &str, ed
     let get_color = |token_type: &TokenType, token_range: &std::ops::Range<usize>| -> Hsla {
         match token_type {
             TokenType::Function => color_function,
-            TokenType::CellRef | TokenType::Range | TokenType::Colon => {
+            TokenType::CellRef | TokenType::Range | TokenType::Colon | TokenType::StructuredRef | TokenType::NamedRange => {
                 // Use FormulaRef color if available, otherwise default
                 get_ref_color(token_range).unwrap_or(color_cell_ref)
             }
@@ -881,7 +883,8 @@ pub fn render_autocomplete_popup(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     let max_visible = 8;
-    let visible_items = suggestions.iter().take(max_visible).enumerate();
+    let first = selected_index.saturating_sub(max_visible - 1);
+    let visible_items = suggestions.iter().enumerate().skip(first).take(max_visible);
 
     div()
         .absolute()
@@ -946,6 +949,7 @@ fn render_autocomplete_item(
                 }
             }
             crate::autocomplete::AutocompleteEntry::Custom { .. } => None,
+            crate::autocomplete::AutocompleteEntry::Table(s) => Some(s.detail.clone()),
         }
     } else {
         None
@@ -1009,6 +1013,7 @@ fn render_autocomplete_item(
             }
         })
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
             this.autocomplete_selected = idx;
             this.autocomplete_accept(cx);
         }));

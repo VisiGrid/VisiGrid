@@ -119,13 +119,13 @@ impl Spreadsheet {
 
         let (new_row, new_col) = if let Some((row, col)) = self.formula_ref_cell {
             // Move existing reference
-            let new_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+            let new_row = if self.table_view_installed { self.next_visible_row(row, dr) } else { (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize };
             let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
             (new_row, new_col)
         } else {
             // Start new reference from the selected cell (editing cell)
             let (sel_row, sel_col) = self.view_state.selected;
-            let new_row = (sel_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+            let new_row = if self.table_view_installed { self.next_visible_row(sel_row, dr) } else { (sel_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize };
             let new_col = (sel_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
             (new_row, new_col)
         };
@@ -136,7 +136,7 @@ impl Spreadsheet {
         self.formula_ref_end = None;  // Reset range when moving without shift
 
         // Insert or update the reference in the formula
-        self.update_formula_reference(is_new);
+        self.update_formula_reference(is_new, cx);
         self.ensure_cell_visible(new_row, new_col);
         cx.notify();
     }
@@ -165,13 +165,13 @@ impl Spreadsheet {
         let (end_row, end_col) = self.formula_ref_end.unwrap_or((anchor_row, anchor_col));
 
         // Extend from the end position
-        let new_row = (end_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
+        let new_row = if self.table_view_installed { self.next_visible_row(end_row, dr) } else { (end_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize };
         let new_col = (end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
 
         self.formula_ref_end = Some((new_row, new_col));
 
         // Update the reference in the formula (not new, updating existing)
-        self.update_formula_reference(false);
+        self.update_formula_reference(false, cx);
         self.ensure_cell_visible(new_row, new_col);
         cx.notify();
     }
@@ -190,7 +190,7 @@ impl Spreadsheet {
         self.formula_ref_cell = Some((row, col));
         self.formula_ref_end = None;
 
-        self.update_formula_reference(is_new);
+        self.update_formula_reference(is_new, cx);
         cx.notify();
     }
 
@@ -208,7 +208,7 @@ impl Spreadsheet {
         }
 
         self.formula_ref_end = Some((row, col));
-        self.update_formula_reference(false);
+        self.update_formula_reference(false, cx);
         cx.notify();
     }
 
@@ -239,7 +239,7 @@ impl Spreadsheet {
         let (new_row, new_col) = self.find_data_boundary(end_row, end_col, dr, dc, cx);
 
         self.formula_ref_end = Some((new_row, new_col));
-        self.update_formula_reference(false);
+        self.update_formula_reference(false, cx);
         self.ensure_cell_visible(new_row, new_col);
         cx.notify();
     }
@@ -266,7 +266,7 @@ impl Spreadsheet {
         self.formula_ref_cell = Some((new_row, new_col));
         self.formula_ref_end = None;
 
-        self.update_formula_reference(is_new);
+        self.update_formula_reference(is_new, cx);
         self.ensure_cell_visible(new_row, new_col);
         cx.notify();
     }
@@ -286,7 +286,7 @@ impl Spreadsheet {
         self.formula_ref_end = None;
         self.dragging_selection = true;  // Reuse the drag flag
 
-        self.update_formula_reference(is_new);
+        self.update_formula_reference(is_new, cx);
         cx.notify();
     }
 
@@ -303,19 +303,21 @@ impl Spreadsheet {
         // Only update if the cell changed
         if self.formula_ref_end != Some((row, col)) {
             self.formula_ref_end = Some((row, col));
-            self.update_formula_reference(false);
+            self.update_formula_reference(false, cx);
             cx.notify();
         }
     }
 
     /// Update the formula string with the current reference
-    fn update_formula_reference(&mut self, is_new: bool) {
+    fn update_formula_reference(&mut self, is_new: bool, cx: &mut Context<Self>) {
         let Some((ref_row, ref_col)) = self.formula_ref_cell else {
             return;
         };
 
         // Build the reference string, prefixed with sheet name if cross-sheet
-        let base_ref = if let Some((end_row, end_col)) = self.formula_ref_end {
+        let base_ref = if self.table_view_installed {
+            crate::table_edit::table_formula_reference(&self.row_view, (ref_row, ref_col), self.formula_ref_end)
+        } else if let Some((end_row, end_col)) = self.formula_ref_end {
             Self::make_range_ref((ref_row, ref_col), (end_row, end_col))
         } else {
             Self::make_cell_ref(ref_row, ref_col)
@@ -343,6 +345,10 @@ impl Spreadsheet {
             self.edit_cursor = start_byte + ref_text.len();  // Byte length
         }
         self.edit_scroll_dirty = true;
+        self.formula_bar_cache_dirty = true;
+        self.autocomplete_visible = false;
+        self.autocomplete_suppressed = true;
+        self.update_formula_refs(cx);
     }
 
     /// Ensure a cell is visible (scroll if necessary)
@@ -388,6 +394,7 @@ impl Spreadsheet {
             self.reset_caret_activity();
             // Auto-switch nav mode based on new caret position
             self.update_formula_nav_mode();
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -402,6 +409,7 @@ impl Spreadsheet {
                 self.reset_caret_activity();
                 // Auto-switch nav mode based on new caret position
                 self.update_formula_nav_mode();
+                self.refresh_autocomplete_at_caret(cx);
                 cx.notify();
             }
         }
@@ -413,6 +421,7 @@ impl Spreadsheet {
             self.edit_selection_anchor = None;  // Clear selection
             self.edit_scroll_dirty = true;
             self.reset_caret_activity();
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -425,6 +434,7 @@ impl Spreadsheet {
                 self.edit_selection_anchor = None;  // Clear selection
                 self.edit_scroll_dirty = true;
                 self.reset_caret_activity();
+                self.refresh_autocomplete_at_caret(cx);
                 cx.notify();
             }
         }
@@ -441,6 +451,7 @@ impl Spreadsheet {
             }
             self.edit_cursor = self.prev_char_boundary(self.edit_cursor);
             self.edit_scroll_dirty = true;
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -454,6 +465,7 @@ impl Spreadsheet {
                 }
                 self.edit_cursor = self.next_char_boundary(self.edit_cursor);
                 self.edit_scroll_dirty = true;
+                self.refresh_autocomplete_at_caret(cx);
                 cx.notify();
             }
         }
@@ -466,6 +478,7 @@ impl Spreadsheet {
             }
             self.edit_cursor = 0;
             self.edit_scroll_dirty = true;
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -479,6 +492,7 @@ impl Spreadsheet {
                 }
                 self.edit_cursor = len;  // Byte offset at end
                 self.edit_scroll_dirty = true;
+                self.refresh_autocomplete_at_caret(cx);
                 cx.notify();
             }
         }
@@ -598,6 +612,7 @@ impl Spreadsheet {
             self.edit_selection_anchor = None;
             self.edit_scroll_dirty = true;
             self.reset_caret_activity();
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -608,6 +623,7 @@ impl Spreadsheet {
             self.edit_selection_anchor = None;
             self.edit_scroll_dirty = true;
             self.reset_caret_activity();
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -620,6 +636,7 @@ impl Spreadsheet {
             }
             self.edit_cursor = self.find_word_boundary_left(self.edit_cursor);
             self.edit_scroll_dirty = true;
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -631,6 +648,7 @@ impl Spreadsheet {
             }
             self.edit_cursor = self.find_word_boundary_right(self.edit_cursor);
             self.edit_scroll_dirty = true;
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }
@@ -999,6 +1017,7 @@ impl Spreadsheet {
             self.edit_selection_anchor = Some(0);
             self.edit_cursor = self.edit_value.len();  // Byte offset at end
             self.edit_scroll_dirty = true;
+            self.refresh_autocomplete_at_caret(cx);
             cx.notify();
         }
     }

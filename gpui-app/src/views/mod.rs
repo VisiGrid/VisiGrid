@@ -11,6 +11,8 @@ mod pairing_dialog;
 mod export_report_dialog;
 mod pdf_export_dialog;
 mod filter_dropdown;
+mod table_filter_dropdown;
+mod table_header_button;
 mod find_dialog;
 mod font_picker;
 pub(crate) mod format_bar;
@@ -207,7 +209,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.f1_help_visible = false;
                 cx.notify();
             }
-            if event.keystroke.key == "space" && this.is_previewing() {
+            if event.keystroke.key == "space" && this.is_previewing() && !this.rewind_confirm.visible {
                 this.exit_preview(cx);
             }
         }))
@@ -981,6 +983,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when_some(filter_dropdown::render_filter_dropdown(app, cx), |div, dropdown| {
             div.child(dropdown)
         })
+        .when_some(table_filter_dropdown::render(app, cx), |div, dropdown| div.child(dropdown))
         // Validation dropdown popup (list validation)
         .when_some(validation_dropdown_view::render_validation_dropdown(app, cx), |div, dropdown| {
             div.child(dropdown)

@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.44.0
+
+### Table sort and filter
+
+- **Table header dropdowns** sort records and filter by searchable values within the Table’s exact bounds. Clear sort and filters independently, or use **Clear view** to restore the original order. Click a header arrow or press Alt+Down on a header. Criteria survive native/full-JSON save and reopen, and support desktop undo/redo. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Edit and paste through Table filters.** Cell edits, Delete and Paste Special write only to visible records, then rebuild the sort/filter view. Pasting past the visible body or Table columns rejects the whole paste. Each batch has one undo/redo step; calculated-column edits affect only the selected record. Copied formulas retain their original record coordinates across sort/filter changes, and Paste Values preserves literal text and leading-zero IDs. The name box, Go To and formula point-picking use the records’ actual cell addresses. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Fill through Table filters.** Fill Down/Right, Ctrl+Enter and fill-handle copy/series touch only visible records. Formulas use the records’ actual addresses, series skip hidden records, and fills that cross Table boundaries are refused as a whole. Each fill has one undo/redo step. Selection totals use visible records and actual numeric values, including formatted numbers. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Cut through Table views** clears only visible records in the primary selection, preserving hidden records and source formatting. Contents and comments are captured before sort/filter keys change. Cut and paste remain separate undoable steps; invalid cuts leave the document and previous clipboard intact. Internal paste also preserves cell boundaries for text containing tabs or newlines. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Lighter Table undo history.** Edits, pastes and fills retain changed cells instead of entire workbook snapshots. Undo/redo checks the expected cells and Table definition before changing anything, recalculates dependents, and preserves unrelated cells. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **History rewind for Table views** previews historical sort/filter criteria and visible records, including filtered edits, fills and cuts. Releasing Space restores the live selection and view. Confirmed rewind restores criteria and cells together, rejects stale previews, and keeps later rewinds usable. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Clearer Table header controls.** Inset buttons use drawn chevrons and distinct sort/filter icons, scale with zoom, and explain active criteria on hover. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Editing around filtered Tables
+
+- **Edit around filtered Tables.** Type, clear or paste into titles, notes, totals and cells on other sheets without clearing Table filters/sorts. Dependent filters and sort order update after recalculation. Unsafe targets or spills reject the complete change, and sparse undo/redo and history rewind preserve the saved views. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Cut and fill around filtered Tables.** Cut, Fill Down/Right, Ctrl+Enter and the fill handle now work in safe cells above/below Tables and on other sheets. They preserve visible-row mapping, formula offsets and dependent filter/sort updates, with atomic rejection and sparse undo/redo. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Insert and delete rows/columns with Table filters active.** Row deletion skips filtered-out records; sorted selections are resolved before one atomic edit. Table identities, formulas, calculated columns and criteria survive supported movement, with guarded undo/redo and history rewind. Deleting a column used by a filter or sort requires clearing that criterion first. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Paste Table headers together.** Paste one row of names into a Table header to rename several columns or swap names atomically. Formulas, calculated-column rules and saved filter/sort bindings follow the same column identities. Paste Values can use copied formula results as names; invalid names or a paste extending beyond the header are refused without changes. One undo restores the complete schema change. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Structured references
+
+- **Structured-reference editing.** Formula suggestions now include Tables, columns and supported section selectors. Tab/Enter or a click inserts an escaped reference; Escape dismisses suggestions before cancelling the edit. Selected suggestions preview their cells, and structured references use matching formula/grid colors with the correct sheet and filtered record coordinates. Keyboard selection remains visible in long suggestion lists. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Pivots
+
+- **Table-backed pivot sources.** Select a named Table in the pivot drawer. Refresh includes its current records, follows column identities through renames and structural movement, and includes hidden records. Missing sources or fields keep the last good result and explain how to repair the pivot. Native/full-JSON files preserve the bindings; guarded pivot operations and undo/redo work with active Table views. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- Desktop Save now preserves pivot definitions as well as their output cells, including existing range-based pivots. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Excel interchange
+
+- **Excel Tables import/export.** `.xlsx` files preserve supported Table names, bounds, headers, row banding, structured references and calculated-column rules, including blank/value/formula overrides. Import reports unsupported metadata; export reviews lost filter/sort criteria and pivot definitions before writing. Header-only Tables require an empty record before export. Excel's long `#This Row` selector is now supported. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- Fixed Excel imports starting away from A1 dropping their last rows or rightmost columns, including values-only imports. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Scripts, sessions and change review
+
+- **Run script and session batches with Table filters active.** Lua console/debug cell writes, CLI workbook scripts and session batches use canonical worksheet addresses, including explicitly addressed hidden records. Unsafe writes and late spills reject the complete batch. Multi-sheet desktop batches have one guarded undo/redo/rewind entry; session row/column commands retain structural protections and agent attribution. Failed Lua runs no longer apply collected writes. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Review Lua changes with Table filters active.** Review reveals source worksheet rows, including filtered records, and supports guarded cell edits and row-deletion previews. Apply restores the saved view and records one undoable transaction with row layout preserved. Session proposals still require approval in the desktop; stale plans and unsafe candidates leave the workbook unchanged. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Clearer change review.** The Review card has full-width Before/After comparisons with scrollable formulas, a separate worksheet-preview control, a contained filter notice, and larger Apply/Discard actions. Card clicks keep keyboard focus in Review without selecting cells underneath; Enter and Escape now reach the Review actions. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Ribbon toolbar
+
+- **An optional ribbon toolbar.** Five tabs (Home, Insert, Formulas, Data, View) with Excel-style groups, a **Search commands…** button, and tooltips that show each command's description, shortcut and why it's disabled. Collapse it to the tab row and click a tab for a temporary flyout; at narrow widths whole groups overflow. Turn it on in **Preferences → Toolbar layout**, from the palette (**Use Ribbon Toolbar**), or with `appearance.toolbar.layout = "ribbon"`. The compact toolbar stays the default. On Linux and Windows, tapping Alt shows KeyTips while the ribbon is visible. The ribbon's Insert rows/columns works from any selection, like Excel's Insert Sheet Rows/Columns; Ctrl+= is unchanged. View › **Format Bar** is now **Show Toolbar**. ([#81](https://github.com/VisiGrid/VisiGrid/pull/81))
+
+### Other changes
+
+- The named-range hint now sits above the status bar with compact shortcut keycaps and a clearer dismiss button. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
+### Limits and compatibility
+
+- **Table-view limits:** clear criteria before creating/resizing/appending Tables or copying reviewed results to another sheet. Safe cell edits, cut/fill, row/column operations, automation batches, reviewed Lua plans, history rewind and guarded pivot operations support active criteria. Views refuse layouts with adjacent body-row content, custom body-row heights, manually hidden body rows or a freeze boundary through the records. While any Table in the workbook is sorted or filtered, commands that can't yet work with filters (such as formatting, Find/Replace, comments and merging) are unavailable on every sheet, including sheets without Tables, and say so; narrowing this to the Table's own sheet is planned. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+- **Files with saved Table sorts or filters use Tables catalog version 3.** VisiGrid 0.42 and 0.43 open them read-only and ask you to upgrade. Clearing the last sort and filter saves the older, compatible version again; a file whose Tables have no criteria is unchanged. ([#83](https://github.com/VisiGrid/VisiGrid/pull/83))
+
 ## 0.43.0
 
 ### CSV import

@@ -3075,6 +3075,9 @@ fn review_mode_workbook_mutators_are_guarded() {
         "session apply, structure, and history mutations must all reject during review"
     );
 
+    // File replacement remains available in a Table view, but still checks
+    // recovery, rewind and Review Mode at entry and async completion.
+    assert_contains_near(include_str!("rewind.rs"), "block_if_previewing_only", "self.review_mode.is_some()");
     let file_ops = include_str!("file_ops.rs");
     for function in [
         "new_in_place",
@@ -3084,10 +3087,10 @@ fn review_mode_workbook_mutators_are_guarded() {
         "reimport_with_freeze",
         "start_excel_import_with_options",
     ] {
-        assert_guarded(file_ops, function);
+        assert_contains_near(file_ops, function, "block_if_previewing_only(cx)");
     }
     assert!(
-        file_ops.matches("if this.block_if_previewing(cx)").count() >= 3,
+        file_ops.matches("if this.block_if_previewing_only(cx)").count() >= 3,
         "every asynchronous workbook replacement must re-check Review Mode on completion"
     );
 
@@ -3151,9 +3154,12 @@ fn make_internal_clipboard(raw_tsv: &str, id: u128) -> InternalClipboard {
     InternalClipboard {
         comments: vec![],
         raw_tsv: raw_tsv.to_string(),
+        raw_cells: vec![vec![raw_tsv.to_string()]],
         values: vec![vec![Value::Text(raw_tsv.to_string())]],
         formats: vec![vec![CellFormat::default()]],
         source: (0, 0),
+        source_rows: vec![0],
+        source_formulas: vec![vec![raw_tsv.starts_with('=')]],
         id,
         merges: vec![],
         created_at: std::time::Instant::now(),

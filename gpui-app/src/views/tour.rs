@@ -212,72 +212,38 @@ pub fn render_name_tooltip(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let text_muted = app.token(TokenKey::TextMuted);
-    let accent = app.token(TokenKey::Accent);
+    #[cfg(target_os = "macos")]
+    let modifier = "Cmd";
+    #[cfg(not(target_os = "macos"))]
+    let modifier = "Ctrl";
+    let width = (f32::from(app.window_size.width) - 32.0).clamp(240.0,360.0);
 
-    // Position near top-center
+    // Optional guidance belongs beside the status area, away from the tools
+    // and the cells the user is currently working with.
     div()
-        .absolute()
-        .top(px(60.0))
-        .left_0()
-        .right_0()
-        .flex()
-        .justify_center()
-        .child(
-            div()
-                .px_4()
-                .py_3()
-                .bg(panel_bg)
-                .border_1()
-                .border_color(accent.opacity(0.5))
-                .rounded_lg()
-                .shadow_lg()
-                .flex()
-                .items_center()
-                .gap_3()
-                // Lightbulb icon (using text)
-                .child(
-                    div()
-                        .text_base()
-                        .child("💡")
-                )
-                // Text
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0()
-                        .child(
-                            div()
-                                .text_color(text_primary)
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Tip: Give this range a name")
-                        )
-                        .child(
-                            div()
-                                .text_color(text_muted)
-                                .text_xs()
-                                .child("Press Ctrl+Shift+N to create a named range")
-                        )
-                )
-                // Dismiss button
-                .child(
-                    div()
-                        .id("dismiss-tooltip")
-                        .ml_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .text_color(text_muted)
-                        .text_xs()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(panel_border.opacity(0.5)))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.dismiss_name_tooltip(cx);
-                        }))
-                        .child("×")
-                )
-        )
+        .id("name-range-hint")
+        .absolute().left(px(16.0)).bottom(px(crate::app::STATUS_BAR_HEIGHT + 12.0))
+        .w(px(width)).px_3().py_2().bg(panel_bg)
+        .border_1().border_color(panel_border).rounded_md().shadow_md()
+        .flex().flex_col().gap_1()
+        .on_mouse_down(MouseButton::Left,cx.listener(|_,_,_,cx| cx.stop_propagation()))
+        .child(div().flex().items_center().justify_between()
+            .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM)
+                .text_color(text_primary).child("Name this range"))
+            .child(div().id("dismiss-tooltip").w(px(24.0)).h(px(24.0))
+                .flex().items_center().justify_center().rounded(px(4.0))
+                .text_color(text_muted).text_size(px(16.0)).cursor_pointer()
+                .hover(move |s| s.bg(panel_border.opacity(0.5)).text_color(text_primary))
+                .on_mouse_down(MouseButton::Left,cx.listener(|this,_,_,cx| {
+                    cx.stop_propagation();
+                    this.dismiss_name_tooltip(cx);
+                })).child("×")))
+        .child(div().flex().items_center().justify_between().gap_2()
+            .child(div().text_color(text_muted).text_size(px(12.0)).child("Reuse it in formulas"))
+            .child(div().flex().items_center().gap(px(3.0))
+                .child(super::key_hint(modifier,text_muted,panel_border))
+                .child(super::key_hint("Shift",text_muted,panel_border))
+                .child(super::key_hint("N",text_muted,panel_border))))
 }
 
 /// Render the F2 function key tip (macOS only)

@@ -91,6 +91,7 @@ pub enum PivotOpError {
     NotFound(u64),
     SheetMissing,
     SourceSheetMissing,
+    TableSource(String),
     /// The output would leave the grid.
     OffGrid { rows: usize, cols: usize },
     /// A cell in the new output area is in use.
@@ -100,6 +101,7 @@ pub enum PivotOpError {
 impl std::fmt::Display for PivotOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PivotOpError::TableSource(message) => write!(f, "{message}"),
             PivotOpError::Pivot(e) => write!(f, "{e}"),
             PivotOpError::NotFound(id) => write!(f, "Pivot table {id} no longer exists."),
             PivotOpError::SheetMissing => write!(f, "The pivot's sheet no longer exists."),
@@ -149,11 +151,46 @@ impl Workbook {
         self.sheets.iter().enumerate().flat_map(|(i, s)| s.pivots.iter().map(move |p| (i, p))).collect()
     }
 
-    /// Read the source of `table` into a snapshot, with the source sheet's edit
-    /// generation at the time of reading.
-    pub fn pivot_snapshot(&self, table: &PivotTable) -> Result<(PivotSnapshot, u64), PivotOpError> {
-        let sheet = self.sheet_by_id(table.source.sheet_id).ok_or(PivotOpError::SourceSheetMissing)?;
-        Ok((pivot::capture_snapshot(sheet, &table.source, &table.definition), sheet.edit_generation()))
+    /// Select a Table by stable identity. Bounds are a cache, resolved afresh
+    /// for each field-list or refresh operation.
+    pub fn table_pivot_source(&self, id: crate::table::TableId) -> Result<pivot::PivotSource, PivotOpError> {
+        let (sheet_id, t) = self.table(id).ok_or_else(|| PivotOpError::TableSource(
+            "The source Table no longer exists. The last pivot result has been kept.".into()))?;
+        Ok(pivot::PivotSource { table_id: Some(id), sheet_id,
+            start_row: t.range.start_row as u32, start_col: t.range.start_col as u32,
+            end_row: t.range.end_row as u32, end_col: t.range.end_col as u32 })
+    }
+
+    /// Resolve stable field IDs, never names or saved offsets, on refresh.
+    /// Missing fields refuse the whole operation without changing output.
+    pub fn resolve_pivot_source(&self, source: &mut pivot::PivotSource, definition: &mut pivot::PivotDefinition) -> Result<(), PivotOpError> {
+        let Some(id) = source.table_id else { return Ok(()) };
+        let current = self.table_pivot_source(id)?;
+        let (_, table) = self.table(id).unwrap();
+        let mut resolved = definition.clone();
+        for field in resolved.rows.iter_mut().chain(resolved.column.iter_mut()).chain(resolved.values.iter_mut().map(|v| &mut v.field)) {
+            let found = field.column_id.and_then(|id| table.columns.iter().enumerate().find(|(_, c)| c.id == id));
+            let Some((offset, column)) = found else {
+                return Err(PivotOpError::TableSource(format!("The source column '{}' is missing from {}. Edit the pivot fields to replace it. The last result has been kept.", field.header, table.name)));
+            };
+            field.offset = offset as u32;
+            field.header = column.name.clone();
+        }
+        *source = current;
+        *definition = resolved;
+        Ok(())
+    }
+
+    /// Read a resolved definition and canonical source snapshot together.
+    /// Callers must aggregate and commit the returned definition, since Table
+    /// columns may have moved or been renamed since the previous refresh.
+    pub fn pivot_snapshot(&self, table: &PivotTable) -> Result<(PivotTable, PivotSnapshot, u64), PivotOpError> {
+        let mut resolved = table.clone();
+        self.resolve_pivot_source(&mut resolved.source, &mut resolved.definition)?;
+        let sheet = self.sheet_by_id(resolved.source.sheet_id).ok_or(PivotOpError::SourceSheetMissing)?;
+        let snapshot = pivot::capture_snapshot(sheet, &resolved.source, &resolved.definition);
+        let generation = self.pivot_source_generation(&resolved).ok_or(PivotOpError::SourceSheetMissing)?;
+        Ok((resolved, snapshot, generation))
     }
 
     /// Rows appended directly below a pivot's source: the last row of the
@@ -162,6 +199,7 @@ impl Workbook {
     /// extend the source; it is never extended silently (a totals row under the
     /// data would otherwise be summed).
     pub fn pivot_source_growth(&self, table: &PivotTable) -> Option<u32> {
+        if table.source.table_id.is_some() { return None; }
         let sheet = self.sheet_by_id(table.source.sheet_id)?;
         let (c0, c1) = (table.source.start_col as usize, table.source.end_col as usize);
         let row_has_data = |r: usize| (c0..=c1).any(|c| !sheet.get_raw(r, c).is_empty());
@@ -177,7 +215,18 @@ impl Workbook {
 
     /// The source sheet's current edit generation (for stale checks before apply).
     pub fn pivot_source_generation(&self, table: &PivotTable) -> Option<u64> {
-        self.sheet_by_id(table.source.sheet_id).map(|s| s.edit_generation())
+        let generation = self.sheet_by_id(table.source.sheet_id)?.edit_generation();
+        let Some(id) = table.source.table_id else { return Some(generation) };
+        let (_, source) = self.table(id)?;
+        // Metadata-only resize/rename must invalidate a background job too.
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        generation.hash(&mut hash);
+        id.hash(&mut hash);
+        source.name.hash(&mut hash);
+        (source.range.start_row, source.range.start_col, source.range.end_row, source.range.end_col).hash(&mut hash);
+        for column in &source.columns { column.id.hash(&mut hash); column.name.hash(&mut hash); }
+        Some(hash.finish())
     }
 
     /// Prepare placing `output` for `table` on the sheet `sheet_id`. `table`
@@ -310,7 +359,17 @@ impl Workbook {
     /// failure the workbook is unchanged. Returns the pivot id and the new
     /// sheet's index.
     pub fn create_pivot(&mut self, source: pivot::PivotSource, definition: pivot::PivotDefinition) -> Result<(u64, usize), String> {
-        let mut table = PivotTable {
+        if self.sheets.iter().any(|s| s.table_view_spec().is_some()) {
+            let mut candidate = self.clone();
+            let result = candidate.create_pivot_inner(source, definition)?;
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(result);
+        }
+        self.create_pivot_inner(source, definition)
+    }
+
+    fn create_pivot_inner(&mut self, source: pivot::PivotSource, definition: pivot::PivotDefinition) -> Result<(u64, usize), String> {
+        let table = PivotTable {
             id: self.next_pivot_id(),
             name: self.next_pivot_name(),
             source,
@@ -322,7 +381,7 @@ impl Workbook {
             stale: false,
             source_generation: None,
         };
-        let (snapshot, generation) = self.pivot_snapshot(&table).map_err(|e| e.to_string())?;
+        let (mut table, snapshot, generation) = self.pivot_snapshot(&table).map_err(|e| e.to_string())?;
         let output = pivot::aggregate(&table.definition, &snapshot).map_err(|e| e.to_string())?;
         pivot::format_new_pivot_values(&mut table.definition, &output);
 
@@ -353,7 +412,7 @@ impl Workbook {
         let (idx, table) = self.find_pivot(pivot_id).ok_or_else(|| PivotOpError::NotFound(pivot_id).to_string())?;
         let table = table.clone();
         let sheet_id = self.sheets[idx].id;
-        let (snapshot, generation) = self.pivot_snapshot(&table).map_err(|e| e.to_string())?;
+        let (table, snapshot, generation) = self.pivot_snapshot(&table).map_err(|e| e.to_string())?;
         let output = pivot::aggregate(&table.definition, &snapshot).map_err(|e| e.to_string())?;
         let commit = self
             .prepare_pivot_commit(sheet_id, table, &output, generation, now_secs())
@@ -396,6 +455,22 @@ impl Workbook {
     /// write every listed cell, then recalculate dependents once. Used for the
     /// action itself and for its undo/redo.
     pub fn apply_pivot_state(&mut self, state: &PivotState) -> Result<Vec<CellId>, PivotOpError> {
+        if self.sheets.iter().any(|s| s.table_view_spec().is_some()) {
+            let mut candidate = self.clone();
+            let changed = candidate.apply_pivot_state_unchecked(state)?;
+            for sheet in &candidate.sheets {
+                sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows)).map_err(PivotOpError::TableSource)?;
+            }
+            if let Some(error) = candidate.take_incremental_errors().first() {
+                return Err(PivotOpError::TableSource(format!("The pivot could not be recalculated: {error:?}")));
+            }
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(changed);
+        }
+        self.apply_pivot_state_unchecked(state)
+    }
+
+    fn apply_pivot_state_unchecked(&mut self, state: &PivotState) -> Result<Vec<CellId>, PivotOpError> {
         let idx = self.sheet_index_by_id(state.sheet_id).ok_or(PivotOpError::SheetMissing)?;
         if let Some((r0, c0, r1, c1)) = state.table.as_ref().and_then(|p| p.region()) {
             if let Some(t) = self.sheets[idx].tables().iter().find(|t| t.range.intersects(crate::table::TableRange {
@@ -438,8 +513,12 @@ impl Workbook {
     /// Is this pivot stale right now? Read-only: the saved flag, or a source
     /// edit since the last refresh, or a missing source sheet.
     pub fn is_pivot_stale(&self, p: &PivotTable) -> bool {
-        if p.stale {
-            return true;
+        if p.stale { return true; }
+        if p.source.table_id.is_some() {
+            let mut source = p.source;
+            let mut definition = p.definition.clone();
+            if self.resolve_pivot_source(&mut source, &mut definition).is_err()
+                || source != p.source || definition != p.definition { return true; }
         }
         match (p.source_generation, self.pivot_source_generation(p)) {
             (Some(recorded), Some(now)) => recorded != now,
@@ -455,14 +534,14 @@ impl Workbook {
     /// the source range. A source whose formulas depend on other sheets may
     /// change without being flagged; Refresh always reads current values.
     pub fn update_pivot_staleness(&mut self) -> bool {
-        let gens: Vec<(SheetId, u64)> = self.sheets.iter().map(|s| (s.id, s.edit_generation())).collect();
+        let gens: Vec<(u64, Option<u64>, bool)> = self.pivots().into_iter().map(|(_, p)| (p.id, self.pivot_source_generation(p), self.is_pivot_stale(p))).collect();
         let mut changed = false;
         for sheet in &mut self.sheets {
             for p in &mut sheet.pivots {
                 if p.stale {
                     continue;
                 }
-                let current = gens.iter().find(|(id, _)| *id == p.source.sheet_id).map(|(_, g)| *g);
+                let (_, current, changed_source) = gens.iter().find(|(id, _, _)| *id == p.id).copied().unwrap();
                 let is_stale = match (p.source_generation, current) {
                     (Some(recorded), Some(now)) => recorded != now,
                     // Never refreshed this session (e.g. just loaded): trust the
@@ -473,7 +552,7 @@ impl Workbook {
                     }
                     (_, None) => true, // source sheet gone
                 };
-                if is_stale {
+                if is_stale || changed_source {
                     p.stale = true;
                     changed = true;
                 }
@@ -655,11 +734,11 @@ mod tests {
         PivotTable {
             id: wb.next_pivot_id(),
             name: wb.next_pivot_name(),
-            source: PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 },
+            source: PivotSource { table_id: None, sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 },
             definition: PivotDefinition {
-                rows: vec![PivotField { offset: 0, header: "Region".into() }],
+                rows: vec![PivotField { column_id: None, offset: 0, header: "Region".into() }],
                 column: None,
-                values: vec![PivotValueField { field: PivotField { offset: 1, header: "Amount".into() }, aggregation: Aggregation::Sum, number_format: None }],
+                values: vec![PivotValueField { field: PivotField { column_id: None, offset: 1, header: "Amount".into() }, aggregation: Aggregation::Sum, number_format: None }],
             },
             anchor_row: 0,
             anchor_col: 0,
@@ -676,7 +755,7 @@ mod tests {
         let editable = wb.create_table(out, crate::table::TableRange { start_row: 0, start_col: 0, end_row: 10, end_col: 3 }, "Records").unwrap();
         let mut pivot = table(&wb, data);
         pivot.anchor_row = 2;
-        let (snap, gen) = wb.pivot_snapshot(&pivot).unwrap();
+        let (pivot, snap, gen) = wb.pivot_snapshot(&pivot).unwrap();
         let output = aggregate(&pivot.definition, &snap).unwrap();
         assert!(wb.prepare_pivot_commit(out, pivot.clone(), &output, gen, 0).is_err());
         wb.remove_table(editable.table_id()).unwrap();
@@ -691,7 +770,7 @@ mod tests {
     }
 
     fn refresh(wb: &mut Workbook, out: SheetId, t: PivotTable) -> PivotCommit {
-        let (snap, gen) = wb.pivot_snapshot(&t).unwrap();
+        let (t, snap, gen) = wb.pivot_snapshot(&t).unwrap();
         let output = aggregate(&t.definition, &snap).unwrap();
         let commit = wb.prepare_pivot_commit(out, t, &output, gen, 0).unwrap();
         wb.apply_pivot_state(&commit.after).unwrap();
@@ -761,16 +840,16 @@ mod tests {
         wb.set_cell_value_tracked(oi, 0, 3, "mine");
         let mut wider = wb.find_pivot(t.id).unwrap().1.clone();
         wider.definition.values.push(PivotValueField {
-            field: PivotField { offset: 1, header: "Amount".into() },
+            field: PivotField { column_id: None, offset: 1, header: "Amount".into() },
             aggregation: Aggregation::Count,
             number_format: None,
         });
         wider.definition.values.push(PivotValueField {
-            field: PivotField { offset: 1, header: "Amount".into() },
+            field: PivotField { column_id: None, offset: 1, header: "Amount".into() },
             aggregation: Aggregation::Max,
             number_format: None,
         });
-        let (snap, gen) = wb.pivot_snapshot(&wider).unwrap();
+        let (wider, snap, gen) = wb.pivot_snapshot(&wider).unwrap();
         let output = aggregate(&wider.definition, &snap).unwrap();
         let err = wb.prepare_pivot_commit(out, wider, &output, gen, 0).unwrap_err();
         assert!(matches!(err, PivotOpError::Blocked { row: 0, col: 3, .. }), "{err:?}");
@@ -783,7 +862,7 @@ mod tests {
         let (mut wb, data, out) = book();
         let mut t = table(&wb, data);
         t.definition.values.push(PivotValueField {
-            field: PivotField { offset: 1, header: "Amount".into() },
+            field: PivotField { column_id: None, offset: 1, header: "Amount".into() },
             aggregation: Aggregation::Count,
             number_format: None,
         });
@@ -866,7 +945,7 @@ mod tests {
         t3.definition.values.insert(
             0,
             PivotValueField {
-                field: PivotField { offset: 1, header: "Amount".into() },
+                field: PivotField { column_id: None, offset: 1, header: "Amount".into() },
                 aggregation: Aggregation::Count,
                 number_format: crate::pivot::default_number_format(Aggregation::Count, &money),
             },
@@ -876,7 +955,7 @@ mod tests {
         assert!(matches!(wb.sheet(oi).unwrap().get_format(1, 1).number_format, NumberFormat::Number { decimals: 0, .. }));
 
         // Undo restores the previous formats exactly.
-        let (snap, gen) = wb.pivot_snapshot(&t3).unwrap();
+        let (t3, snap, gen) = wb.pivot_snapshot(&t3).unwrap();
         let output = crate::pivot::aggregate(&t3.definition, &snap).unwrap();
         let again = wb.prepare_pivot_commit(out, t3, &output, gen, 0).unwrap();
         wb.apply_pivot_state(&again.after).unwrap();
@@ -895,7 +974,7 @@ mod tests {
         wb.sheet_mut(di).unwrap().set_value(3, 2, "Q2");
         let mut t = table(&wb, data);
         t.source.end_col = 2;
-        t.definition.column = Some(PivotField { offset: 2, header: "Q".into() });
+        t.definition.column = Some(PivotField { column_id: None, offset: 2, header: "Q".into() });
         let id = t.id;
         refresh(&mut wb, out, t);
         let oi = wb.sheet_index_by_id(out).unwrap();
@@ -1003,7 +1082,7 @@ mod tests {
         let (mut wb, data, _) = book();
         let headers = vec!["Region".to_string(), "Amount".to_string()];
         let def = PivotDefinition::from_names(&headers, &["region".into()], None, &[(Some(Aggregation::Sum), "AMOUNT".into())], &[]).unwrap();
-        let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
+        let source = PivotSource { table_id: None, sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
         let active = wb.active_sheet_index();
         let (id, idx) = wb.create_pivot(source, def).unwrap();
         assert_eq!(wb.active_sheet_index(), active, "creation does not steal the active sheet");
@@ -1040,7 +1119,7 @@ mod tests {
         let sheets = wb.sheets().len();
         let def = PivotDefinition::from_names(&headers, &["Region".into()], None, &[], &[]).unwrap();
         wb.sheet_mut(0).unwrap().set_value(0, 0, "Area");
-        let source = PivotSource { sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
+        let source = PivotSource { table_id: None, sheet_id: data, start_row: 0, start_col: 0, end_row: 3, end_col: 1 };
         assert!(wb.create_pivot(source, def).is_err());
         assert_eq!(wb.sheets().len(), sheets);
     }

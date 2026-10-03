@@ -405,6 +405,9 @@ pub struct Spreadsheet {
     // Maps view rows to data rows, handles visibility
     pub row_view: RowView,
     pub filter_state: FilterState,
+    pub(crate) table_filter_dropdown: Option<crate::table_filter_ui::TableFilterDropdown>,
+    pub(crate) table_view_sync_key: Option<(SheetId, u64)>,
+    pub(crate) table_view_installed: bool,
     /// Which column's filter dropdown is currently open (None = closed)
     pub filter_dropdown_col: Option<usize>,
     /// Search text in the filter dropdown
@@ -611,6 +614,8 @@ pub struct Spreadsheet {
     pub formula_nav_mode: crate::mode::FormulaNavMode, // Caret vs Point submode in Formula mode
     pub formula_nav_manual_override: Option<crate::mode::FormulaNavMode>, // F2 toggle latch - wins over auto-switch
     pub formula_home_sheet: Option<usize>,              // Sheet where formula is being entered (for cross-sheet refs)
+    pub(crate) table_fill_revision: Option<(visigrid_engine::sheet::SheetId, u64)>,
+    pub(crate) table_edit_target: Option<(usize, usize, usize, u64)>,
     pub formula_edit_cell: Option<(usize, usize)>,     // Cell being edited (preserved across sheet switches in formula mode)
     pub formula_ref_sheet: Option<usize>,               // Sheet where current ref target lives (None = home sheet)
     pub formula_cross_sheet_name: Option<String>,       // Target sheet name when picking cross-sheet refs (None = same sheet)
@@ -874,6 +879,7 @@ pub struct Spreadsheet {
     // Export report state (for Excel exports with warnings)
     pub pdf_export: Option<crate::pdf_export::PdfExportState>,
     pub export_result: Option<visigrid_io::xlsx::ExportResult>,
+    pub pending_xlsx_export: Option<Vec<String>>, // Losses awaiting review before the save chooser
     pub export_filename: Option<String>,  // Exported filename for display
 
     // Keyboard hints state (Vimium-style jump)
@@ -1227,6 +1233,9 @@ impl Spreadsheet {
             role_style_map: crate::role_styles::RoleStyleMap::new(),
             row_view: RowView::new(NUM_ROWS),  // Identity mapping, all visible
             filter_state: FilterState::default(),
+            table_filter_dropdown: None,
+            table_view_sync_key: None,
+            table_view_installed: false,
             filter_dropdown_col: None,
             filter_search_text: String::new(),
             filter_checked_items: std::collections::HashSet::new(),
@@ -1358,6 +1367,8 @@ impl Spreadsheet {
             formula_nav_manual_override: None,
             formula_home_sheet: None,
             formula_edit_cell: None,
+            table_fill_revision: None,
+            table_edit_target: None,
             formula_ref_sheet: None,
             formula_cross_sheet_name: None,
             formula_highlighted_refs: Vec::new(),
@@ -1495,6 +1506,7 @@ impl Spreadsheet {
 
             pdf_export: None,
             export_result: None,
+            pending_xlsx_export: None,
             export_filename: None,
 
             hint_state: crate::hints::HintState::default(),
@@ -2342,8 +2354,10 @@ impl Spreadsheet {
                     self.edit_value = format!("{}{}{}", before, func_text, after);
                     self.edit_cursor += func_text.len();  // Byte length
                 } else {
-                    // Grid navigation: start formula edit with =FUNC(
-                    self.edit_original = self.sheet(cx).get_raw(self.view_state.selected.0, self.view_state.selected.1);
+                    // Use the normal entry path so Table views capture the
+                    // canonical record and the original workbook revision.
+                    if !self.mode.is_editing() { self.start_edit_clear(cx); }
+                    if !self.mode.is_editing() { return; }
                     self.clear_edit_marks();
                     self.edit_value = format!("={}(", name);
                     self.edit_cursor = self.edit_value.len();  // Byte offset at end
@@ -3216,8 +3230,21 @@ impl Spreadsheet {
         start
     }
 
+    fn preview_structure_layout(&self) -> Option<&crate::table_structure::StructureLayout> {
+        self.preview_session()
+            .and_then(|s| s.view_state.per_sheet.get(s.snapshot.active_sheet_index()))
+            .and_then(|v| v.structure_layout.as_ref())
+    }
+
     /// Get width for a column (custom or default) for the current sheet
     pub fn col_width(&self, col: usize) -> f32 {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout
+                .widths
+                .get(&col)
+                .copied()
+                .unwrap_or(self.metrics.default_cell_sizes.column_width);
+        }
         self.col_widths
             .get(&self.cached_sheet_id)
             .and_then(|sheet_widths| sheet_widths.get(&col))
@@ -3227,6 +3254,13 @@ impl Spreadsheet {
 
     /// Get height for a row (custom or default) for the current sheet
     pub fn row_height(&self, row: usize) -> f32 {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout
+                .heights
+                .get(&row)
+                .copied()
+                .unwrap_or(self.metrics.default_cell_sizes.row_height);
+        }
         self.row_heights
             .get(&self.cached_sheet_id)
             .and_then(|sheet_heights| sheet_heights.get(&row))
@@ -3337,6 +3371,9 @@ impl Spreadsheet {
 
     /// Check if a row is hidden on the current sheet
     pub fn is_row_hidden(&self, row: usize) -> bool {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout.hidden_rows.contains(&row);
+        }
         self.hidden_rows
             .get(&self.cached_sheet_id)
             .map_or(false, |set| set.contains(&row))
@@ -3344,6 +3381,9 @@ impl Spreadsheet {
 
     /// Check if a column is hidden on the current sheet
     pub fn is_col_hidden(&self, col: usize) -> bool {
+        if let Some(layout) = self.preview_structure_layout() {
+            return layout.hidden_cols.contains(&col);
+        }
         self.hidden_cols
             .get(&self.cached_sheet_id)
             .map_or(false, |set| set.contains(&col))
@@ -3351,12 +3391,22 @@ impl Spreadsheet {
 
     /// Check if current sheet has any hidden rows
     pub fn has_hidden_rows(&self) -> bool {
-        self.hidden_rows.get(&self.cached_sheet_id).map_or(false, |s| !s.is_empty())
+        if let Some(layout) = self.preview_structure_layout() {
+            return !layout.hidden_rows.is_empty();
+        }
+        self.hidden_rows
+            .get(&self.cached_sheet_id)
+            .map_or(false, |s| !s.is_empty())
     }
 
     /// Check if current sheet has any hidden columns
     pub fn has_hidden_cols(&self) -> bool {
-        self.hidden_cols.get(&self.cached_sheet_id).map_or(false, |s| !s.is_empty())
+        if let Some(layout) = self.preview_structure_layout() {
+            return !layout.hidden_cols.is_empty();
+        }
+        self.hidden_cols
+            .get(&self.cached_sheet_id)
+            .map_or(false, |s| !s.is_empty())
     }
 
     /// Get the nth visible column starting from scroll_col, skipping hidden columns.
@@ -3366,11 +3416,10 @@ impl Spreadsheet {
             let col = scroll_col + visible_index;
             return if col < NUM_COLS { Some(col) } else { None };
         }
-        let hidden = self.hidden_cols.get(&self.cached_sheet_id).unwrap();
         let mut count = 0;
         let mut col = scroll_col;
         while col < NUM_COLS {
-            if !hidden.contains(&col) {
+            if !self.is_col_hidden(col) {
                 if count == visible_index {
                     return Some(col);
                 }
@@ -3387,12 +3436,11 @@ impl Spreadsheet {
         if !self.has_hidden_rows() {
             return self.nth_visible_row(visible_index, cx);
         }
-        let hidden = self.hidden_rows.get(&self.cached_sheet_id).unwrap();
         let mut count = 0;
         let mut idx = 0;
         loop {
             let (view_row, data_row) = self.nth_visible_row(idx, cx)?;
-            if !hidden.contains(&data_row) {
+            if !self.is_row_hidden(data_row) {
                 if count == visible_index {
                     return Some((view_row, data_row));
                 }
@@ -3405,9 +3453,13 @@ impl Spreadsheet {
     /// Update cached sheet ID from the workbook.
     /// Call this after switching sheets.
     pub fn update_cached_sheet_id(&mut self, cx: &mut Context<Self>) {
-        let sheet = self.workbook.read(cx).active_sheet();
-        self.cached_sheet_id = sheet.id;
-        let (rows, cols) = sheet.frozen_panes;
+        self.table_filter_dropdown = None;
+        self.table_view_sync_key = None;
+        let sheet = self.display_workbook(cx).active_sheet();
+        let sheet_id = sheet.id;
+        let panes = sheet.frozen_panes;
+        self.cached_sheet_id = sheet_id;
+        let (rows, cols) = panes;
         self.view_state.frozen_rows = rows;
         self.view_state.frozen_cols = cols;
         self.view_state.scroll_row = self.view_state.scroll_row.max(rows);
@@ -3426,7 +3478,7 @@ impl Spreadsheet {
     pub fn debug_assert_sheet_cache_sync(&self, cx: &Context<Self>) {
         #[cfg(debug_assertions)]
         {
-            let actual_id = self.workbook.read(cx).active_sheet().id;
+            let actual_id = self.display_workbook(cx).active_sheet().id;
             debug_assert_eq!(
                 self.cached_sheet_id, actual_id,
                 "cached_sheet_id desync! cached={:?}, actual={:?}. \
@@ -4046,7 +4098,8 @@ impl Spreadsheet {
 
     // Cell reference (A1, B2, etc.)
     pub fn cell_ref(&self) -> String {
-        format!("{}{}", Self::col_letter(self.view_state.selected.1), self.view_state.selected.0 + 1)
+        let row = if self.table_view_installed { self.row_view.view_to_data(self.view_state.selected.0) } else { self.view_state.selected.0 };
+        format!("{}{}", Self::col_letter(self.view_state.selected.1), row + 1)
     }
 
 
@@ -4409,6 +4462,7 @@ impl Spreadsheet {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_table_view(cx);
         // Drain pending session server requests (TCP → GUI bridge)
         self.drain_session_requests(cx);
 
@@ -4562,7 +4616,8 @@ impl Render for Spreadsheet {
         // This avoids re-parsing on every render
         if !self.mode.is_editing() {
             let cell = self.view_state.selected;
-            let formula = self.sheet(cx).get_raw(cell.0, cell.1);
+            let row = self.view_to_data(cell.0, cx);
+            let formula = self.sheet(cx).get_raw(row, cell.1);
 
             // Only update cache if cell or formula changed
             let cache_valid = self.formula_bar_cache_cell == Some(cell)
@@ -4572,7 +4627,7 @@ impl Render for Spreadsheet {
                 self.formula_bar_cache_cell = Some(cell);
                 self.formula_bar_cache_formula = formula.clone();
                 self.formula_bar_cache_refs = if formula.starts_with('=') || formula.starts_with('+') {
-                    Self::parse_formula_refs(&formula)
+                    Self::parse_table_formula_refs(&formula, self.wb(cx), self.sheet(cx).id, (row, cell.1))
                 } else {
                     Vec::new()
                 };

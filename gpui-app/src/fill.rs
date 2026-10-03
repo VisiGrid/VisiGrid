@@ -36,6 +36,7 @@ impl Spreadsheet {
     /// With a single row selected, fills from the row above into the selection
     /// (Excel-style Ctrl+D on a single cell/row).
     pub fn fill_down(&mut self, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) { self.fill_table_direction(true,cx); return; }
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
@@ -135,6 +136,7 @@ impl Spreadsheet {
 
     /// Fill right: copy the first column's values/formulas to remaining columns in selection
     pub fn fill_right(&mut self, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) { self.fill_table_direction(false,cx); return; }
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("fill", cx) { return; }
@@ -318,10 +320,11 @@ impl Spreadsheet {
             let text_end = formula.len() - 1; // Before ")"
             self.formula_highlighted_refs = vec![FormulaRef {
                 key,
+                sheet: None,
                 start,
                 end,
                 color_index: 0,
-                text_byte_range: text_start..text_end,
+                text_char_range: text_start..text_end,
             }];
         } else {
             self.formula_highlighted_refs.clear();
@@ -563,6 +566,9 @@ impl Spreadsheet {
 
     /// Start fill handle drag from the selection
     pub fn start_fill_drag(&mut self, cx: &mut Context<Self>) {
+        self.table_fill_revision = None;
+        if self.block_if_previewing_only(cx) || self.mode.is_editing() { return; }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) && !self.start_table_fill(cx) { return; }
         // Disallow additional (Ctrl+click) selections - only contiguous ranges
         if !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Fill handle works from contiguous selection".into());
@@ -654,6 +660,11 @@ impl Spreadsheet {
     pub fn end_fill_drag(&mut self, ctrl_held: bool, cx: &mut Context<Self>) {
         if let FillDrag::Dragging { anchor, source_end, current, axis } = self.fill_drag {
             self.fill_drag = FillDrag::None;
+            if self.table_fill_revision.is_some() || crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+                self.end_table_fill(anchor,source_end,current,axis,ctrl_held,cx);
+                return;
+            }
+            if self.block_if_previewing(cx) { return; }
 
             // No-op if current hasn't moved beyond source range
             if current == source_end {
@@ -679,6 +690,7 @@ impl Spreadsheet {
 
     /// Cancel fill handle drag without executing
     pub fn cancel_fill_drag(&mut self, cx: &mut Context<Self>) {
+        self.table_fill_revision = None;
         if self.is_fill_dragging() {
             self.fill_drag = FillDrag::None;
             cx.notify();

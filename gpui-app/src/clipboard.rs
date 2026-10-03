@@ -81,6 +81,8 @@ fn push_svg_border(svg: &mut String, border: CellBorder, x1: f32, y1: f32, x2: f
 pub struct InternalClipboard {
     /// Tab-separated raw values (formulas/text) for normal paste + system clipboard
     pub raw_tsv: String,
+    /// Exact cell boundaries; text may itself contain tabs or newlines.
+    pub raw_cells: Vec<Vec<String>>,
     /// Typed computed values for Paste Values (2D grid aligned to copied rectangle)
     pub values: Vec<Vec<Value>>,
     /// Cell formats for Paste Formats (2D grid with same dimensions as values)
@@ -89,6 +91,9 @@ pub struct InternalClipboard {
     pub comments: Vec<Vec<Option<visigrid_engine::cell::CellComment>>>,
     /// Top-left cell position of the copied region (for reference adjustment)
     pub source: (usize, usize),
+    /// Canonical source record for each copied row, captured before any view changes.
+    pub source_rows: Vec<usize>,
+    pub source_formulas: Vec<Vec<bool>>,
     /// Unique ID written to clipboard metadata for reliable internal detection.
     /// On paste, we check if clipboard metadata contains this ID to distinguish
     /// internal copies from external clipboard content (even if text matches).
@@ -459,9 +464,12 @@ impl Spreadsheet {
         // Build tab-separated raw values (formulas) for system clipboard and normal paste
         // When filtered, only include visible rows
         let mut raw_tsv = String::new();
+        let mut raw_cells = Vec::new();
         let mut values = Vec::new();
         let mut formats = Vec::new();
         let mut comments = Vec::new();
+        let mut source_rows = Vec::new();
+        let mut source_formulas = Vec::new();
         let mut first_row = true;
         let mut source_row = min_row; // Track first visible row for source
 
@@ -475,12 +483,13 @@ impl Spreadsheet {
             let data_row = self.row_view.view_to_data(view_row);
 
             if first_row {
-                source_row = view_row;
+                source_row = data_row;
                 first_row = false;
             } else {
                 raw_tsv.push('\n');
             }
 
+            let mut row_raw = Vec::new();
             let mut row_values = Vec::new();
             let mut row_formats = Vec::new();
             let mut row_comments = Vec::new();
@@ -488,12 +497,17 @@ impl Spreadsheet {
                 if col > min_col {
                     raw_tsv.push('\t');
                 }
-                raw_tsv.push_str(&self.sheet(cx).get_raw(data_row, col));
+                let raw = self.sheet(cx).get_raw(data_row, col);
+                raw_tsv.push_str(&raw);
+                row_raw.push(raw);
                 row_values.push(self.sheet(cx).get_computed_value(data_row, col));
                 // Capture format for every cell position (rectangular, not sparse)
                 row_formats.push(self.sheet(cx).get_format(data_row, col).clone());
                 row_comments.push(self.sheet(cx).comment(data_row, col).cloned());
             }
+            source_formulas.push((min_col..=max_col).map(|c| self.sheet(cx).get_cell_opt(data_row,c).is_some_and(|cell| cell.value().is_formula())).collect());
+            source_rows.push(data_row);
+            raw_cells.push(row_raw);
             values.push(row_values);
             formats.push(row_formats);
             comments.push(row_comments);
@@ -532,10 +546,13 @@ impl Spreadsheet {
 
         self.internal_clipboard = Some(InternalClipboard {
             raw_tsv: raw_tsv.clone(),
+            raw_cells,
             values,
             formats,
             comments,
             source: (source_row, min_col),
+            source_rows,
+            source_formulas,
             id,
             merges,
             created_at: std::time::Instant::now(),
@@ -561,6 +578,20 @@ impl Spreadsheet {
     }
 
     pub fn cut(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
+        if self.mode.is_editing() {
+            self.copy(cx);
+            if self.edit_selection_range().is_none() {
+                self.edit_selection_anchor = Some(0);
+                self.edit_cursor = self.edit_value.len();
+            }
+            self.backspace(cx);
+            return;
+        }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.cut_table_view(cx);
+            return;
+        }
         // Block during preview mode
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("cut", cx) { return; }
@@ -682,7 +713,7 @@ impl Spreadsheet {
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
 
         // If editing, paste into the edit buffer instead
         if self.mode.is_editing() {
@@ -730,6 +761,13 @@ impl Spreadsheet {
     /// `all_formats` it replaces every destination format (Paste Special > All);
     /// without, it fills only unformatted cells (Ctrl+V).
     fn paste_contents(&mut self, all_formats: bool, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
+        let kind = if all_formats { TablePasteKind::All } else { TablePasteKind::Contents };
+        if self.paste_table_headers(kind, cx) { return; }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.paste_table_view(kind, cx);
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() { self.paste_into_edit(cx); return; }
         // Read clipboard item to get both text and metadata
@@ -776,7 +814,9 @@ impl Spreadsheet {
             // Guard: if the sniffed delimiter is comma, check whether every line is
             // actually a formatted number (e.g. "6,601.43"). Commas inside numbers
             // are thousands separators, not field delimiters.
-            let parsed_grid: Option<Vec<Vec<String>>> = if !is_internal && !text.contains('\t') {
+            let parsed_grid: Option<Vec<Vec<String>>> = if is_internal {
+                self.internal_clipboard.as_ref().map(|ic| ic.raw_cells.clone())
+            } else if !text.contains('\t') {
                 let sniffed = csv_io::sniff_delimiter(&text);
                 let grid = csv_io::parse_delimited_text(&text);
                 let has_multi_col = grid.iter().any(|row| row.len() > 1);
@@ -801,21 +841,25 @@ impl Spreadsheet {
             // Internal TSV includes its full rectangle, even blank trailing rows
             // and a single empty cell carrying only a comment.
             let lines: Vec<&str> = full_paste_lines(&text, is_internal);
-            let is_single_cell = parsed_grid.is_none()
-                && lines.len() == 1 && !lines[0].contains('\t');
+            let is_single_cell = parsed_grid.as_ref().map_or_else(
+                || lines.len() == 1 && !lines[0].contains('\t'),
+                |grid| grid.len() == 1 && grid[0].len() == 1,
+            );
 
             // If single cell and multi-selection, broadcast to all selected cells
             if is_single_cell && self.is_multi_selection() {
                 if self.block_if_selection_in_pivot("paste", cx) { return; }
                 if self.block_selection_table_headers("paste", cx) { return; }
-                let single_value = lines[0].to_string();
+                let single_value = parsed_grid.as_ref().map_or_else(
+                    || lines[0].to_string(), |grid| grid[0][0].clone(),
+                );
                 let primary_cell = self.view_state.selected;
                 let primary_data_row = self.row_view.view_to_data(primary_cell.0);
 
                 // Source cell position for formula rebasing (delta = target - source)
                 let (src_data_row, src_col) = if is_internal {
                     if let Some(ic) = &self.internal_clipboard {
-                        (self.row_view.view_to_data(ic.source.0) as i32, ic.source.1 as i32)
+                        (ic.source.0 as i32, ic.source.1 as i32)
                     } else {
                         (primary_data_row as i32, primary_cell.1 as i32)
                     }
@@ -963,24 +1007,13 @@ impl Spreadsheet {
                 return;
             }
 
-            // Calculate delta from source if this is an internal paste
-            let (delta_row, delta_col) = if is_internal {
-                if let Some(ic) = &self.internal_clipboard {
-                    let (src_row, src_col) = ic.source;
-                    let src_data_row = self.row_view.view_to_data(src_row);
-                    (data_start_row as i32 - src_data_row as i32, start_col as i32 - src_col as i32)
-                } else {
-                    (0, 0)
-                }
-            } else {
-                (0, 0)  // External clipboard - no adjustment
-            };
-
             if !self.sheet(cx).tables().is_empty() {
                 let mut values: Vec<Vec<String>> = parsed_grid.clone().unwrap_or_else(|| lines.iter().map(|l| l.split('\t').map(str::to_owned).collect()).collect());
                 if is_internal {
-                    for value in values.iter_mut().flatten() {
-                        if value.starts_with('=') { *value = self.adjust_formula_refs(value, delta_row, delta_col); }
+                    for (ri, row) in values.iter_mut().enumerate() {
+                        for (ci, value) in row.iter_mut().enumerate() {
+                            if value.starts_with('=') { *value = self.adjust_copied_formula(value, ri, ci, data_start_row + ri, start_col + ci); }
+                        }
                     }
                 }
                 let objects = is_internal && (self.internal_clipboard.as_ref().is_some_and(|ic| !ic.merges.is_empty() || ic.comments.iter().flatten().any(Option::is_some))
@@ -1044,7 +1077,7 @@ impl Spreadsheet {
 
                         // Adjust formula references using constant delta from source to destination
                         let new_value = if value.starts_with('=') && is_internal {
-                            self.adjust_formula_refs(value, delta_row, delta_col)
+                            self.adjust_copied_formula(value, row_offset, col_offset, target_data_row, col)
                         } else {
                             value.to_string()
                         };
@@ -1299,7 +1332,13 @@ impl Spreadsheet {
     /// Uses typed values from internal clipboard, or parses external clipboard with leading-zero guard.
     /// When filtered, pastes to consecutive visible rows only.
     pub fn paste_values(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
+        if self.paste_table_headers(TablePasteKind::Values, cx) { return; }
         // Block during preview mode
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.paste_table_view(TablePasteKind::Values, cx);
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
 
         // If editing, paste canonical text into edit buffer (top-left cell only)
@@ -1636,6 +1675,10 @@ impl Spreadsheet {
     /// - External clipboard: falls back to normal paste() (no way to distinguish formula vs text)
     pub fn paste_formulas(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.paste_table_view(TablePasteKind::Formulas, cx);
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
 
         // If editing, paste into edit buffer
@@ -1665,12 +1708,11 @@ impl Spreadsheet {
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
 
+        let raw_cells = self.internal_clipboard.as_ref().map(|ic| ic.raw_cells.clone()).unwrap_or_default();
         // Block if paste would split a merged region
         {
-            let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.as_str()).unwrap_or("");
-            let lines = full_paste_lines(raw_tsv, true);
-            let paste_rows = lines.len();
-            let paste_cols = lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1);
+            let paste_rows = raw_cells.len();
+            let paste_cols = raw_cells.iter().map(Vec::len).max().unwrap_or(1);
             if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
             if paste_rows > 0 && paste_cols > 0 {
                 let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
@@ -1691,15 +1733,9 @@ impl Spreadsheet {
         let mut end_data_row = data_start_row;
         let mut end_col = start_col;
 
-        // Get source position and raw_tsv from internal clipboard
-        let (src_row, src_col) = self.internal_clipboard.as_ref().map(|ic| ic.source).unwrap_or((0, 0));
-        let raw_tsv = self.internal_clipboard.as_ref().map(|ic| ic.raw_tsv.clone()).unwrap_or_default();
-        let src_data_row = self.row_view.view_to_data(src_row);
-        let (delta_row, delta_col) = (data_start_row as i32 - src_data_row as i32, start_col as i32 - src_col as i32);
-
         if !self.sheet(cx).tables().is_empty() {
-            let values: Vec<Vec<String>> = full_paste_lines(&raw_tsv, true).into_iter().map(|line| line.split('\t').map(|value| {
-                if value.starts_with('=') { self.adjust_formula_refs(value, delta_row, delta_col) } else { value.to_owned() }
+            let values: Vec<Vec<String>> = raw_cells.iter().enumerate().map(|(ri,row)| row.iter().enumerate().map(|(ci,value)| {
+                if value.starts_with('=') { self.adjust_copied_formula(value, ri, ci, data_start_row + ri, start_col + ci) } else { value.to_owned() }
             }).collect()).collect();
             if self.paste_table_growth(data_start_row, start_col, &values, false, cx) { return; }
         }
@@ -1712,7 +1748,7 @@ impl Spreadsheet {
         };
 
         self.wb_mut(cx, |wb| wb.begin_batch());
-        for (row_offset, line) in raw_tsv.lines().enumerate() {
+        for (row_offset, row) in raw_cells.iter().enumerate() {
             // Determine target view row for this clipboard row
             let target_data_row = if is_filtered {
                 if let Some(start_idx) = visible_start_idx {
@@ -1731,14 +1767,14 @@ impl Spreadsheet {
             };
 
             let mut row_values: Vec<String> = Vec::new();
-            for (col_offset, value) in line.split('\t').enumerate() {
+            for (col_offset, value) in row.iter().enumerate() {
                 let col = start_col + col_offset;
                 if target_data_row < NUM_ROWS && col < NUM_COLS {
                     let old_value = self.sheet(cx).get_raw(target_data_row, col);
 
                     // Adjust formula references using constant delta from source to destination
                     let new_value = if value.starts_with('=') {
-                        self.adjust_formula_refs(value, delta_row, delta_col)
+                        self.adjust_copied_formula(value, row_offset, col_offset, target_data_row, col)
                     } else {
                         value.to_string()
                     };
@@ -1788,6 +1824,10 @@ impl Spreadsheet {
     /// - External clipboard: no-op with status message (no format data available)
     pub fn paste_formats(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.paste_table_view(TablePasteKind::Formats, cx);
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
 
         // Paste Formats doesn't make sense in edit mode
@@ -1907,6 +1947,10 @@ impl Spreadsheet {
 
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
         // Block during preview mode
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.delete_table_selection(cx);
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
         if self.block_if_selection_in_pivot("clear", cx) { return; }
         if self.block_selection_table_headers("clear", cx) { return; }
@@ -2038,5 +2082,328 @@ impl Spreadsheet {
             }
         }
         None
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TablePasteKind {
+    Contents,
+    All,
+    Values,
+    Formulas,
+    Formats,
+}
+
+impl Spreadsheet {
+    fn adjust_copied_formula(
+        &self,
+        formula: &str,
+        source_offset: usize,
+        source_col: usize,
+        row: usize,
+        col: usize,
+    ) -> String {
+        let Some(ic) = &self.internal_clipboard else {
+            return formula.to_owned();
+        };
+        let source_row = ic
+            .source_rows
+            .get(source_offset)
+            .copied()
+            .unwrap_or(ic.source.0 + source_offset);
+        self.adjust_formula_refs(
+            formula,
+            row as i32 - source_row as i32,
+            col as i32 - (ic.source.1 + source_col) as i32,
+        )
+    }
+
+    fn paste_table_view(&mut self, kind: TablePasteKind, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        if self.mode.is_editing() {
+            if kind == TablePasteKind::Values {
+                self.paste_values_into_edit(cx);
+            } else if kind != TablePasteKind::Formats {
+                self.paste_into_edit(cx);
+            }
+            return;
+        }
+        self.sync_table_view(cx);
+        let result = self.plan_table_paste(kind, cx);
+        match result {
+            Ok(writes) => {
+                self.apply_table_cell_writes(writes, "Paste cells", cx);
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn plan_table_paste(
+        &self,
+        kind: TablePasteKind,
+        cx: &App,
+    ) -> Result<Vec<crate::table_edit::TableCellWrite>, String> {
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(|i| i.text());
+        let metadata = item.as_ref().and_then(|i| i.metadata());
+        let internal = Self::is_internal_paste(
+            self.internal_clipboard.as_ref(),
+            text.as_deref(),
+            metadata.map(|s| s.as_str()),
+        );
+        let ic = if internal {
+            self.internal_clipboard.as_ref()
+        } else {
+            None
+        };
+        if kind == TablePasteKind::Formats && ic.is_none() {
+            return Err("Copy cells in VisiGrid before pasting formats.".into());
+        }
+        if ic.is_some_and(|ic| !ic.merges.is_empty()) {
+            return Err(
+                "Cannot paste merged cells through a Table view. Unmerge the source first.".into(),
+            );
+        }
+        let text = ic
+            .map(|ic| ic.raw_tsv.as_str())
+            .or(text.as_deref())
+            .ok_or("The clipboard is empty.")?;
+        let grid: Vec<Vec<String>> = if let Some(ic) = ic {
+            ic.raw_cells.clone()
+        } else if !text.contains('\t')
+            && !text
+                .lines()
+                .all(|line| visigrid_engine::cell::try_parse_number(line.trim()).is_some())
+        {
+            csv_io::parse_delimited_text(text)
+        } else {
+            full_paste_lines(text, internal)
+                .iter()
+                .map(|line| line.split('\t').map(str::to_owned).collect())
+                .collect()
+        };
+        if grid.is_empty() {
+            return Err("The clipboard is empty.".into());
+        }
+        let width = grid.iter().map(Vec::len).max().unwrap_or(0);
+        if grid.len().saturating_mul(width) > 100_000 {
+            return Err("Paste at most 100,000 cells at a time through a Table view.".into());
+        }
+        let (start, col) = self.view_state.selected;
+        let broadcast = grid.len() == 1 && width == 1 && self.is_multi_selection();
+        let targets: Vec<(usize, usize, usize, usize)> = if broadcast {
+            self.table_selection_targets(cx)?
+                .into_iter()
+                .map(|(r, c)| (r, c, 0, 0))
+                .collect()
+        } else {
+            if !self.view_state.additional_selections.is_empty() {
+                return Err("Select one destination for a multi-cell paste.".into());
+            }
+            crate::table_edit::view_safe_paste_targets(
+                self.sheet(cx),
+                &self.row_view,
+                (start, col),
+                grid.len(),
+                width,
+            )?
+        };
+        Ok(table_paste_writes_for_sheet(self.sheet(cx), &grid, ic, kind, targets))
+    }
+}
+
+/// Match ordinary Ctrl+V: bring source formats only into unformatted cells.
+/// Decide against canonical destinations before the atomic Table transaction.
+fn table_paste_writes_for_sheet(
+    sheet: &visigrid_engine::sheet::Sheet,
+    grid: &[Vec<String>],
+    ic: Option<&InternalClipboard>,
+    kind: TablePasteKind,
+    targets: Vec<(usize, usize, usize, usize)>,
+) -> Vec<crate::table_edit::TableCellWrite> {
+    let source_kind = if kind == TablePasteKind::Contents { TablePasteKind::All } else { kind };
+    let mut writes = table_paste_writes(grid, ic, source_kind, targets);
+    if kind == TablePasteKind::Contents {
+        for write in &mut writes {
+            if sheet.get_format(write.row, write.col) != CellFormat::default() {
+                write.format = None;
+            }
+        }
+    }
+    writes
+}
+
+pub(crate) fn table_paste_writes(
+    grid: &[Vec<String>],
+    ic: Option<&InternalClipboard>,
+    kind: TablePasteKind,
+    targets: Vec<(usize, usize, usize, usize)>,
+) -> Vec<crate::table_edit::TableCellWrite> {
+    use crate::table_edit::TableCellWrite;
+    let mut writes = Vec::with_capacity(targets.len());
+    for (row, col, ri, ci) in targets {
+        let raw = grid[ri].get(ci).map(String::as_str).unwrap_or("");
+        let mut write = TableCellWrite::value(row, col, raw.to_owned());
+        if kind == TablePasteKind::Formats {
+            write.value = None;
+        } else if kind == TablePasteKind::Values {
+            let value = ic
+                .and_then(|ic| ic.values.get(ri)?.get(ci))
+                .cloned()
+                .unwrap_or_else(|| Spreadsheet::parse_external_value(raw));
+            write.literal_text = matches!(value, Value::Text(_));
+            write.value = Some(Spreadsheet::value_to_canonical_string(&value));
+        } else if let Some(ic) = ic {
+            // Raw text that looks like a formula or number must remain text.
+            write.literal_text = matches!(
+                ic.values.get(ri).and_then(|r| r.get(ci)),
+                Some(Value::Text(_))
+            ) && !ic
+                .source_formulas
+                .get(ri)
+                .and_then(|r| r.get(ci))
+                .copied()
+                .unwrap_or(false);
+            if raw.starts_with('=') && !write.literal_text {
+                let source_row = ic.source_rows.get(ri).copied().unwrap_or(ic.source.0 + ri);
+                write.value = Some(visigrid_engine::formula::parser::adjust_formula_refs(
+                    raw,
+                    row as i32 - source_row as i32,
+                    col as i32 - (ic.source.1 + ci) as i32,
+                ));
+            }
+        }
+        if let Some(ic) = ic {
+            if matches!(kind, TablePasteKind::All | TablePasteKind::Formats) {
+                write.format = ic.formats.get(ri).and_then(|r| r.get(ci)).cloned();
+            }
+            if matches!(kind, TablePasteKind::All | TablePasteKind::Contents) {
+                write.comment = Some(
+                    ic.comments
+                        .get(ri)
+                        .and_then(|r| r.get(ci))
+                        .cloned()
+                        .flatten(),
+                );
+            }
+        }
+        writes.push(write);
+    }
+    writes
+}
+
+#[cfg(test)]
+mod table_paste_tests {
+    use super::{table_paste_writes, InternalClipboard, TablePasteKind};
+    use visigrid_engine::{cell::CellFormat, formula::eval::Value};
+
+    fn clipboard() -> InternalClipboard {
+        InternalClipboard {
+            raw_tsv: "=A9\n=A4".into(),
+            raw_cells: vec![vec!["=A9".into()], vec!["=A4".into()]],
+            values: vec![vec![Value::Number(9.0)], vec![Value::Number(4.0)]],
+            formats: vec![vec![CellFormat::default()]; 2],
+            comments: vec![vec![None]; 2],
+            source: (8, 1),
+            source_rows: vec![8, 3],
+            source_formulas: vec![vec![true]; 2],
+            id: 1,
+            merges: vec![],
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn formula_paste_uses_each_canonical_source_and_destination() {
+        let ic = clipboard();
+        let grid = vec![vec!["=(A9+$A$1)*2".into()], vec!["=$A4+A$1".into()]];
+        let writes = table_paste_writes(
+            &grid,
+            Some(&ic),
+            TablePasteKind::Contents,
+            vec![(5, 2, 0, 0), (9, 2, 1, 0)],
+        );
+        assert_eq!(writes[0].value.as_deref(), Some("=(B6+$A$1)*2"));
+        assert_eq!(writes[1].value.as_deref(), Some("=$A10+B$1"));
+        // Broadcast has one source, regardless of destination gaps.
+        let writes = table_paste_writes(
+            &grid,
+            Some(&ic),
+            TablePasteKind::Formulas,
+            vec![(5, 2, 0, 0), (9, 2, 0, 0)],
+        );
+        assert_eq!(writes[1].value.as_deref(), Some("=(B10+$A$1)*2"));
+    }
+
+    #[test]
+    fn paste_values_preserves_formula_looking_text_and_leading_zeroes() {
+        let grid = vec![vec!["=1+1".into(), "00123".into()]];
+        let writes = table_paste_writes(
+            &grid,
+            None,
+            TablePasteKind::Values,
+            vec![(3, 1, 0, 0), (3, 2, 0, 1)],
+        );
+        assert!(writes.iter().all(|w| w.literal_text));
+        assert_eq!(writes[0].value.as_deref(), Some("=1+1"));
+        assert_eq!(writes[1].value.as_deref(), Some("00123"));
+    }
+
+    #[test]
+    fn filtered_contents_paste_preserves_destination_formats_and_undo() {
+        use crate::table_edit::{prepare_table_writes, tests::fixture, view_safe_paste_targets};
+        let mut before = fixture(true);
+        let italic = CellFormat { italic: true, ..Default::default() };
+        before.sheet_mut(0).unwrap().set_format(3, 2, italic.clone());
+        let mut ic = clipboard();
+        ic.raw_cells = vec![vec!["25".into()], vec!["35".into()]];
+        ic.values = vec![vec![Value::Number(25.0)], vec![Value::Number(35.0)]];
+        ic.source_formulas = vec![vec![false]; 2];
+        for formats in &mut ic.formats { formats[0].bold = true; }
+        let sheet = before.active_sheet();
+        let view = sheet.build_saved_table_view(30).unwrap().unwrap();
+        // Slot 3 contains the filtered-out East record; slot 4 is the first visible record.
+        let targets = view_safe_paste_targets(sheet, view.rows(), (4, 2), 2, 1).unwrap();
+        assert_eq!(targets.iter().map(|t| t.0).collect::<Vec<_>>(), vec![5, 3]);
+        let writes = super::table_paste_writes_for_sheet(
+            sheet, &ic.raw_cells, Some(&ic), TablePasteKind::Contents, targets.clone());
+        let mut after = prepare_table_writes(&before, 0, &writes).unwrap();
+        assert!(after.active_sheet().get_format(5, 2).bold);
+        assert_eq!(after.active_sheet().get_format(3, 2), italic);
+        assert_eq!(after.active_sheet().get_raw(4, 2), "10");
+        let commit = before.capture_guarded_batch(&after).unwrap();
+        commit.replay(&mut after, true).unwrap();
+        assert_eq!(after.active_sheet().get_format(5, 2), CellFormat::default());
+        assert_eq!(after.active_sheet().get_format(3, 2), italic);
+        commit.replay(&mut after, false).unwrap();
+        assert!(after.active_sheet().get_format(5, 2).bold);
+        let all = super::table_paste_writes_for_sheet(
+            sheet, &ic.raw_cells, Some(&ic), TablePasteKind::All, targets);
+        let all = prepare_table_writes(&before, 0, &all).unwrap();
+        assert!(all.active_sheet().get_format(3, 2).bold);
+        assert!(!all.active_sheet().get_format(3, 2).italic);
+    }
+
+    #[test]
+    fn paste_special_scopes_formats_and_comments() {
+        let mut ic = clipboard();
+        ic.formats[0][0].bold = true;
+        let grid = vec![vec!["=A9".into()]];
+        let targets = vec![(5, 2, 0, 0)];
+        let writes = table_paste_writes(&grid, Some(&ic), TablePasteKind::Formats, targets.clone());
+        assert!(writes[0].value.is_none());
+        assert!(writes[0].format.as_ref().unwrap().bold);
+        assert!(writes[0].comment.is_none());
+        let writes = table_paste_writes(&grid, Some(&ic), TablePasteKind::All, targets.clone());
+        assert!(writes[0].format.is_some());
+        assert_eq!(writes[0].comment, Some(None));
+        let writes = table_paste_writes(&grid, Some(&ic), TablePasteKind::Values, targets);
+        assert_eq!(writes[0].value.as_deref(), Some("9"));
+        assert!(writes[0].format.is_none() && writes[0].comment.is_none());
     }
 }

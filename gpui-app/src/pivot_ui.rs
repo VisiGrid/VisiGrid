@@ -13,6 +13,55 @@ use visigrid_engine::workbook::PivotCommit;
 
 use crate::app::{Spreadsheet, NUM_ROWS};
 
+/// Preflight and replay the complete pivot action, including sheet creation
+/// or removal. The candidate is published only after every saved view rebuilds.
+fn replay_pivot_candidate(
+    wb: &visigrid_engine::workbook::Workbook,
+    commit: &PivotCommit,
+    created_sheet: &Option<(usize, Box<Sheet>)>,
+    undo: bool,
+) -> Result<visigrid_engine::workbook::Workbook, String> {
+    let mut candidate = wb.clone();
+    if !undo {
+        if let Some((index, sheet)) = created_sheet {
+            if candidate.sheet_index_by_id(sheet.id).is_none() && !candidate.restore_sheet(*index, (**sheet).clone()) {
+                return Err("The pivot's sheet could not be restored.".into());
+            }
+        }
+    }
+    candidate.apply_pivot_state(if undo { &commit.before } else { &commit.after }).map_err(|e| e.to_string())?;
+    if undo {
+        if let Some((_, sheet)) = created_sheet {
+            if let Some(index) = candidate.sheet_index_by_id(sheet.id) {
+                candidate.take_sheet(index).ok_or("The pivot's sheet could not be removed.")?;
+                let report = candidate.recompute_full_ordered();
+                if let Some(error) = report.errors.first() {
+                    return Err(format!("The pivot could not be recalculated: {error:?}"));
+                }
+            }
+        }
+    }
+    for sheet in candidate.sheets() { sheet.build_saved_table_view(NUM_ROWS.min(sheet.rows))?; }
+    if let Some(error) = candidate.take_incremental_errors().first() {
+        return Err(format!("The pivot could not be recalculated: {error:?}"));
+    }
+    Ok(candidate)
+}
+
+/// Only the exact pivot-creation group (pivot + its new sheet's widths) may
+/// bypass the general unrelated-history gate while Table criteria are active.
+pub(crate) fn is_pivot_history(action: &crate::history::UndoAction) -> bool {
+    use crate::history::UndoAction;
+    match action {
+        UndoAction::PivotCommit { .. } => true,
+        UndoAction::Group { actions, .. } => {
+            let Some(UndoAction::PivotCommit { created_sheet: Some((_, sheet)), .. }) = actions.first() else { return false };
+            actions.iter().skip(1).all(|a| matches!(a, UndoAction::ColumnWidthSet { sheet_id, .. } if *sheet_id == sheet.id))
+        }
+        _ => false,
+    }
+}
+
 impl Spreadsheet {
     /// Undo a pivot action: restore the "before" state, and remove the sheet
     /// the action created, if any.
@@ -23,14 +72,11 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         let active_before = self.wb(cx).active_sheet_index();
-        self.workbook.update(cx, |wb, _| {
-            let _ = wb.apply_pivot_state(&commit.before);
-            if let Some((_, sheet)) = created_sheet {
-                if let Some(i) = wb.sheet_index_by_id(sheet.id) {
-                    wb.take_sheet(i);
-                }
-            }
-        });
+        let candidate = match replay_pivot_candidate(self.wb(cx), commit, created_sheet, true) {
+            Ok(candidate) => candidate,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.finish_pivot_restore(active_before, cx);
     }
 
@@ -43,15 +89,24 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         let active_before = self.wb(cx).active_sheet_index();
-        self.workbook.update(cx, |wb, _| {
-            if let Some((index, sheet)) = created_sheet {
-                if wb.sheet_index_by_id(sheet.id).is_none() {
-                    wb.restore_sheet(*index, (**sheet).clone());
-                }
-            }
-            let _ = wb.apply_pivot_state(&commit.after);
-        });
+        let candidate = match replay_pivot_candidate(self.wb(cx), commit, created_sheet, false) {
+            Ok(candidate) => candidate,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.finish_pivot_restore(active_before, cx);
+    }
+
+    pub(crate) fn preflight_pivot_history(&self, action: &crate::history::UndoAction, undo: bool, cx: &App) -> Result<(), String> {
+        use crate::history::UndoAction;
+        let pivot = match action {
+            UndoAction::Group { actions, .. } => actions.first(),
+            action => Some(action),
+        };
+        if let Some(UndoAction::PivotCommit { commit, created_sheet, .. }) = pivot {
+            replay_pivot_candidate(self.wb(cx), commit, created_sheet, undo)?;
+        }
+        Ok(())
     }
 
     fn finish_pivot_restore(&mut self, active_before: usize, cx: &mut Context<Self>) {
@@ -62,6 +117,7 @@ impl Spreadsheet {
             RowView::new(NUM_ROWS)
         };
         self.finish_workbook_snapshot_restore(row_view, cx);
+        self.sync_table_view(cx);
         self.is_modified = true;
         cx.notify();
     }
@@ -178,6 +234,10 @@ pub(crate) struct PivotPanel {
     pub mode: PivotPanelMode,
     pub source: PivotSource,
     pub headers: Vec<String>,
+    pub column_ids: Vec<Option<visigrid_engine::table::TableColumnId>>,
+    pub table_name: Option<String>,
+    pub source_menu: bool,
+    pub source_cursor: usize,
     /// Per source column: first non-empty data cell's number format, and
     /// whether it holds a number (drives the default aggregation).
     pub column_formats: Vec<NumberFormat>,
@@ -208,7 +268,7 @@ impl PivotPanel {
     }
 
     fn field(&self, offset: usize) -> PivotField {
-        PivotField { offset: offset as u32, header: self.headers[offset].clone() }
+        PivotField { column_id: self.column_ids.get(offset).copied().flatten(), offset: offset as u32, header: self.headers[offset].clone() }
     }
 
     pub(crate) fn move_cursor_to(&mut self, item: PivotPanelItem) {
@@ -350,7 +410,14 @@ impl Spreadsheet {
     /// Insert → PivotTable: the selection (if more than one cell) or the
     /// current region around the cursor becomes the source.
     pub(crate) fn insert_pivot_table(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) {
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        let (vr, col) = self.view_state.selected;
+        let row = self.row_view.view_to_data(vr);
+        if let Some(table) = self.sheet(cx).table_at(row, col) {
+            let source = self.wb(cx).table_pivot_source(table.id).unwrap();
+            self.open_pivot_source(PivotPanelMode::New, source, cx);
             return;
         }
         if self.row_view.is_sorted() || self.row_view.is_filtered() {
@@ -365,6 +432,11 @@ impl Spreadsheet {
             (r0, c0, r1, c1)
         };
         if r1 <= r0 {
+            let source = self.wb(cx).tables().next().and_then(|(_, t)| self.wb(cx).table_pivot_source(t.id).ok());
+            if let Some(source) = source {
+                self.open_pivot_source(PivotPanelMode::New, source, cx);
+                return;
+            }
             self.status_message = Some("A pivot needs a header row and at least one data row. Select the table first.".into());
             cx.notify();
             return;
@@ -375,7 +447,7 @@ impl Spreadsheet {
             return;
         }
         let source = PivotSource {
-            sheet_id: self.sheet(cx).id,
+            table_id: None, sheet_id: self.sheet(cx).id,
             start_row: r0 as u32,
             start_col: c0 as u32,
             end_row: r1 as u32,
@@ -389,6 +461,28 @@ impl Spreadsheet {
             Err(msg) => self.status_message = Some(msg),
         }
         cx.notify();
+    }
+
+    fn open_pivot_source(&mut self, mode: PivotPanelMode, source: PivotSource, cx: &mut Context<Self>) {
+        match self.build_pivot_panel(mode, source, PivotDefinition::default(), cx) {
+            Ok(panel) => { self.pivot_panel = Some(panel); self.cf_panel_visible = false; }
+            Err(error) => self.status_message = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn pivot_choose_table(&mut self, id: visigrid_engine::table::TableId, cx: &mut Context<Self>) {
+        let Some(panel) = self.pivot_panel.as_ref().filter(|p| !p.busy) else { return };
+        if panel.source.table_id == Some(id) {
+            self.pivot_panel.as_mut().unwrap().source_menu = false;
+            cx.notify();
+            return;
+        }
+        let mode = panel.mode.clone();
+        match self.wb(cx).table_pivot_source(id) {
+            Ok(source) => self.open_pivot_source(mode, source, cx),
+            Err(error) => { self.set_pivot_panel_message(error.to_string()); cx.notify(); }
+        }
     }
 
     /// Open the field list for the pivot under the cursor.
@@ -412,11 +506,34 @@ impl Spreadsheet {
     fn build_pivot_panel(
         &self,
         mode: PivotPanelMode,
-        source: PivotSource,
-        draft: PivotDefinition,
+        mut source: PivotSource,
+        mut draft: PivotDefinition,
         cx: &App,
     ) -> Result<PivotPanel, String> {
         let wb = self.wb(cx);
+        let mut message = None;
+        let (table_name, column_ids) = if let Some(id) = source.table_id {
+            source = match wb.table_pivot_source(id) {
+                Ok(source) => source,
+                Err(error) => return Ok(PivotPanel { mode, source, draft, headers: Vec::new(),
+                    column_ids: Vec::new(), column_formats: Vec::new(), column_numeric: Vec::new(),
+                    table_name: Some("Missing Table".into()), source_menu: true, source_cursor: 0,
+                    cursor: 0, message: Some(error.to_string()), growth: None, busy: false }),
+            };
+            let (_, table) = wb.table(id).unwrap();
+            // Keep missing fields visible and removable in the drawer. Apply
+            // refuses them until the user repairs the definition.
+            for field in draft.rows.iter_mut().chain(draft.column.iter_mut()).chain(draft.values.iter_mut().map(|v| &mut v.field)) {
+                if let Some((offset, column)) = table.columns.iter().enumerate().find(|(_, c)| Some(c.id) == field.column_id) {
+                    field.offset = offset as u32;
+                    field.header = column.name.clone();
+                } else {
+                    field.offset = u32::MAX;
+                    message = Some(format!("Source field '{}' is missing. Remove it from the layout and choose a replacement.", field.header));
+                }
+            }
+            (Some(table.name.clone()), table.columns.iter().map(|c| Some(c.id)).collect())
+        } else { (None, Vec::new()) };
         let sheet = wb.sheet_by_id(source.sheet_id).ok_or("The pivot's source sheet no longer exists.")?;
         let hr = source.start_row as usize;
         let headers: Vec<String> = (source.start_col..=source.end_col)
@@ -430,11 +547,14 @@ impl Spreadsheet {
             mode,
             source,
             headers,
+            column_ids,
+            table_name,
+            source_menu: false, source_cursor: 0,
             column_formats,
             column_numeric,
             draft,
             cursor: 0,
-            message: None,
+            message,
             growth: None,
             busy: false,
         })
@@ -473,6 +593,7 @@ impl Spreadsheet {
             }
             let Some(this) = this.upgrade() else { return };
             let handled = this.update(cx, |this, cx| {
+                if this.table_filter_key(&event.keystroke, cx) { return true; }
                 if this.table_dialog_key(&event.keystroke, cx) { return true; }
                 if this.pivot_panel.is_none()
                     || this.open_menu.is_some()
@@ -491,10 +612,22 @@ impl Spreadsheet {
     }
 
     pub(crate) fn pivot_panel_handle_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        let table_ids: Vec<_> = self.wb(cx).tables().map(|(_, t)| t.id).collect();
         let Some(panel) = self.pivot_panel.as_mut() else { return false };
         let key = keystroke.key.as_str();
         let m = &keystroke.modifiers;
         if panel.busy && key != "escape" {
+            return true;
+        }
+        if panel.source_menu {
+            match key {
+                "escape" | "s" => panel.source_menu = false,
+                "up" => panel.source_cursor = panel.source_cursor.saturating_sub(1),
+                "down" => panel.source_cursor = (panel.source_cursor + 1).min(table_ids.len().saturating_sub(1)),
+                "enter" => { if let Some(id) = table_ids.get(panel.source_cursor).copied() { self.pivot_choose_table(id, cx); } }
+                _ => {},
+            }
+            cx.notify();
             return true;
         }
         let n = panel.items().len();
@@ -517,6 +650,7 @@ impl Spreadsheet {
             "enter" => apply = true,
             "f5" if m.alt => apply = true,
             _ if !m.control && !m.alt && !m.platform => match key {
+                "s" => { panel.source_menu = true; panel.source_cursor = 0; }
                 "r" | "c" | "v" => panel.message = panel.assign(key.chars().next().unwrap()),
                 "=" => panel.message = panel.apply_aggregation_to_all(),
                 "x" => {
@@ -548,6 +682,7 @@ impl Spreadsheet {
     /// Apply the drawer's draft: create the pivot on a new sheet, or update
     /// the existing one.
     pub(crate) fn pivot_apply(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
         let Some(panel) = self.pivot_panel.clone() else { return };
         let table = match &panel.mode {
             PivotPanelMode::New => PivotTable {
@@ -621,6 +756,7 @@ impl Spreadsheet {
     /// Delete the pivot under the cursor (or in the open drawer) and clear its
     /// output. One undo step.
     pub(crate) fn delete_pivot(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) { return; }
         let id = match self.pivot_panel.as_ref().map(|p| p.mode.clone()) {
             Some(PivotPanelMode::Edit { pivot_id }) => Some(pivot_id),
             _ => self.pivot_under_cursor(cx).map(|t| t.id),
@@ -639,7 +775,10 @@ impl Spreadsheet {
             }
         };
         let name = commit.before.table.as_ref().map(|t| t.name.clone()).unwrap_or_default();
-        let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
+        if let Err(error) = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after)) {
+            self.status_message = Some(error.to_string()); cx.notify(); return;
+        }
+        self.sync_table_view(cx);
         self.record_pivot_commit(commit, None, format!("Delete {name}"));
         self.pivot_panel = None;
         self.pivot_errors.remove(&id);
@@ -706,13 +845,15 @@ impl Spreadsheet {
     /// Validate, snapshot and compute; large sources aggregate on a background
     /// thread and are placed when done.
     fn run_pivot_job(&mut self, mut job: PivotJob, cx: &mut Context<Self>) {
-        let (snapshot, generation) = match self.pivot_prepare_snapshot(&job, cx) {
+        if self.block_if_previewing_only(cx) { return; }
+        let (table, snapshot, generation) = match self.pivot_prepare_snapshot(&job, cx) {
             Ok(s) => s,
             Err(msg) => {
                 self.pivot_job_failed(&job, msg, cx);
                 return;
             }
         };
+        job.table = table;
         job.source_generation = generation;
         if job.table.source.data_rows() <= BACKGROUND_ROWS {
             let result = pivot::aggregate(&job.table.definition, &snapshot);
@@ -735,8 +876,10 @@ impl Spreadsheet {
 
     /// The synchronous path, for Refresh All. Returns false on failure.
     fn run_pivot_job_sync(&mut self, mut job: PivotJob, cx: &mut Context<Self>) -> bool {
+        if self.block_if_previewing_only(cx) { return false; }
         match self.pivot_prepare_snapshot(&job, cx) {
-            Ok((snapshot, generation)) => {
+            Ok((table, snapshot, generation)) => {
+                job.table = table;
                 job.source_generation = generation;
                 let result = pivot::aggregate(&job.table.definition, &snapshot);
                 self.pivot_finish(job, result, cx)
@@ -748,7 +891,7 @@ impl Spreadsheet {
         }
     }
 
-    fn pivot_prepare_snapshot(&self, job: &PivotJob, cx: &App) -> Result<(PivotSnapshot, u64), String> {
+    fn pivot_prepare_snapshot(&self, job: &PivotJob, cx: &App) -> Result<(PivotTable, PivotSnapshot, u64), String> {
         if job.table.definition.is_empty() {
             return Err(PivotError::NoFields.to_string());
         }
@@ -771,6 +914,7 @@ impl Spreadsheet {
         result: Result<PivotOutput, PivotError>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.block_if_previewing_only(cx) { return false; }
         if let Some(p) = self.pivot_panel.as_mut() {
             p.busy = false;
         }
@@ -798,31 +942,27 @@ impl Spreadsheet {
                 format_new_pivot_values(&mut job.table.definition, &output);
                 // Create the output sheet only now, so a failed or cancelled
                 // create never leaves an empty sheet behind.
-                let (sheet_index, created) = self.workbook.update(cx, |wb, _| {
-                    let name = crate::structured_results::unique_sheet_name(wb, "Pivot");
-                    let idx = wb.add_sheet_named(&name).unwrap_or_else(|| wb.add_sheet());
-                    if let Some(sheet) = wb.sheet_mut(idx) {
-                        style_new_pivot(sheet, &job.table, &output);
-                    }
-                    (idx, wb.sheet(idx).cloned())
-                });
-                let Some(created) = created else { return false };
+                let mut candidate = self.wb(cx).clone();
+                let name = crate::structured_results::unique_sheet_name(&candidate, "Pivot");
+                let sheet_index = candidate.add_sheet_named(&name).unwrap_or_else(|| candidate.add_sheet());
+                if let Some(sheet) = candidate.sheet_mut(sheet_index) {
+                    style_new_pivot(sheet, &job.table, &output);
+                }
+                let Some(created) = candidate.sheet(sheet_index).cloned() else { return false };
                 let sheet_id = created.id;
                 let created_name = created.name.clone();
-                let prepared = self.wb(cx).prepare_pivot_commit(sheet_id, job.table.clone(), &output, job.source_generation, now);
-                let commit = match prepared {
-                    Ok(c) => c,
-                    Err(e) => {
-                        self.workbook.update(cx, |wb, _| {
-                            if let Some(i) = wb.sheet_index_by_id(sheet_id) {
-                                wb.take_sheet(i);
-                            }
-                        });
-                        self.pivot_job_failed(&job, e.to_string(), cx);
+                let commit = match candidate.prepare_pivot_commit(sheet_id, job.table.clone(), &output, job.source_generation, now) {
+                    Ok(commit) => commit,
+                    Err(error) => {
+                        self.pivot_job_failed(&job, error.to_string(), cx);
                         return false;
                     }
                 };
-                let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
+                if let Err(error) = candidate.apply_pivot_state(&commit.after) {
+                    self.pivot_job_failed(&job, error.to_string(), cx);
+                    return false;
+                }
+                self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 if job.activate {
                     self.activate_sheet(sheet_index, cx);
                     self.row_view = RowView::new(NUM_ROWS);
@@ -874,7 +1014,10 @@ impl Spreadsheet {
                         return false;
                     }
                 };
-                let _ = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after));
+                if let Err(error) = self.workbook.update(cx, |wb, _| wb.apply_pivot_state(&commit.after)) {
+                    self.pivot_job_failed(&job, error.to_string(), cx);
+                    return false;
+                }
                 self.record_pivot_commit(commit, None, job.description.clone());
                 let growth = self.wb(cx).pivot_source_growth(&job.table);
                 let note = growth.map(|last| {
@@ -891,6 +1034,15 @@ impl Spreadsheet {
                 self.status_message = Some(format!("{}.{}", job.description, note.unwrap_or_default()));
             }
         }
+        if let Some(old_panel) = self.pivot_panel.as_ref().filter(|p| p.mode == (PivotPanelMode::Edit { pivot_id: job.table.id })) {
+            let message = old_panel.message.clone();
+            if let Ok(mut panel) = self.build_pivot_panel(old_panel.mode.clone(), job.table.source, job.table.definition.clone(), cx) {
+                panel.message = message;
+                panel.growth = self.wb(cx).pivot_source_growth(&job.table);
+                self.pivot_panel = Some(panel);
+            }
+        }
+        self.sync_table_view(cx);
         self.pivot_errors.remove(&job.table.id);
         self.bump_cells_rev();
         self.is_modified = true;
@@ -935,7 +1087,9 @@ impl Spreadsheet {
         } else {
             "up to date".to_string()
         };
-        Some(format!("{} · {}!{} · {}", t.name, source_sheet, range, state))
+        let source = t.source.table_id.map(|id| wb.table(id).map(|(_, t)| t.name.clone()).unwrap_or_else(|| "Missing Table".into()))
+            .unwrap_or_else(|| format!("{}!{}", source_sheet, range));
+        Some(format!("{} · {} · {}", t.name, source, state))
     }
 
     /// Pivot entries for the Problems panel: failed refreshes and stale pivots,
@@ -981,8 +1135,9 @@ mod panel_tests {
         let money = NumberFormat::Currency { decimals: 2, thousands: true, negative: Default::default(), symbol: None };
         PivotPanel {
             mode: PivotPanelMode::New,
-            source: PivotSource { sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: 10, end_col: 2 },
+            source: PivotSource { table_id: None, sheet_id: SheetId(1), start_row: 0, start_col: 0, end_row: 10, end_col: 2 },
             headers: vec!["Region".into(), "Customer".into(), "Amount".into()],
+            column_ids: Vec::new(), table_name: None, source_menu: false, source_cursor: 0,
             column_formats: vec![NumberFormat::General, NumberFormat::General, money],
             column_numeric: vec![false, false, true],
             draft: PivotDefinition::default(),
@@ -1067,10 +1222,10 @@ mod panel_tests {
                 wb.set_cell_value_tracked(0, r, c, value);
             }
         }
-        let field = |offset, header: &str| PivotField { offset, header: header.into() };
+        let field = |offset, header: &str| PivotField { column_id: None, offset, header: header.into() };
         let mut table = PivotTable {
             id: wb.next_pivot_id(), name: wb.next_pivot_name(),
-            source: PivotSource { sheet_id: source_id, start_row: 0, start_col: 0, end_row: 2, end_col: 2 },
+            source: PivotSource { table_id: None, sheet_id: source_id, start_row: 0, start_col: 0, end_row: 2, end_col: 2 },
             definition: PivotDefinition {
                 rows: vec![field(0, "Region")], column: Some(field(1, "Product")),
                 values: vec![PivotValueField { field: field(2, "Revenue"), aggregation: Aggregation::Sum, number_format: None }],
@@ -1078,7 +1233,7 @@ mod panel_tests {
             anchor_row: 0, anchor_col: 0, extent: None, last_refresh: None,
             stale: false, source_generation: None,
         };
-        let (snapshot, generation) = wb.pivot_snapshot(&table).unwrap();
+        let (mut table, snapshot, generation) = wb.pivot_snapshot(&table).unwrap();
         let output = aggregate(&table.definition, &snapshot).unwrap();
         format_new_pivot_values(&mut table.definition, &output);
         let index = wb.add_sheet();
@@ -1112,7 +1267,7 @@ mod panel_tests {
         wb.sheet_mut(index).unwrap().set_bold(0, 0, false);
         wb.sheet_mut(index).unwrap().set_background_color(2, 2, Some([250, 220, 100, 255]));
         wb.set_cell_value_tracked(0, 1, 2, "125000.50");
-        let (snapshot, generation) = wb.pivot_snapshot(&table).unwrap();
+        let (table, snapshot, generation) = wb.pivot_snapshot(&table).unwrap();
         let output = aggregate(&table.definition, &snapshot).unwrap();
         let refresh = wb.prepare_pivot_commit(sheet_id, table, &output, generation, 1).unwrap();
         wb.apply_pivot_state(&refresh.after).unwrap();
@@ -1146,7 +1301,7 @@ mod panel_tests {
         let table = PivotTable {
             id: 1, name: "Groups".into(), source: p.source,
             definition: PivotDefinition {
-                rows: vec![PivotField { offset: 0, header: "Region".into() }],
+                rows: vec![PivotField { column_id: None, offset: 0, header: "Region".into() }],
                 ..Default::default()
             },
             anchor_row: 3, anchor_col: 2, extent: None, last_refresh: None,
@@ -1162,5 +1317,54 @@ mod panel_tests {
         assert!(!sheet.get_format(4, 2).bold);
         assert!(!sheet.get_format(4, 2).border_top.is_set());
         assert_eq!(sheet.get_format(0, 0), Default::default());
+    }
+}
+
+#[cfg(test)]
+mod table_source_tests {
+    use super::*;
+    use visigrid_engine::{table::{TableColumnId, TableRange}, table_view::{TableSort, TableViewSpec}, filter::SortDirection, workbook::Workbook};
+
+    #[::core::prelude::v1::test]
+    fn table_field_picker_preserves_identity_and_filtered_create_replays() {
+        let mut wb = Workbook::new();
+        let sheet = wb.sheet(0).unwrap().id;
+        for (r, row) in [["Region", "Amount"], ["West", "10"], ["East", "20"]].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() { wb.set_cell_value_tracked(0, r, c, value); }
+        }
+        let id = wb.create_table(sheet, TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 1 }, "Sales").unwrap().table_id();
+        let columns = &wb.table(id).unwrap().1.columns;
+        let mut panel = PivotPanel { mode: PivotPanelMode::New, source: wb.table_pivot_source(id).unwrap(),
+            headers: columns.iter().map(|c| c.name.clone()).collect(), column_ids: columns.iter().map(|c| Some(c.id)).collect(),
+            table_name: Some("Sales".into()), source_menu: false, source_cursor: 0,
+            column_formats: vec![NumberFormat::General; 2], column_numeric: vec![false, true],
+            draft: PivotDefinition::default(), cursor: 0, message: None, growth: None, busy: false };
+        panel.assign('r');
+        panel.cursor = 1;
+        panel.assign('v');
+        assert_eq!(panel.draft.values[0].field.column_id, panel.column_ids[1]);
+        let mut spec = TableViewSpec::new(id);
+        spec.sort = Some(TableSort { column: columns[0].id, direction: SortDirection::Ascending });
+        wb.set_table_view_spec(sheet, Some(spec.clone())).unwrap();
+        let (pivot, index) = wb.create_pivot(panel.source, panel.draft).unwrap();
+        let deleted = wb.prepare_pivot_delete(pivot).unwrap();
+        let commit = PivotCommit { before: deleted.after, after: deleted.before };
+        let mut empty = wb.clone();
+        empty.apply_pivot_state(&commit.before).unwrap();
+        let created = Some((index, Box::new(empty.sheet(index).unwrap().clone())));
+        let undo = replay_pivot_candidate(&wb, &commit, &created, true).unwrap();
+        assert_eq!(undo.sheets().len(), 1);
+        assert_eq!(undo.sheet(0).unwrap().table_view_spec(), Some(&spec));
+        let redo = replay_pivot_candidate(&undo, &commit, &created, false).unwrap();
+        assert_eq!(redo.sheet(1).unwrap().get_raw(3, 1), "30");
+        assert_eq!(redo.sheet(0).unwrap().table_view_spec(), Some(&spec));
+        assert_eq!(redo.find_pivot(pivot).unwrap().1.definition.values[0].field.column_id, Some(TableColumnId(2)));
+        use crate::history::UndoAction;
+        let action = UndoAction::Group { actions: vec![
+            UndoAction::PivotCommit { commit: Box::new(commit), created_sheet: created.clone(), description: "Create pivot".into() },
+            UndoAction::ColumnWidthSet { sheet_id: created.unwrap().1.id, col: 0, old: None, new: Some(100.0) },
+        ], description: "Create pivot".into() };
+        assert!(is_pivot_history(&action));
+        assert!(!is_pivot_history(&UndoAction::Group { actions: vec![action], description: "Arbitrary group".into() }));
     }
 }

@@ -244,6 +244,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &ConfirmEdit, window, cx| {
             if this.guard_terminal_focus(window, cx, "ConfirmEdit") { return; }
+            if this.rewind_confirm.visible { this.confirm_rewind(cx); return; }
             // Close-confirm dialog: Enter activates focused button
             if this.close_confirm_visible {
                 let choice = this.close_confirm_focused;
@@ -297,6 +298,11 @@ pub(crate) fn bind(
                 crate::views::lua_console::execute_console(this, cx);
                 return;
             }
+            // Bound actions run before on_key_down, including Review's raw keys.
+            if this.review_mode.is_some() && this.mode == Mode::Navigation {
+                this.apply_review_if_ready(window, cx);
+                return;
+            }
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
@@ -348,6 +354,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &CancelEdit, window, cx| {
             if this.guard_terminal_focus(window, cx, "CancelEdit") { return; }
+            if this.rewind_confirm.visible { this.cancel_rewind(cx); return; }
             // Close-confirm dialog: Escape dismisses
             if this.close_confirm_visible {
                 this.close_confirm_visible = false;
@@ -397,6 +404,10 @@ pub(crate) fn bind(
                 cx.notify();
                 return;
             }
+            if this.mode.is_editing() && this.autocomplete_visible {
+                this.autocomplete_dismiss(cx);
+                return;
+            }
             // Import overlay takes priority - dismiss it but let import continue
             if this.import_overlay_visible {
                 this.dismiss_import_overlay(cx);
@@ -408,6 +419,8 @@ pub(crate) fn bind(
             }
             if this.open_menu.is_some() {
                 this.close_menu(cx);
+            } else if this.review_mode.is_some() && this.mode == Mode::Navigation {
+                this.dismiss_structured_result(cx);
             } else if this.mode == Mode::Command {
                 this.hide_palette(cx);
             } else if this.mode == Mode::GoTo {
@@ -448,6 +461,8 @@ pub(crate) fn bind(
                 this.hide_refactor_log(cx);
             } else if this.mode == Mode::ExtractNamedRange {
                 this.hide_extract_named_range(cx);
+            } else if this.mode == Mode::ExportReport {
+                this.hide_export_report(cx);
             } else if this.mode == Mode::ImportReport {
                 this.hide_import_report(cx);
             } else if this.mode == Mode::ExplainDiff {

@@ -30,7 +30,7 @@ impl Spreadsheet {
     /// - Internal use (e.g., after explicit user confirmation)
     /// - "New in This Window" menu item (if exposed)
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         if self.comment_editor.is_some() { self.close_comment(cx); }
         self.cancel_duckdb_import(cx);
         self.wb_mut(cx, |wb| *wb = Workbook::new());
@@ -87,7 +87,7 @@ impl Spreadsheet {
     }
 
     pub fn load_file(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         self.load_file_with_recovery(path, false, cx);
     }
 
@@ -111,7 +111,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         self.cancel_duckdb_import(cx);
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
@@ -330,7 +330,7 @@ impl Spreadsheet {
 
     /// Start background Excel import with delayed overlay
     fn start_excel_import(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
@@ -384,7 +384,7 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, mut result)) => {
-                        if this.block_if_previewing(cx) { return; }
+                        if this.block_if_previewing_only(cx) { return; }
                         // Atomic swap: replace entire workbook (wrap in Entity)
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
@@ -480,7 +480,7 @@ impl Spreadsheet {
     }
 
     fn start_delimited_import(&mut self, path: &PathBuf, ext: &str, explicit: Option<csv::CsvOptions>, approved_formulas: Option<u64>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
@@ -571,7 +571,7 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, note, csv_doc)) => {
-                        if this.block_if_previewing(cx) { return; }
+                        if this.block_if_previewing_only(cx) { return; }
                         let is_csv = csv_doc.is_some();
                         this.csv_doc = csv_doc;
                         this.workbook = cx.new(|_| workbook);
@@ -669,7 +669,7 @@ impl Spreadsheet {
     }
 
     pub fn reimport_with_freeze(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let Some(path) = self.current_file.clone() else { return; };
         let current_sheet = self.wb(cx).active_sheet_index();
         self.import_result = None; // hide dialog
@@ -725,7 +725,7 @@ impl Spreadsheet {
         restore_sheet: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
@@ -774,7 +774,7 @@ impl Spreadsheet {
 
                 match import_result {
                     Ok((workbook, mut result)) => {
-                        if this.block_if_previewing(cx) { return; }
+                        if this.block_if_previewing_only(cx) { return; }
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
@@ -1186,12 +1186,30 @@ impl Spreadsheet {
     /// This is a presentation snapshot - not a round-trip format.
     pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
         if self.block_read_only_recovery(cx) { return; }
-        if self.wb(cx).tables().next().is_some() {
-            self.status_message = Some("Excel export does not preserve Tables yet. Save as .sheet, or convert Tables to ranges before exporting.".into()); cx.notify(); return;
-        }
-        // Commit any pending edit so it's included in the export
         self.commit_pending_edit(cx);
+        let warnings = match xlsx::table_export_warnings(self.wb(cx)) {
+            Ok(warnings) => warnings,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        if warnings.is_empty() {
+            self.export_xlsx_reviewed(warnings, cx);
+            return;
+        }
+        self.pending_xlsx_export = Some(warnings);
+        self.lua_console.visible = false;
+        self.mode = crate::mode::Mode::ExportReport;
+        cx.notify();
+    }
 
+    pub(crate) fn confirm_xlsx_export(&mut self, cx: &mut Context<Self>) {
+        let Some(warnings) = self.pending_xlsx_export.take() else { return; };
+        self.hide_export_report(cx);
+        self.export_xlsx_reviewed(warnings, cx);
+    }
+
+    fn export_xlsx_reviewed(&mut self, reviewed_warnings: Vec<String>, cx: &mut Context<Self>) {
+        self.pending_xlsx_export = None;
+        if self.block_read_only_recovery(cx) { return; }
         let directory = self.current_file.as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
@@ -1209,9 +1227,6 @@ impl Spreadsheet {
             .unwrap_or("export");
         let suggested_name = format!("{}.xlsx", base_name);
 
-        // Build layout information for each sheet
-        let _layouts = self.build_export_layouts(cx);
-
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
@@ -1220,8 +1235,10 @@ impl Spreadsheet {
                     // Rebuild layouts in case data changed
                     let layouts = this.build_export_layouts(cx);
 
-                    if this.wb(cx).tables().next().is_some() {
-                        this.status_message=Some("Convert Tables to ranges before exporting to Excel.".into()); cx.notify(); return;
+                    match xlsx::table_export_warnings(this.wb(cx)) {
+                        Ok(warnings) if warnings == reviewed_warnings => {},
+                        Ok(_) => { this.status_message = Some("The workbook's export details changed. Export again to review them.".into()); cx.notify(); return; }
+                        Err(error) => { this.status_message = Some(error); cx.notify(); return; }
                     }
 
                     match xlsx::export(this.wb(cx), &path, Some(&layouts)) {
@@ -1359,7 +1376,7 @@ impl Spreadsheet {
             }
 
             // AutoFilter state (only on active sheet — per-sheet filter persistence not yet implemented)
-            if sheet_idx == wb.active_sheet_index() && self.filter_state.is_enabled() {
+            if sheet_idx == wb.active_sheet_index() && !self.table_view_installed && self.filter_state.is_enabled() {
                 layout.autofilter_range = self.filter_state.filter_range;
 
                 let mask = self.row_view.visible_mask();

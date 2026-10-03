@@ -41,6 +41,7 @@ impl Spreadsheet {
         self.formula_ref_end = None;
         self.formula_home_sheet = None;
         self.formula_edit_cell = None;
+        self.table_edit_target = None;
         self.formula_ref_sheet = None;
         self.formula_cross_sheet_name = None;
     }
@@ -94,12 +95,13 @@ impl Spreadsheet {
         }
 
         // Block editing during preview mode
-        if self.block_if_previewing(cx) { return; }
+        if self.table_cell_edit_guard(cx) { return; }
 
         // Clear copy/cut border overlay when entering edit mode
         self.clipboard_visual_range = None;
 
         let (mut row, mut col) = self.view_state.selected;
+        if self.table_edit_target.is_some() { row = self.row_view.view_to_data(row); }
 
         // If on a merge-hidden cell, redirect selection to the merge origin
         let merge_redirect = self.sheet(cx).get_merge(row, col)
@@ -141,7 +143,7 @@ impl Spreadsheet {
 
         // Record home sheet and cell for cross-sheet formula references
         self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
-        self.formula_edit_cell = Some((row, col));
+        self.formula_edit_cell = Some(self.view_state.selected);
 
         // Set mode based on content: Formula if starts with '=' or '+', else Edit
         let is_formula = self.edit_value.starts_with('=') || self.edit_value.starts_with('+');
@@ -155,7 +157,7 @@ impl Spreadsheet {
         // Clear color map for fresh edit session
         self.clear_formula_ref_colors();
         if is_formula {
-            self.update_formula_refs();
+            self.update_formula_refs(cx);
             // F2 on existing formula: start in Caret mode (user wants to edit text).
             // Set the manual override so auto-switch doesn't flip to Point when
             // cursor passes an operator. Override clears on buffer mutation (typing).
@@ -174,12 +176,13 @@ impl Spreadsheet {
         self.text_edit_caret_mode = false;
 
         // Block editing during preview mode
-        if self.block_if_previewing(cx) { return; }
+        if self.table_cell_edit_guard(cx) { return; }
 
         // Clear copy/cut border overlay when entering edit mode
         self.clipboard_visual_range = None;
 
         let (mut row, mut col) = self.view_state.selected;
+        if self.table_edit_target.is_some() { row = self.row_view.view_to_data(row); }
 
         // If on a merge-hidden cell, redirect selection to the merge origin
         let merge_redirect = self.sheet(cx).get_merge(row, col)
@@ -212,7 +215,7 @@ impl Spreadsheet {
         self.clear_edit_marks();
         // Record home sheet and cell for cross-sheet formula references
         self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
-        self.formula_edit_cell = Some((row, col));
+        self.formula_edit_cell = Some(self.view_state.selected);
         // Clear formula state - fresh edit session with empty buffer
         self.clear_formula_ref_colors();
         self.formula_highlighted_refs.clear();
@@ -252,6 +255,10 @@ impl Spreadsheet {
     /// Call this before file operations (Save, Export) to ensure unsaved edits are captured.
     pub fn commit_pending_edit(&mut self, cx: &mut Context<Self>) {
         if !self.mode.is_editing() {
+            return;
+        }
+        if self.table_edit_target.is_some() {
+            self.commit_current_edit(cx);
             return;
         }
         if self.block_if_previewing(cx) { return; }
@@ -890,6 +897,13 @@ impl Spreadsheet {
     /// - Absolute references ($A$1) are preserved unchanged
     /// - One undo step for all changes
     pub fn confirm_edit_in_place(&mut self, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            if self.is_multi_selection() {
+                self.fill_table_selection(cx);
+            } else if self.mode.is_editing() { self.commit_current_edit(cx); }
+            else { self.start_edit(cx); }
+            return;
+        }
         if !self.mode.is_editing() {
             // Navigation mode: fill selection or open link
             if self.is_multi_selection() {
@@ -1153,6 +1167,7 @@ impl Spreadsheet {
                 self.formula_ref_end = None;
             }
             self.autocomplete_suppressed = false;
+            self.autocomplete_selected = 0;
             self.reset_caret_activity();
 
             // If there's a selection, delete it
@@ -1161,7 +1176,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1181,7 +1196,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1201,6 +1216,7 @@ impl Spreadsheet {
                 self.formula_ref_end = None;
             }
             self.autocomplete_suppressed = false;
+            self.autocomplete_selected = 0;
             self.reset_caret_activity();
 
             // If there's a selection, delete it
@@ -1209,7 +1225,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1230,7 +1246,7 @@ impl Spreadsheet {
                 self.recompute_edit_mode();
                 // Update highlighted refs for formulas
                 if self.mode.is_formula() {
-                    self.update_formula_refs();
+                    self.update_formula_refs(cx);
                     self.clear_formula_nav_override();
                     self.update_formula_nav_mode();
                 }
@@ -1243,6 +1259,10 @@ impl Spreadsheet {
     }
 
     pub fn insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) && !self.mode.is_editing() {
+            self.start_edit_clear(cx);
+            if !self.mode.is_editing() { return; }
+        }
         if self.mode.is_editing() {
             // In Formula mode, typing an operator finalizes the current reference
             if self.mode.is_formula() && self.formula_ref_cell.is_some() {
@@ -1268,7 +1288,7 @@ impl Spreadsheet {
 
             // Update highlighted refs for formulas
             if self.mode.is_formula() {
-                self.update_formula_refs();
+                self.update_formula_refs(cx);
                 // Buffer mutation clears F2 override, then auto-switch based on caret
                 self.clear_formula_nav_override();
                 self.update_formula_nav_mode();
@@ -1276,6 +1296,7 @@ impl Spreadsheet {
 
             // Text edit: clear suppression so autocomplete can reopen
             self.autocomplete_suppressed = false;
+            self.autocomplete_selected = 0;
 
             // Reset caret blink (keep visible while typing)
             self.reset_caret_activity();
@@ -1374,6 +1395,8 @@ impl Spreadsheet {
             return false;
         }
 
+        if self.table_edit_target.is_some() { return self.commit_table_cell_edit(cx); }
+        if self.block_if_previewing(cx) { return false; }
         // Restore home sheet for cross-sheet formula editing
         self.restore_formula_home_sheet(cx);
 
@@ -1462,6 +1485,44 @@ impl Spreadsheet {
         cx.notify();
 
         true
+    }
+
+    fn commit_table_cell_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.block_if_previewing_only(cx) { return false; }
+        let Some((sheet, row, col, revision)) = self.table_edit_target else { return false; };
+        if self.wb(cx).revision() != revision {
+            self.status_message = Some("The workbook changed while editing. Cancel this edit and try again.".into());
+            cx.notify();
+            return false;
+        }
+        self.restore_formula_home_sheet(cx);
+        if self.sheet_index(cx) != sheet { return false; }
+        self.sync_table_view(cx);
+        if let Some(view_row) = self.row_view.data_to_view(row) {
+            self.view_state.selected = (view_row, col);
+        }
+        if self.edit_value == self.edit_original { self.cancel_edit(cx); return true; }
+        let mut value = if self.edit_value.starts_with('+') { format!("={}", &self.edit_value[1..]) } else { self.edit_value.clone() };
+        if value.starts_with('=') {
+            let missing = value.matches('(').count().saturating_sub(value.matches(')').count());
+            value.extend(std::iter::repeat_n(')', missing));
+        }
+        let mut write = crate::table_edit::TableCellWrite::value(row, col, value);
+        if self.edit_value.trim().ends_with('%') && matches!(self.sheet(cx).get_format(row,col).number_format, visigrid_engine::cell::NumberFormat::General) {
+            let mut format = self.sheet(cx).get_format(row,col).clone();
+            format.number_format = visigrid_engine::cell::NumberFormat::Percent { decimals: 0 };
+            write.format = Some(format);
+        }
+        if !self.apply_table_cell_writes(vec![write], "Edit cell", cx) { return false; }
+        let still_visible = self.row_view.data_to_view(row).is_some_and(|r| self.row_view.is_view_row_visible(r));
+        self.formula_edit_cell = None;
+        let tab_origin = self.tab_chain_origin_col;
+        self.cancel_edit(cx);
+        self.tab_chain_origin_col = tab_origin;
+        self.maybe_show_cycle_banner(cx);
+        // A filtered-out record already moved focus to its nearest visible
+        // neighbor. Suppress a second Enter/Tab move that would skip that record.
+        still_visible
     }
 
     fn confirm_edit_and_move(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {

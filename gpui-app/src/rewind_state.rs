@@ -49,6 +49,9 @@ pub struct RewindPreviewSession {
     pub view_state: PreviewViewState,
     /// Live state to restore on exit
     pub live_focus: PreviewFocus,
+    pub live_rows: visigrid_engine::filter::RowView,
+    pub live_table_view_installed: bool,
+    pub live_revision: u64,
     /// History fingerprint at preview time (for detecting concurrent changes).
     /// 128-bit blake3 hash ensures collision resistance.
     pub history_fingerprint: HistoryFingerprint,
@@ -88,6 +91,9 @@ pub struct PreviewViewState {
 /// Per-sheet view state for preview rendering
 #[derive(Clone, Debug, Default)]
 pub struct PreviewSheetView {
+    pub(crate) structure_layout: Option<crate::table_structure::StructureLayout>,
+    /// Rebuilt from historical Table criteria and computed cells; preview only.
+    pub table_rows: Option<visigrid_engine::filter::RowView>,
     /// Row order permutation (None = identity order)
     pub row_order: Option<Vec<usize>>,
     /// Sort state (column, is_ascending) - None = no sort
@@ -97,6 +103,7 @@ pub struct PreviewSheetView {
 /// Preserved focus state for restoring after preview
 #[derive(Clone, Debug)]
 pub struct PreviewFocus {
+    pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,
     pub sheet_index: usize,
     pub selected: (usize, usize),
     pub selection_end: Option<(usize, usize)>,

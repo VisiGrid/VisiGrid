@@ -1515,6 +1515,18 @@ fn render_cell(
         }
     }
 
+    if let Some(table_id) = app.table_header_button(display_data_row, col, cx) {
+        let spec = display_sheet.table_view_spec().filter(|s| s.table == table_id);
+        let field = display_sheet.table_header_at(display_data_row, col).and_then(|t| t.columns.get(col - t.range.start_col)).map(|c| c.id);
+        let sort = spec.and_then(|s| s.sort.as_ref()).filter(|s| Some(s.column) == field);
+        let filtered = spec.is_some_and(|s| s.filters.iter().any(|f| Some(f.column) == field));
+        let direction = sort.map(|s| s.direction);
+        let label = display_sheet.get_raw(display_data_row,col);
+        let control_width = super::table_header_button::width(direction,filtered,app.metrics.zoom);
+        cell = cell.pr(px(control_width + 6.0 * app.metrics.zoom))
+            .child(super::table_header_button::render(app,super::table_header_button::HeaderControl {table:table_id,col,field,label,sort:direction,filtered},cx));
+    }
+
     // Check if this cell is in fill preview range
     let is_fill_preview = app.is_fill_preview_cell(view_row, col);
 
@@ -1594,7 +1606,7 @@ fn render_cell(
                 this.confirm_sheet_rename(cx);
             }
             // Don't handle clicks if modal/overlay is visible
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // Don't handle clicks if we're resizing
@@ -1681,7 +1693,7 @@ fn render_cell(
         }))
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             // Don't handle right-clicks if modal/overlay is visible
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // If right-clicking outside current selection, move active cell there
@@ -1696,7 +1708,7 @@ fn render_cell(
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
             // Don't handle if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.is_fill_dragging() || this.dragging_selection {
@@ -1718,7 +1730,7 @@ fn render_cell(
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
             // Don't handle if modal/overlay is visible
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             // End fill handle drag if active (commits the fill)
@@ -2257,11 +2269,12 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
     // Collect unique ranges with their color indices
     // We deduplicate by RefKey so each range gets one border
     let mut seen_keys = std::collections::HashSet::new();
-    let mut ranges: Vec<(RefKey, usize)> = Vec::new();
+    let mut ranges = Vec::new();
 
     for fref in refs {
+        if fref.sheet.is_some_and(|sheet| sheet != app.cached_sheet_id()) { continue; }
         if seen_keys.insert(fref.key.clone()) {
-            ranges.push((fref.key.clone(), fref.color_index));
+            ranges.push(fref);
         }
     }
 
@@ -2272,20 +2285,39 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
     let header_width = crate::app::HEADER_WIDTH * app.metrics.zoom;
     let mut layers = Vec::new();
     for region in grid_overlay_regions(app, view_state) {
-        let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = ranges.iter()
+        let mut projected = Vec::new();
+        for fref in &ranges {
+            if fref.sheet.is_some() && (app.table_view_installed || app.filter_state.sort.is_some()) {
+                let visible = app.row_view.visible_rows();
+                let first = visible.partition_point(|&r| r < region.row);
+                let rows = visible.iter().skip(first).copied().take(region.rows)
+                    .take_while(|r| region.height.is_none() || *r < region.row + region.rows);
+                let end = fref.end.unwrap_or(fref.start);
+                for (start,last) in crate::table_formula_editor::projected_runs(&app.row_view, fref.start.0..end.0 + 1, rows) {
+                    projected.push((RefKey::new(start,fref.start.1,last,end.1),fref.color_index));
+                }
+            } else { projected.push((fref.key.clone(), fref.color_index)); }
+        }
+        let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = projected.iter()
             .filter_map(|(key, color_idx)| {
+                // Filtered view indices can extend beyond the visible row count.
+                let mut projected_region = region;
+                if app.table_view_installed || app.filter_state.sort.is_some() {
+                    let visible = app.row_view.visible_rows();
+                    let first = visible.partition_point(|&r| r < region.row);
+                    if region.height.is_none() {
+                        if let Some(last) = visible.iter().skip(first).take(region.rows).last() { projected_region.rows = last + 1 - region.row; }
+                    }
+                }
                 let (x, y, width, height) = formula_ref_rect(
-                    key, region,
+                    key, projected_region,
                     |c| if app.is_col_hidden(c) { 0.0 } else { app.metrics.col_width(app.col_width(c)) },
                     |r| if app.is_row_hidden(r) { 0.0 } else { app.metrics.row_height(app.row_height(r)) },
                 )?;
                 if width <= 0.0 || height <= 0.0 { return None; }
                 let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
                 color.a = 1.0;
-                Some((Bounds {
-                    origin: Point::new(px(x), px(y)),
-                    size: Size { width: px(width), height: px(height) },
-                }, color))
+                Some((Bounds { origin: Point::new(px(x), px(y)), size: Size { width: px(width), height: px(height) } }, color))
             }).collect();
         if range_bounds.is_empty() { continue; }
         let borders = canvas(
@@ -2720,7 +2752,7 @@ fn render_merge_div(
             if this.renaming_sheet.is_some() {
                 this.confirm_sheet_rename(cx);
             }
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.resizing_col.is_some() || this.resizing_row.is_some() {
@@ -2782,7 +2814,7 @@ fn render_merge_div(
             }
         }))
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            if this.mode.is_overlay() || this.inspector_visible || this.filter_dropdown_col.is_some() { return; }
+            if this.mode.is_overlay() || this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) { return; }
             this.activate_pane(pane_side, cx);
             this.end_drag_selection(cx);
             this.select_cell(origin_row, origin_col, false, cx);
@@ -2791,7 +2823,7 @@ fn render_merge_div(
             cx.stop_propagation();
         }))
         .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _, cx| {
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.is_fill_dragging() || this.dragging_selection {
@@ -2810,7 +2842,7 @@ fn render_merge_div(
             }
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
-            if this.inspector_visible || this.filter_dropdown_col.is_some() {
+            if this.inspector_visible || (this.filter_dropdown_col.is_some() || this.table_filter_dropdown.is_some()) {
                 return;
             }
             if this.is_fill_dragging() {
@@ -3378,7 +3410,7 @@ fn render_popup_overlay(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> imp
         .inset_0()
         // Formula autocomplete popup
         .when(app.autocomplete_visible, |div| {
-            let suggestions = app.autocomplete_suggestions();
+            let suggestions = app.autocomplete_suggestions(cx);
             let selected = app.autocomplete_selected;
             div.child(formula_bar::render_autocomplete_popup(
                 &suggestions,

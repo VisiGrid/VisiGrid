@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 use crate::cell::{CellFormat, CellStyle};
 use crate::cell_id::CellId;
 use crate::sheet::{Sheet, SheetId};
-use crate::structural::Axis;
 use crate::workbook::Workbook;
 
 pub const OPERATION_PLAN_CONTRACT_VERSION: u32 = 1;
@@ -605,6 +604,9 @@ impl PreparedOperationPlan {
 
         let mut preview = source.clone();
         let report = apply_operations(&mut preview, request.source_sheet_id, &operations)?;
+        if source.has_table_criteria() {
+            source.capture_guarded_batch(&preview).map_err(PlanError::InvalidOperation)?;
+        }
         let mut row_lineage = build_row_lineage(source_sheet.rows, &operations);
         let changes = materialize_changes(
             source,
@@ -733,6 +735,7 @@ impl PreparedOperationPlan {
         context: &ExecutionContextFingerprint,
         allow_conditional: bool,
     ) -> Result<PlanCommit, PlanError> {
+        current.ensure_writable().map_err(PlanError::InvalidOperation)?;
         if current.revision() != self.plan.source_revision {
             return Err(PlanError::RevisionMismatch {
                 expected: self.plan.source_revision,
@@ -812,6 +815,9 @@ impl PreparedOperationPlan {
             && workbook_fingerprint(&candidate) != self.plan.preview_fingerprint
         {
             return Err(PlanError::PreviewFingerprintMismatch);
+        }
+        if current.has_table_criteria() {
+            current.capture_guarded_batch(&candidate).map_err(PlanError::InvalidOperation)?;
         }
         candidate.set_revision_after_atomic_commit(self.plan.source_revision.saturating_add(1));
 
@@ -1470,6 +1476,9 @@ fn parse_a1_coordinate(value: &str) -> Option<CellCoordinate> {
     })
 }
 
+#[path = "operation_plan_tables.rs"]
+mod table_guards;
+
 fn apply_operations(
     workbook: &mut Workbook,
     sheet_id: SheetId,
@@ -1478,6 +1487,13 @@ fn apply_operations(
     let sheet_index = workbook
         .sheet_index_by_id(sheet_id)
         .ok_or(PlanError::SourceSheetMissing)?;
+    let guarded = workbook.has_table_criteria();
+    if guarded {
+        workbook
+            .validate_saved_table_views()
+            .map_err(PlanError::InvalidOperation)?;
+        table_guards::validate_targets(workbook, sheet_index, operations, false)?;
+    }
     workbook.begin_batch();
     for planned in operations {
         match &planned.operation {
@@ -1533,14 +1549,27 @@ fn apply_operations(
     }
     workbook.end_batch();
 
-    for planned in operations {
-        if let PlannedOp::DeleteRows { at, count } = &planned.operation {
+    let steps = table_guards::steps(operations);
+    if guarded && !steps.is_empty() {
+        let (candidate, _) = workbook
+            .prepare_guarded_structure(sheet_index, steps)
+            .map_err(PlanError::InvalidOperation)?;
+        workbook.restore_snapshot_monotonic(&candidate);
+    } else {
+        for step in steps {
             workbook
-                .structural_edit(sheet_index, Axis::Row, *at, *count, true)
+                .structural_edit(sheet_index, step.axis, step.at, step.count, true)
                 .map_err(PlanError::InvalidOperation)?;
         }
     }
-    Ok(workbook.recompute_full_ordered())
+    let report = workbook.recompute_full_ordered();
+    if guarded {
+        table_guards::validate_targets(workbook, sheet_index, operations, true)?;
+        workbook
+            .validate_saved_table_views()
+            .map_err(PlanError::InvalidOperation)?;
+    }
+    Ok(report)
 }
 
 fn build_row_lineage(row_count: usize, operations: &[PlannedOperation]) -> Vec<ReviewRowLineage> {
@@ -1945,6 +1974,10 @@ pub fn workbook_fingerprint(workbook: &Workbook) -> String {
         let validation_rules: Vec<_> = sheet.validations.iter().collect();
         let validation_exclusions: Vec<_> = sheet.validations.exclusions_iter().collect();
         for encoded in [
+            serde_json::to_vec(&serde_json::json!({
+                "tables": sheet.tables(), "table_view": sheet.table_view_spec(),
+                "frozen": sheet.frozen_panes,
+            })).expect("Table metadata serializes"),
             serde_json::to_vec(&sheet.merged_regions).expect("merged regions serialize"),
             serde_json::to_vec(&sheet.cond_formats).expect("conditional formats serialize"),
             serde_json::to_vec(&(validation_rules, validation_exclusions))
@@ -2065,6 +2098,207 @@ mod tests {
         }
     }
 
+    fn filtered_review_fixture() -> Workbook {
+        use crate::{
+            filter::{ColumnFilter, FilterKey, SortDirection},
+            sheet::{Sheet, SheetId},
+            table::TableRange,
+            table_view::{TableFilter, TableSort, TableViewSpec},
+        };
+        let mut wb = Workbook::from_sheets(
+            vec![
+                Sheet::new(SheetId(7), 30, 8),
+                Sheet::new_with_name(SheetId(99), 30, 8, "Controls"),
+            ],
+            0,
+        );
+        for (r, values) in [
+            ["Group", "Amount", "Result"],
+            ["West", "30", "=C4*2"],
+            ["East", "10", "=C5*2"],
+            ["West", "20", "=C6*2"],
+            ["West", "40", "=C7*2"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, v) in values.iter().enumerate() {
+                wb.set_cell_value_tracked(0, r + 2, c + 1, v);
+            }
+        }
+        let id = wb
+            .create_table(
+                SheetId(7),
+                TableRange {
+                    start_row: 2,
+                    end_row: 6,
+                    start_col: 1,
+                    end_col: 3,
+                },
+                "Sales",
+            )
+            .unwrap()
+            .table_id();
+        wb.set_calculated_column(id, 3, 3, "=C4*2", true).unwrap();
+        let table = wb.table(id).unwrap().1;
+        let mut spec = TableViewSpec::new(id);
+        spec.sort = Some(TableSort {
+            column: table.columns[1].id,
+            direction: SortDirection::Ascending,
+        });
+        spec.filters.push(TableFilter {
+            column: table.columns[0].id,
+            criteria: ColumnFilter {
+                selected: Some([FilterKey::Text("West".into()).normalized()].into()),
+                text_filter: None,
+            },
+        });
+        wb.set_table_view_spec(SheetId(7), Some(spec)).unwrap();
+        wb
+    }
+
+    #[test]
+    fn filtered_review_hidden_write_and_delete_keep_source_lineage_and_table_identity() {
+        let wb = filtered_review_fixture();
+        let before = workbook_fingerprint(&wb);
+        let prepared = PreparedOperationPlan::materialize(
+            &wb,
+            request(
+                &wb,
+                vec![
+                    PlannedOp::SetCellValue {
+                        coordinate: CellCoordinate { row: 4, col: 2 },
+                        value: PlannedCellValue::Number(55.0),
+                    },
+                    PlannedOp::DeleteRows { at: 3, count: 1 },
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(workbook_fingerprint(&wb), before);
+        assert_eq!(
+            prepared.preview_workbook().active_sheet().get_raw(3, 2),
+            "55"
+        );
+        assert_eq!(
+            prepared.preview_workbook().active_sheet().get_display(3, 3),
+            "110"
+        );
+        assert_eq!(
+            prepared.preview_workbook().active_sheet().tables()[0].id,
+            wb.active_sheet().tables()[0].id
+        );
+        assert!(prepared
+            .plan()
+            .row_lineage
+            .iter()
+            .any(|r| r.before_data_row == Some(3) && r.state == ReviewRowState::Deleted));
+        let commit = prepared.verify_candidate(&wb, &context()).unwrap();
+        assert_eq!(commit.applied.revision(), wb.revision() + 1);
+        let history = wb.capture_guarded_batch(&commit.applied).unwrap();
+        let mut live = commit.applied.clone();
+        history.replay(&mut live, true).unwrap();
+        assert_eq!(workbook_fingerprint(&live), before);
+        history.replay(&mut live, false).unwrap();
+        assert_eq!(
+            workbook_fingerprint(&live),
+            workbook_fingerprint(&commit.applied)
+        );
+    }
+
+    #[test]
+    fn filtered_review_header_and_adjacent_writes_refuse_without_mutation() {
+        let wb = filtered_review_fixture();
+        let before = workbook_fingerprint(&wb);
+        for coordinate in [
+            CellCoordinate { row: 2, col: 1 },
+            CellCoordinate { row: 4, col: 0 },
+        ] {
+            assert!(PreparedOperationPlan::materialize(
+                &wb,
+                request(
+                    &wb,
+                    vec![
+                        PlannedOp::SetCellValue {
+                            coordinate: CellCoordinate { row: 4, col: 2 },
+                            value: PlannedCellValue::Number(55.0)
+                        },
+                        PlannedOp::SetCellValue {
+                            coordinate,
+                            value: PlannedCellValue::Text("unsafe".into())
+                        },
+                    ]
+                )
+            )
+            .is_err());
+            assert_eq!(workbook_fingerprint(&wb), before);
+        }
+        assert!(PreparedOperationPlan::materialize(
+            &wb,
+            request(&wb, vec![PlannedOp::DeleteRows { at: 2, count: 1 }])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn filtered_review_cross_sheet_late_spill_is_rejected() {
+        let mut wb = filtered_review_fixture();
+        wb.set_cell_value_tracked(1, 0, 0, "0");
+        wb.set_cell_value_tracked(0, 0, 0, "=IF(Controls!A1=0,\"\",SEQUENCE(6))");
+        wb.set_active_sheet(1);
+        let before = workbook_fingerprint(&wb);
+        assert!(PreparedOperationPlan::materialize(
+            &wb,
+            request(
+                &wb,
+                vec![PlannedOp::SetCellValue {
+                    coordinate: CellCoordinate { row: 0, col: 0 },
+                    value: PlannedCellValue::Number(1.0)
+                }]
+            )
+        )
+        .is_err());
+        assert_eq!(workbook_fingerprint(&wb), before);
+    }
+
+    #[test]
+    fn filtered_review_deleting_all_records_preserves_dormant_criteria() {
+        let wb = filtered_review_fixture();
+        let prepared = PreparedOperationPlan::materialize(
+            &wb,
+            request(&wb, vec![PlannedOp::DeleteRows { at: 3, count: 4 }]),
+        )
+        .unwrap();
+        let candidate = prepared.verify_candidate(&wb, &context()).unwrap().applied;
+        assert_eq!(candidate.active_sheet().tables()[0].range.data_rows(), 0);
+        assert_eq!(
+            candidate.active_sheet().table_view_spec(),
+            wb.active_sheet().table_view_spec()
+        );
+    }
+
+    #[test]
+    fn filtered_review_metadata_changes_invalidate_frozen_preview_even_at_same_revision() {
+        let mut wb = filtered_review_fixture();
+        let prepared = PreparedOperationPlan::materialize(
+            &wb,
+            request(
+                &wb,
+                vec![PlannedOp::ClearCell {
+                    coordinate: CellCoordinate { row: 4, col: 2 },
+                }],
+            ),
+        )
+        .unwrap();
+        let revision = wb.revision();
+        let mut spec = wb.active_sheet().table_view_spec().unwrap().clone();
+        spec.sort = None;
+        wb.set_table_view_spec(wb.active_sheet_id(), Some(spec))
+            .unwrap();
+        wb.set_revision_after_atomic_commit(revision);
+        assert!(prepared.is_stale(&wb, &context()));
+        assert!(prepared.verify_candidate(&wb, &context()).is_err());
+    }
     #[test]
     fn table_headers_reject_planned_clear_and_write_batches() {
         let mut wb = Workbook::new();

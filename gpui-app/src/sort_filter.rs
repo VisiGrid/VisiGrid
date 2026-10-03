@@ -18,8 +18,8 @@ impl Spreadsheet {
     // Storage uses DATA space (canonical row numbers)
     // Convert at boundaries only
     //
-    // PREVIEW MODE: When previewing, we use the preview session's row_order
-    // instead of the live row_view. This allows showing sorted state from history.
+    // PREVIEW MODE: row_view is installed from the snapshot, then restored
+    // on exit. Both sorting and filter visibility follow historical records.
 
     /// Get the preview row order for the active sheet, if in preview mode
     /// Returns None if not previewing or no sort order recorded
@@ -57,82 +57,33 @@ impl Spreadsheet {
         }
     }
 
-    /// Convert view row to data row
-    /// In preview mode, uses preview row order if available
+    /// The active row projection is installed from the preview snapshot while
+    /// peeking and restored on exit. Rendering and navigation share it.
     #[inline]
-    pub fn view_to_data(&self, view_row: usize, cx: &App) -> usize {
-        if let Some(row_order) = self.preview_row_order(cx) {
-            // Preview mode with sorted state
-            row_order.get(view_row).copied().unwrap_or(view_row)
-        } else if self.is_previewing() {
-            // Preview mode but sort invalidated - identity
-            view_row
-        } else {
-            // Live mode
-            self.row_view.view_to_data(view_row)
-        }
+    pub fn view_to_data(&self, view_row: usize, _cx: &App) -> usize {
+        self.row_view.view_to_data(view_row)
     }
 
-    /// Convert data row to view row (None if hidden by filter)
-    /// In preview mode, filtering is not active (all rows visible)
     #[inline]
-    pub fn data_to_view(&self, data_row: usize, cx: &App) -> Option<usize> {
-        if let Some(row_order) = self.preview_row_order(cx) {
-            // Preview mode with sorted state - find position
-            row_order.iter().position(|&r| r == data_row)
-        } else if self.is_previewing() {
-            // Preview mode but sort invalidated - identity, always visible
-            Some(data_row)
-        } else {
-            // Live mode
-            self.row_view.data_to_view(data_row)
-        }
+    pub fn data_to_view(&self, data_row: usize, _cx: &App) -> Option<usize> {
+        self.row_view.data_to_view(data_row)
     }
 
-    /// Get visible row count
-    /// In preview mode, all rows are considered visible (no filter state)
     #[inline]
     pub fn visible_row_count(&self) -> usize {
-        if self.is_previewing() {
-            // Preview doesn't track filters, use sheet's row count
-            // (Heuristic: use same count as live row_view for consistency)
-            self.row_view.row_count()
-        } else {
-            self.row_view.visible_count()
-        }
+        self.row_view.visible_count()
     }
 
-    /// Get the nth visible row (view_row, data_row) for rendering
-    /// Returns None if index is out of bounds
-    /// In preview mode, uses preview row order if available
     #[inline]
-    pub fn nth_visible_row(&self, visible_index: usize, cx: &App) -> Option<(usize, usize)> {
-        if let Some(row_order) = self.preview_row_order(cx) {
-            // Preview mode with sorted state
-            let data_row = row_order.get(visible_index).copied()?;
-            // view_row == visible_index in sorted preview (no filter)
-            Some((visible_index, data_row))
-        } else if self.is_previewing() {
-            // Preview mode but sort invalidated - identity mapping
-            if visible_index < self.row_view.row_count() {
-                Some((visible_index, visible_index))
-            } else {
-                None
-            }
-        } else {
-            // Live mode
-            let view_row = self.row_view.nth_visible(visible_index)?;
-            let data_row = self.row_view.view_to_data(view_row);
-            Some((view_row, data_row))
-        }
+    pub fn nth_visible_row(&self, visible_index: usize, _cx: &App) -> Option<(usize, usize)> {
+        let row = self.row_view.nth_visible(visible_index)?;
+        Some((row, self.row_view.view_to_data(row)))
     }
 
     /// View row indices that are visible after filtering
     /// (Not to be confused with visible_rows() which returns screen row count)
     #[inline]
     pub fn filtered_row_indices(&self) -> &[usize] {
-        // Note: This method is used for live filtering state only
-        // Preview mode doesn't use this - it uses preview_row_order() directly
         self.row_view.visible_rows()
     }
 
@@ -158,8 +109,15 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         use visigrid_engine::filter::{sort_by_column, SortState};
+        if let Some(table) = self.table_under_cursor(cx) {
+            let col = self.view_state.selected.1;
+            let mut spec = self.sheet(cx).table_view_spec().filter(|s| s.table == table.id).cloned()
+                .unwrap_or_else(|| visigrid_engine::table_view::TableViewSpec::new(table.id));
+            spec.sort = Some(visigrid_engine::table_view::TableSort { column: table.columns[col - table.range.start_col].id, direction });
+            self.change_table_view(Some(spec), "Sort Table", cx); return;
+        }
         if !self.sheet(cx).tables().is_empty() {
-            self.status_message=Some("Sorting sheets with Tables is not available yet. Convert to a range to use worksheet sorting.".into()); cx.notify(); return;
+            self.status_message=Some("Select a Table column to sort its records. Worksheet sorting is unavailable on sheets with Tables.".into()); cx.notify(); return;
         }
 
         // Block during preview mode
@@ -258,6 +216,16 @@ impl Spreadsheet {
 
     /// Toggle AutoFilter on/off for current selection
     pub fn toggle_auto_filter(&mut self, cx: &mut Context<Self>) {
+        if let Some(spec) = self.sheet(cx).table_view_spec().cloned() {
+            let mut spec = spec; spec.show_filter_buttons = !spec.show_filter_buttons;
+            self.change_table_view(Some(spec), "Toggle Table filter buttons", cx); return;
+        }
+        if let Some(table) = self.table_under_cursor(cx) {
+            let mut spec = visigrid_engine::table_view::TableViewSpec::new(table.id);
+            spec.show_filter_buttons = false; // New Tables show header buttons by default.
+            self.change_table_view(Some(spec), "Hide Table filter buttons", cx); return;
+        }
+        if self.block_if_previewing(cx) { return; }
         if self.filter_state.is_enabled() {
             // Disable: restore original order, clear filters
             self.row_view.clear_sort();
@@ -266,7 +234,7 @@ impl Spreadsheet {
             self.status_message = Some("AutoFilter disabled".to_string());
         } else {
             if !self.sheet(cx).tables().is_empty() {
-                self.status_message=Some("Table filters are not available yet. Convert to a range to use worksheet AutoFilter.".into()); cx.notify(); return;
+                self.status_message=Some("Open a Table header dropdown to filter its records. Worksheet AutoFilter is unavailable on sheets with Tables.".into()); cx.notify(); return;
             }
             // Enable on the table around the cursor (header = its first row).
             let Some(range) = self.table_range_at_cursor(cx) else {
@@ -291,6 +259,7 @@ impl Spreadsheet {
 
     /// Open the filter dropdown for a column
     pub fn open_filter_dropdown(&mut self, col: usize, cx: &mut Context<Self>) {
+        if self.table_view_installed { return; }
         if !self.filter_state.is_enabled() {
             return;
         }
@@ -371,6 +340,7 @@ impl Spreadsheet {
 
     /// Apply the current filter dropdown selection
     pub fn apply_filter_dropdown(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
         let Some(col) = self.filter_dropdown_col else { return };
         let Some(unique_vals) = self.filter_state.get_unique_values(col) else {
             self.close_filter_dropdown(cx);
@@ -462,6 +432,10 @@ impl Spreadsheet {
 
     /// Clear sort (restore original data order)
     pub fn clear_sort(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut spec) = self.sheet(cx).table_view_spec().cloned() {
+            spec.clear_sort(); self.change_table_view(Some(spec), "Clear Table sort", cx); return;
+        }
+        if self.block_if_previewing(cx) { return; }
         // Only record undo if there's actually a sort to clear
         if let Some(sort_state) = &self.filter_state.sort {
             // Capture previous state for undo

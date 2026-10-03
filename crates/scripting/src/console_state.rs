@@ -174,6 +174,8 @@ pub struct ConsoleState {
 
     /// Last pause snapshot from the debugger
     pub debug_snapshot: Option<DebugSnapshot>,
+    /// Host revision at snapshot time; refuse stale debug writes.
+    pub debug_source_revision: Option<u64>,
 
     /// Currently selected call stack frame index (0 = top frame)
     pub selected_frame: usize,
@@ -309,6 +311,7 @@ impl ConsoleState {
             debug_session: None,
             debug_output: Vec::new(),
             debug_snapshot: None,
+            debug_source_revision: None,
             selected_frame: 0,
             frame_vars_cache: HashMap::new(),
             expanded_vars: HashMap::new(),
@@ -508,6 +511,7 @@ impl ConsoleState {
         self.active_tab = ConsoleTab::Debug;
         self.debug_output.clear();
         self.debug_snapshot = None;
+        self.debug_source_revision = None;
         self.selected_frame = 0;
         self.frame_vars_cache.clear();
         self.expanded_vars.clear();
@@ -522,6 +526,7 @@ impl ConsoleState {
             // Dropping session closes cmd_tx, which unblocks recv() in the debug thread
         }
         self.debug_snapshot = None;
+        self.debug_source_revision = None;
         self.expanded_vars.clear();
         self.frame_vars_cache.clear();
         self.selected_frame = 0;
