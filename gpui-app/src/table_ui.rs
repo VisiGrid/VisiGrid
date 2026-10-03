@@ -200,9 +200,12 @@ impl Spreadsheet {
     }
 
     pub(crate) fn add_table_row(&mut self, id: TableId, cx: &mut Context<Self>) {
-        if self.mode.is_editing() || self.table_growth_blocked(cx) {
+        if self.mode.is_editing() { return; }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.append_table_row_in_view(id, None, cx);
             return;
         }
+        if self.table_growth_blocked(cx) { return; }
         self.append_table_row_and_select(id, Vec::new(), cx);
     }
 
@@ -271,9 +274,34 @@ impl Spreadsheet {
         };
         let (r, c) = self.view_state.selected;
         if table.range.data_rows() == 0
-            || (self.row_view.view_to_data(r), c) != (table.range.end_row, table.range.end_col)
+            || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c))
         {
             return false;
+        }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            let edit = if self.mode.is_editing() {
+                let row = self.row_view.view_to_data(r);
+                if self.table_edit_target != Some((self.sheet_index(cx), row, c, self.wb(cx).revision())) {
+                    self.status_message = Some("The workbook changed while editing. Cancel this edit and try again.".into());
+                    cx.notify();
+                    return true;
+                }
+                let mut value = self.edit_value.clone();
+                if value.starts_with('+') { value = format!("={}", &value[1..]); }
+                if value.starts_with('=') {
+                    let missing = value.matches('(').count().saturating_sub(value.matches(')').count());
+                    value.extend(std::iter::repeat_n(')', missing));
+                }
+                let mut write = crate::table_edit::TableCellWrite::value(row, c, value);
+                if self.edit_value.trim().ends_with('%') && matches!(self.sheet(cx).get_format(row, c).number_format, visigrid_engine::cell::NumberFormat::General) {
+                    let mut format = self.sheet(cx).get_format(row, c);
+                    format.number_format = visigrid_engine::cell::NumberFormat::Percent { decimals: 0 };
+                    write.format = Some(format);
+                }
+                Some(write)
+            } else { None };
+            self.append_table_row_in_view(table.id, edit, cx);
+            return true;
         }
         if self.table_growth_blocked(cx) {
             return true;

@@ -89,7 +89,7 @@ pub(crate) fn render_table_controls(
                 }
             }
             if view_only {
-                controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Editing visible records · clear view to change Table structure").into_any_element());
+                controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Editing visible records").into_any_element());
             }
             if !view_only && column.formula.is_some() {
                 let exception = app.sheet(cx).is_calculated_exception(row, col);
@@ -157,14 +157,14 @@ pub(crate) fn render_table_controls(
             }
             controls
         })
-        .when(!view_only, |d| d.child(button(
+        .child(button(
             "table-add-row",
             "Add row",
             app,
             move |s, cx| s.add_table_row(id, cx),
             cx,
         ))
-        .child(button(
+        .when(!view_only, |d| d.child(button(
             "table-rename",
             "Rename",
             app,

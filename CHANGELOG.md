@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Table rows without clearing saved sort/filter criteria, using Add row or Tab from the last visible record. Calculated columns fill automatically; hidden new rows are explained, and a pending Tab edit plus append undo together.
+
 - History hold-to-preview now requires a visible History tab and worksheet focus. A previously selected history entry no longer steals spaces from the command palette, dialogs or sheet renaming; modified Space shortcuts retain their normal behavior.
 - The formula bar uses the same drawn chevron as Table controls, with a rounded hover target and an expanded state. The conditional-formatting dialog has clearer rule guidance, a separate live-preview/error area, and visible Cancel and Add/Save buttons.
 - Formatting, conditional formatting, comments and freeze panes now work on sheets without active Table criteria while another sheet has a sorted/filtered Table. Their undo/redo follows the target sheet; grouped history is checked before applying. Percent formatting that converts text to numbers retains the workbook-wide guard. Cleared criteria and hidden-button settings no longer enforce an active Table row projection.

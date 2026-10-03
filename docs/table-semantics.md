@@ -30,13 +30,13 @@ Structural edits entirely before a Table move its bounds with its cells. Edits a
 
 `Workbook::append_table_rows` accepts an explicit row count and sparse body writes, and returns one guarded `TableCommit`. Ordinary workbook setters and file loading never infer append intent. Appending validates the entire new stripe, including untouched columns: existing values/comments, another Table, merges, spills, pivot output, or the grid boundary refuse the operation before any write. Explicit Resize remains the way to include existing records. Formatting-only empty cells are allowed and retain their formatting. Append changes membership without inserting worksheet rows or shifting adjacent data.
 
-Desktop entry points:
+Desktop entry points without active Table criteria:
 
 - Nonempty typing immediately below a Table, within its width, appends one row when the new stripe is empty.
 - A rectangular paste starting in the body or immediately below it, contained within its width and extending below the bottom, appends through the pasted last row. Represented blank records count. Existing body writes and new bounds share one undo entry.
 - A paste crossing both side and bottom boundaries refuses with Resize guidance. Writes separated by a blank row or entirely to the right do not imply growth. Single-cell paste broadcast/fill across a selected range retains existing fill behavior.
 - Tab from the last body cell appends one empty row and selects its first column. An in-progress edit in that last cell joins the append commit. A header-only Table uses the **Add row** control; that control is also available for nonempty Tables.
-- Clearing cell values retains membership. Appending still requires clearing active sorting/filtering; whole-row edits use the guarded structural path below.
+- Clearing cell values retains membership. Whole-row edits use the guarded structural path below. With saved Table criteria active, the explicit Add row and Tab paths below are available; typing/pasting below a Table does not infer growth through a view.
 
 Normal paste, Paste Values and Paste Formulas share append preflight. An internal normal paste carrying merges/comments (or replacing destination comments) refuses growth with guidance to use Paste Values or resize first; it never silently drops those objects. Omitted cells in calculated columns receive their rule; supplied values/formulas, including explicit blank cells, take priority.
 
@@ -294,9 +294,21 @@ Freeze-pane history records a stable sheet ID, so switching tabs before undo/red
 
 Merging/unmerging, named-range changes, Replace, worksheet sort/AutoFilter, row/column sizing/visibility and other unsupported mutation surfaces retain the workbook-wide criteria guard in this slice. Find itself remains available. Enabling these requires their own coordinate and dependency checks; merging can erase values and is not a formatting-only operation.
 
+## Phase 3: append with active Table criteria
+
+**Add row** remains available while a Table is sorted or filtered, including when every record is hidden or the Table has only headers. **Tab** from the rightmost cell of the last visible body record appends one row. The last visible record is resolved through the current projection, not assumed to be the last stored row. These paths also work on another sheet while a Table elsewhere has active criteria. Worksheet sort/AutoFilter still requires clearing before append.
+
+Growth adds one canonical record at the bottom without inserting worksheet rows or moving neighboring content. Existing calculated-column rules fill the new row; existing values and formula overrides remain unchanged. A pending Tab edit uses its original canonical address and joins the append in one history entry, including automatic Percent formatting. It does not establish a new calculated-column rule across existing hidden records.
+
+The saved sort and filters remain unchanged and are reapplied after recalculation. A visible new record is selected at its sorted position. If the filter excludes it, the status explicitly says that the new row is hidden and that clearing filters allows its values to be entered; focus stays on the last visible Table record, or the header when none remain. A hidden row is never exposed merely to make data entry possible.
+
+The edit and append are staged together. Existing data/comments, merges, spills, pivot output, another Table or the sheet boundary block growth. The expanded Table must satisfy view-layout rules, including neighboring content, row heights, manual hiding and frozen-pane boundaries. Recalculated views on every sheet are checked before publishing. A refused append leaves the pending edit and workbook intact. Recovery, Review Mode and history-preview guards remain in force.
+
+Undo/redo and rewind retain a sparse pending-cell patch and engine Table commit, without retaining a workbook snapshot. Replay checks the original view, schema and owned values and validates the resulting workbook before publication. Typing/pasting below a Table and bulk paste overflow remain outside this explicit append slice; existing visible-record paste continues to refuse overflow.
+
 ## Phase 3 backlog
 
-1. Create, resize and append Tables while criteria are active; start with appending records and filling calculated columns without clearing filters.
+1. Create and resize Tables while criteria are active; expand the implemented explicit single-row append to typing/pasting below a Table and bulk append.
 2. Copy reviewed results to another sheet while criteria are active.
 3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
@@ -320,6 +332,8 @@ Existing PivotTables remain a separate feature.
 ## Verification
 
 Phase 3 metadata scope, 2026-10-02: 745 desktop tests passed (3 existing ignores), plus 28 focused engine Table-view/state tests and 8 Table-view I/O tests. New regressions cover history target sheets, grouped refusal, percentage-text conversion preflight, freeze-pane undo/redo and rewind alongside structural history, and metadata on an inactive Table view followed by editing a different filtered Table. Recovery, Review Mode and rewind guards remain covered by the desktop suite. The native debug build passed. Linux native QA verified formatting and Paste Format on an unaffected sheet, numeric Percent formatting, comments, conditional-format predicates, freeze panes, cross-sheet formatting/freeze/conditional-format undo and redo, and history hold-to-preview with live-state restoration. Percentage-text conversion through F4, metadata formatting on the filtered sheet, merge conversion and an unsafe cross-sheet spill were refused. Saved SQLite checks confirmed unchanged Table criteria, formulas, hidden records and the rejected spill control. QA found and fixed conditional-format rules missing from the desktop full-save path; the added regression and all 41 native persistence tests passed (1 existing ignore). The rebuilt app preserved rules, comments, formatting and frozen panes after a fresh save/reopen ([screenshot](images/tables/phase3-metadata-reopened.png)). macOS/Windows live UI remains untested; cleared/button-only specs and grouped/structural rewind combinations have automated coverage rather than live coverage in this pass. The history/palette Space-key follow-up found during this pass is resolved below.
+
+Table append with active criteria, 2026-10-03: all 758 desktop tests passed (3 existing ignores), including 13 new regressions covering filtered calculated-column append, canonical Tab targets under descending sort, pending percentage edits and format undo/redo, sorted focus, all-hidden/header-only Tables, collisions and hidden-write refusal, cross-sheet spill safety, another-sheet append, stale history, rewind, expanded desktop layout, recovery/boundary refusal and native full-save roundtrip. The native debug build and diff checks passed. Live keyboard QA is pending after the QA window lost focus; macOS/Windows live UI remains untested.
 
 History Space-key focus fix, 2026-10-03: 745 desktop tests passed (3 existing ignores), and the native debug build passed. Linux native QA verified spaces in command-palette searches, Find and conditional-format rules while a history entry remained selected; hold-to-preview, Up-arrow scrubbing and release restored the expected historical/live states. Ctrl+Space column selection and Shift+Space row selection remained available. Name-box input did not trigger preview, and closing History allowed ordinary cell text entry with spaces. After cancelling text entry and undoing the two temporary formatting edits, saved SQLite checks confirmed unchanged cells, formulas, formatting, Table criteria, conditional-format rules, comments and frozen panes. Inline sheet renaming is guarded in code but was not exercised in this filtered fixture; macOS/Windows live UI remains untested. [Palette with retained spaces](images/tables/history-palette-spaces.png).
 

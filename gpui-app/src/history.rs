@@ -240,6 +240,11 @@ pub enum UndoAction {
         commit: Box<visigrid_engine::workbook::TableViewCommit>,
         description: String,
     },
+    TableAppend {
+        sheet_index: usize,
+        history: Box<crate::table_append::TableAppendHistory>,
+        description: String,
+    },
     TableCommit {
         sheet_index: usize,
         commit: Box<visigrid_engine::workbook::TableCommit>,
@@ -494,7 +499,7 @@ impl UndoAction {
             UndoAction::TableBatchChanged { description, .. } | UndoAction::TableStructureChanged { description, .. }
             | UndoAction::TableViewChanged { description, .. }
             | UndoAction::TableCellsChanged { description, .. } => description.clone(),
-            UndoAction::TableCommit { description, .. } => description.clone(),
+            UndoAction::TableCommit { description, .. } | UndoAction::TableAppend { description, .. } => description.clone(),
             UndoAction::PivotCommit { description, .. } => description.clone(),
             UndoAction::RowsInserted { count, .. } => {
                 if *count == 1 {
@@ -1208,6 +1213,10 @@ impl History {
                 (Some(*sheet_index), vec![], None)
             }
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
+            UndoAction::TableAppend { sheet_index, history, .. } => {
+                let r = history.table.after_table().unwrap().range;
+                (Some(*sheet_index), vec![], Some((r.start_row, r.start_col, r.end_row, r.end_col)))
+            }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
                 (Some(*sheet_index),vec![],range)
@@ -1770,6 +1779,11 @@ impl History {
                 workbook.rebuild_dep_graph();
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
+            UndoAction::TableAppend { history, .. } => {
+                let candidate = history.replay(workbook, false)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
+                workbook.restore_snapshot_monotonic(&candidate);
+            }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 if crate::table_header_paste::is_header_rename(commit) {
                     let candidate = crate::table_header_paste::prepare_header_replay(workbook, commit, false)
@@ -1994,6 +2008,7 @@ pub enum UndoActionKind {
     WorkbookSnapshot,
     PivotCommit,
     TableCommit,
+    TableAppend,
     TableViewChanged,
     TableCellsChanged,
     TableStructureChanged,
@@ -2038,6 +2053,7 @@ impl UndoActionKind {
             UndoActionKind::Comments => true,
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::TableCommit => true,
+            UndoActionKind::TableAppend => true,
             UndoActionKind::TableViewChanged => true,
             UndoActionKind::TableCellsChanged => true,
             UndoActionKind::TableStructureChanged => true,
@@ -2090,6 +2106,7 @@ impl UndoActionKind {
             UndoActionKind::Comments => "Comment",
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::TableCommit => "Table",
+            UndoActionKind::TableAppend => "Append Table row",
             UndoActionKind::TableViewChanged => "Table view",
             UndoActionKind::TableCellsChanged => "Table cells",
             UndoActionKind::TableStructureChanged => "Table structure",
@@ -2134,6 +2151,7 @@ impl UndoActionKind {
             UndoActionKind::Comments => 0x1E,
             UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::TableCommit => 0x1F,
+            UndoActionKind::TableAppend => 0x27,
             UndoActionKind::TableViewChanged => 0x20,
             UndoActionKind::TableCellsChanged => 0x21,
             UndoActionKind::TableStructureChanged => 0x22,
@@ -2178,6 +2196,7 @@ impl UndoAction {
             UndoAction::Comments { .. } => UndoActionKind::Comments,
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::TableCommit { .. } => UndoActionKind::TableCommit,
+            UndoAction::TableAppend { .. } => UndoActionKind::TableAppend,
             UndoAction::TableViewChanged { .. } => UndoActionKind::TableViewChanged,
             UndoAction::TableCellsChanged { .. } => UndoActionKind::TableCellsChanged,
             UndoAction::TableStructureChanged { .. } => UndoActionKind::TableStructureChanged,
@@ -2729,6 +2748,7 @@ mod tests {
             UndoActionKind::PrintSetupChanged,
             UndoActionKind::WorkbookSnapshot,
             UndoActionKind::TableCommit,
+            UndoActionKind::TableAppend,
             UndoActionKind::TableViewChanged,
             UndoActionKind::TableCellsChanged,
             UndoActionKind::TableStructureChanged,
