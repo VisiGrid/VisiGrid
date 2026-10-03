@@ -1,5 +1,5 @@
-//! Saved Table sort intent. Worksheet cells stay in canonical order on export;
-//! consumers must reapply the saved sort to materialize that order.
+//! Saved Table sort intent. Physical export ordering and reference checks live
+//! in xlsx_sorted_export; this module only reads/writes the saved criterion.
 use super::{
     xlsx_table_filters::boolean,
     xlsx_tables::{attr, range},

@@ -338,7 +338,7 @@ fn xml_escaping_and_at_signs_in_headers_and_literals_survive() {
 }
 
 #[test]
-fn saved_sort_and_checkbox_filters_import_without_moving_stored_records() {
+fn materialized_sort_and_checkbox_filters_import_with_all_records() {
     use visigrid_engine::{
         filter::SortDirection,
         table_view::{TableSort, TableViewSpec},
@@ -383,7 +383,7 @@ fn saved_sort_and_checkbox_filters_import_without_moving_stored_records() {
     );
     assert!(!report.imported_layouts[0].hidden_rows.contains(&4));
     for r in 3..8 {
-        assert_eq!(loaded.sheet(0).unwrap().get_raw(r, 1), (r - 1).to_string());
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(r, 1), (9 - r).to_string());
     }
     assert_eq!(loaded.sheet(1).unwrap().get_display(0, 0), "860");
 }
@@ -1052,7 +1052,7 @@ fn set_saved_sort(wb: &mut Workbook, id: TableId, offset: usize, descending: boo
 }
 
 #[test]
-fn saved_sort_roundtrips_both_directions_and_buttons_without_moving_cells_or_formulas() {
+fn materialized_sort_roundtrips_both_directions_and_buttons_with_formula_results() {
     use visigrid_engine::table_view::TableView;
     let dir = tempfile::tempdir().unwrap();
     let plain = dir.path().join("plain.xlsx");
@@ -1068,12 +1068,8 @@ fn saved_sort_roundtrips_both_directions_and_buttons_without_moving_cells_or_for
                 let report = xlsx::export(&wb, &file, None).unwrap();
                 assert_eq!(serde_json::to_value(wb.saved_tables()).unwrap(), original);
                 assert_eq!(report.warnings.len(), 1);
-                assert!(report.warnings[0].contains("saves the sort definition"));
-                assert!(report.warnings[0].contains("Reapply"));
-                assert_eq!(
-                    xml(&file, "xl/worksheets/sheet1.xml"),
-                    xml(&plain, "xl/worksheets/sheet1.xml")
-                );
+                assert!(report.warnings[0].contains("saved sort order"));
+                assert!(report.warnings[0].contains("Reapplying"));
                 assert_eq!(
                     xml(&file, "xl/worksheets/sheet2.xml"),
                     xml(&plain, "xl/worksheets/sheet2.xml")
@@ -1092,16 +1088,22 @@ fn saved_sort_roundtrips_both_directions_and_buttons_without_moving_cells_or_for
                 assert_eq!(Some(&spec), wb.sheet(0).unwrap().table_view_spec());
                 let view = TableView::build(sheet, spec, 10, None).unwrap();
                 let rows: Vec<_> = (3..8).map(|r| view.rows().view_to_data(r)).collect();
+                assert_eq!(rows, vec![3, 4, 5, 6, 7]);
+                let expected = if descending {
+                    ["777", "60", "20", "3", ""]
+                } else {
+                    ["3", "20", "60", "777", ""]
+                };
+                for (r, value) in (3..8).zip(expected) {
+                    assert_eq!(sheet.get_display(r, 3), value);
+                }
                 assert_eq!(
-                    rows,
-                    if descending {
-                        vec![4, 7, 3, 6, 5]
-                    } else {
-                        vec![6, 3, 7, 4, 5]
-                    }
+                    sheet
+                        .comment(if descending { 3 } else { 6 }, 3)
+                        .unwrap()
+                        .text,
+                    "Manual override"
                 );
-                assert_eq!(sheet.get_raw(4, 3), "777");
-                assert_eq!(sheet.get_raw(5, 3), "");
                 assert_eq!(loaded.sheet(1).unwrap().get_display(0, 0), "860");
                 let imported = serde_json::to_value(loaded.saved_tables()).unwrap();
                 native::save_workbook(&loaded, &native_file).unwrap();
@@ -1110,6 +1112,12 @@ fn saved_sort_roundtrips_both_directions_and_buttons_without_moving_cells_or_for
                     serde_json::to_value(loaded.saved_tables()).unwrap(),
                     imported
                 );
+                let mut appended = loaded.clone();
+                appended
+                    .append_table_rows(id, 1, &[(8, 1, "7".into()), (8, 2, "10".into())])
+                    .unwrap();
+                assert_eq!(appended.sheet(0).unwrap().get_display(8, 3), "70");
+                assert_eq!(appended.sheet(1).unwrap().get_display(0, 0), "930");
                 wb = loaded;
             }
         }
@@ -1363,7 +1371,7 @@ fn sort_only_import_refuses_unsafe_layouts_and_preserves_manual_hidden_rows() {
         if mode == 0 {
             assert!(report.imported_layouts[0].hidden_rows.contains(&3));
         }
-        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "2");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "6");
     }
 }
 
@@ -1412,5 +1420,334 @@ fn multiple_sorted_tables_respect_the_single_view_owner_rule() {
             .filter(|w| w.contains("More than one Table"))
             .count(),
         2
+    );
+}
+
+fn authored_snapshot(wb: &Workbook) -> serde_json::Value {
+    serde_json::json!({
+        "tables": wb.saved_tables(),
+        "sheets": wb.sheets().iter().map(|s| {
+            let mut cells: Vec<_> = s.cells_iter().map(|((r,c), cell)|
+                (r, c, format!("{:?}", cell.to_cell()), s.get_display(r,c))).collect();
+            cells.sort_by_key(|(r,c,_,_)| (*r,*c));
+            (s.name.clone(), cells)
+        }).collect::<Vec<_>>()
+    })
+}
+
+#[test]
+fn sorted_export_follows_records_for_mixed_absolute_cross_sheet_refs_formats_and_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("materialized.xlsx");
+    let (mut wb, id) = book();
+    wb.sheet_mut(0).unwrap().set_bold(3, 1, true);
+    wb.set_cell_value_tracked(
+        1,
+        1,
+        0,
+        "=Sheet1!$B$4+Sheet1!B$4+Sheet1!$B4+(Sheet1!B4+Sheet1!C4)*2",
+    );
+    wb.set_cell_value_tracked(1, 2, 0, "=SUM(Sheet1!B4:D8)");
+    wb.set_cell_value_tracked(1, 3, 0, "=SUM(Sheet1!B:B)");
+    select_values(&mut wb, id, 0, &[3, 7], false);
+    set_saved_sort(&mut wb, id, 0, true, false);
+    let original = authored_snapshot(&wb);
+    let report = xlsx::export(&wb, &file, None).unwrap();
+    assert_eq!(report.warnings, xlsx::table_export_warnings(&wb).unwrap());
+    assert_eq!(authored_snapshot(&wb), original);
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "6");
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(7, 1), "2");
+    assert!(loaded.sheet(0).unwrap().get_format(7, 1).bold);
+    assert_eq!(
+        loaded.sheet(0).unwrap().comment(6, 3).unwrap().text,
+        "Manual override"
+    );
+    assert_eq!(
+        loaded.sheet(1).unwrap().get_raw(1, 0),
+        "=Sheet1!$B$8+Sheet1!B$8+Sheet1!$B8+(Sheet1!B8+Sheet1!C8)*2"
+    );
+    for r in 0..4 {
+        assert_eq!(
+            loaded.sheet(1).unwrap().get_display(r, 0),
+            wb.sheet(1).unwrap().get_display(r, 0)
+        );
+    }
+    let meta = xml(&file, "xl/tables/table1.xml");
+    assert!(meta.contains("<sortState"));
+    assert!(meta.contains("hiddenButton=\"1\""));
+    let sheet_xml = xml(&file, "xl/worksheets/sheet1.xml");
+    for r in [5, 6, 7] {
+        assert!(
+            sheet_xml.contains(&format!("<row r=\"{r}\" spans=\"2:4\" hidden=\"1\"")),
+            "{sheet_xml}"
+        );
+    }
+    // Clearing criteria keeps the new physical order, and all five records remain.
+    let mut loaded = loaded;
+    loaded.set_table_view_spec(SheetId(1), None).unwrap();
+    for r in 3..8 {
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(r, 1), (9 - r).to_string());
+    }
+}
+
+#[test]
+fn sorted_file_and_buffer_exports_agree_and_repeated_exports_do_not_mutate_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.xlsx");
+    let buffer = dir.path().join("buffer.xlsx");
+    let (mut wb, id) = book();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    let original = authored_snapshot(&wb);
+    let report = xlsx::export(&wb, &file, None).unwrap();
+    let (bytes, buffered) = xlsx::export_to_buffer(&wb, None).unwrap();
+    std::fs::write(&buffer, bytes).unwrap();
+    assert_eq!(report.warnings, buffered.warnings);
+    for part in [
+        "xl/worksheets/sheet1.xml",
+        "xl/worksheets/sheet2.xml",
+        "xl/tables/table1.xml",
+        "xl/comments1.xml",
+    ] {
+        assert_eq!(xml(&file, part), xml(&buffer, part));
+    }
+    assert_eq!(authored_snapshot(&wb), original);
+}
+
+fn assert_sorted_export_refuses(
+    wb: &Workbook,
+    expected: &str,
+    layouts: Option<&[xlsx::ExportLayout]>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("keep.xlsx");
+    std::fs::write(&file, b"existing destination").unwrap();
+    let original = authored_snapshot(wb);
+    let error = xlsx::export(wb, &file, layouts).unwrap_err();
+    assert!(error.contains(expected), "{error}");
+    assert!(error.contains("no file was written"), "{error}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"existing destination");
+    assert!(xlsx::export_to_buffer(wb, layouts)
+        .unwrap_err()
+        .contains(expected));
+    if layouts.is_none() {
+        assert!(xlsx::table_export_warnings(wb)
+            .unwrap_err()
+            .contains(expected));
+    }
+    assert_eq!(authored_snapshot(wb), original);
+}
+
+#[test]
+fn sorted_export_refuses_discontiguous_ranges_and_coordinate_or_dynamic_functions_atomically() {
+    for (source, expected) in [
+        ("=SUM(Sheet1!B4:B5)", "discontiguous"),
+        ("=SUM(Sheet1!$B$4:B8)", "discontiguous"),
+        ("=SUM(Sheet1!B8:B4)", "Reversed ranges"),
+        ("=A2", "Cannot export Tables"),
+        ("=ROW(Sheet1!B4)", "Function ROW"),
+        ("=INDIRECT(\"Sheet1!B4\")", "Function INDIRECT"),
+        ("=OFFSET(Sheet1!B4,1,0)", "Function OFFSET"),
+        ("=INDEX(Sales[Qty],1)", "Function INDEX"),
+        ("=RAND()", "Function RAND"),
+        ("=UnknownName", "Named-range"),
+        ("=1+", "Unexpected"),
+    ] {
+        let (mut wb, id) = book();
+        wb.set_cell_value_tracked(1, 1, 0, source);
+        set_saved_sort(&mut wb, id, 2, false, true);
+        assert_sorted_export_refuses(&wb, expected, None);
+    }
+}
+
+#[test]
+fn sorted_export_refuses_nonuniform_calculated_rules_before_writing() {
+    let (mut wb, id) = book();
+    wb.set_calculated_column(id, 3, 3, "=B3", true).unwrap();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    assert_sorted_export_refuses(&wb, "different fill rules", None);
+}
+
+#[test]
+fn sorted_export_refuses_unsafe_host_layout_before_writing() {
+    let (mut wb, id) = book();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    for mode in 0..4 {
+        let mut layout = xlsx::ExportLayout::default();
+        match mode {
+            0 => {
+                layout.row_heights.insert(4, 30.0);
+            }
+            1 => layout.hidden_rows.push(4),
+            2 => layout.frozen_rows = 4,
+            _ => layout.autofilter_range = Some((2, 1, 7, 3)),
+        }
+        assert_sorted_export_refuses(&wb, "row layout", Some(&[layout]));
+    }
+}
+
+#[test]
+fn sorted_export_keeps_ties_text_numbers_and_blanks_in_view_order() {
+    use visigrid_engine::table_view::TableView;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("types.xlsx");
+    for descending in [false, true] {
+        let (mut wb, id) = book();
+        wb.set_cell_value_tracked(0, 3, 1, "5");
+        wb.set_cell_value_tracked(0, 4, 1, "5");
+        wb.set_cell_text_tracked(0, 5, 1, "001");
+        wb.clear_cell_tracked(0, 6, 1);
+        wb.set_cell_text_tracked(0, 7, 1, "alpha");
+        set_saved_sort(&mut wb, id, 0, descending, true);
+        let sheet = wb.sheet(0).unwrap();
+        let view =
+            TableView::build(sheet, sheet.table_view_spec().unwrap().clone(), 8, None).unwrap();
+        let records: Vec<_> = (3..8)
+            .map(|r| {
+                let original = view.rows().view_to_data(r);
+                (sheet.get_raw(original, 1), sheet.get_display(original, 3))
+            })
+            .collect();
+        xlsx::export(&wb, &file, None).unwrap();
+        let (loaded, _) = xlsx::import(&file).unwrap();
+        for (r, (qty, amount)) in (3..8).zip(records) {
+            assert_eq!(loaded.sheet(0).unwrap().get_raw(r, 1), qty);
+            assert_eq!(loaded.sheet(0).unwrap().get_display(r, 3), amount);
+        }
+    }
+}
+
+#[test]
+fn sorted_export_rewrites_references_between_two_sorted_sheets_in_one_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("two-sheets.xlsx");
+    let (mut wb, id) = book();
+    let sid = wb.add_sheet_named("Second").unwrap();
+    for (r, c, value) in [
+        (0, 0, "Key"),
+        (0, 1, "Linked"),
+        (1, 0, "2"),
+        (2, 0, "1"),
+        (1, 1, "=Sheet1!B4"),
+        (2, 1, "=Sheet1!B8"),
+    ] {
+        wb.set_cell_value_tracked(sid, r, c, value);
+    }
+    let sid_id = wb.sheet(sid).unwrap().id;
+    let second = wb
+        .create_table(
+            sid_id,
+            TableRange {
+                start_row: 0,
+                end_row: 2,
+                start_col: 0,
+                end_col: 1,
+            },
+            "SecondTable",
+        )
+        .unwrap()
+        .table_id();
+    wb.set_cell_value_tracked(1, 1, 0, "=Second!$B$2");
+    set_saved_sort(&mut wb, id, 0, true, true);
+    set_saved_sort(&mut wb, second, 0, false, true);
+    let snapshot = authored_snapshot(&wb);
+    xlsx::export(&wb, &file, None).unwrap();
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(sid).unwrap().get_raw(1, 1), "=Sheet1!B4");
+    assert_eq!(loaded.sheet(sid).unwrap().get_display(1, 1), "6");
+    assert_eq!(loaded.sheet(sid).unwrap().get_raw(2, 1), "=Sheet1!B8");
+    assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "=Second!$B$3");
+    assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), "2");
+    assert_eq!(authored_snapshot(&wb), snapshot);
+}
+
+#[test]
+fn sorted_export_preserves_contiguous_aggregate_membership_even_when_reversed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("subset.xlsx");
+    let (mut wb, id) = book();
+    wb.set_cell_value_tracked(1, 1, 0, "=SUM(Sheet1!$B$4:$B$5)");
+    set_saved_sort(&mut wb, id, 0, true, true);
+    xlsx::export(&wb, &file, None).unwrap();
+    let (loaded, _) = xlsx::import(&file).unwrap();
+    assert_eq!(
+        loaded.sheet(1).unwrap().get_raw(1, 0),
+        "=SUM(Sheet1!$B$7:$B$8)"
+    );
+    assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), "5");
+}
+
+#[test]
+fn sorted_export_refuses_stale_results_without_changing_live_caches() {
+    let (mut wb, id) = book();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    wb.set_auto_recalc(false);
+    wb.set_cell_value_tracked(0, 3, 2, "11");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 3), "20");
+    assert_sorted_export_refuses(&wb, "changes result", None);
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 3), "20");
+}
+
+#[test]
+fn sorted_export_refuses_validation_conditional_format_spills_and_native_freeze_boundaries() {
+    use visigrid_engine::{
+        cell::CellStyle,
+        cond_format::CondStyle,
+        validation::{CellRange, ValidationRule},
+    };
+    for mode in 0..4 {
+        let (mut wb, id) = book();
+        set_saved_sort(&mut wb, id, 0, true, true);
+        let expected = match mode {
+            0 => {
+                wb.sheet_mut(0).unwrap().set_validation(
+                    3,
+                    1,
+                    3,
+                    1,
+                    ValidationRule::list_inline(vec!["2".into()]),
+                );
+                "Validation"
+            }
+            1 => {
+                wb.sheet_mut(0).unwrap().cond_formats.add(
+                    vec![CellRange::single(3, 1)],
+                    "=B4>0",
+                    CondStyle::Named(CellStyle::Success),
+                );
+                "conditional-format"
+            }
+            2 => {
+                wb.set_cell_value_tracked(1, 2, 0, "=SEQUENCE(2,1)");
+                "Spilled formulas"
+            }
+            _ => {
+                wb.sheet_mut(0).unwrap().frozen_panes = (4, 0);
+                "freeze boundary"
+            }
+        };
+        assert_sorted_export_refuses(&wb, expected, None);
+    }
+}
+
+#[test]
+fn already_sorted_tables_and_unsorted_workbooks_do_not_trigger_materialization_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain.xlsx");
+    let sorted = dir.path().join("sorted.xlsx");
+    let (mut wb, id) = book();
+    wb.set_cell_value_tracked(1, 1, 0, "=ROW(Sheet1!B4)");
+    xlsx::export(&wb, &plain, None).unwrap();
+    set_saved_sort(&mut wb, id, 0, false, true); // Qty is already ascending.
+    xlsx::export(&wb, &sorted, None).unwrap();
+    assert_eq!(
+        xml(&plain, "xl/worksheets/sheet1.xml"),
+        xml(&sorted, "xl/worksheets/sheet1.xml")
+    );
+    assert_eq!(
+        xml(&plain, "xl/worksheets/sheet2.xml"),
+        xml(&sorted, "xl/worksheets/sheet2.xml")
     );
 }

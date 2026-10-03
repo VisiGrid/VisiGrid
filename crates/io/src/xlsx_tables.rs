@@ -472,7 +472,7 @@ pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
             .filter(|v| v.table == table.id)
         {
             if view.sort.is_some() {
-                warnings.push(format!("Table {}: Excel export saves the sort definition and every record in stored order to preserve formula coordinates. Use Reapply in Excel to apply the saved sort; text and mixed-type ordering may differ from VisiGrid.", table.name));
+                warnings.push(format!("Table {}: Excel export places every record in the saved sort order, including filtered-out records, and updates supported formula references. Clearing the sort in the exported copy keeps that order. Reapplying it in Excel may change text or mixed-type ordering.", table.name));
             }
             if let Err(reason) =
                 super::xlsx_table_filters::export_filters(wb.sheet_by_id(sheet_id).unwrap(), table)

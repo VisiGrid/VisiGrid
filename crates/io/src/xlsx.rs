@@ -1428,6 +1428,10 @@ pub fn export(
     layouts: Option<&[ExportLayout]>,
 ) -> Result<ExportResult, String> {
     let start_time = Instant::now();
+    workbook.ensure_writable()?;
+    crate::xlsx_tables::export_warnings(workbook)?;
+    let prepared = crate::xlsx_sorted_export::prepare(workbook, layouts)?;
+    let workbook = prepared.as_ref();
     let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
     let bytes = xlsx_workbook.save_to_buffer().map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
@@ -1443,6 +1447,10 @@ pub fn export_to_buffer(
     layouts: Option<&[ExportLayout]>,
 ) -> Result<(Vec<u8>, ExportResult), String> {
     let start_time = Instant::now();
+    workbook.ensure_writable()?;
+    crate::xlsx_tables::export_warnings(workbook)?;
+    let prepared = crate::xlsx_sorted_export::prepare(workbook, layouts)?;
+    let workbook = prepared.as_ref();
     let (mut xlsx_workbook, mut result) = build_export(workbook, layouts)?;
     let bytes = xlsx_workbook
         .save_to_buffer()
@@ -1456,7 +1464,9 @@ pub fn export_to_buffer(
 /// Table-specific losses reported before desktop export and in every host's
 /// export result. Fatal cases are rejected before the destination is written.
 pub fn table_export_warnings(workbook: &Workbook) -> Result<Vec<String>, String> {
-    crate::xlsx_tables::export_warnings(workbook)
+    let warnings = crate::xlsx_tables::export_warnings(workbook)?;
+    crate::xlsx_sorted_export::prepare(workbook, None)?;
+    Ok(warnings)
 }
 
 /// Shared body: build the rust_xlsxwriter workbook from ours.
@@ -1466,7 +1476,7 @@ fn build_export(
 ) -> Result<(XlsxWorkbook, ExportResult), String> {
     workbook.ensure_writable()?;
     let mut result = ExportResult::default();
-    result.warnings = table_export_warnings(workbook)?;
+    result.warnings = crate::xlsx_tables::export_warnings(workbook)?;
 
     let mut xlsx_workbook = XlsxWorkbook::new();
 

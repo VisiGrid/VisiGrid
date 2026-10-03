@@ -13,6 +13,7 @@ mod xlsx_comments;
 mod xlsx_tables;
 mod xlsx_table_filters;
 mod xlsx_table_sorts;
+mod xlsx_sorted_export;
 pub mod xlsx_styles;
 pub mod xlsx_validation;
 

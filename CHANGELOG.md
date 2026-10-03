@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Excel Tables now retain saved single-column ascending/descending sorts through XLSX and native round trips, including with filters or hidden header controls. Export preserves every record and formula coordinate and explains that Excel needs Reapply to display the saved order. Unsupported or unsafe sorts warn without partially applying their keys; supported filter metadata is handled separately.
+- Excel Tables now retain saved single-column ascending/descending sorts through XLSX and native round trips, including with filters or hidden header controls. Export now writes records in the saved sort order using an isolated copy, keeps filtered-out records, moves formatting/comments with records, and rewrites supported formula references. No Reapply step is needed to display that order. Unsupported formulas, metadata/layouts or changed calculation results refuse before writing; the source workbook remains unchanged. Unsupported or unsafe sorts warn without partially applying their keys; supported filter metadata is handled separately.
 
 - Excel Table round trips now preserve built-in style identities, stripe/emphasis options, checkbox-value filters and uniform filter-button visibility, including through native saves. Export hides records that fail supported filters while retaining their cells and formulas. Unsupported or ambiguous filters and unsafe import layouts produce explicit warnings; custom styles/themes remain limited. Table names over Excel's 255-character limit refuse export before writing.
 
