@@ -7,6 +7,7 @@ use super::parser::{BoundExpr, Expr};
 pub enum TableSection {
     Data,
     Headers,
+    Totals,
     All,
     ThisRow,
 }
@@ -47,6 +48,7 @@ impl StructuredReference {
                 let label = match section {
                     TableSection::Data => "#Data",
                     TableSection::Headers => "#Headers",
+                    TableSection::Totals => "#Totals",
                     TableSection::All => "#All",
                     TableSection::ThisRow => unreachable!(),
                 };
@@ -179,6 +181,7 @@ pub fn parse(table: Option<String>, input: &str) -> Result<StructuredReference, 
             section = match label.to_ascii_lowercase().as_str() {
                 "#data" => TableSection::Data,
                 "#headers" => TableSection::Headers,
+                "#totals" => TableSection::Totals,
                 "#all" => TableSection::All,
                 "#this row" => TableSection::ThisRow,
                 _ => return Err(format!("Unsupported table selector: {label}")),
@@ -343,7 +346,11 @@ pub fn resolve_region(
     };
     let (r0, r1) = match reference.section {
         TableSection::Headers => (table.range.start_row, table.range.start_row),
-        TableSection::All => (table.range.start_row, table.range.end_row),
+        TableSection::All => (table.range.start_row, table.full_range().end_row),
+        TableSection::Totals => match table.totals_row() {
+            Some(row) => (row, row),
+            None => return Expr::ReferenceError("#REF! Table has no totals row".into()),
+        },
         TableSection::Data => {
             if table.range.data_rows() == 0 {
                 return Expr::EmptyRange {

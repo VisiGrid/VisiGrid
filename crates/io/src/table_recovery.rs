@@ -18,8 +18,8 @@ pub(crate) fn decode_catalog(raw: &str) -> Result<SavedTableCatalog, TableLoadIs
     let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| TableLoadIssue::Corrupt(e.to_string()))?;
     match value.get("version").and_then(|v| v.as_u64()) {
-        Some(version) if version > 4 => return Err(TableLoadIssue::FutureVersion(version)),
-        Some(1..=4) => {}
+        Some(version) if version > 5 => return Err(TableLoadIssue::FutureVersion(version)),
+        Some(1..=5) => {}
         _ => {
             return Err(TableLoadIssue::Corrupt(
                 "invalid or missing Table format version".into(),

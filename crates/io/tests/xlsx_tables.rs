@@ -223,7 +223,11 @@ fn unsupported_or_corrupt_tables_keep_cells_and_report_loss() {
     let (wb, _) = book();
     xlsx::export(&wb, &file, None).unwrap();
     for (before, after, reason) in [
-        ("totalsRowShown=\"0\"", "totalsRowCount=\"1\"", "totals row"),
+        (
+            "totalsRowShown=\"0\"",
+            "totalsRowCount=\"2\"",
+            "totals-row count",
+        ),
         (
             "totalsRowShown=\"0\"",
             "headerRowCount=\"0\"",
@@ -1998,4 +2002,314 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
         }
         assert_eq!(authored_snapshot(&wb), before);
     }
+}
+
+fn external_totals_file(path: &Path, hidden: bool) {
+    use rust_xlsxwriter::{Formula, Table, TableColumn, TableFunction, Workbook as Excel};
+    let mut wb = Excel::new();
+    let sheet = wb.add_worksheet();
+    sheet.write_string(1, 0, "West").unwrap();
+    sheet.write_number(1, 1, 10).unwrap();
+    sheet.write_number(1, 2, 2).unwrap();
+    sheet.write_string(2, 0, "East").unwrap();
+    sheet.write_number(2, 1, 20).unwrap();
+    sheet.write_number(2, 2, 3).unwrap();
+    if hidden {
+        sheet.set_row_hidden(2).unwrap();
+    }
+    sheet
+        .add_table(
+            0,
+            0,
+            3,
+            2,
+            &Table::new()
+                .set_name("Sales")
+                .set_total_row(true)
+                .set_columns(&[
+                    TableColumn::new()
+                        .set_header("Region")
+                        .set_total_label("Grand & total"),
+                    TableColumn::new()
+                        .set_header("Amount")
+                        .set_total_function(TableFunction::Sum),
+                    TableColumn::new()
+                        .set_header("Qty")
+                        .set_total_function(TableFunction::Custom(Formula::new("SUM([Qty])*2"))),
+                ]),
+        )
+        .unwrap();
+    sheet
+        .write_formula(0, 5, Formula::new("Sales[[#Totals],[Amount]]"))
+        .unwrap();
+    sheet
+        .write_formula(0, 6, Formula::new("SUM(Sales[Amount])"))
+        .unwrap();
+    wb.save(path).unwrap();
+}
+
+#[test]
+fn excel_totals_roundtrip_preserves_body_footer_formulas_metadata_and_native_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("external.xlsx");
+    let native_path = dir.path().join("totals.sheet");
+    external_totals_file(&input, false);
+    let (mut wb, report) = xlsx::import(&input).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(report.tables_skipped, 0);
+    assert_eq!(wb.saved_tables().version, 5);
+    let table = wb.tables().next().unwrap().1;
+    assert_eq!(table.range.data_rows(), 2);
+    assert_eq!(table.totals_row(), Some(3));
+    assert_eq!(
+        table.totals.as_ref().unwrap().columns[1]
+            .function
+            .as_deref(),
+        Some("sum")
+    );
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "30");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 2), "10");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "30");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 6), "30");
+    // Body editing recalculates both totals and dependent #Totals formulas.
+    wb.set_cell_value_tracked(0, 1, 1, "15");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "35");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "35");
+    native::save_workbook(&wb, &native_path).unwrap();
+    wb = native::load_workbook(&native_path).unwrap();
+    let json = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    let (loaded, _, _) = visigrid_io::json::import_any(&json).unwrap();
+    assert_eq!(loaded.saved_tables().version, 5);
+    assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "35");
+    assert_eq!(loaded.sheet(0).unwrap().get_display(0, 5), "35");
+    wb = loaded;
+    for _ in 0..2 {
+        let output = dir.path().join("output.xlsx");
+        xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+        let metadata = xml(&output, "xl/tables/table1.xml");
+        assert!(metadata.contains("ref=\"A1:C4\""), "{metadata}");
+        assert!(metadata.contains("totalsRowCount=\"1\""), "{metadata}");
+        assert!(metadata.contains("totalsRowFunction=\"sum\""), "{metadata}");
+        assert!(
+            metadata.contains("totalsRowLabel=\"Grand &amp; total\""),
+            "{metadata}"
+        );
+        assert!(
+            metadata.contains("<totalsRowFormula>SUM([Qty])*2</totalsRowFormula>"),
+            "{metadata}"
+        );
+        assert!(metadata.contains("<autoFilter ref=\"A1:C3\""), "{metadata}");
+        let (loaded, report) = xlsx::import(&output).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "35");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(0, 5), "35");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(3, 2), "10");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 0), "Grand & total");
+        wb = loaded;
+    }
+}
+
+#[test]
+fn imported_totals_remain_visible_and_recalculate_when_filter_fields_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("external.xlsx");
+    external_totals_file(&input, false);
+    let (mut wb, _) = xlsx::import(&input).unwrap();
+    let (sid, table) = wb.tables().next().unwrap();
+    let id = table.id;
+    let column = table.columns[0].id;
+    let mut spec = visigrid_engine::table_view::TableViewSpec::new(id);
+    spec.filters.push(visigrid_engine::table_view::TableFilter {
+        column,
+        criteria: visigrid_engine::filter::ColumnFilter {
+            selected: Some(
+                [visigrid_engine::filter::NormalizedFilterKey::Text(
+                    "west".into(),
+                )]
+                .into(),
+            ),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    let view = wb
+        .sheet(0)
+        .unwrap()
+        .build_saved_table_view(5)
+        .unwrap()
+        .unwrap();
+    assert!(
+        view.rows().data_to_view(3).is_some(),
+        "footer stays visible"
+    );
+    let filtered_path = dir.path().join("filtered-totals.xlsx");
+    xlsx::export_with_order(&wb, &filtered_path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (roundtrip, report) = xlsx::import(&filtered_path).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(roundtrip.sheet(0).unwrap().get_display(3, 1), "10");
+    assert!(
+        roundtrip
+            .tables()
+            .next()
+            .unwrap()
+            .1
+            .totals
+            .as_ref()
+            .unwrap()
+            .hidden_rows
+            .is_empty(),
+        "filter masks must not become manual hiding"
+    );
+    // Changing a different column still invalidates the subtotal.
+    wb.set_cell_value_tracked(0, 2, 0, "West");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "30");
+    wb.set_table_view_spec(sid, None).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "30");
+    let output = dir.path().join("filtered.xlsx");
+    xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+}
+
+#[test]
+fn totals_keep_manual_hidden_rows_and_refuse_unsafe_authoring() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("hidden.xlsx");
+    external_totals_file(&input, true);
+    let (mut wb, report) = xlsx::import(&input).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    let native_path = dir.path().join("hidden.sheet");
+    native::save_workbook(&wb, &native_path).unwrap();
+    assert!(native::load_layout(&native_path).hidden_rows[&0].contains(&2));
+    wb = native::load_workbook(&native_path).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    let (sid, t) = wb.tables().next().unwrap();
+    let id = t.id;
+    let range = t.range;
+    assert!(wb
+        .resize_table(
+            id,
+            TableRange {
+                end_row: 4,
+                ..range
+            }
+        )
+        .is_err());
+    assert!(wb.append_table_rows(id, 1, &[]).is_err());
+    assert!(wb.remove_table(id).is_err());
+    assert!(wb
+        .sheet(0)
+        .unwrap()
+        .table_structural_error(true, 2, 1, false)
+        .is_some());
+    assert!(wb.sheet(0).unwrap().table_value_write_error(3, 1).is_some());
+    assert!(wb
+        .create_table(
+            sid,
+            TableRange {
+                start_row: 3,
+                end_row: 4,
+                start_col: 0,
+                end_col: 2
+            },
+            "Overlap"
+        )
+        .is_err());
+    let output = dir.path().join("output.xlsx");
+    xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+    let (loaded, report) = xlsx::import(&output).unwrap();
+    assert!(report.imported_layouts[0].hidden_rows.contains(&2));
+    assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "10");
+}
+
+#[test]
+fn empty_body_and_dormant_totals_metadata_roundtrip() {
+    use rust_xlsxwriter::{Table, TableColumn as Column, TableFunction};
+    let dir = tempfile::tempdir().unwrap();
+    for empty in [true, false] {
+        let changed = dir.path().join("external.xlsx");
+        let mut external = rust_xlsxwriter::Workbook::new();
+        let sheet = external.add_worksheet();
+        if !empty {
+            sheet.write_string(1, 0, "West").unwrap();
+            sheet.write_number(1, 1, 10).unwrap();
+            sheet.write_number(1, 2, 2).unwrap();
+            sheet.write_string(2, 0, "East").unwrap();
+            sheet.write_number(2, 1, 20).unwrap();
+            sheet.write_number(2, 2, 3).unwrap();
+        }
+        sheet
+            .add_table(
+                0,
+                0,
+                if empty { 1 } else { 2 },
+                2,
+                &Table::new()
+                    .set_name("Sales")
+                    .set_total_row(empty)
+                    .set_columns(&[
+                        Column::new().set_header("Region").set_total_label("Total"),
+                        Column::new()
+                            .set_header("Amount")
+                            .set_total_function(TableFunction::Sum),
+                        Column::new()
+                            .set_header("Qty")
+                            .set_total_function(TableFunction::Custom("SUM([Qty])*2".into())),
+                    ]),
+            )
+            .unwrap();
+        external.save(&changed).unwrap();
+        let (wb, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let t = wb.tables().next().unwrap().1;
+        assert!(t.totals.is_some(), "dormant function settings must survive");
+        assert_eq!(t.totals_row(), empty.then_some(1));
+        if empty {
+            assert_eq!(t.range.data_rows(), 0);
+            assert_eq!(wb.sheet(0).unwrap().get_display(1, 1), "0");
+            assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "0");
+        }
+        let output = dir.path().join("out.xlsx");
+        xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+        let (loaded, report) = xlsx::import(&output).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(loaded.tables().next().unwrap().1.totals, t.totals);
+    }
+}
+
+#[test]
+fn totals_sort_export_uses_explicit_stored_order_or_headless_fallback() {
+    use visigrid_engine::{
+        filter::SortDirection,
+        table_view::{TableSort, TableViewSpec},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("external.xlsx");
+    external_totals_file(&input, false);
+    let (mut wb, _) = xlsx::import(&input).unwrap();
+    let (sid, t) = wb.tables().next().unwrap();
+    let mut spec = TableViewSpec::new(t.id);
+    spec.sort = Some(TableSort {
+        column: t.columns[1].id,
+        direction: SortDirection::Descending,
+    });
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+    let output = dir.path().join("out.xlsx");
+    assert!(xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Sorted).is_err());
+    assert!(!output.exists());
+    let (bytes, report) = xlsx::export_to_buffer_with_stored_fallback(&wb, None).unwrap();
+    std::fs::write(&output, bytes).unwrap();
+    assert!(
+        report.warnings.iter().any(|w| w.contains("stored")),
+        "{:?}",
+        report.warnings
+    );
+    let (loaded, report) = xlsx::import(&output).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 1), "10");
+    assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "30");
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec().unwrap().sort,
+        wb.sheet(0).unwrap().table_view_spec().unwrap().sort
+    );
 }

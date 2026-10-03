@@ -231,7 +231,7 @@ fn damaged_current_view_and_future_catalog_use_distinct_read_only_recovery() {
             "corrupt"
         };
         match case {
-            0 => doc["table_catalog"]["version"] = 5.into(),
+            0 => doc["table_catalog"]["version"] = 6.into(),
             1 => doc["table_catalog"]["sheets"][0]["view"]["sort"]["column"] = 999.into(),
             2 => doc["table_catalog"]["version"] = 2.into(),
             _ => doc["table_catalog"]["sheets"][0]["view"]["unknown_criterion"] = true.into(),

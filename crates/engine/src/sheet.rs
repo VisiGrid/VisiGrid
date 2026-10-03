@@ -386,6 +386,11 @@ pub struct Sheet {
 }
 
 impl CellLookup for Sheet {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool {
+        if !matches!(sheet, SheetRef::Current) && *sheet != SheetRef::Id(self.id) { return false; }
+        self.subtotal_excluded(row, col, ignore_hidden)
+    }
+
     fn is_table_name(&self, name: &str) -> bool { self.tables().iter().any(|t| t.name.eq_ignore_ascii_case(name)) }
     fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {
         let target = match &reference.table {
@@ -669,7 +674,7 @@ impl Sheet {
     /// count the write otherwise.
     #[inline]
     fn accept_value_write(&mut self, row: usize, col: usize) -> bool {
-        if self.is_pivot_owned(row, col) || self.table_header_at(row, col).is_some() {
+        if self.is_pivot_owned(row, col) || self.table_at(row, col).is_some_and(|t| row == t.range.start_row || t.totals_row() == Some(row)) {
             return false;
         }
         self.edit_generation = self.edit_generation.wrapping_add(1);
@@ -680,8 +685,25 @@ impl Sheet {
 
     pub fn has_table_history(&self) -> bool { self.table_id_high_water > 0 || !self.data_tables.is_empty() }
 
+    pub(crate) fn subtotal_excluded(&self, row: usize, col: usize, ignore_hidden: bool) -> bool {
+        if ignore_hidden && self.tables().iter().any(|t| t.totals.as_ref().is_some_and(|t| t.hidden_rows.contains(&row))) { return true; }
+        if self.get_cell_opt(row, col).is_some_and(|cell| {
+            matches!(cell.value(), crate::cell::ValueRef::Formula { ast: Some(ast), .. }
+                if crate::formula::eval_subtotal::contains_subtotal(ast))
+        }) { return true; }
+        let Some(spec) = self.table_view_spec() else { return false; };
+        let Some(table) = self.tables().iter().find(|t| t.id == spec.table) else { return false; };
+        if row <= table.range.start_row || row > table.range.end_row { return false; }
+        spec.filters.iter().any(|f| {
+            table.columns.iter().position(|c| c.id == f.column).is_some_and(|offset| {
+                !f.criteria.passes(&crate::filter::FilterKey::from_value(
+                    &self.get_computed_value(row, table.range.start_col + offset)))
+            })
+        })
+    }
+
     pub fn table_at(&self, row: usize, col: usize) -> Option<&crate::table::DataTable> {
-        self.data_tables.iter().find(|t| t.range.contains(row, col))
+        self.data_tables.iter().find(|t| t.full_range().contains(row, col))
     }
 
     pub fn table_header_at(&self, row: usize, col: usize) -> Option<&crate::table::DataTable> {
@@ -691,6 +713,9 @@ impl Sheet {
     /// Shared preflight for hosts. Low-level void setters additionally refuse
     /// these writes; callers use this to reject an entire batch with a reason.
     pub fn table_value_write_error(&self, row: usize, col: usize) -> Option<String> {
+        if let Some(t) = self.tables().iter().find(|t| t.totals_row() == Some(row) && t.full_range().contains(row, col)) {
+            return Some(format!("{} has an imported totals row. Totals-row editing is not supported yet; convert it to a range first.", t.name));
+        }
         self.table_header_at(row, col).map(|t| format!(
             "'{}' has a protected table header; use the table column rename operation.", t.name
         ))
@@ -700,7 +725,7 @@ impl Sheet {
     /// cannot leave a second exception registry out of sync.
     pub fn is_calculated_exception(&self, row: usize, col: usize) -> bool {
         let Some(table) = self.table_at(row, col) else { return false; };
-        if row == table.range.start_row { return false; }
+        if row == table.range.start_row || table.totals_row() == Some(row) { return false; }
         let Some(expected) = table.formula_at(row, col) else { return false; };
         let actual = self.get_raw(row, col);
         actual != expected && !(actual.starts_with('=')
@@ -711,6 +736,9 @@ impl Sheet {
         if count == 0 { return None; }
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
         for t in self.tables() {
+            if t.totals.is_some() && at <= if is_row { t.full_range().end_row.max(t.totals.as_ref().and_then(|t| t.hidden_rows.last().copied()).unwrap_or(0)) } else { t.range.end_col } {
+                return Some("Structural edits affecting imported totals-row Tables are not supported yet. Convert the Table to a range first.".into());
+            }
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };
             if delete && at <= last && end > start && (if is_row { at <= start } else { at <= start && end > last }) {
@@ -1892,7 +1920,7 @@ impl Sheet {
     /// Replace all merged regions and rebuild the lookup index.
     /// Used by undo/redo to restore merge state.
     pub fn set_merges(&mut self, regions: Vec<MergedRegion>) {
-        if regions.iter().any(|m| self.tables().iter().any(|t| t.range.intersects(crate::table::TableRange {
+        if regions.iter().any(|m| self.tables().iter().any(|t| t.full_range().intersects(crate::table::TableRange {
             start_row: m.start.0, start_col: m.start.1, end_row: m.end.0, end_col: m.end.1,
         }))) { return; }
         self.merged_regions = regions;
@@ -1947,7 +1975,7 @@ impl Sheet {
     /// Add a merged region. Returns Err if it overlaps an existing merge.
     pub fn add_merge(&mut self, region: MergedRegion) -> Result<(), String> {
         let range = crate::table::TableRange { start_row: region.start.0, start_col: region.start.1, end_row: region.end.0, end_col: region.end.1 };
-        if self.tables().iter().any(|t| t.range.intersects(range)) {
+        if self.tables().iter().any(|t| t.full_range().intersects(range)) {
             return Err("Cannot merge cells inside a Table.".into());
         }
         if region.is_degenerate() {

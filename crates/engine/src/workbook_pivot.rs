@@ -252,7 +252,7 @@ impl Workbook {
 
         // Every cell of the new area must be free: owned by this pivot, or
         // empty, unmerged, not a spill, not another pivot's.
-        if let Some(t) = sheet.tables().iter().find(|t| t.range.intersects(crate::table::TableRange {
+        if let Some(t) = sheet.tables().iter().find(|t| t.full_range().intersects(crate::table::TableRange {
             start_row: r0, start_col: c0, end_row: r1, end_col: c1,
         })) {
             return Err(PivotOpError::Blocked { row: r0.max(t.range.start_row), col: c0.max(t.range.start_col), reason: format!("part of table {}", t.name) });
@@ -473,7 +473,7 @@ impl Workbook {
     fn apply_pivot_state_unchecked(&mut self, state: &PivotState) -> Result<Vec<CellId>, PivotOpError> {
         let idx = self.sheet_index_by_id(state.sheet_id).ok_or(PivotOpError::SheetMissing)?;
         if let Some((r0, c0, r1, c1)) = state.table.as_ref().and_then(|p| p.region()) {
-            if let Some(t) = self.sheets[idx].tables().iter().find(|t| t.range.intersects(crate::table::TableRange {
+            if let Some(t) = self.sheets[idx].tables().iter().find(|t| t.full_range().intersects(crate::table::TableRange {
                 start_row: r0, start_col: c0, end_row: r1, end_col: c1,
             })) {
                 return Err(PivotOpError::Blocked { row: r0, col: c0, reason: format!("part of table {}", t.name) });

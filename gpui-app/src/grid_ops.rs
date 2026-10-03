@@ -487,6 +487,11 @@ impl Spreadsheet {
 
     /// Hide selected rows (Ctrl+9)
     pub(crate) fn hide_rows(&mut self, cx: &mut Context<Self>) {
+        if self.workbook.read(cx).active_sheet().tables().iter().any(|t| t.totals.is_some()) {
+            self.status_message = Some("Manual visibility changes on imported totals-row sheets are not supported yet. Convert the Table to a range first.".into());
+            cx.notify();
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() { return; }
 
@@ -521,6 +526,11 @@ impl Spreadsheet {
     /// Excel behavior: select rows spanning the hidden range, then unhide.
     /// E.g., if rows 5-8 are hidden, select rows 4-9 and press Ctrl+Shift+9.
     pub(crate) fn unhide_rows(&mut self, cx: &mut Context<Self>) {
+        if self.workbook.read(cx).active_sheet().tables().iter().any(|t| t.totals.is_some()) {
+            self.status_message = Some("Manual visibility changes on imported totals-row sheets are not supported yet. Convert the Table to a range first.".into());
+            cx.notify();
+            return;
+        }
         if self.block_if_previewing(cx) { return; }
         if self.mode.is_editing() { return; }
 

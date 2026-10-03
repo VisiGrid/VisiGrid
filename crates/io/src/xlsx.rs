@@ -756,7 +756,10 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     result.warnings.extend(notes.warnings);
     result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
 
-    let table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, options.values_only);
+    let mut table_views = Vec::new();
+    if options.values_only {
+        table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, true);
+    }
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)
@@ -809,6 +812,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                 value_backfill_count, xml_values.len());
         }
 
+        // Install ownership only after formula/value backfill, including footer cells.
+        table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, false);
         // Rebuild dependency graph after loading all data
         workbook.rebuild_dep_graph();
 
@@ -928,6 +933,21 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     }
 
     crate::xlsx_table_filters::finish_import(table_views, &mut workbook, &mut result);
+    // Remaining hidden rows are manual (filter masks were consumed above).
+    if workbook.tables().any(|(_, t)| t.totals.is_some()) {
+        let mut catalog = workbook.saved_tables();
+        for entry in &mut catalog.sheets {
+            if let Some(layout) = result.imported_layouts.get(entry.sheet) {
+                for table in &mut entry.tables {
+                    if let Some(totals) = &mut table.totals {
+                        totals.hidden_rows = layout.hidden_rows.iter().copied().collect();
+                    }
+                }
+            }
+        }
+        workbook.restore_tables(catalog)?;
+        if !options.values_only { workbook.rebuild_dep_graph(); workbook.recompute_full_ordered(); }
+    }
     Ok((workbook, result))
 }
 
@@ -1631,6 +1651,15 @@ fn build_export(
             result.hidden_rows_exported += layout.hidden_rows.len();
         }
 
+        // Imported totals retain manual visibility even for headless exports
+        // without a host layout. Filter-hidden rows remain a separate mask.
+        for row in sheet.tables().iter().filter_map(|t| t.totals.as_ref())
+            .flat_map(|t| t.hidden_rows.iter()).collect::<std::collections::BTreeSet<_>>() {
+            worksheet.set_row_hidden(*row as u32).map_err(|e| e.to_string())?;
+            if !layout.is_some_and(|l| l.hidden_rows.contains(row)) {
+                result.hidden_rows_exported += 1;
+            }
+        }
         crate::xlsx_table_filters::write_hidden_rows(sheet, worksheet, &mut result)?;
         result.sheets_exported += 1;
     }

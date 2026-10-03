@@ -28,7 +28,7 @@ impl Workbook {
     ) -> bool {
         match &reference.table {
             Some(name) => name.eq_ignore_ascii_case(&table.name),
-            None => sheet == owner_sheet && table.range.contains(row, col),
+            None => sheet == owner_sheet && table.full_range().contains(row, col),
         }
     }
 
@@ -42,7 +42,7 @@ impl Workbook {
             for ((row, col), cell) in sheet.cells_iter() {
                 if sheet.id == owner_sheet
                     && row == table.range.start_row
-                    && table.range.contains(row, col)
+                    && table.full_range().contains(row, col)
                 {
                     continue;
                 }
@@ -79,6 +79,18 @@ impl Workbook {
         };
         let mut changes = Vec::new();
         for sheet in self.sheets() {
+            for table in sheet.tables().iter().filter(|t| t.id != before.id) {
+                if let Some(totals) = &table.totals {
+                    for (offset, total) in totals.columns.iter().enumerate() {
+                        if let Some(source) = &total.formula {
+                            if self.rewrite_table_formula_source(owner_sheet, before, after, sheet.id,
+                                table.range.end_row + 1, table.range.start_col + offset, source)? != *source {
+                                return Err("This schema change would rewrite imported totals metadata. Native totals editing is not supported yet.".into());
+                            }
+                        }
+                    }
+                }
+            }
             for ((row, col), cell) in sheet.cells_iter() {
                 let ValueRef::Formula {
                     source,
@@ -98,6 +110,9 @@ impl Workbook {
                     source,
                 )?;
                 if rewritten != source {
+                    if sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
+                        return Err("This schema change would rewrite an imported totals formula. Native totals editing is not supported yet.".into());
+                    }
                     changes.push(TableFormulaChange {
                         cell: CellId::new(sheet.id, row, col),
                         before: source.to_string(),

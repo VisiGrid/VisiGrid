@@ -428,7 +428,7 @@ pub fn validate_table_view_layout(sheet: &Sheet, id: TableId) -> Result<(), Stri
         return refuse("merged cells in the Table's body rows");
     }
     if sheet.tables().iter().any(|other| {
-        other.id != id && body_rows_overlap(range, other.range.start_row, other.range.end_row)
+        other.id != id && body_rows_overlap(range, other.range.start_row, other.full_range().end_row)
     }) {
         return refuse("another Table");
     }

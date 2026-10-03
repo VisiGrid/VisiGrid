@@ -99,6 +99,11 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         hasher.update(b"\n");
     }
     for (_, table) in &tables {
+        if let Some(totals) = &table.totals {
+            hasher.update(b"totals-row:");
+            hasher.update(&serde_json::to_vec(&(&table.name, totals)).unwrap());
+            hasher.update(b"\n");
+        }
         for column in &table.columns {
             if let Some(formula) = &column.formula {
                 hasher.update(b"calculated-column:");
@@ -107,7 +112,7 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
             }
         }
     }
-    let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else { 3 };
+    let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else if tables.iter().any(|(_, t)| t.totals.is_some()) { 4 } else { 3 };
     let hash = hasher.finalize();
     let hash_hex = &hash.to_hex()[0..16]; // First 16 hex chars (64 bits)
     format!("v{}:{}:{}", fingerprint_version, op_count, hash_hex)
@@ -1751,6 +1756,16 @@ fn save_tables(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
         let json = serde_json::to_string(&workbook.saved_tables()).map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO meta (key, value) VALUES ('tables', ?1)", params![json])
             .map_err(|e| e.to_string())?;
+    }
+    // Headless saves have no separate host layout, but totals rely on these
+    // imported manual hides. Keep native display and calculation consistent.
+    for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+        let rows: std::collections::BTreeSet<_> = sheet.tables().iter()
+            .filter_map(|t| t.totals.as_ref()).flat_map(|t| t.hidden_rows.iter()).collect();
+        for row in rows {
+            conn.execute("INSERT OR IGNORE INTO hidden_rows (sheet_idx, row) VALUES (?1, ?2)",
+                params![sheet_idx as i64, *row as i64]).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }

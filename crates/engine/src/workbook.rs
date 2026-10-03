@@ -1048,6 +1048,28 @@ impl Workbook {
                 .iter()
                 .map(crate::dep_graph::RangeRef::from_whole),
         );
+        if crate::formula::eval_subtotal::contains_subtotal(bound) {
+            let sheets: FxHashSet<_> = ranges.iter().map(|r| r.sheet).chain(refs.iter().map(|r| r.sheet)).collect();
+            for sheet in self.sheets().iter().filter(|s| sheets.contains(&s.id)) {
+                if let Some(spec) = sheet.table_view_spec() {
+                    if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table && t.range.data_rows() > 0) {
+                        let touches_body = ranges.iter().any(|r| r.sheet == sheet.id
+                            && r.end_row > table.range.start_row && r.start_row <= table.range.end_row)
+                            || refs.iter().any(|r| r.sheet == sheet.id
+                                && r.row > table.range.start_row && r.row <= table.range.end_row);
+                        if !touches_body { continue; }
+                        for filter in &spec.filters {
+                            if let Some(offset) = table.columns.iter().position(|c| c.id == filter.column) {
+                                let column = table.range.start_col + offset;
+                                ranges.push(crate::dep_graph::RangeRef { sheet: sheet.id,
+                                    start_row: table.range.start_row + 1, start_col: column,
+                                    end_row: table.range.end_row, end_col: column });
+                            }
+                        }
+                    }
+                }
+            }
+        }
         (refs, ranges)
     }
 
@@ -2388,6 +2410,24 @@ impl Workbook {
         if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
             return Err("Structural edit exceeds the sheet boundary.".into());
         }
+        // Footer cells are protected from ordinary setters. Refuse any edit
+        // that would require rewriting their formulas or dormant metadata.
+        let edit = crate::structural::StructuralEdit { sheet_name: sheet.name.clone(), axis, at, count, delete };
+        for owner in &self.sheets {
+            for table in owner.tables() {
+                if let Some(totals) = &table.totals {
+                    for (offset, total) in totals.columns.iter().enumerate() {
+                        let cell = table.totals_row().map(|row| owner.get_raw(row, table.range.start_col + offset));
+                        for formula in total.formula.iter().chain(cell.as_ref().filter(|s| s.starts_with('='))) {
+                            if crate::structural::adjust_formula_text(formula, &edit, &owner.name)
+                                .is_some_and(|rewritten| rewritten != *formula) {
+                                return Err("This structural edit would rewrite an imported totals formula. Native totals editing is not supported yet.".into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Refuse inserts that would push content off the grid rather than
         // dropping it (Excel's behavior).
         if !delete {
@@ -2918,6 +2958,14 @@ impl<'a> WorkbookLookup<'a> {
 }
 
 impl<'a> CellLookup for WorkbookLookup<'a> {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool {
+        match sheet {
+            SheetRef::Current => self.current_sheet(),
+            SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
+            SheetRef::RefError { .. } => None,
+        }.is_some_and(|s| s.subtotal_excluded(row, col, ignore_hidden))
+    }
+
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) {
         let sheet = match sheet {
             SheetRef::Current => self.current_sheet(),

@@ -98,7 +98,6 @@ fn structured_grammar_and_escaping_roundtrip() {
     for bad in [
         "Sales[]",
         "Sales[Amount",
-        "Sales[[#Totals],[Amount]]",
         "Sales[[#Headers],[#Data]]",
         "Sales[[Qty],[Amount]]",
         "Sales[[Qty]:]",

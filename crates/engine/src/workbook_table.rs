@@ -309,7 +309,7 @@ impl Workbook {
         if let Some(t) = sheet
             .tables()
             .iter()
-            .find(|t| Some(t.id) != except && t.range.intersects(range))
+            .find(|t| Some(t.id) != except && t.full_range().intersects(range))
         {
             return Err(format!("Table range overlaps '{}'.", t.name));
         }
@@ -392,6 +392,7 @@ impl Workbook {
             columns,
             style: TableStyle::default(),
             source: None,
+            totals: None,
         };
         let commit = self.table_commit(sheet_id, id, None, Some(table))?;
         self.apply_table_commit(&commit, false)?;
@@ -678,6 +679,9 @@ impl Workbook {
     /// formulas to absolute A1 references, preserving explicit formatting.
     pub fn remove_table(&mut self, id: TableId) -> Result<TableCommit, String> {
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        if old.totals.as_ref().is_some_and(|t| !t.hidden_rows.is_empty()) {
+            return Err("Converting this Table would discard the manual row visibility used by its totals. Keep it as a Table until native totals editing is supported.".into());
+        }
         let commit = self.table_commit(sheet_id, id, Some(old.clone()), None)?;
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
@@ -690,6 +694,10 @@ impl Workbook {
         before: Option<DataTable>,
         mut after: Option<DataTable>,
     ) -> Result<TableCommit, String> {
+        if before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
+            && (a.range != b.range || a.name != b.name || a.columns != b.columns)) {
+            return Err("Resizing or changing the schema of an imported totals-row Table is not supported yet. Convert it to a range first.".into());
+        }
         let sheet = self
             .sheet_by_id(sheet_id)
             .ok_or("Table sheet no longer exists.")?;
@@ -966,11 +974,15 @@ impl Workbook {
         self.refresh_table_name_reservations();
         for change in &commit.formulas {
             let source = if undo { &change.before } else { &change.after };
-            self.sheet_by_id_mut(change.cell.sheet).unwrap().set_value(
-                change.cell.row,
-                change.cell.col,
-                source,
-            );
+            let sheet = self.sheet_by_id_mut(change.cell.sheet).unwrap();
+            if sheet.table_at(change.cell.row, change.cell.col)
+                .is_some_and(|t| t.id == commit.id && t.totals_row() == Some(change.cell.row)) {
+                // Restoring Convert to Range reinstalls the footer owner before
+                // its symbolic formula. This validated replay owns that write.
+                sheet.write_table_header(change.cell.row, change.cell.col, CellValue::from_input(source));
+            } else {
+                sheet.set_value(change.cell.row, change.cell.col, source);
+            }
         }
         for (before, after) in &commit.cells {
             let cell = if undo { before } else { after };
@@ -994,7 +1006,9 @@ impl Workbook {
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
             // Older readers must refuse a recipe link rather than drop it
-            version: if self.tables().any(|(_, t)| t.source.is_some()) {
+            version: if self.tables().any(|(_, t)| t.totals.is_some()) {
+                5
+            } else if self.tables().any(|(_, t)| t.source.is_some()) {
                 4
             } else if self.sheets.iter().any(|s| {
                 s.table_view_spec().is_some_and(|v| v.requires_persistence())
@@ -1027,7 +1041,7 @@ impl Workbook {
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
     /// before recalculation. Reject corrupt metadata, never discard silently.
     pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
-        if ![1, 2, 3, 4].contains(&saved.version) || saved.next_table_id == 0 {
+        if ![1, 2, 3, 4, 5].contains(&saved.version) || saved.next_table_id == 0 {
             return Err("Unsupported or invalid Tables metadata version/allocator.".into());
         }
         let mut names = HashSet::new();
@@ -1060,6 +1074,9 @@ impl Workbook {
                 if saved.version == 1 && table.columns.iter().any(|c| c.formula.is_some()) {
                     return Err("Calculated columns require Tables metadata version 2.".into());
                 }
+                if saved.version < 5 && table.totals.is_some() {
+                    return Err("Totals rows require Tables metadata version 5.".into());
+                }
                 if saved.version < 4 && table.source.is_some() {
                     return Err("Recipe-backed Tables require Tables metadata version 4.".into());
                 }
@@ -1072,14 +1089,14 @@ impl Workbook {
                 }
                 if entry.tables[..i]
                     .iter()
-                    .any(|t| t.range.intersects(table.range))
+                    .any(|t| t.full_range().intersects(table.full_range()))
                 {
                     return Err("Saved tables overlap.".into());
                 }
                 // Existing tables are replaced only after validating the whole
                 // envelope; collisions against their old bounds are irrelevant.
                 if sheet.merged_regions.iter().any(|m| {
-                    table.range.intersects(TableRange {
+                    table.full_range().intersects(TableRange {
                         start_row: m.start.0,
                         start_col: m.start.1,
                         end_row: m.end.0,
@@ -1089,7 +1106,7 @@ impl Workbook {
                     .pivot_in_rect(
                         table.range.start_row,
                         table.range.start_col,
-                        table.range.end_row,
+                        table.full_range().end_row,
                         table.range.end_col,
                     )
                     .is_some()
@@ -1106,7 +1123,7 @@ impl Workbook {
                     }
                 }
                 for ((r, c), cell) in sheet.cells_iter() {
-                    if table.range.contains(r, c)
+                    if table.full_range().contains(r, c)
                         && (cell.spill_info().is_some() || cell.spill_parent().is_some())
                     {
                         return Err("Saved table overlaps an array spill.".into());

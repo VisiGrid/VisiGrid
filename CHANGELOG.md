@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
+- Imported totals use Table metadata version 5; earlier releases open these files in read-only recovery. Footer/schema editing and affected structural operations remain guarded. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning); native totals-row authoring remains future work.
+
 ## 0.45.0
 
 ### Fixed

@@ -11,6 +11,9 @@ pub enum NamedRangeResolution {
 }
 
 pub trait CellLookup {
+    /// SUBTOTAL excludes filtered records and nested subtotal formulas.
+    fn subtotal_skip_cell(&self, _sheet: &SheetRef, _row: usize, _col: usize, _ignore_hidden: bool) -> bool { false }
+
     /// Exclusive data bounds on the requested sheet. Empty lookups default
     /// to no data; real sheet lookups include formulas and spill receivers.
     fn data_bounds(&self, _sheet: &SheetRef) -> (usize, usize) { (0, 0) }
@@ -181,6 +184,7 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> LookupWithN
 }
 
 impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup for LookupWithNamedRanges<'a, L, F> {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool { self.inner.subtotal_skip_cell(sheet, row, col, ignore_hidden) }
     fn whole_column_start(&self) -> usize { self.inner.whole_column_start() }
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
 
@@ -276,6 +280,7 @@ impl<'a, L: CellLookup> LookupWithContext<'a, L> {
 }
 
 impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool { self.inner.subtotal_skip_cell(sheet, row, col, ignore_hidden) }
     fn whole_column_start(&self) -> usize { self.column_start.unwrap_or_else(|| self.inner.whole_column_start()) }
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
 
@@ -1073,6 +1078,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         super::lift::Lifted::No => args,
     };
     let result = None
+        .or_else(|| super::eval_subtotal::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_math::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_logical::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_text::try_evaluate(name, args, lookup))
