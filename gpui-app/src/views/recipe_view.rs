@@ -496,3 +496,110 @@ pub(crate) fn render_recipe_banner(app: &Spreadsheet, cx: &mut Context<Spreadshe
         .child(card)
         .into_any_element()
 }
+
+// ============================================================================
+// Confirmation before a recipe first reads its source
+// ============================================================================
+
+/// "Load data from this file?": the recipe, the exact file it would read,
+/// its size and date. Enter loads, Esc cancels; nothing is read before.
+pub(crate) fn render_recipe_confirm(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> AnyElement {
+    let Some(confirm) = app.recipe_confirm.as_ref() else {
+        return div().into_any_element();
+    };
+    let c = Colors::new(app);
+    let recipe_name = file_name(&confirm.recipe_path.display().to_string());
+    let (muted, text) = (c.muted, c.text);
+    let readable = confirm.source.is_ok();
+    let mut body = div().flex().flex_col().gap(px(6.0)).px(px(14.0)).py(px(12.0));
+    match &confirm.source {
+        Ok((file, detail)) => {
+            body = body
+                .child(div().text_size(px(12.0)).text_color(c.muted).child(format!("{recipe_name} reads")))
+                .child(div().text_size(px(13.0)).font_family("IBM Plex Mono").text_color(c.text).child(file.clone()))
+                .child(div().text_size(px(11.0)).text_color(c.muted).child(detail.clone()))
+                .child(
+                    div()
+                        .mt(px(4.0))
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .text_color(c.warn)
+                        .child("A recipe can read any file you can. Load only recipes you made or trust; this is asked once per recipe and file."),
+                );
+        }
+        Err(e) => {
+            body = body
+                .child(div().text_size(px(12.0)).text_color(c.error).child(format!("{recipe_name} can't be loaded: {e}")));
+        }
+    }
+    let card = div()
+        .id("recipe-confirm")
+        .w_full()
+        .max_w(px(600.0))
+        .bg(c.panel)
+        .border_1()
+        .border_color(c.border)
+        .rounded_md()
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(14.0))
+                .py(px(10.0))
+                .border_b_1()
+                .border_color(c.border.opacity(0.6))
+                .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(c.text).child(if readable {
+                    "Load data from this file?"
+                } else {
+                    "This recipe's source can't be read"
+                }))
+                .child(
+                    div()
+                        .id("recipe-confirm-dismiss")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(13.0))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(text))
+                        .child(key_cap("Esc", &c))
+                        .child("✕")
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.cancel_recipe_confirm(cx);
+                        })),
+                ),
+        )
+        .child(body)
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(8.0))
+                .px(px(14.0))
+                .py(px(10.0))
+                .border_t_1()
+                .border_color(c.border.opacity(0.6))
+                .child(action("recipe-confirm-cancel", "Cancel", false, &c, cx, |this, cx| this.cancel_recipe_confirm(cx)))
+                .when(readable, |d| {
+                    d.child(action("recipe-confirm-load", "Load  Ctrl+↵", true, &c, cx, |this, cx| this.approve_recipe_source(cx)))
+                }),
+        );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .pt_2()
+        .px_4()
+        .child(card)
+        .into_any_element()
+}

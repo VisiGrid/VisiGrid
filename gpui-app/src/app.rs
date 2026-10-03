@@ -833,6 +833,7 @@ pub struct Spreadsheet {
     #[allow(dead_code)]
     duckdb_key_subscription: gpui::Subscription,
     recipe_builder_key_subscription: gpui::Subscription,
+    recipe_confirm_key_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -859,6 +860,7 @@ pub struct Spreadsheet {
     pub recipe_blocked: Option<crate::recipe_ui::RecipeBlocked>,
     pub recipe_run_in_progress: bool,
     pub recipe_builder: Option<crate::recipe_builder::RecipeBuilder>,
+    pub recipe_confirm: Option<crate::recipe_ui::RecipeConfirm>,
     /// The CSV import settings dialog, while open.
     pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
     /// A CSV whose rows did not all fit, and how many were left out: no save
@@ -1215,6 +1217,7 @@ impl Spreadsheet {
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
         let duckdb_key_subscription = Self::intercept_duckdb_keys(window, cx);
         let recipe_builder_key_subscription = Self::intercept_recipe_builder_keys(window, cx);
+        let recipe_confirm_key_subscription = Self::intercept_recipe_confirm_keys(window, cx);
 
         // Coming back to the window: has the open CSV changed on disk?
         // Also pauses the copy border's animation while the window is inactive.
@@ -1478,6 +1481,7 @@ impl Spreadsheet {
             pivot_key_subscription,
             duckdb_key_subscription,
             recipe_builder_key_subscription,
+            recipe_confirm_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -1498,6 +1502,7 @@ impl Spreadsheet {
             recipe_blocked: None,
             recipe_run_in_progress: false,
             recipe_builder: None,
+            recipe_confirm: None,
             csv_dialog: None,
             csv_protected_source: None,
             csv_activation_subscription: Some(csv_activation_subscription),
