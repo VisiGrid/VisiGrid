@@ -5,6 +5,7 @@ pub mod csv_import;
 pub mod json;
 pub mod native;
 pub mod parquet;
+pub mod recipe;
 pub mod scripting;
 pub mod table_recovery;
 pub mod truth;

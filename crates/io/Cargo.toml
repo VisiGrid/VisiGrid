@@ -22,6 +22,7 @@ sha2 = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = { workspace = true }
+toml = { workspace = true }
 # Parquet import. No Arrow: the record reader is enough to fill a grid and
 # keeps several large crates out of the build. The codecs are the ones real
 # files are written with; a file using one left out fails to open with a clear
