@@ -886,6 +886,14 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
             // Function call
             if pos + 1 < tokens.len() {
                 if let Token::LParen = &tokens[pos + 1] {
+                    // Underscore-prefixed calls are the engine's internal forms
+                    // (array constants, in-place LAMBDA calls). Formula text
+                    // writes those as {...} and LAMBDA(...)(...), never by
+                    // name; a file that names one directly is refused, as an
+                    // unknown function would be.
+                    if name.starts_with('_') {
+                        return Err(format!("#NAME? Unknown function: {}", name));
+                    }
                     let (args, mut new_pos) = parse_function_args(tokens, pos + 2)?;
                     let mut call = Expr::Function { name: name.clone(), args };
                     // A LAMBDA called where it is written: LAMBDA(x, x+1)(2),
@@ -1155,7 +1163,7 @@ fn format_whole_range(
 
 /// The internal name of a call to a LAMBDA written in place,
 /// `LAMBDA(x, x+1)(2)`: args are the callee, then the call's arguments. It is
-/// never typed by a user (names cannot start with an underscore) and prints
+/// never typed by a user (the parser refuses underscore-prefixed calls) and prints
 /// back as the call it came from.
 pub const INVOKE: &str = "_INVOKE";
 

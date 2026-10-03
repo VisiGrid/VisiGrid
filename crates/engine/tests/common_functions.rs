@@ -425,3 +425,81 @@ fn array_constants_print_back_and_reject_bad_shapes() {
     assert!(eval(&[], "={1,2;3}").starts_with('#'), "ragged rows are an error");
     assert!(eval(&[], "={A1,2}").starts_with('#'), "references are not constants");
 }
+
+// --- Hardening (PR #87 review) -------------------------------------------------
+
+#[test]
+fn internal_forms_cannot_be_named_in_formula_text() {
+    // _ARRAY(100000,100000) used to allocate ten billion cells before
+    // anything checked it. Formula text can no longer name internal forms.
+    for f in ["=_ARRAY(100000,100000)", "=_ARRAY(2,2,1)", "=_INVOKE(1)", "=_LET.ERR(\"#N/A\")", "=SUM(_ARRAY(1,1,5))"] {
+        let got = eval(&[], f);
+        assert!(got.starts_with('#'), "{f} should be refused, got {got:?}");
+        assert_ne!(got, "5");
+    }
+    // Underscore names are still names (references), just not callable.
+    assert!(eval(&[], "=_foo").starts_with('#'));
+    // Array constants still work and print back as constants.
+    assert_eq!(eval(&[], "=SUM({1,2;3,4})"), "10");
+}
+
+#[test]
+fn array_constant_reprint_is_a_constant_not_the_internal_form() {
+    let mut wb = book(&[("A2", "1"), ("B2", "=SUM({1,2;3,4})+A2"), ("C2", "=LAMBDA(x,x*2)(A2)")]);
+    wb.structural_edit(0, visigrid_engine::structural::Axis::Row, 0, 1, false).unwrap();
+    for (r, c) in [(2, 1), (2, 2)] {
+        let raw = wb.active_sheet().get_raw(r, c);
+        assert!(!raw.contains('_'), "internal form leaked into stored text: {raw}");
+    }
+    assert_eq!(show(&wb, "B3"), "11");
+    assert_eq!(show(&wb, "C3"), "2");
+}
+
+#[test]
+fn exponential_lambda_chains_stop_quickly_with_calc() {
+    // Each level calls the previous one twice: 2^40 nodes if expanded.
+    let mut f = String::from("=LET(l_0,LAMBDA(x,x+x)");
+    for i in 1..=40 {
+        f.push_str(&format!(",l_{i},LAMBDA(x,l_{}(l_{}(x)))", i - 1, i - 1));
+    }
+    f.push_str(",l_40(1))");
+    let started = std::time::Instant::now();
+    let got = eval(&[], &f);
+    let took = started.elapsed();
+    assert!(got.starts_with("#CALC!"), "got {got:?}");
+    assert!(took < std::time::Duration::from_millis(100), "took {took:?}");
+}
+
+#[test]
+fn moderate_lambda_chains_still_evaluate() {
+    // l_0 doubles; each level applies the previous twice: l_3(1) = 2^8.
+    let mut f = String::from("=LET(l_0,LAMBDA(x,x+x)");
+    for i in 1..=3 {
+        f.push_str(&format!(",l_{i},LAMBDA(x,l_{}(l_{}(x)))", i - 1, i - 1));
+    }
+    f.push_str(",l_3(1))");
+    assert_eq!(eval(&[], &f), "256");
+    assert_eq!(eval(&[], "=LET(a,LAMBDA(x,x+1),b,LAMBDA(x,a(a(x))),c,LAMBDA(x,b(b(x))),c(0))"), "4");
+}
+
+#[test]
+fn lambda_arguments_are_evaluated_in_the_callers_scope() {
+    // Excel: 11. The argument x is the defined name, not the parameter x.
+    let mut wb = book(&[("A1", "10")]);
+    wb.define_name_for_cell("X", 0, 0, 0).unwrap();
+    wb.set_cell_value_tracked(0, 0, 25, "=LET(f,LAMBDA(x,y,x+y),f(1,x))");
+    assert_eq!(show(&wb, "Z1"), "11");
+    // The same through LET names and in-place calls.
+    assert_eq!(eval(&[], "=LET(x,10,f,LAMBDA(x,y,x+y),f(1,x))"), "11");
+    assert_eq!(eval(&[], "=LET(y,5,LAMBDA(x,y,x*y)(y,2))"), "10");
+    assert_eq!(eval(&[], "=LET(x,7,LAMBDA(x,LAMBDA(y,x+y))(1)(x))"), "8");
+}
+
+
+#[test]
+fn large_bound_values_do_not_count_against_the_expansion_limit() {
+    // A bound value is held by handle, not inlined, however large.
+    assert_eq!(eval(&[], "=LET(s,SEQUENCE(200000),SUM(s)+SUM(s))"), "40000200000");
+    assert_eq!(eval(&[], "=LET(s,SEQUENCE(50000),f,LAMBDA(v,SUM(v)),f(s))"), "1250025000");
+    assert_eq!(eval(&[], "=LET(e,1/0,IFERROR(e,\"ok\"))"), "ok");
+}
