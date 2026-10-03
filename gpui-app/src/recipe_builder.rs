@@ -238,7 +238,12 @@ pub fn cli_line(recipe_path: Option<&Path>, source_path: &Path) -> String {
             format!("'{}'", s.replace('\'', "'\\''"))
         }
     };
-    format!("vgrid recipe run {} -o {}", quote(&name), quote(&format!("{stem}.csv")))
+    // Never suggest writing over the file the recipe reads
+    let mut out = format!("{stem}.csv");
+    if source_path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(&out)) {
+        out = format!("{stem}-clean.csv");
+    }
+    format!("vgrid recipe run {} -o {}", quote(&name), quote(&out))
 }
 
 /// `export-2026-09.csv` -> `export-2026-09.recipe.toml`.
@@ -625,7 +630,7 @@ impl RecipeBuilder {
                 let file = self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if self.recipe.source_is_pattern() {
                     let pattern = Path::new(&src.path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-                    (format!("Newest {pattern}"), format!("Picks up next month's export by itself. Now: {file}."))
+                    ("Newest match".into(), format!("The newest {pattern}, so next month's export is picked up by itself. Now: {file}."))
                 } else {
                     match recipe::suggest_pattern(file) {
                         Some(p) => ("This file only".into(), format!("Or the newest file like {p}.")),
@@ -747,7 +752,13 @@ impl Spreadsheet {
                 _ => "utf-16".into(),
             });
             src.decimal_comma = o.decimal_comma;
-            src.header_row = if o.no_header { 0 } else { 1 };
+            // The import dialog has no header-line setting: guess it, so an
+            // export with title lines above its table starts out right
+            src.header_row = if o.no_header {
+                0
+            } else {
+                Snapshot::read(&csv_path).map_or(1, |snap| recipe::guess_header_row(&snap))
+            };
             let types: BTreeMap<String, String> = o
                 .columns
                 .iter()
@@ -774,6 +785,7 @@ impl Spreadsheet {
             src.header_row = recipe::guess_header_row(&snap);
         }
         let recipe = Recipe { version: RECIPE_VERSION, source: Source::Csv(src), steps };
+        self.dismiss_csv_banner(cx);
         self.recipe_builder = Some(RecipeBuilder::new(recipe, None, csv_path, None));
         if let Some(b) = self.recipe_builder.as_mut() {
             b.dirty = true;
@@ -1177,5 +1189,6 @@ mod tests {
         assert_eq!(stored_source_path(Path::new("/d/x.csv"), Some(Path::new("/d"))), "x.csv");
         assert_eq!(stored_source_path(Path::new("/e/x.csv"), Some(Path::new("/d"))), "/e/x.csv");
         assert_eq!(cli_line(Some(Path::new("/d/my orders.recipe.toml")), Path::new("x.csv")), "vgrid recipe run 'my orders.recipe.toml' -o 'my orders.csv'");
+        assert_eq!(cli_line(None, Path::new("/d/export-09.csv")), "vgrid recipe run export-09.recipe.toml -o export-09-clean.csv");
     }
 }
