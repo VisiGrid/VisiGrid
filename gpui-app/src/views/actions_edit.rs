@@ -303,6 +303,10 @@ pub(crate) fn bind(
                 this.apply_review_if_ready(window, cx);
                 return;
             }
+            // Recipe banner: Enter takes its suggested fix ("Use Order Number")
+            if this.mode == Mode::Navigation && this.open_menu.is_none() && this.recipe_primary_fix(cx) {
+                return;
+            }
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);
@@ -411,6 +415,11 @@ pub(crate) fn bind(
             // Import overlay takes priority - dismiss it but let import continue
             if this.import_overlay_visible {
                 this.dismiss_import_overlay(cx);
+                return;
+            }
+            // Recipe banner: Esc closes it; the Table keeps its last result
+            if this.open_menu.is_none() && this.mode == Mode::Navigation && this.recipe_blocked.is_some() {
+                this.dismiss_recipe_blocked(cx);
                 return;
             }
             // CSV banner: Esc backs out of the review step, then closes it

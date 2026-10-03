@@ -39,11 +39,23 @@ impl PeekData {
 
     /// Compute column widths by scanning up to `scan_rows` data rows (0 = all).
     /// Always includes the header names in the scan.
-    pub(crate) fn compute_widths(col_names: &[String], rows: &[Vec<String>], num_cols: usize, scan_rows: usize) -> Vec<usize> {
-        let scan_limit = if scan_rows == 0 { rows.len() } else { scan_rows.min(rows.len()) };
+    pub(crate) fn compute_widths(
+        col_names: &[String],
+        rows: &[Vec<String>],
+        num_cols: usize,
+        scan_rows: usize,
+    ) -> Vec<usize> {
+        let scan_limit = if scan_rows == 0 {
+            rows.len()
+        } else {
+            scan_rows.min(rows.len())
+        };
         (0..num_cols)
             .map(|c| {
-                let header_w = col_names.get(c).map(|s| util::display_width(s)).unwrap_or(0);
+                let header_w = col_names
+                    .get(c)
+                    .map(|s| util::display_width(s))
+                    .unwrap_or(0);
                 let max_cell = rows[..scan_limit]
                     .iter()
                     .map(|row| row.get(c).map(|s| util::display_width(s)).unwrap_or(0))
@@ -166,7 +178,9 @@ pub fn load_csv(
 /// looks like data: an empty or numeric/date-like cell, two cells with the same
 /// text, or a value that recurs further down its own column.
 pub fn looks_like_header(rows: &[Vec<String>]) -> bool {
-    let Some((first, rest)) = rows.split_first() else { return false };
+    let Some((first, rest)) = rows.split_first() else {
+        return false;
+    };
     if rest.is_empty() || first.is_empty() {
         return false;
     }
@@ -177,14 +191,18 @@ pub fn looks_like_header(rows: &[Vec<String>]) -> bool {
             return false;
         }
         let lead = t.trim_start_matches(['-', '+', '$', '(', '€', '£']);
-        if lead.starts_with(|c: char| c.is_ascii_digit()) || matches!(t.to_lowercase().as_str(), "true" | "false") {
+        if lead.starts_with(|c: char| c.is_ascii_digit())
+            || matches!(t.to_lowercase().as_str(), "true" | "false")
+        {
             return false;
         }
     }
     let sample = &rest[..rest.len().min(200)];
     !first.iter().enumerate().any(|(c, cell)| {
         let t = cell.trim();
-        sample.iter().any(|row| row.get(c).is_some_and(|v| v.trim().eq_ignore_ascii_case(t)))
+        sample
+            .iter()
+            .any(|row| row.get(c).is_some_and(|v| v.trim().eq_ignore_ascii_case(t)))
     })
 }
 
@@ -215,42 +233,107 @@ pub fn load_parquet(
         limit,
         if force { None } else { Some(PEEK_CELL_CAP) },
     )?;
+    table_preview(imported, max_rows, force, width_scan_rows, json)
+}
+
+/// Bounded, read-only previews of database tables, with one aggregate cell budget.
+pub fn load_duckdb(
+    path: &Path,
+    selection: Option<&str>,
+    max_rows: usize,
+    force: bool,
+    width_scan_rows: usize,
+    json: bool,
+) -> Result<Vec<SheetData>, String> {
+    let db = visigrid_io::duckdb::Database::open(path)?;
+    let indices = match selection {
+        Some(name) => vec![db.resolve(name)?],
+        None => (0..db.tables().len()).collect(),
+    };
+    let limit = if max_rows == 0 {
+        if force {
+            usize::MAX
+        } else {
+            crate::PEEK_FORCE_CAP + 1
+        }
+    } else {
+        max_rows
+    };
+    let mut budget = PEEK_CELL_CAP;
+    let mut sheets = Vec::new();
+    for index in indices {
+        let imported =
+            db.read_table(index, limit, if force { None } else { Some(budget) }, false)?;
+        budget =
+            budget.saturating_sub((imported.rows_loaded + 1).saturating_mul(imported.cols_loaded));
+        sheets.push(SheetData {
+            name: db.tables()[index].name.clone(),
+            data: table_preview(imported, max_rows, force, width_scan_rows, json)?,
+        });
+    }
+    Ok(sheets)
+}
+
+fn table_preview(
+    imported: visigrid_io::parquet::ParquetImport,
+    max_rows: usize,
+    force: bool,
+    width_scan_rows: usize,
+    json: bool,
+) -> Result<PeekData, String> {
     if max_rows == 0 && !force && imported.total_rows > crate::PEEK_FORCE_CAP as u64 {
-        return Err("Parquet file has >200k rows; use --max-rows to preview fewer rows or --force to override".into());
+        return Err(
+            "Table has >200k rows; use --max-rows to preview fewer rows or --force to override"
+                .into(),
+        );
     }
     if imported.cols_loaded < imported.total_cols {
         return Err(format!(
-            "Parquet file has {} columns; peek supports at most {} (select fewer columns first)",
+            "Table has {} columns; peek supports at most {} (select fewer columns first)",
             imported.total_cols, imported.cols_loaded,
         ));
     }
     let total = usize::try_from(imported.total_rows)
-        .map_err(|_| "Parquet row count exceeds this platform's capacity")?;
+        .map_err(|_| "Table row count exceeds this platform's capacity")?;
     let num_rows = imported.rows_loaded;
     let num_cols = imported.cols_loaded;
     let col_names: Vec<String> = (0..num_cols)
         .map(|c| imported.sheet.get_display(0, c))
         .collect();
     let rows: Vec<Vec<String>> = (1..=num_rows)
-        .map(|r| (0..num_cols).map(|c| imported.sheet.get_interchange_display(r, c)).collect())
+        .map(|r| {
+            (0..num_cols)
+                .map(|c| imported.sheet.get_interchange_display(r, c))
+                .collect()
+        })
         .collect();
     let json_rows = if json {
-        Some((1..=num_rows).map(|r| {
-            (0..num_cols).map(|c| {
-                if imported.sheet.get_cell_opt(r, c).is_none_or(|cell| cell.value().is_empty()) {
-                    serde_json::Value::Null
-                } else {
-                    let value = crate::convert::cell_json_value(&imported.sheet, r, c);
-                    // Temporal values are numbers in the engine, but their
-                    // interchange representation is an ISO date/time string.
-                    if value.is_number() {
-                        crate::convert::string_to_json_value(&rows[r - 1][c])
-                    } else {
-                        value
-                    }
-                }
-            }).collect()
-        }).collect())
+        Some(
+            (1..=num_rows)
+                .map(|r| {
+                    (0..num_cols)
+                        .map(|c| {
+                            if imported
+                                .sheet
+                                .get_cell_opt(r, c)
+                                .is_none_or(|cell| cell.value().is_empty())
+                            {
+                                serde_json::Value::Null
+                            } else {
+                                let value = crate::convert::cell_json_value(&imported.sheet, r, c);
+                                // Temporal values are numbers in the engine, but their
+                                // interchange representation is an ISO date/time string.
+                                if value.is_number() {
+                                    crate::convert::string_to_json_value(&rows[r - 1][c])
+                                } else {
+                                    value
+                                }
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
     } else {
         None
     };
@@ -623,18 +706,51 @@ mod tests {
 
     #[test]
     fn header_detection() {
-        let rows = |v: &[&[&str]]| v.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect::<Vec<Vec<String>>>();
+        let rows = |v: &[&[&str]]| {
+            v.iter()
+                .map(|r| r.iter().map(|s| s.to_string()).collect())
+                .collect::<Vec<Vec<String>>>()
+        };
         // Typical header over mixed data, and over all-text data.
-        assert!(looks_like_header(&rows(&[&["Region", "Amount"], &["West", "10"], &["East", "5"]])));
-        assert!(looks_like_header(&rows(&[&["Name", "City"], &["Ann", "Paris"], &["Bo", "Rome"]])));
+        assert!(looks_like_header(&rows(&[
+            &["Region", "Amount"],
+            &["West", "10"],
+            &["East", "5"]
+        ])));
+        assert!(looks_like_header(&rows(&[
+            &["Name", "City"],
+            &["Ann", "Paris"],
+            &["Bo", "Rome"]
+        ])));
         // First row that looks like data.
-        assert!(!looks_like_header(&rows(&[&["West", "10"], &["East", "5"]])), "numeric cell");
-        assert!(!looks_like_header(&rows(&[&["2026-01-02", "x"], &["2026-01-03", "y"]])), "date cell");
-        assert!(!looks_like_header(&rows(&[&["West", ""], &["East", "a"]])), "empty cell");
-        assert!(!looks_like_header(&rows(&[&["West", "West"], &["East", "a"]])), "duplicate cells");
-        assert!(!looks_like_header(&rows(&[&["West", "Ann"], &["East", "Bo"], &["West", "Cy"]])), "value recurs below");
-        assert!(!looks_like_header(&rows(&[&["only", "row"]])), "a lone row is data");
-        assert!(!looks_like_header(&rows(&[&["TRUE", "x"], &["FALSE", "y"]])), "boolean cell");
+        assert!(
+            !looks_like_header(&rows(&[&["West", "10"], &["East", "5"]])),
+            "numeric cell"
+        );
+        assert!(
+            !looks_like_header(&rows(&[&["2026-01-02", "x"], &["2026-01-03", "y"]])),
+            "date cell"
+        );
+        assert!(
+            !looks_like_header(&rows(&[&["West", ""], &["East", "a"]])),
+            "empty cell"
+        );
+        assert!(
+            !looks_like_header(&rows(&[&["West", "West"], &["East", "a"]])),
+            "duplicate cells"
+        );
+        assert!(
+            !looks_like_header(&rows(&[&["West", "Ann"], &["East", "Bo"], &["West", "Cy"]])),
+            "value recurs below"
+        );
+        assert!(
+            !looks_like_header(&rows(&[&["only", "row"]])),
+            "a lone row is data"
+        );
+        assert!(
+            !looks_like_header(&rows(&[&["TRUE", "x"], &["FALSE", "y"]])),
+            "boolean cell"
+        );
     }
 
     #[test]

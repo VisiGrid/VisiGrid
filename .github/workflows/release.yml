@@ -20,6 +20,8 @@ env:
   # worse than the ambiguity it replaces. This workflow only runs on a tag
   # push, so ref_name is that tag.
   VGRID_RELEASE_TAG: ${{ github.ref_name }}
+  # Bound the memory used by bundled DuckDB C++ compilation.
+  CARGO_BUILD_JOBS: 2
 
 jobs:
   build-linux:
@@ -50,8 +52,7 @@ jobs:
 
       - name: Build release
         run: |
-          cargo build --release -p visigrid-gpui
-          cargo build --release -p visigrid-cli
+          cargo build --release -p visigrid-gpui -p visigrid-cli
 
       - name: Get version
         id: version
@@ -142,8 +143,7 @@ jobs:
 
       - name: Build release
         run: |
-          cargo build --release -p visigrid-gpui
-          cargo build --release -p visigrid-cli
+          cargo build --release -p visigrid-gpui -p visigrid-cli
 
       - name: Create tarball
         run: |
@@ -348,13 +348,11 @@ jobs:
       - name: Build universal binary
         run: |
           # Build aarch64 (native) first
-          cargo build --release --target aarch64-apple-darwin -p visigrid-gpui
-          cargo build --release --target aarch64-apple-darwin -p visigrid-cli
+          cargo build --release --target aarch64-apple-darwin -p visigrid-gpui -p visigrid-cli
 
           # ssh2's vendored-openssl feature builds a static target-architecture
           # OpenSSL, so the Intel cross-build needs no Homebrew installation.
-          cargo build --release --target x86_64-apple-darwin -p visigrid-gpui
-          cargo build --release --target x86_64-apple-darwin -p visigrid-cli
+          cargo build --release --target x86_64-apple-darwin -p visigrid-gpui -p visigrid-cli
 
           mkdir -p dist/universal
           lipo -create \

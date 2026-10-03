@@ -2,9 +2,13 @@
 
 pub mod csv;
 pub mod csv_import;
+pub mod duckdb;
 pub mod json;
 pub mod native;
 pub mod parquet;
+pub mod parquet_export;
+pub mod recipe;
+pub mod recipe_table;
 pub mod scripting;
 pub mod table_recovery;
 pub mod truth;

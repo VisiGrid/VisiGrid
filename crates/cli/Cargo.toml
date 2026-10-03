@@ -10,6 +10,7 @@ name = "vgrid"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3"
 visigrid-engine = { path = "../engine" }
 visigrid-io = { path = "../io" }
 visigrid-config = { path = "../config" }
@@ -73,5 +74,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 proptest = "1"
-tempfile = "3"
 httpmock = "0.8"

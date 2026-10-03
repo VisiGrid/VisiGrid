@@ -26,6 +26,7 @@ Run from `visigrid/app`:
 
 ```bash
 cargo run -p visigrid-cli -- peek crates/cli/tests/fixtures/parquet_orders.parquet
+cargo run -p visigrid-cli -- peek warehouse.duckdb --sheet main.orders
 cargo run -p visigrid-cli -- peek data.parquet --shape
 cargo run -p visigrid-cli -- peek data.parquet --json --max-rows 100
 cargo run -p visigrid-cli -- peek report.xlsx --sheet Summary --recompute
@@ -35,37 +36,6 @@ An interactive terminal starts the TUI automatically. Redirected output uses
 a plain table. `--plain` forces a table; `--tui` requires terminal input/output.
 Arrow keys or hjkl navigate, PgUp/PgDn page, g/G jump to first/last loaded row,
 Tab switches workbook sheets, `?` opens help, and q exits.
-
-Finding and summarizing (added after 0.40.0) work on the loaded rows:
-
-- `/` searches every cell (case-insensitive); `n`/`N` step through matches,
-  which are highlighted.
-- `[` / `]` sort by the cursor column, ascending or descending. Numbers sort
-  by value (`1,200`, `$5`, `(5)` included), text case-insensitively, blanks
-  last. Sorts are stable, so sort by the tiebreak first. `R` restores file
-  order. Row numbers stay file row numbers.
-- `F` opens the cursor column's frequency table as a new tab.
-- `P` opens a pivot prompt, prefilled from the cursor column:
-  `rows=Region column=Month values=sum:Amount`. The result opens as a tab,
-  computed by the desktop's pivot engine. Without a header row (CSV opened
-  without `--headers`) the first row supplies the field names.
-- `=` adds a column computed by the spreadsheet engine from an Excel formula
-  written for the first data row and filled down (relative references move,
-  `$` anchors stay): `=D2*1.08`, `Tax =[Amount]*0.1` (named, with a header
-  reference), `=IF([Amount]>2500,"high","normal")`. Row numbers are the
-  gutter's file row numbers, so with a header row the first data row is 2.
-  Values show to 15 significant digits; error cells show the error. The new
-  column sorts, searches, and feeds `F` and `P` like any other.
-- On a derived tab, `q` returns to the tab it came from, and every tab keeps
-  its own cursor.
-
-Delimited text detects a header row: the first row is data when it has an
-empty or numeric/date-like cell, repeats itself, or recurs further down a
-column; otherwise it names the columns. `--headers` / `--no-headers` override.
-
-When the preview is truncated, derived tab names say "(loaded rows)". For a
-whole-file answer use `vgrid pivot FILE`, which refuses truncated Parquet
-rather than summarizing part of it.
 
 ## Current parity
 
@@ -78,11 +48,11 @@ rather than summarizing part of it.
 | Document settings | Desktop loads sidecar calculation/layout settings | Peek loaders do not apply desktop sidecars |
 | Number/date formats | Desktop cell formats | Parquet dates/times use ISO; workbook previews still use raw display values |
 | Formatting, comments, merged cells, charts | Desktop rendering | Display strings only; no visual parity |
-| Find/go-to, sort/filter | Desktop actions | Find (`/`, `n`/`N`) and single-column sort over loaded rows; no filter or go-to |
-| Pivot tables | Field-list drawer, linked to source | `P` pivot and `F` frequency tabs (read-only, loaded rows); `vgrid pivot` for files and sessions |
+| Search, sort, frequency, pivot, computed column | Desktop actions | Loaded rows only: `/` searches, `n`/`N` repeat, `[` `]` sort, `F` frequency, `P` pivot, `=` adds a formula column. No go-to-cell and no filter of the whole file |
 | Range selection, clipboard, fill | Desktop selection semantics | Single-cell navigation only |
 | Editing, formula entry, undo/redo, save | Supported | Not implemented |
-| `.duckdb`, SQL table/query browsing | Not implemented | Not implemented |
+| `.duckdb` files | Base tables become worksheet tabs | Bounded table previews, tab switching, `--sheet` selection |
+| Arbitrary SQL / live database connections | Not implemented | Not implemented |
 | Large-file access | Imported into the workbook | Bounded snapshot; no fetching more rows while scrolling |
 
 The broader CLI already has evaluation, conversion, inspection, and scripted
@@ -93,7 +63,8 @@ workbook operations. Those commands do not imply interactive TUI editing.
 - Default: 5,000 rows per sheet. `--max-rows 0` requests all rows; above 200,000
   rows this requires `--force`. Positive explicit limits bypass that row guard.
 - Workbook and Parquet preview grids have a 10-million-cell guard unless
-  `--force` is supplied. This is per sheet, not a total memory budget.
+  `--force` is supplied. This is per sheet, not a total memory budget. DuckDB
+  previews apply the 10-million-cell budget across all selected tables.
 - Parquet currently passes through the spreadsheet engine: at most 1,048,575
   data records plus its header, and 16,384 columns. `--force` cannot remove
   engine limits. Oversized columns are refused by peek; row truncation is shown.
@@ -111,10 +82,11 @@ workbook operations. Those commands do not imply interactive TUI editing.
 
 ## Recommended next steps
 
-1. **Data inspection first:** add find/next, go-to row or column, full-cell
-   inspection, formatted workbook values, column selection, and copy/export
-   selection. Keep typed export values separate from display formatting. Clearly label
-   operations that only cover loaded preview rows.
+1. **Data inspection still open:** go-to a row or column, full-cell inspection,
+   formatted workbook values, column selection, and copy. Search, sort,
+   frequency, pivot, and computed columns already cover loaded rows. Keep typed
+   export values separate from display formatting, and label operations that
+   only cover the loaded preview.
 2. **Shared data-source layer:** provide schema, typed values, row counts,
    cancellable page reads, and query results independent of `Sheet`. Use this
    in the desktop, CLI, and TUI to avoid repeating format dispatch and caps.

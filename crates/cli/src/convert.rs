@@ -144,7 +144,15 @@ pub(crate) fn cmd_convert(
     rename: Option<String>,
     quiet: bool,
     csv: &visigrid_io::csv::CsvOptions,
+    parquet_plan: bool,
+    text_columns: Vec<String>,
 ) -> Result<(), CliError> {
+    if (parquet_plan || !text_columns.is_empty()) && !matches!(to, Format::Parquet | Format::Duckdb) {
+        return Err(CliError::args("--export-plan and --text-column require -t parquet or -t duckdb"));
+    }
+    if parquet_plan && output.is_some() {
+        return Err(CliError::args("--parquet-plan writes JSON to stdout; omit --output"));
+    }
 
     // Validate --where requires --headers
     if !where_clauses.is_empty() && !headers {
@@ -180,9 +188,9 @@ pub(crate) fn cmd_convert(
     };
 
     // Validate --sheet is only used with multi-sheet formats
-    if sheet_arg.is_some() && !matches!(input_format, Format::Xlsx | Format::Sheet | Format::JsonFull) {
+    if sheet_arg.is_some() && !matches!(input_format, Format::Xlsx | Format::Sheet | Format::JsonFull | Format::Duckdb) {
         return Err(CliError::args("--sheet is not supported for single-sheet formats")
-            .with_hint("--sheet works with .sheet, .xlsx, and json-full inputs"));
+            .with_hint("--sheet works with .sheet, .xlsx, .duckdb, and json-full inputs"));
     }
 
     // ── Full-fidelity path: keep the whole workbook, never collapse ──
@@ -205,10 +213,11 @@ pub(crate) fn cmd_convert(
 
     let workbook_in = matches!(
         input_format,
-        Format::JsonFull | Format::Xlsx | Format::Sheet
+        Format::JsonFull | Format::Xlsx | Format::Sheet | Format::Duckdb
     );
 
-    if !reshaping && workbook_in && matches!(to, Format::JsonFull | Format::Xlsx) {
+    if !reshaping && workbook_in && (matches!(to, Format::JsonFull | Format::Xlsx)
+        || (matches!(input_format, Format::Duckdb) && matches!(to, Format::Sheet))) {
         let (wb, layouts, active) = read_workbook_full(input.as_deref(), input_format)?;
 
         match to {
@@ -249,6 +258,10 @@ pub(crate) fn cmd_convert(
                     }
                 }
             }
+            Format::Sheet => {
+                let path = output.as_ref().ok_or_else(|| CliError::args("sheet output requires -o FILE"))?;
+                visigrid_io::native::save_workbook(&wb, path).map_err(CliError::io)?;
+            }
             _ => unreachable!("guarded by the matches! above"),
         }
 
@@ -263,6 +276,11 @@ pub(crate) fn cmd_convert(
     // Read input into sheet (convert always starts at A1)
     let mut sheet = match &input {
         Some(path) => read_file(path, input_format, csv, sheet_arg.as_deref())?,
+        None if matches!(input_format, Format::JsonFull) && matches!(to, Format::Parquet | Format::Duckdb) => {
+            let (workbook, _, active) = read_workbook_full(None, input_format)?;
+            let index = if sheet_arg.is_some() { resolve_sheet(&workbook, sheet_arg.as_deref())?.0 } else { active };
+            workbook.into_sheets().swap_remove(index)
+        }
         None => read_stdin(input_format, delimiter, csv, 0, 0)?,
     };
 
@@ -350,6 +368,60 @@ pub(crate) fn cmd_convert(
     if matches!(to, Format::JsonFull) && (row_filter.is_some() || col_filter.is_some()) {
         return Err(CliError::args("--where/--select are not supported with -t json-full")
             .with_hint("filter to csv/json first, or export the full sheet"));
+    }
+
+    if matches!(to, Format::Parquet | Format::Duckdb) {
+        use visigrid_io::parquet_export::{self, Column};
+        let mut columns: Vec<Column> = match &col_filter {
+            Some(cols) => cols.iter().map(|(index, name)| Column { index: *index, name: name.clone(), as_text: false }).collect(),
+            None => (0..bounds_cols).map(|index| Column {
+                index, name: if headers { canonical_headers[index].clone() } else { parquet_export::column_name(index) }, as_text: false,
+            }).collect(),
+        };
+        for name in text_columns {
+            let column = columns.iter_mut().find(|c| c.name.to_lowercase() == name.trim().to_lowercase())
+                .ok_or_else(|| CliError::args(format!("unknown output column in --text-column: {name:?}")))?;
+            column.as_text = true;
+        }
+        let rows = row_filter.unwrap_or_else(|| (if headers { header_row + 1 } else { 0 }..bounds_rows).collect());
+        let plan = parquet_export::analyze(&sheet, rows, columns).map_err(CliError::format)?;
+        if parquet_plan {
+            serde_json::to_writer(io::stdout(), plan.report()).map_err(|e| CliError::io(e.to_string()))?;
+            println!();
+            return Ok(());
+        }
+        if let Some(error) = plan.validation_error() {
+            return Err(CliError::format(error).with_hint("inspect with --parquet-plan; resolve mixed columns with --text-column NAME"));
+        }
+        if !quiet {
+            for col in &plan.report().columns {
+                for warning in &col.warnings { eprintln!("note: {:?}: {}", col.name, warning); }
+            }
+        }
+        if matches!(to, Format::Duckdb) {
+            let path = output.ok_or_else(|| CliError::args("DuckDB export requires -o NEW_FILE.duckdb"))?;
+            if path.as_os_str() == "-" {
+                return Err(CliError::args("DuckDB export requires a named file; stdout is not supported"));
+            }
+            visigrid_io::duckdb::export(&plan, &path).map_err(CliError::io)?;
+            return Ok(());
+        }
+        match output {
+            Some(path) => plan.write_path(&path).map_err(CliError::io)?,
+            None => {
+                use std::io::IsTerminal;
+                if io::stdout().is_terminal() {
+                    return Err(CliError::args("Parquet is binary; use -o FILE or pipe stdout"));
+                }
+                // Spool first so writer errors cannot leave a partial stdout file.
+                let mut temp = tempfile::tempfile().map_err(|e| CliError::io(e.to_string()))?;
+                plan.write(&mut temp).map_err(CliError::io)?;
+                use std::io::Seek;
+                temp.rewind().map_err(|e| CliError::io(e.to_string()))?;
+                io::copy(&mut temp, &mut io::stdout()).map_err(|e| CliError::io(e.to_string()))?;
+            }
+        }
+        return Ok(());
     }
 
     // Binary spreadsheet outputs: full fidelity (formulas, formats) when
@@ -467,10 +539,11 @@ pub(crate) fn infer_inspect_format(path: &PathBuf) -> Result<InspectFormat, CliE
         Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => Ok(InspectFormat::Xlsx),
         Some("sheet") => Ok(InspectFormat::Sheet),
         Some("parquet") => Ok(InspectFormat::Parquet),
+        Some("duckdb") => Ok(InspectFormat::Duckdb),
         _ => Err(CliError::args(format!(
             "cannot infer inspect format from extension {:?}",
             ext.as_deref().unwrap_or("(none)")
-        )).with_hint("supported: .sheet, .xlsx, .xls, .xlsb, .ods, .csv, .tsv, .parquet (or use --format)")),
+        )).with_hint("supported: .sheet, .xlsx, .xls, .xlsb, .ods, .csv, .tsv, .parquet, .duckdb (or use --format)")),
     }
 }
 
@@ -487,10 +560,11 @@ pub(crate) fn infer_format(path: &PathBuf) -> Result<Format, CliError> {
         Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => Ok(Format::Xlsx),
         Some("sheet") => Ok(Format::Sheet),
         Some("parquet") => Ok(Format::Parquet),
+        Some("duckdb") => Ok(Format::Duckdb),
         _ => Err(CliError::args(format!(
             "cannot infer format from extension {:?}",
             ext.as_deref().unwrap_or("(none)")
-        )).with_hint("use --from with one of: csv, tsv, json, xlsx, sheet, parquet")),
+        )).with_hint("use --from with one of: csv, tsv, json, xlsx, sheet, parquet, duckdb")),
     }
 }
 
@@ -529,6 +603,12 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::
             visigrid_io::csv::import_report(path, &tsv).map(|r| r.sheet).map_err(CliError::parse)
         }
         Format::Parquet => read_parquet_whole(path),
+        Format::Duckdb => {
+            let db = visigrid_io::duckdb::Database::open(path).map_err(CliError::parse)?;
+            let index = sheet_arg.map(|s| db.resolve(s)).transpose().map_err(CliError::args)?.unwrap_or(0);
+            Ok(db.read_table(index, visigrid_io::parquet::MAX_ROWS - 1,
+                Some(visigrid_io::duckdb::IMPORT_CELL_LIMIT), true).map_err(CliError::parse)?.sheet)
+        }
         Format::Xlsx => {
             let (workbook, _stats) = visigrid_io::xlsx::import(path)
                 .map_err(CliError::parse)?;
@@ -581,6 +661,12 @@ fn read_workbook_full(
     CliError,
 > {
     match format {
+        Format::Duckdb => {
+            let path = input.ok_or_else(|| CliError::args("DuckDB requires file input"))?;
+            let wb = visigrid_io::duckdb::import(path, None).map_err(CliError::parse)?;
+            let layouts = pad_layouts(Vec::new(), wb.sheet_count());
+            Ok((wb, layouts, 0))
+        }
         Format::JsonFull => {
             let content = match input {
                 Some(path) => std::fs::read_to_string(path)
@@ -711,8 +797,8 @@ pub(crate) fn read_stdin(format: Format, delimiter: char, csv: &visigrid_io::csv
         Format::Json => parse_json(&input, into_row, into_col),
         Format::JsonFull => visigrid_io::json::import_full(&input).map_err(CliError::io),
         Format::Lines => parse_lines(&input, into_row, into_col),
-        Format::Xlsx | Format::Sheet | Format::Parquet => {
-            Err(CliError::args("xlsx, sheet and parquet formats require file input"))
+        Format::Xlsx | Format::Sheet | Format::Parquet | Format::Duckdb => {
+            Err(CliError::args("xlsx, sheet, parquet and duckdb formats require file input"))
         }
     }
 }
@@ -835,8 +921,7 @@ pub(crate) fn write_format(
             .with_hint("this is a bug — please report it")),
         Format::Sheet => Err(CliError::format("sheet format cannot be written to stdout")
             .with_hint("use -o output.sheet to write to a file")),
-        Format::Parquet => Err(CliError::format("parquet output is not supported")
-            .with_hint("parquet is read-only; convert to csv, json, xlsx or sheet")),
+        Format::Parquet | Format::Duckdb => Err(CliError::format("Typed table output requires the typed export path")),
     }
 }
 

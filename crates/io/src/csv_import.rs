@@ -470,7 +470,7 @@ pub(crate) fn keep_as_text(field: &str, evaluate_formulas: bool) -> Option<KeepT
 
 /// A number read with a decimal comma: 1.234,56 → 1234.56, 1,5 → 1.5,
 /// -1.234 → -1234. None if the text is not shaped like one.
-fn parse_decimal_comma(s: &str) -> Option<f64> {
+pub(crate) fn parse_decimal_comma(s: &str) -> Option<f64> {
     let t = s.trim();
     let (neg, body) = match t.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -504,7 +504,7 @@ fn parse_decimal_comma(s: &str) -> Option<f64> {
 /// A number a Number column accepts: plain, signed, decimal, E notation, with
 /// thousands separators; respecting the decimal mark. Leading zeros are fine
 /// here — the user chose Number.
-fn parse_number(s: &str, decimal_comma: bool) -> Option<f64> {
+pub(crate) fn parse_number(s: &str, decimal_comma: bool) -> Option<f64> {
     if decimal_comma {
         return parse_decimal_comma(s);
     }
@@ -514,7 +514,7 @@ fn parse_number(s: &str, decimal_comma: bool) -> Option<f64> {
 
 /// A date in the given order, with -, / or . between parts; ISO is always
 /// accepted. Returns the date serial.
-fn parse_date(s: &str, order: DateOrder) -> Option<f64> {
+pub(crate) fn parse_date(s: &str, order: DateOrder) -> Option<f64> {
     let t = s.trim();
     let parts: Vec<&str> = t.split(['-', '/', '.']).collect();
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
