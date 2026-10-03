@@ -304,6 +304,95 @@ impl Recipe {
         Recipe::from_toml(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// The source renamed column `old` to `new`: point every step that reads
+    /// the source's `old` at `new`, and record `new` in the saved column
+    /// list. Steps after one that renames `old` away, or that creates a new
+    /// column called `old`, refer to that column and are left alone. Returns
+    /// whether anything changed.
+    pub fn rename_source_column(&mut self, old: &str, new: &str) -> bool {
+        let same = |a: &str| a.eq_ignore_ascii_case(old);
+        let mut changed = false;
+        let Source::Csv(src) = &mut self.source;
+        for c in &mut src.columns {
+            if same(c) {
+                *c = new.to_string();
+                changed = true;
+            }
+        }
+        for step in &mut self.steps {
+            let swap = |names: &mut Vec<String>, changed: &mut bool| {
+                for n in names.iter_mut() {
+                    if same(n) {
+                        *n = new.to_string();
+                        *changed = true;
+                    }
+                }
+            };
+            let swap_keys = |map: &mut BTreeMap<String, String>, changed: &mut bool| {
+                if let Some(key) = map.keys().find(|k| same(k)).cloned() {
+                    let v = map.remove(&key).unwrap();
+                    map.insert(new.to_string(), v);
+                    *changed = true;
+                }
+            };
+            match step {
+                Step::Select { columns, .. } => {
+                    swap(columns, &mut changed);
+                }
+                Step::Trim { columns, .. } | Step::Dedupe { columns, .. } => swap(columns, &mut changed),
+                Step::Types { columns, .. } => swap_keys(columns, &mut changed),
+                Step::Filter { column, .. } => {
+                    if same(column) {
+                        *column = new.to_string();
+                        changed = true;
+                    }
+                }
+                Step::Remove { columns, .. } => {
+                    let gone = columns.iter().any(|c| same(c));
+                    swap(columns, &mut changed);
+                    if gone {
+                        break;
+                    }
+                }
+                Step::Rename { columns, .. } => {
+                    let renamed_away = columns.keys().any(|k| same(k));
+                    let created = columns.values().any(|v| same(v));
+                    swap_keys(columns, &mut changed);
+                    if renamed_away || created {
+                        break;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Set what step `step` (counting from 1) does with values that do not
+    /// fit their type. Only a Set types step has this.
+    pub fn set_on_error(&mut self, step: usize, value: OnError) -> Result<(), String> {
+        match self.steps.get_mut(step.wrapping_sub(1)) {
+            Some(Step::Types { on_error, .. }) => {
+                *on_error = value;
+                Ok(())
+            }
+            Some(other) => Err(format!("step {step} ({}) does not check types", other.describe())),
+            None => Err(format!("the recipe has no step {step}")),
+        }
+    }
+
+    /// Save to `path`, replacing it whole (through a temporary file, so a
+    /// failed write leaves the old recipe).
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("recipe.toml");
+        let tmp = dir.join(format!(".{name}.{}.partial", std::process::id()));
+        std::fs::write(&tmp, self.to_toml()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{}: {e}", path.display())
+        })
+    }
+
     /// The source file: `over` if given, else the recipe's path, relative
     /// paths resolved against `recipe_dir`.
     pub fn source_path(&self, recipe_dir: &Path, over: Option<&Path>) -> PathBuf {
@@ -366,6 +455,8 @@ impl Snapshot {
 /// A value that did not fit, and where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CellError {
+    /// The step that checked it, counting from 1.
+    pub step: usize,
     /// Line in the source file, counting from 1.
     pub line: usize,
     pub column: String,
@@ -385,6 +476,12 @@ pub struct StepReport {
     /// What the step did that is worth saying: "removed 3 duplicate rows".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// This step failed the run.
+    #[serde(skip_serializing_if = "is_false")]
+    pub failed: bool,
+    /// Columns it names that the source does not have, when that failed it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 /// Columns that changed since the recipe was saved.
@@ -543,6 +640,8 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         let rows_in = frame.rows.len();
         let mut skipped = false;
         let mut note = None;
+        let mut missing = Vec::new();
+        let (failures_before, errors_before) = (report.failures.len(), report.errors.len());
 
         // Columns this step names that are not there
         let absent: Vec<String> = step
@@ -563,6 +662,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
                         absent.join(", ")
                     ));
                     skipped = true;
+                    missing = absent.clone();
                 }
                 Missing::Skip => {
                     skipped = true;
@@ -594,14 +694,20 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
             }
         }
 
+        for e in &mut report.errors[errors_before..] {
+            e.step = index + 1;
+        }
         report.steps.push(StepReport {
             index: index + 1,
             description: step.describe(),
             rows_in,
             rows_out: frame.rows.len(),
             millis: started.elapsed().as_millis(),
-            skipped,
+            // A step that failed the run is not "skipped": it failed
+            skipped: skipped && missing.is_empty() && report.failures.len() == failures_before,
             note,
+            failed: report.failures.len() > failures_before,
+            missing,
         });
     }
 
@@ -814,6 +920,7 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
                     report.error_count += 1;
                     if report.errors.len() < MAX_REPORTED_ERRORS {
                         report.errors.push(CellError {
+                            step: 0, // set by run()
                             line: frame.lines[r],
                             column: frame.columns[i].name.clone(),
                             value: value.clone(),
@@ -1065,7 +1172,7 @@ impl RunReport {
                 s.rows_in,
                 s.rows_out,
                 s.millis,
-                if s.skipped { " SKIPPED" } else { "" },
+                if s.failed { " FAILED" } else if s.skipped { " SKIPPED" } else { "" },
                 s.note.as_ref().map(|n| format!(": {n}")).unwrap_or_default()
             ));
         }
@@ -1402,5 +1509,85 @@ missing = "blank"
         // Past the end of the file
         let r = recipe_with("", "header_row = 40");
         assert!(run(&r, &snap(src)).report.failures[0].contains("fewer than 40 lines"));
+    }
+
+    #[test]
+    fn failed_steps_name_their_missing_columns_and_errors_their_step() {
+        let text = r#"
+version = 1
+[source]
+kind = "csv"
+path = "x.csv"
+columns = ["Order ID", "Amount"]
+[[step]]
+op = "rename"
+columns = { "Order ID" = "order_id" }
+[[step]]
+op = "types"
+columns = { Amount = "number" }
+"#;
+        let r = Recipe::from_toml(text).unwrap();
+        let res = run(&r, &snap("Order Number,Amount\n1,x\n"));
+        assert!(!res.report.ok);
+        let s = &res.report.steps;
+        assert!(s[0].failed && !s[0].skipped);
+        assert_eq!(s[0].missing, ["Order ID"]);
+        assert!(s[1].failed);
+        assert_eq!(res.report.errors[0].step, 2);
+        assert!(res.report.summary().contains("FAILED"));
+    }
+
+    #[test]
+    fn rename_source_column_stops_where_the_column_is_renamed_away() {
+        let text = r#"
+version = 1
+[source]
+kind = "csv"
+path = "x.csv"
+columns = ["Order ID", "Amount"]
+[[step]]
+op = "trim"
+columns = ["Order ID"]
+[[step]]
+op = "rename"
+columns = { "Order ID" = "order_id" }
+[[step]]
+op = "filter"
+column = "Order ID"
+is = "not_empty"
+"#;
+        let mut r = Recipe::from_toml(text).unwrap();
+        assert!(r.rename_source_column("order id", "Order Number"));
+        let Source::Csv(src) = &r.source;
+        assert_eq!(src.columns, ["Order Number", "Amount"]);
+        assert_eq!(r.steps[0], Step::Trim { columns: vec!["Order Number".into()], missing: Missing::Fail });
+        assert!(matches!(&r.steps[1], Step::Rename { columns, .. } if columns.get("Order Number").map(String::as_str) == Some("order_id")));
+        // After the rename, "Order ID" would be some other column: untouched
+        assert!(matches!(&r.steps[2], Step::Filter { column, .. } if column == "Order ID"));
+        assert!(!r.rename_source_column("Nope", "X"));
+    }
+
+    #[test]
+    fn set_on_error_only_on_types_steps_and_save_round_trips() {
+        let text = r#"
+version = 1
+[source]
+kind = "csv"
+path = "x.csv"
+[[step]]
+op = "trim"
+[[step]]
+op = "types"
+columns = { Amount = "number" }
+"#;
+        let mut r = Recipe::from_toml(text).unwrap();
+        assert!(r.set_on_error(1, OnError::KeepText).is_err());
+        assert!(r.set_on_error(9, OnError::KeepText).is_err());
+        r.set_on_error(2, OnError::KeepText).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.recipe.toml");
+        r.save(&path).unwrap();
+        assert_eq!(Recipe::load(&path).unwrap(), r);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }
