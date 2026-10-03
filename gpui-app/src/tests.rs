@@ -3133,7 +3133,9 @@ fn review_mode_workbook_mutators_are_guarded() {
     }
 
     let ai_actions = include_str!("ai_actions.rs");
-    assert!(ai_actions.contains("add_sheet_clone_named(&preview_sheet"));
+    assert_contains_near(ai_actions, "apply_lua_to_new_sheet", "block_read_only_recovery(cx)");
+    assert!(ai_actions.contains("crate::review_copy::prepare_copy"));
+    assert!(ai_actions.contains("self.publish_review_copy(candidate, history, cx)"));
     assert_contains_near(
         ai_actions,
         "capture_ai_lua",
@@ -3144,7 +3146,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "preview_last_lua",
         "block_review_entry_for_workbook_transition(cx)",
     );
-    assert!(ai_actions.contains("UndoAction::WorkbookSnapshot"));
+    assert!(include_str!("review_copy.rs").contains("UndoAction::ReviewCopy"));
 }
 
 // =========================================================================

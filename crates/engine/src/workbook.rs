@@ -8,6 +8,8 @@ pub use pivot_ops::{PivotCell, PivotCommit, PivotOpError, PivotState, SavedPivot
 mod table_ops;
 #[path = "workbook_table_refs.rs"]
 mod table_refs;
+#[path = "workbook_sheet_copy.rs"]
+mod sheet_copy;
 #[path = "workbook_guarded_structure.rs"]
 mod guarded_structure;
 #[path = "workbook_automation.rs"]

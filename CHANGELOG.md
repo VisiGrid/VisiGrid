@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Copy a complete reviewed sheet without clearing Table sorting/filtering, including hidden records. Copied Tables and pivots get fresh identities, internal structured references follow the copies, and row layout follows reviewed deletions. The copy has atomic validation, one-step undo/redo and history rewind; external formulas remain live.
+
 - Create Tables above/below filtered or sorted Tables and on other sheets without clearing saved criteria. Both existing and generated headers are supported; header insertion, row layout and freeze panes undo together, with atomic validation and history rewind.
 
 - Resize Tables without clearing saved sorting or filters. Existing records and column identities are preserved, unsafe changes are refused atomically, and one-step undo/redo and history rewind restore the bounds and dependent formulas. Clear a column’s sort/filter before removing it.

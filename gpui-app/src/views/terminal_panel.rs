@@ -609,7 +609,7 @@ pub fn render_terminal_panel(
                                             .border_1()
                                             .border_color(accent)
                                             .hover(|s| s.bg(accent).text_color(editor_bg))
-                                            .child("Apply to New Sheet")
+                                            .child("Copy reviewed sheet")
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 this.apply_lua_to_new_sheet(_window, cx);
                                             }))

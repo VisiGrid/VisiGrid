@@ -47,7 +47,7 @@ impl Spreadsheet {
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(
                     &entry.action,
-                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. }
+                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. } | UndoAction::ReviewCopy { .. }
                 )
                 && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
@@ -193,6 +193,10 @@ impl Spreadsheet {
                 UndoAction::TableViewChanged { commit, description, .. } => {
                     if !self.replay_table_view(&commit, true, cx) { self.history.redo(); return; }
                     self.status_message = Some(format!("Undo: {description}"));
+                }
+                UndoAction::ReviewCopy { history } => {
+                    if !self.replay_review_copy(&history, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some("Undo: Copy reviewed result".into());
                 }
                 UndoAction::TableAppend { history, description, .. } => {
                     if !self.replay_table_append(&history, true, cx) { self.history.redo(); return; }
@@ -673,6 +677,7 @@ impl Spreadsheet {
             UndoAction::TableViewChanged { commit, .. } => {
                 self.replay_table_view(&commit, true, cx);
             }
+            UndoAction::ReviewCopy { history } => { self.replay_review_copy(&history, true, cx); }
             UndoAction::TableAppend { history, .. } => { self.replay_table_append(&history, true, cx); }
             UndoAction::TableCommit { commit, header_layout, .. } => {
                 self.replay_table_commit(&commit, header_layout.as_deref(), true, cx);
@@ -1089,6 +1094,9 @@ impl Spreadsheet {
                     return false;
                 }
             }
+            UndoAction::ReviewCopy { history } => {
+                if !self.replay_review_copy(&history, false, cx) { return false; }
+            }
             UndoAction::TableAppend { history, .. } => {
                 if !self.replay_table_append(&history, false, cx) { return false; }
             }
@@ -1325,7 +1333,7 @@ impl Spreadsheet {
             if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
                 && !matches!(
                     &entry.action,
-                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. }
+                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. } | UndoAction::ReviewCopy { .. }
                 )
                 && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
@@ -1472,6 +1480,10 @@ impl Spreadsheet {
                 UndoAction::TableViewChanged { commit, description, .. } => {
                     if !self.replay_table_view(&commit, false, cx) { self.history.undo(); return; }
                     self.status_message = Some(format!("Redo: {description}"));
+                }
+                UndoAction::ReviewCopy { history } => {
+                    if !self.replay_review_copy(&history, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some("Redo: Copy reviewed result".into());
                 }
                 UndoAction::TableAppend { history, description, .. } => {
                     if !self.replay_table_append(&history, false, cx) { self.history.undo(); return; }

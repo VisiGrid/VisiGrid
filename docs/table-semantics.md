@@ -221,7 +221,7 @@ The producer journal retains the existing Review normalization contract: cell wr
 
 Session-created plans retain desktop approval: `apply_plan` returns `approval_required` until the user applies the proposal in Review. Review continues to block direct edits and other session writes. Existing determinism, verification, source-revision and execution-context checks remain. Legacy worksheet sort/filter row-deletion previews remain unsupported.
 
-Copying reviewed results to another sheet, scripted sheet changes and scripted pivot operations remain gated while criteria are active. Direct console row deletion still requires Review; this does not add Lua row insertion or column structural methods.
+Scripted sheet changes and scripted pivot operations remain gated while criteria are active. Copying a reviewed result uses the guarded Phase 3 path below. Direct console row deletion still requires Review; this does not add Lua row insertion or column structural methods.
 
 ### History rewind
 
@@ -229,7 +229,7 @@ With the History tab visible and an entry selected, hold unmodified Space with w
 
 Preview is read-only. Opening rewind confirmation keeps the preview after Space is released; Escape/Cancel returns to live state, and Enter confirms. Releasing Space outside confirmation restores the live sheet, projection, selection (including additional selections) and scroll position. Preview sheet switching changes only the snapshot’s active sheet. Confirmed rewind validates the history fingerprint, live workbook revision, selected target, engine layout and desktop Table layout before publishing. It advances the live revision, restores filter state, discards the later history/redo branch and records an audit entry. Retained history continues to replay from the original base; audit entries have no cell effect, so later previews and rewinds remain usable. Existing replay count/time limits and unsupported-action gates remain in force.
 
-**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, Table creation/resizing/appending, copying reviewed results to another sheet and unrelated history actions remain gated. Safe direct edits, Delete, cut, paste and fill can target cells outside Tables and on other sheets; cut/fill rectangles cannot cross a Table body boundary. Header-name paste, whole-row/column edits and guarded pivot actions, including their undo/redo, are supported. Clear the criteria before unsupported operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths from invalidating formula-dependent filters.
+**Remaining restrictions:** while any sheet has saved Table sort/filter criteria, unsupported sheet lifecycle commands and unrelated history actions remain gated. Table creation/resizing/appending and copying a reviewed sheet use the guarded Phase 3 paths below. Safe direct edits, Delete, cut, paste and fill can target cells outside Tables and on other sheets; cut/fill rectangles cannot cross a Table body boundary. Header-name paste, whole-row/column edits and guarded pivot actions, including their undo/redo, are supported. Clear the criteria before unsupported operations. Hiding buttons does not lift the gate; buttons alone do not block edits. This prevents unsupported mutation paths from invalidating formula-dependent filters.
 
 ### Multi-header schema paste
 
@@ -348,14 +348,25 @@ One sparse Table commit records schema, header values and formula changes. Heade
 
 Creation validation, 2026-10-03: all 804 desktop tests passed (3 existing ignores), including 15 regressions for same/cross-sheet creation, hidden record preservation, generated-header insertion, comments and neighboring cells, layout/freeze shifts, structured-formula binding, atomic rejection, stale replay, dormant specs, rewind and native full-save roundtrip. The native debug build passed. Live keyboard QA remains pending.
 
+## Phase 3: copy reviewed results with active Table criteria
+
+The terminal preview's **Copy reviewed sheet** action copies the complete materialized source sheet, including unchanged cells and hidden records, into a uniquely named result sheet. It works while Tables elsewhere or on the source sheet have active criteria. The original sheets and their criteria are retained; the reviewed writes/deletions are applied only to the new result. Script errors, incomplete previews, read-only recovery and history preview refuse copying. Failure preserves the pending review for correction or dismissal.
+
+Copied Tables receive fresh workbook identities and unique `Name_Copy` names. Their column IDs remain scoped to the new Table; calculated rules, overrides, named structured references, conditional-format predicates and validation formulas follow the copies. Literal text is untouched. Copied pivots receive fresh IDs/names; sources within the copied sheet bind to the copied sheet/Tables and their cached output is marked stale for refresh. Relative formulas evaluate in the copy. Explicit worksheet references and references to objects outside the copied sheet remain live against the current workbook, so their computed values can differ from a stale review. Direct cell inputs still come from the reviewed snapshot. Changed workbook style catalogs require a fresh preview instead of guessing imported style bindings.
+
+Desktop row/column sizing, manual hiding and freeze panes are captured when the review is prepared. Reviewed row deletions shift the copied presentation. Saved sort/filter bindings follow copied Table identities and are rebuilt after recalculation. Every saved view and affected desktop layout is validated before publication, including effects of previously unresolved formulas becoming bound to the new sheet/Table name. No partial sheet is added on failure.
+
+Undo/redo stores only the copied sheet, its presentation and authored-state fingerprints, not whole-workbook snapshots. Replay refuses drift in sheet contents, formulas, comments, metadata or layout before removing/restoring the copy; volatile computed caches and monotonic column allocators do not cause false drift. It recalculates and revalidates all views. One history entry supports undo/redo and rewind, including alongside prior guarded structural history. Native full-save/reopen preserves the copied definitions and both view specs. This does not enable general sheet duplication/deletion, scripted sheet changes or scripted pivots under criteria.
+
+Reviewed-copy validation, 2026-10-03: all 818 desktop tests passed (3 existing ignores) and the full engine suite passed 982 tests (15 existing ignores). Fourteen new desktop regressions cover hidden records, calculated rules/overrides, stale previews, row-layout shifts, name-binding spill refusal, sparse undo/redo, stale metadata, volatile formulas, monotonic allocators, mixed structural rewind and native full-save. Four engine regressions cover multi-Table formulas and metadata, fresh pivot identities/bindings, live external references and avoiding capture of unresolved Table names. Two older pivot integration fixtures now install real filters instead of empty view specs. The native debug build passed. Live UI QA is deferred at the user’s request.
+
 ## Phase 3 backlog
 
-1. Copy reviewed results to another sheet while criteria are active.
-2. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
-3. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
-4. Named saved views and richer mixed-layout support beyond the current saved criteria.
-5. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
-6. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
+1. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
+2. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.
+3. Named saved views and richer mixed-layout support beyond the current saved criteria.
+4. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
+5. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
 
 Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.
 

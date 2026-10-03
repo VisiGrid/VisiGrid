@@ -369,6 +369,8 @@ impl Spreadsheet {
             self.workbook.read(cx),
         ));
         self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
+            source_layout: self.structure_layout(self.wb(cx).sheet(source_sheet_index).unwrap().id),
+            source_frozen: if source_sheet_index == self.sheet_index(cx) { (self.view_state.frozen_rows, self.view_state.frozen_cols) } else { self.wb(cx).sheet(source_sheet_index).unwrap().frozen_panes },
             script_path: std::path::PathBuf::from(format!("mcp/{plan_id}.lua")),
             script_hash,
             ops: result.ops,

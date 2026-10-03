@@ -19,6 +19,8 @@ use crate::structured_results::StructuredResult;
 
 /// Data captured from an AI-generated Lua script preview (dry-run).
 pub struct LuaPreviewData {
+    pub source_layout: crate::table_structure::StructureLayout,
+    pub source_frozen: (usize, usize),
     /// Path where the script was saved on disk.
     pub script_path: PathBuf,
     /// Blake3 hash of the script (first 16 bytes, hex).

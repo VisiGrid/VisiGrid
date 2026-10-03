@@ -240,6 +240,7 @@ pub enum UndoAction {
         commit: Box<visigrid_engine::workbook::TableViewCommit>,
         description: String,
     },
+    ReviewCopy { history: Box<crate::review_copy::ReviewCopyHistory> },
     TableAppend {
         sheet_index: usize,
         history: Box<crate::table_append::TableAppendHistory>,
@@ -497,6 +498,7 @@ impl UndoAction {
             }
             UndoAction::PrintSetupChanged { .. } => "Save print setup".into(),
             UndoAction::WorkbookSnapshot { commit, .. } => commit.description.clone(),
+            UndoAction::ReviewCopy { history } => format!("Copy reviewed result to {}", history.sheet.name),
             UndoAction::TableBatchChanged { description, .. } | UndoAction::TableStructureChanged { description, .. }
             | UndoAction::TableViewChanged { description, .. }
             | UndoAction::TableCellsChanged { description, .. } => description.clone(),
@@ -1214,6 +1216,7 @@ impl History {
                 (Some(*sheet_index), vec![], None)
             }
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
+            UndoAction::ReviewCopy { history } => (Some(history.index), vec![], None),
             UndoAction::TableAppend { sheet_index, history, .. } => {
                 let r = history.table.after_table().unwrap().range;
                 (Some(*sheet_index), vec![], Some((r.start_row, r.start_col, r.end_row, r.end_col)))
@@ -1785,6 +1788,12 @@ impl History {
                 workbook.rebuild_dep_graph();
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
+            UndoAction::ReviewCopy { history } => {
+                let candidate = history.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
+                workbook.restore_snapshot_monotonic(&candidate);
+                view_state.per_sheet.resize_with(workbook.sheet_count(), crate::app::PreviewSheetView::default);
+                view_state.per_sheet[history.index].structure_layout = Some(history.layout.clone());
+            }
             UndoAction::TableAppend { history, .. } => {
                 let candidate = history.replay(workbook, false)
                     .map_err(PreviewBuildError::InvariantViolation)?;
@@ -2031,6 +2040,7 @@ pub enum UndoActionKind {
     PivotCommit,
     TableCommit,
     TableAppend,
+    ReviewCopy,
     TableViewChanged,
     TableCellsChanged,
     TableStructureChanged,
@@ -2076,6 +2086,7 @@ impl UndoActionKind {
             UndoActionKind::WorkbookSnapshot => true,
             UndoActionKind::TableCommit => true,
             UndoActionKind::TableAppend => true,
+            UndoActionKind::ReviewCopy => true,
             UndoActionKind::TableViewChanged => true,
             UndoActionKind::TableCellsChanged => true,
             UndoActionKind::TableStructureChanged => true,
@@ -2129,6 +2140,7 @@ impl UndoActionKind {
             UndoActionKind::WorkbookSnapshot => "Workbook snapshot",
             UndoActionKind::TableCommit => "Table",
             UndoActionKind::TableAppend => "Append Table row",
+            UndoActionKind::ReviewCopy => "Copy reviewed sheet",
             UndoActionKind::TableViewChanged => "Table view",
             UndoActionKind::TableCellsChanged => "Table cells",
             UndoActionKind::TableStructureChanged => "Table structure",
@@ -2174,6 +2186,7 @@ impl UndoActionKind {
             UndoActionKind::WorkbookSnapshot => 0x1B,
             UndoActionKind::TableCommit => 0x1F,
             UndoActionKind::TableAppend => 0x27,
+            UndoActionKind::ReviewCopy => 0x28,
             UndoActionKind::TableViewChanged => 0x20,
             UndoActionKind::TableCellsChanged => 0x21,
             UndoActionKind::TableStructureChanged => 0x22,
@@ -2219,6 +2232,7 @@ impl UndoAction {
             UndoAction::WorkbookSnapshot { .. } => UndoActionKind::WorkbookSnapshot,
             UndoAction::TableCommit { .. } => UndoActionKind::TableCommit,
             UndoAction::TableAppend { .. } => UndoActionKind::TableAppend,
+            UndoAction::ReviewCopy { .. } => UndoActionKind::ReviewCopy,
             UndoAction::TableViewChanged { .. } => UndoActionKind::TableViewChanged,
             UndoAction::TableCellsChanged { .. } => UndoActionKind::TableCellsChanged,
             UndoAction::TableStructureChanged { .. } => UndoActionKind::TableStructureChanged,
@@ -2771,6 +2785,7 @@ mod tests {
             UndoActionKind::WorkbookSnapshot,
             UndoActionKind::TableCommit,
             UndoActionKind::TableAppend,
+            UndoActionKind::ReviewCopy,
             UndoActionKind::TableViewChanged,
             UndoActionKind::TableCellsChanged,
             UndoActionKind::TableStructureChanged,
