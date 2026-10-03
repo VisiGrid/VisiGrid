@@ -722,6 +722,11 @@ impl Spreadsheet {
                 return;
             }
         };
+        // The builder previews the source: the same approval as a run
+        if !crate::recipe_trust::is_approved(recipe_path, &recipe) {
+            self.ask_to_approve(crate::recipe_ui::ConfirmThen::Edit(link), recipe_path.to_path_buf(), recipe, cx);
+            return;
+        }
         let dir = recipe_path.parent().unwrap_or(Path::new("."));
         // A pattern opens on the file it matches now
         let source_path = recipe.resolve_source(dir, None).unwrap_or_else(|_| recipe.source_path(dir, None));
@@ -891,6 +896,10 @@ impl Spreadsheet {
             b.error = Some(format!("Couldn't save the recipe: {e}"));
             cx.notify();
             return;
+        }
+        // The user built this recipe and chose its source here
+        if let Err(e) = crate::recipe_trust::approve(&path, &b.recipe) {
+            b.error = Some(format!("Saved, but couldn't remember the approval: {e}"));
         }
         b.recipe_path = Some(path.clone());
         b.dirty = false;

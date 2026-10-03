@@ -367,7 +367,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             }
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
-        TableDialogKind::Resize(_)=>preview=preview.child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),
+        TableDialogKind::Resize(_)=>preview=preview.child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Shrinking removes records from the Table by stored row position, not the displayed sort order. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),
         TableDialogKind::ColumnFormula(id,col,replace) => {
             if let Some((sheet,table)) = app.wb(cx).table(id) {
                 let sheet = app.wb(cx).sheet_by_id(sheet).unwrap();

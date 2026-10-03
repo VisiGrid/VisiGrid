@@ -58,7 +58,7 @@ pub(crate) fn cmd_recipe_run(
             write_replacing(&path, |tmp| match format {
                 Format::Xlsx => {
                     let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
-                    visigrid_io::xlsx::export(&wb, tmp, None).map(|_| ()).map_err(CliError::io)
+                    crate::convert::write_xlsx(&wb, Some(tmp), None)
                 }
                 Format::Sheet => visigrid_io::native::save(&sheet, tmp).map_err(CliError::io),
                 Format::Parquet => Err(CliError::format("parquet output is not supported by recipes yet")),

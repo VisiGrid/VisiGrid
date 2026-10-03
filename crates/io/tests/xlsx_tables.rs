@@ -1926,3 +1926,76 @@ fn stored_order_does_not_bypass_table_writer_refusals() {
     assert!(xlsx::export_to_buffer_with_order(&wb, None, ExportOrder::Stored).is_err());
     assert_eq!(std::fs::read(&file).unwrap(), b"untouched");
 }
+
+#[test]
+fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata() {
+    use visigrid_engine::{
+        cell::CellStyle,
+        cond_format::CondStyle,
+        validation::{CellRange, ValidationRule},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fallback.xlsx");
+    for validation in [true, false] {
+        let (mut wb, id) = book();
+        if validation {
+            wb.sheet_mut(0).unwrap().set_cell_validation(
+                3,
+                1,
+                ValidationRule::list_inline(vec!["2".into()]),
+            );
+        } else {
+            wb.sheet_mut(0).unwrap().cond_formats.add(
+                vec![CellRange::single(3, 1)],
+                "=B4>0",
+                CondStyle::Named(CellStyle::Success),
+            );
+        }
+        set_saved_sort(&mut wb, id, 0, true, true);
+        let before = authored_snapshot(&wb);
+        assert!(xlsx::export_to_buffer(&wb, None).is_err());
+        let (bytes, report) = xlsx::export_to_buffer_with_stored_fallback(&wb, None).unwrap();
+        assert!(report.warnings[0].contains("Exported in stored order instead"));
+        assert!(report.warnings[0].contains(if validation {
+            "Validation"
+        } else {
+            "conditional-format"
+        }));
+        if !validation {
+            assert!(report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Conditional formatting is not exported")));
+        }
+        std::fs::write(&file, bytes).unwrap();
+        let (loaded, _) = xlsx::import(&file).unwrap();
+        for row in 3..8 {
+            assert_eq!(
+                loaded.sheet(0).unwrap().get_raw(row, 1),
+                wb.sheet(0).unwrap().get_raw(row, 1)
+            );
+            assert_eq!(
+                loaded.sheet(0).unwrap().get_raw(row, 3),
+                wb.sheet(0)
+                    .unwrap()
+                    .get_raw(row, 3)
+                    .replace("[@Qty]", "[[#This Row],[Qty]]")
+            );
+            assert_eq!(
+                loaded.sheet(0).unwrap().get_display(row, 3),
+                wb.sheet(0).unwrap().get_display(row, 3)
+            );
+        }
+        assert!(loaded
+            .sheet(0)
+            .unwrap()
+            .table_view_spec()
+            .unwrap()
+            .sort
+            .is_some());
+        if validation {
+            assert!(loaded.sheet(0).unwrap().has_validation(3, 1));
+        }
+        assert_eq!(authored_snapshot(&wb), before);
+    }
+}

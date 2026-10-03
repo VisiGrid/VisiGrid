@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+- Headless XLSX export (`vgrid convert` and recipe output) now falls back to stored row order when saved sorting cannot safely be materialized, with a warning on stderr and Excel Reapply guidance. Recovery, schema and serialization errors still refuse before writing; output failures are not retried.
+
 - Excel export now offers **Export sorted** or **Keep stored order**. When sorted export is unsupported, stored order remains available with a clear Excel Reapply notice. The selected mode is checked again before writing and never silently changed. Both choices retain recovery/schema protections; the review now also discloses loss of conditional formatting and named-range definitions.
 
-- Excel Tables now retain saved single-column ascending/descending sorts through XLSX and native round trips, including with filters or hidden header controls. Export now writes records in the saved sort order using an isolated copy, keeps filtered-out records, moves formatting/comments with records, and rewrites supported formula references. No Reapply step is needed to display that order. Unsupported formulas, metadata/layouts or changed calculation results refuse before writing; the source workbook remains unchanged. Unsupported or unsafe sorts warn without partially applying their keys; supported filter metadata is handled separately.
+- Excel Tables now retain saved single-column ascending/descending sorts through XLSX and native round trips, including with filters or hidden header controls. Export now writes records in the saved sort order using an isolated copy, keeps filtered-out records, moves formatting/comments with records, and rewrites supported formula references. No Reapply step is needed to display that order. Explicit sorted exports refuse unsupported formulas, metadata/layouts or changed calculation results before writing; the source workbook remains unchanged. Unsupported or unsafe sorts warn without partially applying their keys; supported filter metadata is handled separately.
 
 - Excel Table round trips now preserve built-in style identities, stripe/emphasis options, checkbox-value filters and uniform filter-button visibility, including through native saves. Export hides records that fail supported filters while retaining their cells and formulas. Unsupported or ambiguous filters and unsafe import layouts produce explicit warnings; custom styles/themes remain limited. Table names over Excel's 255-character limit refuse export before writing.
 
@@ -25,6 +27,20 @@
 - Formatting, conditional formatting, comments and freeze panes now work on sheets without active Table criteria while another sheet has a sorted/filtered Table. Their undo/redo follows the target sheet; grouped history is checked before applying. Percent formatting that converts text to numbers retains the workbook-wide guard. Cleared criteria and hidden-button settings no longer enforce an active Table row projection.
 - Freeze-pane undo/redo now restores the sheet where the command ran, even after switching tabs. History rewind also restores frozen panes, including alongside Table structural changes.
 - Desktop native saves now preserve conditional-formatting rules on every sheet; the full-save path previously omitted them.
+
+### Import recipes
+
+- **Clean an export once, refresh it every month.** An import recipe records how a CSV is cleaned: keep, remove and rename columns, declare types that are checked on every run, trim, filter rows and remove duplicates. Start one from **Data → New Import Recipe…**, the command palette, or **Make a recipe…** on the CSV banner. The builder shows the source settings (including the header line below title rows), each step's rows in and out, and a preview after any step with whole-file counts. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))
+- **Refresh into a linked Table.** A recipe loads into a Table that remembers it; **Refresh** (Alt+F5 in the Table) re-runs it and replaces the records only if every check passes, in one undo step. A refresh that fails keeps the last good result and explains why, with fixes: use a renamed column, or keep or blank values that don't fit their type. Each fix is saved into the recipe and retried on the same copy of the file. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))
+- **Pick up next month's file by itself.** A recipe can read the newest file matching a pattern such as `export-*-*.csv`; **Choose file…** reads another file once. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))
+- **`vgrid recipe run`** runs the same recipe unattended with the same results: per-step diagnostics on stderr, an optional JSON report, nothing written and exit 70 when a check fails, exit 71 for an invalid recipe. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))
+- **Recipes from other people ask first.** Before a recipe first reads its source, VisiGrid shows the exact file, its size and date (Ctrl+Enter loads, Esc cancels); the answer is remembered per recipe and file. Recipes read only local regular files: network paths, pipes and devices are refused, and sources are capped at 256 MB. ([#85](https://github.com/VisiGrid/VisiGrid/pull/85))
+- Workbooks with a recipe-linked Table save a newer Table format (version 4). Earlier releases open them read-only rather than dropping the link.
+
+### DuckDB and Parquet
+
+- **Open DuckDB databases.** Opening a `.duckdb` file shows its tables with exact row counts and an eight-row preview; the chosen tables are copied into sheets. The database is opened read-only, without network access or extension loading, and is never modified. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))
+- **`vgrid convert` writes typed Parquet and new DuckDB databases**, and `vgrid peek` and `vgrid convert` read Parquet and DuckDB. `--parquet-plan` shows column types and conflicts before writing; a column mixing numbers and text must be named with `--text-column`. ([#84](https://github.com/VisiGrid/VisiGrid/pull/84))
 
 ## 0.44.0
 

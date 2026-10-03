@@ -1458,15 +1458,50 @@ pub fn export_to_buffer_with_order(
     layouts: Option<&[ExportLayout]>,
     order: ExportOrder,
 ) -> Result<(Vec<u8>, ExportResult), String> {
+    export_to_buffer_impl(workbook, layouts, order, false)
+}
+
+/// Headless export: prefer sorted records, but retain stored order when sort
+/// materialization is unsupported. Callers must surface the returned warnings.
+/// Recovery, schema, serialization and other writer errors never fall back.
+pub fn export_to_buffer_with_stored_fallback(
+    workbook: &Workbook,
+    layouts: Option<&[ExportLayout]>,
+) -> Result<(Vec<u8>, ExportResult), String> {
+    export_to_buffer_impl(workbook, layouts, ExportOrder::Sorted, true)
+}
+
+fn export_to_buffer_impl(
+    workbook: &Workbook,
+    layouts: Option<&[ExportLayout]>,
+    mut order: ExportOrder,
+    allow_stored_fallback: bool,
+) -> Result<(Vec<u8>, ExportResult), String> {
     let start_time = Instant::now();
     workbook.ensure_writable()?;
     crate::xlsx_tables::export_warnings(workbook, order)?;
+    let mut fallback_warning = None;
     let prepared = match order {
+        ExportOrder::Sorted if allow_stored_fallback => {
+            match crate::xlsx_sorted_export::prepare_inner(workbook, layouts) {
+                Ok(prepared) => prepared,
+                Err(reason) => {
+                    order = ExportOrder::Stored;
+                    fallback_warning = Some(format!(
+                        "Sorted XLSX export is unavailable: {reason}. Exported in stored order instead; formulas keep their stored coordinates. Use Reapply in Excel to apply the saved sort."
+                    ));
+                    std::borrow::Cow::Borrowed(workbook)
+                }
+            }
+        }
         ExportOrder::Sorted => crate::xlsx_sorted_export::prepare(workbook, layouts)?,
         ExportOrder::Stored => std::borrow::Cow::Borrowed(workbook),
     };
     let workbook = prepared.as_ref();
     let (mut xlsx_workbook, mut result) = build_export(workbook, layouts, order)?;
+    if let Some(warning) = fallback_warning {
+        result.warnings.insert(0, warning);
+    }
     let bytes = xlsx_workbook.save_to_buffer()
         .map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;

@@ -300,7 +300,8 @@ impl Recipe {
     }
 
     pub fn load(path: &Path) -> Result<Recipe, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = read_regular_file(path, MAX_RECIPE_BYTES, "recipe")?;
+        let text = String::from_utf8(bytes).map_err(|_| format!("{}: not UTF-8 text", path.display()))?;
         Recipe::from_toml(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
@@ -404,6 +405,7 @@ impl Recipe {
     /// file it matches, so next month's export is picked up by itself.
     pub fn resolve_source(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<PathBuf, String> {
         let path = self.source_path(recipe_dir, over);
+        check_local(&path, "source")?;
         if over.is_some() {
             return Ok(path);
         }
@@ -525,9 +527,66 @@ pub struct Snapshot {
     pub hash: String,
 }
 
+/// The largest source file a recipe reads. The whole file is held in memory
+/// (once as bytes, once parsed), so this also bounds what a run costs.
+pub const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+/// The largest recipe file read. Recipes are a few kilobytes of TOML.
+pub const MAX_RECIPE_BYTES: u64 = 1024 * 1024;
+
+/// A UNC or device path (`\\server\share`, `//server/share`, `\\?\…`).
+/// Recipes refuse these before touching the filesystem: on Windows merely
+/// opening one sends the user's network credentials to that server, and a
+/// recipe or a shared workbook can name any path.
+pub fn is_network_path(path: &Path) -> bool {
+    let s = path.as_os_str().to_string_lossy();
+    s.starts_with("\\\\") || s.starts_with("//") || s.starts_with("\\/") || s.starts_with("/\\")
+}
+
+/// Refuse a network path, with the reason.
+pub fn check_local(path: &Path, what: &str) -> Result<(), String> {
+    if is_network_path(path) {
+        return Err(format!(
+            "{what} {} is on a network share; recipes only read local files (copy it to this computer first)",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Read a whole regular file, refusing anything else (a pipe, a device, a
+/// directory) and anything over `cap` bytes. The checks are made on the
+/// opened file, so a path swapped after checking is still caught.
+pub fn read_regular_file(path: &Path, cap: u64, what: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    check_local(path, what)?;
+    let shown = path.display();
+    // Not following through to open a FIFO for reading blocks until a writer
+    // appears; check the type before opening, then again on the handle
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read {what} {shown}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{what} {shown} is not a regular file"));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot read {what} {shown}: {e}"))?;
+    let meta = file.metadata().map_err(|e| format!("cannot read {what} {shown}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{what} {shown} is not a regular file"));
+    }
+    let too_big = |n: u64| format!("{what} {shown} is {} MB; recipes read files up to {} MB", n / (1024 * 1024), cap / (1024 * 1024));
+    if meta.len() > cap {
+        return Err(too_big(meta.len()));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| format!("cannot read {what} {shown}: {e}"))?;
+    if bytes.len() as u64 > cap {
+        return Err(too_big(bytes.len() as u64));
+    }
+    Ok(bytes)
+}
+
 impl Snapshot {
+    /// Read a source: a local regular file of at most [`MAX_SOURCE_BYTES`].
     pub fn read(path: &Path) -> Result<Snapshot, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("cannot read source {}: {e}", path.display()))?;
+        let bytes = read_regular_file(path, MAX_SOURCE_BYTES, "source")?;
         Ok(Snapshot::from_bytes(path, bytes))
     }
 
@@ -1800,5 +1859,38 @@ path = "export-*-*.csv"
         assert_eq!(r.resolve_source(dir.path(), Some(&over)).unwrap(), over);
         let empty = tempfile::tempdir().unwrap();
         assert!(r.resolve_source(empty.path(), None).unwrap_err().contains("no file in"));
+    }
+
+    #[test]
+    fn sources_must_be_local_regular_files_within_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory
+        assert!(Snapshot::read(dir.path()).unwrap_err().contains("not a regular file"));
+        // Over the cap
+        let big = dir.path().join("big.csv");
+        std::fs::write(&big, vec![b'a'; 2048]).unwrap();
+        assert!(read_regular_file(&big, 1024, "source").unwrap_err().contains("up to"));
+        assert_eq!(read_regular_file(&big, 4096, "source").unwrap().len(), 2048);
+        // Network paths are refused without touching the filesystem
+        for p in [r"\\server\share\x.csv", "//server/share/x.csv", r"\\?\UNC\server\x.csv"] {
+            assert!(is_network_path(Path::new(p)), "{p}");
+            assert!(Snapshot::read(Path::new(p)).unwrap_err().contains("network share"));
+        }
+        assert!(!is_network_path(Path::new("/data/x.csv")));
+        assert!(!is_network_path(Path::new(r"C:\data\x.csv")));
+        let text = "version = 1\n[source]\nkind = \"csv\"\npath = \"//evil/share/x.csv\"\n";
+        let r = Recipe::from_toml(text).unwrap();
+        assert!(r.resolve_source(dir.path(), None).unwrap_err().contains("network share"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_or_device_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.csv");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        assert!(Snapshot::read(&fifo).unwrap_err().contains("not a regular file"));
+        assert!(Recipe::load(&fifo).unwrap_err().contains("not a regular file"));
+        assert!(Snapshot::read(Path::new("/dev/zero")).unwrap_err().contains("not a regular file"));
     }
 }

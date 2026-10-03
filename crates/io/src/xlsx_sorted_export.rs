@@ -342,7 +342,7 @@ pub(crate) fn prepare<'a>(
 ) -> Result<Cow<'a, Workbook>, String> {
     prepare_inner(wb, layouts).map_err(|reason| format!("Cannot export Tables in sorted order: {reason}. Choose stored-order export or save a native .sheet file; no file was written."))
 }
-fn prepare_inner<'a>(
+pub(super) fn prepare_inner<'a>(
     wb: &'a Workbook,
     layouts: Option<&[ExportLayout]>,
 ) -> Result<Cow<'a, Workbook>, String> {
