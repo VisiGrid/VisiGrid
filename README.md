@@ -172,7 +172,7 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 ## Advanced: Automation, CLI, and Reproducible Workflows
 
 Preview files in a read-only terminal grid with `vgrid peek data.parquet`.
-CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
+DuckDB databases, CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
 Use `--shape` for dimensions, `--json` for structured output, or `--plain` for
 a text table. Previews default to 5,000 rows; `--max-rows` changes the limit.
 In the viewer, `/` searches, `[` `]` sort, `F` shows a column's frequencies,
@@ -202,6 +202,14 @@ vgrid diff vendor.xlsx ours.csv --key Invoice --compare Total --tolerance 0.01
 vgrid convert data.xlsx --to csv
 vgrid convert data.csv --to xlsx -o report.xlsx
 
+# Export a typed Parquet table (or inspect its schema before writing)
+vgrid convert report.xlsx -t parquet --headers -o data.parquet
+vgrid convert report.xlsx -t parquet --headers --parquet-plan
+
+# Browse a database or export a worksheet into a new database
+vgrid peek warehouse.duckdb --sheet main.orders
+vgrid convert report.xlsx -t duckdb --headers -o data.duckdb
+
 # Full-fidelity JSON: formulas, formats, merges (stable versioned schema)
 vgrid convert model.xlsx -t json-full | jq '.cells[] | select(.formula)'
 
@@ -211,6 +219,11 @@ vgrid convert vendor.xlsx -t csv --headers --select 'Invoice,Amount' | \
 ```
 
 The CLI reads spreadsheet files (CSV, XLSX, JSON, TSV), runs the same formula engine and comparison logic as the GUI, and writes structured output to stdout. Exit codes are stable for scripting. Output is JSON or CSV.
+
+Parquet export validates every row and reports mixed columns before writing.
+Use `--text-column NAME` for explicit text conversion. See the
+[Parquet export contract](docs/parquet-export.md) for types and web behavior.
+See [DuckDB files](docs/duckdb-files.md) for database tables, previews, and export limits.
 
 **Filtering rows** (`convert --where`) — no awk required:
 

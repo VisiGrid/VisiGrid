@@ -14,7 +14,7 @@ use super::table_refs::TableFormulaChange;
 use super::Workbook;
 use crate::cell::{CellValue, ValueRef};
 use crate::sheet::SheetId;
-use crate::table::{self, DataTable, TableColumn, TableColumnId, TableId, TableRange, TableStyle};
+use crate::table::{self, DataTable, TableColumn, TableColumnId, TableId, TableRange, TableSource, TableStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -391,6 +391,7 @@ impl Workbook {
             next_column_id: columns.len() as u64 + 1,
             columns,
             style: TableStyle::default(),
+            source: None,
         };
         let commit = self.table_commit(sheet_id, id, None, Some(table))?;
         self.apply_table_commit(&commit, false)?;
@@ -653,6 +654,21 @@ impl Workbook {
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
         let mut new = old.clone();
         new.style = style;
+        let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        self.apply_table_commit(&commit, false)?;
+        Ok(commit)
+    }
+
+    /// Link a Table to the recipe it is loaded from, record a refresh, or
+    /// (None) unlink it. Cells are not touched.
+    pub fn set_table_source(
+        &mut self,
+        id: TableId,
+        source: Option<TableSource>,
+    ) -> Result<TableCommit, String> {
+        let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
+        let mut new = old.clone();
+        new.source = source;
         let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
@@ -977,7 +993,10 @@ impl Workbook {
 
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
-            version: if self.sheets.iter().any(|s| {
+            // Older readers must refuse a recipe link rather than drop it
+            version: if self.tables().any(|(_, t)| t.source.is_some()) {
+                4
+            } else if self.sheets.iter().any(|s| {
                 s.table_view_spec().is_some_and(|v| v.requires_persistence())
             }) {
                 3
@@ -1008,7 +1027,7 @@ impl Workbook {
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
     /// before recalculation. Reject corrupt metadata, never discard silently.
     pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
-        if ![1, 2, 3].contains(&saved.version) || saved.next_table_id == 0 {
+        if ![1, 2, 3, 4].contains(&saved.version) || saved.next_table_id == 0 {
             return Err("Unsupported or invalid Tables metadata version/allocator.".into());
         }
         let mut names = HashSet::new();
@@ -1040,6 +1059,9 @@ impl Workbook {
                 table.validate(sheet.rows, sheet.cols)?;
                 if saved.version == 1 && table.columns.iter().any(|c| c.formula.is_some()) {
                     return Err("Calculated columns require Tables metadata version 2.".into());
+                }
+                if saved.version < 4 && table.source.is_some() {
+                    return Err("Recipe-backed Tables require Tables metadata version 4.".into());
                 }
                 if table.id.0 >= saved.next_table_id
                     || !ids.insert(table.id)

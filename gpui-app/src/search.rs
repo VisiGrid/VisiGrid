@@ -173,6 +173,9 @@ pub enum CommandId {
     ExportPdf,
     CsvImportSettings,
     CsvImportNotes,
+    RefreshRecipeTable,
+    EditRecipe,
+    NewRecipe,
     PrintPreview,
     ExportTsv,
     ExportJson,
@@ -408,6 +411,9 @@ impl CommandId {
             Self::ExportPdf => "Export PDF",
             Self::CsvImportSettings => "CSV Import Settings...",
             Self::CsvImportNotes => "Show CSV Import Notes",
+            Self::RefreshRecipeTable => "Refresh Table from Recipe",
+            Self::EditRecipe => "Edit Import Recipe",
+            Self::NewRecipe => "New Import Recipe…",
             Self::PrintPreview => "Print",
             Self::ExportTsv => "Export as TSV",
             Self::ExportJson => "Export as JSON",
@@ -568,6 +574,7 @@ impl CommandId {
             Self::ZoomReset => Some("Ctrl+Alt+0"),
             Self::ToggleAutoFilter => Some("Ctrl+Shift+L"),
             Self::RefreshPivot => Some("Alt+F5"),
+            Self::RefreshRecipeTable => Some("Alt+F5"),
             Self::RefreshAllPivots => Some("Ctrl+Alt+F5"),
             Self::CreateTable => Some("Ctrl+T"),
             Self::InsertPivotTable | Self::EditPivotFields | Self::DeletePivot => None,
@@ -698,6 +705,9 @@ impl CommandId {
             Self::ExportPdf => "print preview portable document paper page gridlines",
             Self::CsvImportSettings => "csv tsv delimiter encoding column types text leading zeros reimport",
             Self::CsvImportNotes => "csv tsv banner import report findings formulas kept as text changed on disk",
+            Self::RefreshRecipeTable => "recipe import refresh reload query power query update table next month export",
+            Self::EditRecipe => "recipe import edit steps toml power query transform",
+            Self::NewRecipe => "recipe import new create csv clean shape steps power query transform get data",
             Self::PrintPreview => "printer print preview copies pages paper",
             Self::ExportTsv => "save tab separated",
             Self::ExportJson => "save array",
@@ -893,6 +903,9 @@ impl CommandId {
             Self::ExportPdf,
             Self::CsvImportSettings,
             Self::CsvImportNotes,
+            Self::RefreshRecipeTable,
+            Self::EditRecipe,
+            Self::NewRecipe,
             Self::PrintPreview,
             Self::ExportTsv,
             Self::ExportJson,
@@ -1012,6 +1025,9 @@ impl CommandId {
             | Self::ExportPdf
             | Self::CsvImportSettings
             | Self::CsvImportNotes
+            | Self::RefreshRecipeTable
+            | Self::EditRecipe
+            | Self::NewRecipe
             | Self::ExportCsv
             | Self::ExportTsv
             | Self::ExportJson

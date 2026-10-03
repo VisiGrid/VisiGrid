@@ -308,6 +308,9 @@ actions!(data, [
     ExcludeFromValidation,   // Exclude selection from validation
     ClearValidationExclusions, // Clear exclusions in selection
     OpenDiffResults,         // Open newest diff-*.json as a Diff Results sheet
+    NewImportRecipe,         // Recipe builder for a file (the open CSV, else a picker)
+    EditImportRecipe,        // Recipe builder for the recipe-backed Table here
+    RefreshRecipeTable,      // Re-run the recipe of the Table here
 ]);
 
 // Terminal actions — consume keys in Terminal context to prevent bubbling to Spreadsheet

@@ -7,6 +7,8 @@ pub mod command_palette;
 pub(crate) mod context_menu;
 mod cycle_banner;
 mod csv_import_view;
+mod recipe_view;
+mod recipe_builder_view;
 mod hub_dialogs;
 mod pairing_dialog;
 mod export_report_dialog;
@@ -37,6 +39,7 @@ pub mod minimap;
 mod paste_special_dialog;
 mod convert_picker;
 mod cloud_open_dialog;
+mod duckdb_import_dialog;
 pub(crate) mod preferences_panel;
 pub mod refactor_log;
 pub(crate) mod review_card;
@@ -123,7 +126,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_pairing_prompt = app.pairing_prompt.is_some();
     let show_cycle_banner = app.cycle_banner.visible;
     // The cycle banner wins the same spot; a CSV import rarely has cycles
+    let show_recipe_banner = !show_cycle_banner && app.recipe_blocked.is_some();
     let show_csv_banner = !show_cycle_banner
+        && !show_recipe_banner
         && app.mode != Mode::CsvImport
         && app.current_csv().is_some_and(|c| c.banner_visible);
     let show_merge_confirm = app.merge_confirm.visible;
@@ -607,6 +612,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             .bg(app.token(crate::theme::TokenKey::PanelBg)).text_color(app.token(crate::theme::TokenKey::TextPrimary))
             .child(div().text_size(px(12.0)).child("READ-ONLY RECOVERY · Table definitions are unavailable"))
             .child(div().text_size(px(12.0)).child("Saved formula results may be stale or unavailable. Editing, recalculation, Save, Save As and export are disabled."))))
+        .when(app.show_recipe_strip(cx), |d| d.child(recipe_view::render_recipe_strip(app, cx)))
         .when(app.show_table_controls(cx), |d| d.child(table_controls::render_table_controls(app, cx)))
         .child(headers::render_column_headers(app, cx))
         // Split view: render two grids side-by-side, or single grid
@@ -851,6 +857,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_cloud_open, |div| {
             div.child(cloud_open_dialog::render_cloud_open_dialog(app, cx))
         })
+        .when(app.mode == Mode::DuckdbImport, |div| {
+            div.child(duckdb_import_dialog::render(app, cx))
+        })
         .when(show_transform_preview, |div| {
             div.child(transform_diff_dialog::render_transform_diff_dialog(app, cx))
         })
@@ -915,6 +924,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(show_csv_banner, |div| {
             div.child(csv_import_view::render_csv_banner(app, cx))
         })
+        .when(show_recipe_banner, |div| {
+            div.child(recipe_view::render_recipe_banner(app, cx))
+        })
         .when(show_hub_paste_token, |div| {
             div.child(hub_dialogs::render_paste_token_dialog(app, cx))
         })
@@ -932,6 +944,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(app.mode == Mode::CsvImport, |div| {
             div.child(csv_import_view::render_csv_import_dialog(app, cx))
+        })
+        .when(app.mode == Mode::RecipeBuilder, |div| {
+            div.child(recipe_builder_view::render_recipe_builder(app, cx))
         })
         .when(show_export_report, |div| {
             div.child(export_report_dialog::render_export_report_dialog(app, cx))

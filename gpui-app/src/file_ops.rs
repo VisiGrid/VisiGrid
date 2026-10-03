@@ -32,6 +32,7 @@ impl Spreadsheet {
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if self.comment_editor.is_some() { self.close_comment(cx); }
+        self.cancel_duckdb_import(cx);
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);
@@ -111,8 +112,20 @@ impl Spreadsheet {
             return;
         }
         if self.block_if_previewing_only(cx) { return; }
+        self.cancel_duckdb_import(cx);
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
+
+        if ext_lower == "duckdb" {
+            self.start_duckdb_import(path, cx);
+            return;
+        }
+
+        // An import recipe opens as the Table it produces
+        if ext_lower == "toml" {
+            self.open_recipe(path, cx);
+            return;
+        }
 
         // Excel files import in the background, for everyone. The
         // synchronous path froze the window for the length of the import and
@@ -624,6 +637,41 @@ impl Spreadsheet {
             });
         })
         .detach();
+    }
+
+    /// Install a completed value-only import. Called only after successful
+    /// materialization; previews and cancelled imports never reach this path.
+    pub(crate) fn finish_table_import(&mut self, workbook: Workbook, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.cancel_duckdb_import(cx);
+        self.workbook = cx.new(|_| workbook);
+        self.update_cached_sheet_id(cx);
+        self.debug_assert_sheet_cache_sync(cx);
+        self.capture_base_workbook(cx);
+        self.rewind_preview = crate::app::RewindPreviewState::Off;
+        self.cycle_banner.reset_for_new_file();
+        self.import_result = None;
+        self.import_filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        self.import_source_dir = path.parent().map(|p| p.to_owned());
+        self.doc_settings = DocumentSettings::default();
+        self.col_widths.clear();
+        self.row_heights.clear();
+        self.view_state.selected = (0, 0);
+        self.view_state.active_sheet = 0;
+        self.view_state.selection_end = None;
+        self.view_state.additional_selections.clear();
+        self.view_state.scroll_row = 0;
+        self.view_state.scroll_col = 0;
+        self.view_state.frozen_rows = 0;
+        self.view_state.frozen_cols = 0;
+        self.history.clear();
+        self.bump_cells_rev();
+        self.add_recent_file(&path.to_path_buf());
+        self.finalize_load(path);
+        self.request_title_refresh(cx);
+        self.hub_link = None;
+        self.hub_status = crate::hub::HubStatus::Unlinked;
+        self.cell_metadata.clear();
+        self.update_session_cached(cx);
     }
 
     pub fn reimport_with_freeze(&mut self, cx: &mut Context<Self>) {

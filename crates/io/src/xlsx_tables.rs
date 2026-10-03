@@ -326,6 +326,7 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
         columns,
         next_column_id,
         style,
+        source: None,
     };
     table.validate(
         visigrid_engine::sheet::NUM_ROWS,

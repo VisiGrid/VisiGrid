@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.43.0"
+version = "0.44.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -53,3 +53,11 @@ opt-level = "z"
 
 [profile.dev]
 opt-level = 1
+
+# DuckDB's bundled C++ engine is a 1.8 GB library when built with debug info,
+# and every binary that uses visigrid-io (the CLI's dozens of test binaries
+# included) links it statically, at 1-2 GB each: one test run filled a 476 GB
+# disk. Nobody steps into DuckDB, so build its C++ without debug info. Our own
+# crates keep theirs.
+[profile.dev.package.libduckdb-sys]
+debug = false
