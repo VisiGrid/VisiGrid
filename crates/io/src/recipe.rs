@@ -991,41 +991,49 @@ impl RecipeOutput {
         }
         for (r, row) in self.rows.iter().enumerate() {
             for (c, value) in row.iter().enumerate() {
-                if value.is_empty() {
-                    continue;
-                }
-                let (dr, rule) = (r + 1, self.columns[c].rule);
-                match rule {
-                    ColumnRule::Text | ColumnRule::Skip => sheet.set_text(dr, c, value),
-                    ColumnRule::Number => match parse_number(value, self.decimal_comma) {
-                        Some(n) => sheet.set_value_deferred(dr, c, &interchange_number(n)),
-                        None => sheet.set_text(dr, c, value), // reported; kept as text
-                    },
-                    ColumnRule::Date(order) => match parse_date(value, order) {
-                        Some(serial) => {
-                            sheet.set_value_deferred(dr, c, &interchange_number(serial));
-                            sheet.set_number_format(dr, c, NumberFormat::Date { style: DateStyle::Iso });
-                        }
-                        None => sheet.set_text(dr, c, value),
-                    },
-                    ColumnRule::Auto => {
-                        if keep_as_text(value, false).is_some() {
-                            sheet.set_text(dr, c, value);
-                        } else if self.decimal_comma {
-                            match parse_decimal_comma(value) {
-                                Some(n) => sheet.set_value_deferred(dr, c, &interchange_number(n)),
-                                None => sheet.set_value_deferred(dr, c, value),
-                            }
-                        } else {
-                            sheet.set_value_deferred(dr, c, value);
-                        }
-                    }
-                }
+                self.write_value(&mut sheet, r + 1, c, c, value);
             }
         }
         sheet.rows = (self.rows.len() + 1).max(1000);
         sheet.cols = self.columns.len().max(26);
         sheet
+    }
+}
+
+impl RecipeOutput {
+    /// Write one value of column `col` at (`row`, `at_col`), typed the way
+    /// [`to_sheet`](Self::to_sheet) types it. An empty value writes nothing.
+    pub(crate) fn write_value(&self, sheet: &mut Sheet, row: usize, at_col: usize, col: usize, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        let (dr, c) = (row, at_col);
+        match self.columns[col].rule {
+            ColumnRule::Text | ColumnRule::Skip => sheet.set_text(dr, c, value),
+            ColumnRule::Number => match parse_number(value, self.decimal_comma) {
+                Some(n) => sheet.set_value_deferred(dr, c, &interchange_number(n)),
+                None => sheet.set_text(dr, c, value), // reported; kept as text
+            },
+            ColumnRule::Date(order) => match parse_date(value, order) {
+                Some(serial) => {
+                    sheet.set_value_deferred(dr, c, &interchange_number(serial));
+                    sheet.set_number_format(dr, c, NumberFormat::Date { style: DateStyle::Iso });
+                }
+                None => sheet.set_text(dr, c, value),
+            },
+            ColumnRule::Auto => {
+                if keep_as_text(value, false).is_some() {
+                    sheet.set_text(dr, c, value);
+                } else if self.decimal_comma {
+                    match parse_decimal_comma(value) {
+                        Some(n) => sheet.set_value_deferred(dr, c, &interchange_number(n)),
+                        None => sheet.set_value_deferred(dr, c, value),
+                    }
+                } else {
+                    sheet.set_value_deferred(dr, c, value);
+                }
+            }
+        }
     }
 }
 

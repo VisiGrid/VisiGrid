@@ -97,6 +97,32 @@ pub struct DataTable {
     /// Column IDs are local to this table and never reused after shrinking.
     pub next_column_id: u64,
     pub style: TableStyle,
+    /// The recipe this Table is loaded from, if any. Refresh re-runs it and
+    /// replaces the records; a Table without one is edited by hand only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TableSource>,
+}
+
+/// Where a recipe-backed Table comes from, and its last good refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableSource {
+    /// Path to the `.recipe.toml`, as the user chose it.
+    pub recipe: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed: Option<RefreshStamp>,
+}
+
+/// The last refresh that published: what it read and what it loaded.
+/// A failed refresh never changes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshStamp {
+    /// RFC 3339, UTC.
+    pub at: String,
+    /// The source file read, as resolved for that run.
+    pub source: String,
+    /// The snapshot's content hash.
+    pub snapshot: String,
+    pub rows: usize,
 }
 
 impl DataTable {
