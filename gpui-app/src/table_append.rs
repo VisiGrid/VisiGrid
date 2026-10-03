@@ -1,5 +1,5 @@
 //! Append through saved Table views without moving neighboring worksheet cells.
-//! History retains a schema/value commit and an optional sparse pending edit.
+//! History retains a schema/value commit plus sparse pending-edit or paste patches.
 use crate::{
     app::Spreadsheet,
     history::UndoAction,
@@ -19,6 +19,7 @@ pub(crate) struct TableAppendHistory {
     pub table: TableCommit,
     edit: Option<TableCellsCommit>,
     view: Option<TableViewSpec>,
+    paste: Option<TableCellsCommit>,
 }
 
 fn validate_views(wb: &Workbook) -> Result<(), String> {
@@ -67,10 +68,31 @@ fn prepare_append(
         ));
     }
     validate_views(&candidate)?;
-    Ok((candidate, TableAppendHistory { table, edit, view }))
+    Ok((
+        candidate,
+        TableAppendHistory {
+            table,
+            edit,
+            view,
+            paste: None,
+        },
+    ))
 }
 
 impl TableAppendHistory {
+    pub(crate) fn from_paste(
+        table: TableCommit,
+        paste: TableCellsCommit,
+        view: Option<TableViewSpec>,
+    ) -> Self {
+        Self {
+            table,
+            edit: None,
+            view,
+            paste: Some(paste),
+        }
+    }
+
     pub(crate) fn replay(&self, wb: &Workbook, undo: bool) -> Result<Workbook, String> {
         wb.ensure_writable()?;
         let sheet = wb
@@ -84,6 +106,9 @@ impl TableAppendHistory {
         validate_views(wb)?;
         let mut candidate = wb.clone();
         if undo {
+            if let Some(paste) = &self.paste {
+                paste.replay(&mut candidate, true)?;
+            }
             candidate.apply_table_commit(&self.table, true)?;
             if let Some(edit) = &self.edit {
                 edit.replay(&mut candidate, true)?;
@@ -93,6 +118,9 @@ impl TableAppendHistory {
                 edit.replay(&mut candidate, false)?;
             }
             candidate.apply_table_commit(&self.table, false)?;
+            if let Some(paste) = &self.paste {
+                paste.replay(&mut candidate, false)?;
+            }
         }
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!(

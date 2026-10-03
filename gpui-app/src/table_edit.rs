@@ -239,12 +239,24 @@ pub(crate) fn prepare_table_writes(
     sheet_index: usize,
     writes: &[TableCellWrite],
 ) -> Result<Workbook, String> {
-    validate_view_safe_targets(
-        wb,
-        sheet_index,
-        &writes.iter().map(|w| (w.row, w.col)).collect::<Vec<_>>(),
-        false,
-    )?;
+    prepare_table_writes_with_new_rows(wb, sheet_index, writes, None)
+}
+
+/// Only the newly allocated append stripe may receive writes while hidden.
+/// Existing records still require visibility in the pre-paste projection.
+pub(crate) fn prepare_table_writes_with_new_rows(
+    wb: &Workbook,
+    sheet_index: usize,
+    writes: &[TableCellWrite],
+    new_rows: Option<visigrid_engine::table::TableRange>,
+) -> Result<Workbook, String> {
+    let targets: Vec<_> = writes.iter().map(|w| (w.row, w.col)).collect();
+    validate_view_safe_targets(wb, sheet_index, &targets, new_rows.is_some())?;
+    if let Some(new_rows) = new_rows {
+        let existing: Vec<_> = targets.iter().copied()
+            .filter(|&(r, c)| !new_rows.contains(r, c)).collect();
+        validate_view_safe_targets(wb, sheet_index, &existing, false)?;
+    }
     let mut candidate = wb.clone();
     {
         let mut batch = candidate.batch_guard();
