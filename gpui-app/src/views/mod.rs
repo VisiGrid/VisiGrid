@@ -1,6 +1,7 @@
 mod about_dialog;
 mod ai_settings_dialog;
 mod ask_ai_dialog;
+mod chevron;
 mod color_picker;
 pub mod command_palette;
 pub(crate) mod context_menu;
@@ -946,7 +947,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             div.child(named_range_dialogs::render_create_named_range_dialog(app, cx))
         })
         .when(show_add_cond_format, |div| {
-            div.child(cond_format_dialog::render_add_cond_format_dialog(app))
+            div.child(cond_format_dialog::render_add_cond_format_dialog(app, cx))
         })
         .when(show_edit_description, |div| {
             div.child(named_range_dialogs::render_edit_description_dialog(app))

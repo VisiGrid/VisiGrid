@@ -198,6 +198,7 @@ pub const CELL_HEIGHT: f32 = crate::settings::CellSizeDefaults::ROW_HEIGHT;
 pub const HEADER_WIDTH: f32 = 50.0;
 pub const MENU_BAR_HEIGHT: f32 = 32.0;
 pub const FORMULA_BAR_HEIGHT: f32 = 40.0;
+pub const FORMULA_BAR_EXPAND_WIDTH: f32 = 40.0;
 pub const COLUMN_HEADER_HEIGHT: f32 = 24.0;
 pub const STATUS_BAR_HEIGHT: f32 = 36.0;
 pub const MACOS_TITLEBAR_HEIGHT: f32 = 34.0;
@@ -4530,7 +4531,7 @@ impl Render for Spreadsheet {
         // Update formula bar text rect for click-to-place-caret hit-testing
         // Uses centralized constants: FORMULA_BAR_TEXT_LEFT, FORMULA_BAR_PADDING
         let formula_bar_input_left = FORMULA_BAR_TEXT_LEFT - FORMULA_BAR_PADDING;
-        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - 28.0).max(0.0);
+        let formula_bar_text_width = (window_width - formula_bar_input_left - FORMULA_BAR_PADDING * 2.0 - FORMULA_BAR_EXPAND_WIDTH).max(0.0);
         let formula_bar_y = self.toolbar_geometry(cx).formula_top;
         self.formula_bar_text_rect = gpui::Bounds {
             origin: gpui::point(gpui::px(FORMULA_BAR_TEXT_LEFT), gpui::px(formula_bar_y)),

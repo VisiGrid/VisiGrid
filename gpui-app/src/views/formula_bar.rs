@@ -2,7 +2,8 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::app::{
     Spreadsheet, REF_COLORS, EditorSurface,
-    FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH,
+    FORMULA_BAR_CELL_REF_WIDTH, FORMULA_BAR_FX_WIDTH, FORMULA_BAR_HEIGHT,
+    FORMULA_BAR_EXPAND_WIDTH,
 };
 use crate::theme::TokenKey;
 use crate::formula_context::{tokenize_for_highlight, TokenType, char_index_to_byte_offset};
@@ -373,35 +374,66 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
                 // Function docs are available via autocomplete and signature help while editing.
                 .child(formula_content)
         )
-        // Expand/collapse chevron (right side) - Excel-style affordance
+        // Inset the control from both the input and window edge; keep it fixed when expanded.
         .child(
             div()
-                .id("formula-bar-expand")
-                .w(px(28.0))
+                .w(px(FORMULA_BAR_EXPAND_WIDTH))
                 .flex_shrink_0()
                 .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .text_size(px(10.0))
-                .text_color(text_muted)
-                .hover(|s| s.text_color(text_primary))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.formula_bar_expanded = !this.formula_bar_expanded;
-                    cx.notify();
-                }))
-                .tooltip(|_window, cx| {
-                    cx.new(|_| ExpandTooltip).into()
-                })
-                .child(if app.formula_bar_expanded { "▲" } else { "▼" })
+                .pt(px((FORMULA_BAR_HEIGHT - 24.0) / 2.0))
+                .px(px(8.0))
+                .child(
+                    div()
+                        .id("formula-bar-expand")
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(if app.formula_bar_expanded {
+                            accent.opacity(0.35)
+                        } else {
+                            text_muted.opacity(0.14)
+                        })
+                        .bg(if app.formula_bar_expanded {
+                            accent.opacity(0.1)
+                        } else {
+                            transparent_black()
+                        })
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(accent.opacity(0.18)).border_color(accent.opacity(0.5)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.formula_bar_expanded = !this.formula_bar_expanded;
+                            cx.notify();
+                        }))
+                        .tooltip({
+                            move |_, cx| {
+                                cx.new(|_| ExpandTooltip {
+                                    bg: panel_bg,
+                                    border: panel_border,
+                                    ink: text_primary,
+                                }).into()
+                            }
+                        })
+                        .child(super::chevron::render(
+                            if app.formula_bar_expanded { accent } else { text_muted },
+                            1.0,
+                            app.formula_bar_expanded,
+                        ))
+                )
         )
         // Note: Autocomplete, signature help, and error popups are rendered at the top level
         // in views/mod.rs to avoid being clipped by the formula bar's fixed height
 }
 
 /// Tooltip for formula bar expand button.
-struct ExpandTooltip;
+struct ExpandTooltip {
+    bg: Hsla,
+    border: Hsla,
+    ink: Hsla,
+}
 
 impl Render for ExpandTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -409,11 +441,11 @@ impl Render for ExpandTooltip {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x2d2d2d))
+            .bg(self.bg)
             .border_1()
-            .border_color(rgb(0x3d3d3d))
+            .border_color(self.border)
             .text_size(px(11.0))
-            .text_color(rgb(0xcccccc))
+            .text_color(self.ink)
             .child("Expand/collapse formula bar")
     }
 }
