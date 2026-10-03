@@ -713,3 +713,66 @@ mod tests {
         assert_eq!(days as i32, 296); // 296 days between these dates
     }
 }
+
+/// What one argument supplies to a function that walks values: its typed
+/// values, row-major, and whether they came from a reference or an array
+/// (`bulk`). Excel treats the two kinds differently: inside a reference or an
+/// array, text and blanks are skipped by XOR, MODE, LARGE and the like, while
+/// a value written directly as an argument is coerced, or is an error.
+pub(crate) struct ArgValues {
+    pub values: Vec<Value>,
+    pub rows: usize,
+    pub cols: usize,
+    pub bulk: bool,
+}
+
+pub(crate) fn arg_values<L: CellLookup>(arg: &BoundExpr, lookup: &L) -> Result<ArgValues, String> {
+    fn rect<L: CellLookup>(
+        lookup: &L, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize,
+    ) -> Result<ArgValues, String> {
+        if matches!(sheet, SheetRef::RefError { .. }) {
+            return Err("#REF!".to_string());
+        }
+        let (r0, r1) = (r0.min(r1), r0.max(r1));
+        let (c0, c1) = (c0.min(c1), c0.max(c1));
+        let mut values = Vec::with_capacity((r1 - r0 + 1) * (c1 - c0 + 1));
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                values.push(read_cell_value(lookup, sheet, r, c));
+            }
+        }
+        Ok(ArgValues { values, rows: r1 - r0 + 1, cols: c1 - c0 + 1, bulk: true })
+    }
+    match arg {
+        Expr::Range { sheet, start_row, start_col, end_row, end_col, .. } => {
+            rect(lookup, sheet, *start_row, *start_col, *end_row, *end_col)
+        }
+        Expr::CellRef { sheet, row, col, .. } => rect(lookup, sheet, *row, *col, *row, *col),
+        Expr::WholeRange { .. } => {
+            let bounded = super::whole_range::bound_for_evaluation(arg, lookup);
+            if matches!(bounded, Expr::WholeRange { .. }) {
+                return Ok(ArgValues { values: Vec::new(), rows: 0, cols: 0, bulk: true });
+            }
+            arg_values(&bounded, lookup)
+        }
+        Expr::NamedRange(name) => match lookup.resolve_named_range(name) {
+            Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
+                rect(lookup, &SheetRef::Current, start_row, start_col, end_row, end_col)
+            }
+            Some(NamedRangeResolution::Cell { row, col }) => rect(lookup, &SheetRef::Current, row, col, row, col),
+            None => Err(format!("#NAME? '{}'", name)),
+        },
+        _ => match evaluate(arg, lookup) {
+            EvalResult::Array(a) => {
+                let mut values = Vec::with_capacity(a.rows() * a.cols());
+                for r in 0..a.rows() {
+                    for c in 0..a.cols() {
+                        values.push(a.get(r, c).cloned().unwrap_or(Value::Empty));
+                    }
+                }
+                Ok(ArgValues { values, rows: a.rows(), cols: a.cols(), bulk: true })
+            }
+            other => Ok(ArgValues { values: vec![other.to_value()], rows: 1, cols: 1, bulk: false }),
+        },
+    }
+}

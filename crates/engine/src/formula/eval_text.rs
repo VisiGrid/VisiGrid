@@ -1,7 +1,7 @@
 // Text functions: CONCATENATE, TEXTJOIN, LEFT, RIGHT, MID, LEN, UPPER, LOWER,
-// TRIM, TEXT, VALUE, FIND, SUBSTITUTE, REPT
+// TRIM, TEXT, VALUE, FIND, SUBSTITUTE, REPT, HYPERLINK, TEXTSPLIT
 
-use super::eval::{evaluate, CellLookup, EvalResult};
+use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
 use super::parser::{BoundExpr, Expr};
 
 
@@ -407,6 +407,113 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
             EvalResult::Text(text.repeat(times))
         }
+        "HYPERLINK" => {
+            // HYPERLINK(link_location, [friendly_name]): a cell shows the
+            // friendly name, or the link itself when there is none. Only the
+            // value is computed here; following the link is the UI's business.
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error("HYPERLINK requires 1 or 2 arguments".to_string()));
+            }
+            let link = evaluate(&args[0], lookup);
+            if let EvalResult::Error(e) = link {
+                return Some(EvalResult::Error(e));
+            }
+            match args.get(1) {
+                Some(friendly) if !matches!(friendly, Expr::Empty) => evaluate(friendly, lookup),
+                _ => EvalResult::Text(link.to_text()),
+            }
+        }
+        "TEXTSPLIT" => {
+            // TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty],
+            // [match_mode], [pad_with]): split text into a grid that spills.
+            // Either delimiter may be a list ({",",";"}); the earliest match
+            // wins, the longest at a tie. ignore_empty drops empty pieces;
+            // match_mode 1 ignores case. Short rows are padded with pad_with,
+            // #N/A by default.
+            if args.len() < 2 || args.len() > 6 {
+                return Some(EvalResult::Error("TEXTSPLIT requires 2 to 6 arguments".to_string()));
+            }
+            let text = match evaluate(&args[0], lookup) {
+                EvalResult::Error(e) => return Some(EvalResult::Error(e)),
+                other => other.to_text(),
+            };
+            let delimiters = |arg: Option<&BoundExpr>| -> Result<Vec<String>, String> {
+                let Some(arg) = arg.filter(|a| !matches!(a, Expr::Empty)) else { return Ok(Vec::new()) };
+                let list: Vec<String> = match evaluate(arg, lookup) {
+                    EvalResult::Error(e) => return Err(e),
+                    EvalResult::Array(a) => (0..a.rows())
+                        .flat_map(|r| (0..a.cols()).map(move |c| (r, c)))
+                        .map(|(r, c)| a.get(r, c).map(|v| v.to_text()).unwrap_or_default())
+                        .collect(),
+                    other => vec![other.to_text()],
+                };
+                if list.iter().any(|d| d.is_empty()) {
+                    return Err("#VALUE!".to_string());
+                }
+                Ok(list)
+            };
+            let cols = match delimiters(args.get(1)) {
+                Ok(d) => d,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let rows = match delimiters(args.get(2)) {
+                Ok(d) => d,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            if cols.is_empty() && rows.is_empty() {
+                return Some(EvalResult::Error("#VALUE!".to_string()));
+            }
+            let flag = |i: usize| -> Result<bool, String> {
+                match args.get(i).filter(|a| !matches!(a, Expr::Empty)) {
+                    None => Ok(false),
+                    Some(a) => evaluate(a, lookup).to_bool(),
+                }
+            };
+            let ignore_empty = match flag(3) {
+                Ok(b) => b,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let ignore_case = match flag(4) {
+                Ok(b) => b,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let pad = match args.get(5).filter(|a| !matches!(a, Expr::Empty)) {
+                None => Value::Error("#N/A".to_string()),
+                Some(a) => evaluate(a, lookup).to_value(),
+            };
+            let mut grid: Vec<Vec<String>> = Vec::new();
+            for line in split_any(&text, &rows, ignore_case) {
+                if ignore_empty && line.is_empty() {
+                    continue;
+                }
+                let mut pieces = split_any(&line, &cols, ignore_case);
+                if ignore_empty {
+                    pieces.retain(|p| !p.is_empty());
+                    if pieces.is_empty() {
+                        continue;
+                    }
+                }
+                grid.push(pieces);
+            }
+            if grid.is_empty() {
+                return Some(EvalResult::Error("#CALC! Empty array".to_string()));
+            }
+            let width = grid.iter().map(Vec::len).max().unwrap_or(1);
+            if grid.len() == 1 && width == 1 {
+                return Some(EvalResult::Text(grid.remove(0).remove(0)));
+            }
+            let mut out = Array2D::new(grid.len(), width);
+            for (r, row) in grid.into_iter().enumerate() {
+                let filled = row.len();
+                for (c, piece) in row.into_iter().enumerate() {
+                    out.set(r, c, Value::Text(piece));
+                }
+                for c in filled..width {
+                    out.set(r, c, pad.clone());
+                }
+            }
+            EvalResult::Array(out)
+        }
         _ => return None,
     };
     Some(result)
@@ -553,4 +660,33 @@ mod newly_added_tests {
         // would be indistinguishable from a delimiter at position one.
         assert!(is_error(r#"=TEXTBEFORE("abc","-")"#));
     }
+}
+
+/// Split `text` at every occurrence of any delimiter. With no delimiters the
+/// text is one piece. At one position the longest matching delimiter wins.
+/// Works on characters, so case-insensitive matching never splits a
+/// multi-byte character.
+fn split_any(text: &str, delimiters: &[String], ignore_case: bool) -> Vec<String> {
+    if delimiters.is_empty() {
+        return vec![text.to_string()];
+    }
+    let fold = |c: char| if ignore_case { c.to_lowercase().next().unwrap_or(c) } else { c };
+    let chars: Vec<char> = text.chars().collect();
+    let folded: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
+    let mut delims: Vec<Vec<char>> = delimiters.iter().map(|d| d.chars().map(fold).collect()).collect();
+    delims.sort_by_key(|d| std::cmp::Reverse(d.len()));
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(d) = delims.iter().find(|d| folded[i..].starts_with(d)) {
+            pieces.push(chars[start..i].iter().collect());
+            i += d.len();
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    pieces.push(chars[start..].iter().collect());
+    pieces
 }

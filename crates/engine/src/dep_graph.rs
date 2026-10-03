@@ -1757,7 +1757,8 @@ mod tests {
             seen
         }
         let c = |s: u64, r: usize| cell(s, r, 0);
-        let shapes: Vec<(&str, Vec<(CellId, Vec<CellId>)>)> = vec![
+        type Shape = (&'static str, Vec<(CellId, Vec<CellId>)>);
+        let shapes: Vec<Shape> = vec![
             ("chain", (1..12).map(|r| (c(1, r), vec![c(1, r - 1)])).collect()),
             ("diamond", vec![
                 (c(1, 1), vec![c(1, 0)]),

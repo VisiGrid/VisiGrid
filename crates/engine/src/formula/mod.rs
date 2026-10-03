@@ -9,6 +9,7 @@ pub mod refs;
 pub mod whole_range;
 
 pub(crate) mod eval_helpers;
+mod eval_let;
 pub(crate) mod eval_math;
 pub(crate) mod eval_financial;
 pub(crate) mod eval_regex;

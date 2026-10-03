@@ -143,6 +143,10 @@ enum Token {
     RParen,
     Colon,
     Comma,
+    /// `{`, `}` and `;` of an array constant like {1,2;3,4}
+    LBrace,
+    RBrace,
+    Semicolon,
     // Comparison operators
     Lt,      // <
     Gt,      // >
@@ -179,6 +183,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             ')' => { tokens.push(Token::RParen); chars.next(); }
             ':' => { tokens.push(Token::Colon); chars.next(); }
             ',' => { tokens.push(Token::Comma); chars.next(); }
+            '{' => { tokens.push(Token::LBrace); chars.next(); }
+            '}' => { tokens.push(Token::RBrace); chars.next(); }
+            ';' => { tokens.push(Token::Semicolon); chars.next(); }
             '&' => { tokens.push(Token::Ampersand); chars.next(); }
             '^' => { tokens.push(Token::Caret); chars.next(); }
             '%' => { tokens.push(Token::Percent); chars.next(); }
@@ -879,19 +886,26 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
             // Function call
             if pos + 1 < tokens.len() {
                 if let Token::LParen = &tokens[pos + 1] {
-                    let (args, new_pos) = parse_function_args(tokens, pos + 2)?;
-                    return Ok((
-                        Expr::Function {
-                            name: name.clone(),
-                            args,
-                        },
-                        new_pos,
-                    ));
+                    let (args, mut new_pos) = parse_function_args(tokens, pos + 2)?;
+                    let mut call = Expr::Function { name: name.clone(), args };
+                    // A LAMBDA called where it is written: LAMBDA(x, x+1)(2),
+                    // and curried calls LAMBDA(x, LAMBDA(y, x+y))(1)(2).
+                    if name == "LAMBDA" {
+                        while let Some(Token::LParen) = tokens.get(new_pos) {
+                            let (call_args, next) = parse_function_args(tokens, new_pos + 1)?;
+                            let mut invoke = vec![call];
+                            invoke.extend(call_args);
+                            call = Expr::Function { name: INVOKE.to_string(), args: invoke };
+                            new_pos = next;
+                        }
+                    }
+                    return Ok((call, new_pos));
                 }
             }
             // Not a function call - treat as a named range (resolved at evaluation time)
             Ok((Expr::NamedRange(name.clone()), pos + 1))
         }
+        Token::LBrace => parse_array_constant(tokens, pos + 1),
         Token::LParen => {
             let (expr, pos) = parse_comparison(tokens, pos + 1)?;
             if pos >= tokens.len() {
@@ -920,6 +934,48 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
         }
         _ => Err(format!("Unexpected token at position {}", pos)),
     }
+}
+
+/// An array constant after its `{`: values separated by `,` within a row and
+/// `;` between rows, every row the same length. Elements are constants only —
+/// numbers (optionally negative), text and TRUE/FALSE — as in Excel. It parses
+/// to the internal ARRAY_LITERAL call: rows, columns, then the elements.
+fn parse_array_constant(tokens: &[Token], mut pos: usize) -> Result<(ParsedExpr, usize), String> {
+    let mut rows: Vec<Vec<ParsedExpr>> = vec![Vec::new()];
+    loop {
+        let negative = matches!(tokens.get(pos), Some(Token::Minus));
+        if negative {
+            pos += 1;
+        }
+        let element = match tokens.get(pos) {
+            Some(Token::Number(n, _)) => Expr::Number(if negative { -n } else { *n }),
+            Some(Token::StringLit(t)) if !negative => Expr::Text(t.clone()),
+            Some(Token::Ident(b)) if !negative && b == "TRUE" => Expr::Boolean(true),
+            Some(Token::Ident(b)) if !negative && b == "FALSE" => Expr::Boolean(false),
+            _ => return Err("Array constants may hold only numbers, text and TRUE/FALSE".to_string()),
+        };
+        rows.last_mut().expect("a row").push(element);
+        pos += 1;
+        match tokens.get(pos) {
+            Some(Token::Comma) => pos += 1,
+            Some(Token::Semicolon) => {
+                rows.push(Vec::new());
+                pos += 1;
+            }
+            Some(Token::RBrace) => {
+                pos += 1;
+                break;
+            }
+            _ => return Err("Expected , ; or } in an array constant".to_string()),
+        }
+    }
+    let cols = rows[0].len();
+    if rows.iter().any(|r| r.len() != cols) {
+        return Err("Every row of an array constant must have the same length".to_string());
+    }
+    let mut args = vec![Expr::Number(rows.len() as f64), Expr::Number(cols as f64)];
+    args.extend(rows.into_iter().flatten());
+    Ok((Expr::Function { name: ARRAY_LITERAL.to_string(), args }, pos))
 }
 
 fn parse_function_args(tokens: &[Token], pos: usize) -> Result<(Vec<ParsedExpr>, usize), String> {
@@ -1097,6 +1153,34 @@ fn format_whole_range(
     format!("{}:{}", endpoint(start, start_abs), endpoint(end, end_abs))
 }
 
+/// The internal name of a call to a LAMBDA written in place,
+/// `LAMBDA(x, x+1)(2)`: args are the callee, then the call's arguments. It is
+/// never typed by a user (names cannot start with an underscore) and prints
+/// back as the call it came from.
+pub const INVOKE: &str = "_INVOKE";
+
+/// The internal name of an array value: args are the row count, the column
+/// count, then the elements row by row. An array constant `{1,2;3,4}` parses
+/// to it, LET uses it to hold an evaluated array, and it prints back as the
+/// constant.
+pub const ARRAY_LITERAL: &str = "_ARRAY";
+
+/// `NAME(a,b)`; for an in-place LAMBDA call, `callee(a,b)`; for an array,
+/// `{a,b;c,d}`.
+fn format_call(name: &str, args: &[String], separator: &str) -> String {
+    if name == ARRAY_LITERAL && args.len() >= 2 {
+        let cols = args[1].parse::<usize>().unwrap_or(1).max(1);
+        let rows: Vec<String> = args[2..].chunks(cols).map(|row| row.join(",")).collect();
+        return format!("{{{}}}", rows.join(";"));
+    }
+    if name == INVOKE {
+        if let Some((callee, rest)) = args.split_first() {
+            return format!("{}({})", callee, rest.join(separator));
+        }
+    }
+    format!("{}({})", name, args.join(separator))
+}
+
 /// Keep grouping when a structural edit reformats a stored formula.
 fn format_binary<S>(op: Op, left: &Expr<S>, right: &Expr<S>, render: impl Fn(&Expr<S>) -> String) -> String {
     let precedence = |op| match op {
@@ -1151,11 +1235,9 @@ fn format_parsed_expr_inner(expr: &ParsedExpr) -> String {
         ),
         Expr::WholeRange { sheet, axis, start, end, start_abs, end_abs } =>
             format!("{}{}", prefix(sheet), format_whole_range(*axis, *start, *end, *start_abs, *end_abs)),
-        Expr::Function { name, args } => format!(
-            "{}({})",
-            name,
-            args.iter().map(format_parsed_expr_inner).collect::<Vec<_>>().join(", ")
-        ),
+        Expr::Function { name, args } => {
+            format_call(name, &args.iter().map(format_parsed_expr_inner).collect::<Vec<_>>(), ", ")
+        }
         Expr::BinaryOp { op, left, right } => format_binary(*op, left, right, format_parsed_expr_inner),
     }
 }
@@ -1209,7 +1291,7 @@ where
             let args_str: Vec<String> = args.iter()
                 .map(|arg| format_expr_inner(arg, name_resolver))
                 .collect();
-            format!("{}({})", name, args_str.join(","))
+            format_call(name, &args_str, ",")
         }
         Expr::BinaryOp { op, left, right } => format_binary(*op, left, right, |expr| format_expr_inner(expr, name_resolver)),
     }

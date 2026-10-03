@@ -1,5 +1,5 @@
 // Date/time functions: TODAY, NOW, DATE, DATEVALUE, YEAR, MONTH, DAY, WEEKDAY, DATEDIF,
-// EDATE, EOMONTH, HOUR, MINUTE, SECOND
+// EDATE, EOMONTH, HOUR, MINUTE, SECOND, WEEKNUM
 
 use super::eval::{evaluate, CellLookup, EvalResult};
 use super::eval_helpers::{date_to_serial, serial_to_date, days_in_month, try_parse_date_string};
@@ -408,9 +408,71 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let seconds = total_seconds % 60;
             EvalResult::Number(seconds as f64)
         }
+        "WEEKNUM" => {
+            // WEEKNUM(date, [return_type]): the week of the year. Types 1 and
+            // 17 start weeks on Sunday, 2 and 11 on Monday, 12-16 Tuesday to
+            // Saturday; week 1 is the week holding January 1. Type 21 is the
+            // ISO 8601 week (weeks start Monday; week 1 holds the first
+            // Thursday), which can belong to the neighbouring year. Any other
+            // type, or a negative date, is #NUM!.
+            if args.is_empty() || args.len() > 2 {
+                return Some(EvalResult::Error("WEEKNUM requires 1 or 2 arguments".to_string()));
+            }
+            let serial = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) if n < 0.0 => return Some(EvalResult::Error("#NUM!".to_string())),
+                Ok(n) => n.floor(),
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let return_type = if args.len() == 2 {
+                match evaluate(&args[1], lookup) {
+                    EvalResult::Empty => 1,
+                    other => match other.to_number() {
+                        Ok(n) => n.trunc() as i64,
+                        Err(e) => return Some(EvalResult::Error(e)),
+                    },
+                }
+            } else {
+                1
+            };
+            let weekday0 = |serial: f64| (serial as i64 + 6).rem_euclid(7); // 0 = Sunday
+            let (year, _, _) = serial_to_date(serial);
+            let doy = (serial - date_to_serial(year, 1, 1)) as i64 + 1;
+            if return_type == 21 {
+                return Some(EvalResult::Number(iso_week(serial, year, doy, weekday0) as f64));
+            }
+            let start = match return_type {
+                1 | 17 => 0,
+                2 | 11 => 1,
+                12..=16 => return_type - 10,
+                _ => return Some(EvalResult::Error("#NUM!".to_string())),
+            };
+            let jan1_offset = (weekday0(date_to_serial(year, 1, 1)) - start).rem_euclid(7);
+            EvalResult::Number(((doy - 1 + jan1_offset) / 7 + 1) as f64)
+        }
         _ => return None,
     };
     Some(result)
+}
+
+/// ISO 8601 week number for a serial whose Gregorian year is `year` and day of
+/// year is `doy` (1-based).
+fn iso_week(serial: f64, year: i32, doy: i64, weekday0: impl Fn(f64) -> i64) -> i64 {
+    let iso_weekday = (weekday0(serial) + 6) % 7 + 1; // Monday 1 .. Sunday 7
+    let week = (doy - iso_weekday + 10) / 7;
+    let weeks_in = |y: i32| -> i64 {
+        // A year has 53 ISO weeks when January 1 is a Thursday, or a
+        // Wednesday in a leap year.
+        let jan1 = (weekday0(date_to_serial(y, 1, 1)) + 6) % 7 + 1;
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        if jan1 == 4 || (leap && jan1 == 3) { 53 } else { 52 }
+    };
+    if week < 1 {
+        weeks_in(year - 1)
+    } else if week > weeks_in(year) {
+        1
+    } else {
+        week
+    }
 }
 
 #[cfg(test)]
@@ -474,3 +536,4 @@ mod time_tests {
         assert!((number("=TIME(25,0,0)") - 1.0 / 24.0).abs() < 1e-12);
     }
 }
+
