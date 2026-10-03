@@ -7,6 +7,7 @@ pub(crate) mod context_menu;
 mod cycle_banner;
 mod csv_import_view;
 mod recipe_view;
+mod recipe_builder_view;
 mod hub_dialogs;
 mod pairing_dialog;
 mod export_report_dialog;
@@ -942,6 +943,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(app.mode == Mode::CsvImport, |div| {
             div.child(csv_import_view::render_csv_import_dialog(app, cx))
+        })
+        .when(app.mode == Mode::RecipeBuilder, |div| {
+            div.child(recipe_builder_view::render_recipe_builder(app, cx))
         })
         .when(show_export_report, |div| {
             div.child(export_report_dialog::render_export_report_dialog(app, cx))

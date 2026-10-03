@@ -732,6 +732,61 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
     }
 }
 
+/// What a source's settings resolve to for one snapshot: the delimiter and
+/// encoding actually used, and the file's first lines, for the builder.
+#[derive(Debug, Clone)]
+pub struct SourceInfo {
+    pub delimiter: u8,
+    pub encoding: Encoding,
+    /// The first lines of the file, as a text editor shows them.
+    pub first_lines: Vec<String>,
+}
+
+/// Resolve `src` against `snapshot` without running anything.
+pub fn source_info(src: &CsvSource, snapshot: &Snapshot) -> SourceInfo {
+    let encoding = src.encoding.as_deref().and_then(Encoding::parse);
+    let (content, encoding) = decode(&snapshot.bytes, encoding);
+    let skip = src.header_row.saturating_sub(1);
+    let body: Vec<&str> = content.lines().skip(skip).take(20).collect();
+    let delimiter = match src.delimiter.as_deref() {
+        Some("tab") | Some("\t") => b'\t',
+        Some(d) if d.len() == 1 => d.as_bytes()[0],
+        _ => sniff_delimiter(&body.join("\n")),
+    };
+    let first_lines = content.lines().take(12).map(|l| l.chars().take(160).collect()).collect();
+    SourceInfo { delimiter, encoding, first_lines }
+}
+
+/// The line that most likely holds the column names (counting from 1):
+/// the first line with more than one field whose field count the next
+/// lines repeat. Title and "generated on" lines above a table have fewer.
+/// 1 when nothing stands out.
+pub fn guess_header_row(snapshot: &Snapshot) -> usize {
+    let (content, _) = decode(&snapshot.bytes, None);
+    let lines: Vec<&str> = content.lines().take(40).collect();
+    let delimiter = sniff_delimiter(&lines.join("\n"));
+    let count = |line: &str| {
+        csv::ReaderBuilder::new()
+            .delimiter(delimiter)
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(line.as_bytes())
+            .records()
+            .next()
+            .and_then(Result::ok)
+            .map_or(0, |r| r.len())
+    };
+    let counts: Vec<usize> = lines.iter().map(|l| count(l)).collect();
+    for i in 0..counts.len().min(10) {
+        let n = counts[i];
+        let next: Vec<usize> = counts[i + 1..].iter().copied().filter(|c| *c > 0).take(3).collect();
+        if n > 1 && !next.is_empty() && next.iter().all(|c| *c == n) {
+            return i + 1;
+        }
+    }
+    1
+}
+
 fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
     let encoding = match &src.encoding {
         Some(e) => Some(Encoding::parse(e).ok_or_else(|| format!("unknown encoding {e:?}"))?),
@@ -1611,5 +1666,16 @@ columns = { Amount = "number" }
         r.save(&path).unwrap();
         assert_eq!(Recipe::load(&path).unwrap(), r);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn guesses_the_header_below_title_lines_and_reports_the_source() {
+        let s = snap("Acme export\nGenerated 2026-09-30\n\nID,Name,Amount\n1,a,2\n2,b,3\n3,c,4\n");
+        assert_eq!(guess_header_row(&s), 4);
+        assert_eq!(guess_header_row(&snap("a;b\n1;2\n")), 1);
+        let src = CsvSource { path: "x.csv".into(), delimiter: None, encoding: None, header_row: 4, decimal_comma: false, columns: vec![] };
+        let info = source_info(&src, &s);
+        assert_eq!(info.delimiter, b',');
+        assert_eq!(info.first_lines[0], "Acme export");
     }
 }

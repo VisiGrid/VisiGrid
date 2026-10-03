@@ -832,6 +832,7 @@ pub struct Spreadsheet {
     pivot_key_subscription: gpui::Subscription,
     #[allow(dead_code)]
     duckdb_key_subscription: gpui::Subscription,
+    recipe_builder_key_subscription: gpui::Subscription,
 
     // Impact preview state
     pub impact_preview_action: Option<crate::views::impact_preview::ImpactAction>,
@@ -857,6 +858,7 @@ pub struct Spreadsheet {
     /// A recipe run that did not publish, and the fixes it offers.
     pub recipe_blocked: Option<crate::recipe_ui::RecipeBlocked>,
     pub recipe_run_in_progress: bool,
+    pub recipe_builder: Option<crate::recipe_builder::RecipeBuilder>,
     /// The CSV import settings dialog, while open.
     pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
     /// A CSV whose rows did not all fit, and how many were left out: no save
@@ -1212,6 +1214,7 @@ impl Spreadsheet {
         }
         let pivot_key_subscription = Self::intercept_pivot_keys(window, cx);
         let duckdb_key_subscription = Self::intercept_duckdb_keys(window, cx);
+        let recipe_builder_key_subscription = Self::intercept_recipe_builder_keys(window, cx);
 
         // Coming back to the window: has the open CSV changed on disk?
         // Also pauses the copy border's animation while the window is inactive.
@@ -1474,6 +1477,7 @@ impl Spreadsheet {
             appearance_subscription: Some(appearance_subscription),
             pivot_key_subscription,
             duckdb_key_subscription,
+            recipe_builder_key_subscription,
 
             impact_preview_action: None,
             impact_preview_usages: Vec::new(),
@@ -1493,6 +1497,7 @@ impl Spreadsheet {
             csv_doc: None,
             recipe_blocked: None,
             recipe_run_in_progress: false,
+            recipe_builder: None,
             csv_dialog: None,
             csv_protected_source: None,
             csv_activation_subscription: Some(csv_activation_subscription),
@@ -2558,8 +2563,16 @@ impl Spreadsheet {
                     cx.notify();
                 }
             }
-            CommandId::EditRecipe => match self.recipe_strip_table(cx).and_then(|t| t.source) {
-                Some(source) => self.edit_recipe_file(std::path::Path::new(&source.recipe), cx),
+            CommandId::NewRecipe => match self.current_csv().map(|d| (d.path.clone(), d.options.clone())) {
+                // From the open CSV, with the settings it was imported with
+                Some((path, options)) => self.new_recipe_from_file(&path, Some(&options), cx),
+                None => self.new_recipe_prompt(cx),
+            },
+            CommandId::EditRecipe => match self.recipe_strip_table(cx) {
+                Some(t) => {
+                    let path = std::path::PathBuf::from(&t.source.as_ref().unwrap().recipe);
+                    self.open_recipe_builder(&path, Some(t.id), cx)
+                }
                 None => {
                     self.status_message = Some("No recipe-backed Table on this sheet".into());
                     cx.notify();

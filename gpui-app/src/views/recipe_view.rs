@@ -115,6 +115,7 @@ pub(crate) fn render_recipe_strip(app: &Spreadsheet, cx: &mut Context<Spreadshee
     };
     let running = app.recipe_run_in_progress;
     let edit_path = recipe_path.clone();
+    let table_id = table.id;
     div()
         .id("recipe-strip")
         .h(px(RECIPE_STRIP_HEIGHT))
@@ -150,7 +151,7 @@ pub(crate) fn render_recipe_strip(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 .child(format!("from recipe {} · {detail}", file_name(&source.recipe))),
         )
         .child(action("recipe-strip-edit", "Edit recipe", false, &c, cx, move |this, cx| {
-            this.edit_recipe_file(&edit_path, cx)
+            this.open_recipe_builder(&edit_path, Some(table_id), cx)
         }))
         .child(
             div()
@@ -189,9 +190,13 @@ struct Problem {
 fn problems(b: &RecipeBlocked, c: &Colors, cx: &mut Context<Spreadsheet>) -> Vec<Problem> {
     let mut out = Vec::new();
     let path = b.recipe_path.clone();
+    let link = match b.target {
+        RecipeTarget::Table(id) => Some(id),
+        RecipeTarget::NewWorkbook => None,
+    };
     let edit = |id: String, c: &Colors, cx: &mut Context<Spreadsheet>| {
         let path = path.clone();
-        action(id, "Edit recipe", false, c, cx, move |this, cx| this.edit_recipe_file(&path, cx)).into_any_element()
+        action(id, "Edit recipe", false, c, cx, move |this, cx| this.open_recipe_builder(&path, link, cx)).into_any_element()
     };
     let mut covered_steps = Vec::new();
 

@@ -37,6 +37,7 @@ mod editing;
 mod file_ops;
 mod csv_import_ui;
 mod recipe_ui;
+mod recipe_builder;
 mod pdf_export;
 mod native_print;
 mod duckdb_import;
