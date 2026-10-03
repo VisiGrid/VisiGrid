@@ -164,18 +164,18 @@ pub(crate) fn render_table_controls(
             move |s, cx| s.add_table_row(id, cx),
             cx,
         ))
-        .when(!view_only, |d| d.child(button(
-            "table-rename",
-            "Rename",
-            app,
-            move |s, cx| s.open_table_dialog(TableDialogKind::Rename(id), cx),
-            cx,
-        ))
         .child(button(
             "table-resize",
             "Resize",
             app,
             move |s, cx| s.open_table_dialog(TableDialogKind::Resize(id), cx),
+            cx,
+        ))
+        .when(!view_only, |d| d.child(button(
+            "table-rename",
+            "Rename",
+            app,
+            move |s, cx| s.open_table_dialog(TableDialogKind::Rename(id), cx),
             cx,
         ))
         .child(button(
@@ -364,7 +364,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             }
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
-        TableDialogKind::Resize(_)=>preview=preview.child("Keep the top-left cell fixed. Cells released by shrinking stay in place; references to removed columns become #REF!."),
+        TableDialogKind::Resize(_)=>preview=preview.child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),
         TableDialogKind::ColumnFormula(id,col,replace) => {
             if let Some((sheet,table)) = app.wb(cx).table(id) {
                 let sheet = app.wb(cx).sheet_by_id(sheet).unwrap();

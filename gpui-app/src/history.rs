@@ -1785,7 +1785,11 @@ impl History {
                 workbook.restore_snapshot_monotonic(&candidate);
             }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
-                if crate::table_header_paste::is_header_rename(commit) {
+                if crate::table_resize::is_resize(commit) {
+                    let candidate = crate::table_resize::prepare_resize_replay(workbook, commit, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
+                } else if crate::table_header_paste::is_header_rename(commit) {
                     let candidate = crate::table_header_paste::prepare_header_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
                     workbook.restore_snapshot_monotonic(&candidate);

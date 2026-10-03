@@ -324,9 +324,21 @@ The entire paste and growth are staged together and checked against every saved 
 
 One sparse history entry owns the append plus pasted values, literal types, formatting and comments. Undo/redo and rewind restore the same canonical cells without writing to unrelated hidden records. Intermediate generated formulas and final pasted overrides are validated so replay can reverse both stages safely. Stale view/schema/cell state refuses replay atomically.
 
+## Phase 3: resize with active Table criteria
+
+Resize remains available in Table controls and through Create Table on an existing Table while criteria are active. The dialog uses canonical worksheet addresses, including hidden records. Only the bottom and right edges change; the header origin stays fixed. Existing records can be included without being overwritten or receiving inferred calculated formulas. Shrinking leaves released cell values in place, including hidden records. Surviving column IDs, calculated rules, overrides and saved sort/filter criteria are retained. New headers use the existing normalization rules.
+
+Removing a column used by a saved sort or filter requires clearing that criterion first. Other removed-column references follow the engine's existing `#REF!` behavior. A narrower Table can be refused if released content would sit beside the remaining filtered/sorted body; clearing criteria first permits ordinary resize semantics. Header-only Tables retain criteria for later growth. Worksheet sort/AutoFilter remains gated separately.
+
+Resize stages its schema/formula change on a candidate workbook and checks every saved view after recalculation, plus desktop row heights, manual hiding and freeze boundaries, before publication. Invalid ranges, overlapping objects, adjacent content or unsafe dependent spills leave the workbook and dialog intact. An unchanged range creates no history entry. Successful resize anchors selection at the Table header, which remains visible. Recovery, Review Mode and history preview still block mutation.
+
+Undo/redo and rewind reuse a sparse engine Table commit, without retaining a workbook snapshot. Replay validates schema/header/formula preconditions and the resulting views; it also refuses to remove a column newly used by criteria. Save/reopen retains the resized bounds and saved criteria. Creation under active criteria remains a separate follow-up.
+
+Resize validation, 2026-10-03: all 789 desktop tests passed (3 existing ignores), including 12 regressions for existing-record growth, hidden overrides, column identities/header normalization, row/header-only shrinking, dependent formulas, criterion removal refusal, unsafe layout/spills on other sheets, recovery/stale history, desktop row presentation, rewind and native full-save roundtrip. The native debug build passed. Live keyboard QA remains pending.
+
 ## Phase 3 backlog
 
-1. Create and resize Tables while criteria are active; preserve canonical bounds and workbook-wide view safety.
+1. Create Tables while criteria are active; preserve canonical bounds and workbook-wide view safety.
 2. Copy reviewed results to another sheet while criteria are active.
 3. Expand XLSX fidelity: saved criteria, styles and Excel-client verification.
 4. Totals rows with filter-aware SUBTOTAL, #Totals and XLSX metadata.

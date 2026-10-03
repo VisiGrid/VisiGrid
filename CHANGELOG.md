@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resize Tables without clearing saved sorting or filters. Existing records and column identities are preserved, unsafe changes are refused atomically, and one-step undo/redo and history rewind restore the bounds and dependent formulas. Clear a column’s sort/filter before removing it.
+
 - Typing immediately below a sorted or filtered Table now appends a row, fills calculated columns and preserves criteria. The value, Percent format and row growth undo together; rejected edits stay open and stop save/close/navigation from discarding them.
 
 - Bulk paste can extend a sorted or filtered Table: existing visible records receive the first rows, overflow appends new records, and calculated columns fill automatically. The whole paste supports one-step undo/redo and reports new rows hidden by filters.

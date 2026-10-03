@@ -428,9 +428,17 @@ impl Spreadsheet {
     }
 
     pub(crate) fn create_table_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
+        if self.table_under_cursor(cx).is_some() {
+            self.open_table_dialog(
+                TableDialogKind::Resize(self.table_under_cursor(cx).unwrap().id),
+                cx,
+            );
+            return;
+        }
+        if self.block_table_view_edit(cx) { return; }
         if self.row_view.is_sorted() || self.row_view.is_filtered() {
             self.status_message = Some("Clear sorting and filters before creating a Table.".into());
             cx.notify();
@@ -439,13 +447,6 @@ impl Spreadsheet {
         if self.all_selection_ranges().len() > 1 {
             self.status_message = Some("Select one rectangle to create a Table.".into());
             cx.notify();
-            return;
-        }
-        if self.table_under_cursor(cx).is_some() {
-            self.open_table_dialog(
-                TableDialogKind::Resize(self.table_under_cursor(cx).unwrap().id),
-                cx,
-            );
             return;
         }
         let ((r0, c0), (r1, c1)) = self.selection_range();
@@ -474,9 +475,10 @@ impl Spreadsheet {
     }
 
     pub(crate) fn open_table_dialog(&mut self, kind: TableDialogKind, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
+        if !matches!(kind, TableDialogKind::Resize(_)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
             TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
@@ -525,12 +527,21 @@ impl Spreadsheet {
     }
 
     pub(crate) fn submit_table_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) {
+        if self.block_if_previewing_only(cx) {
             return;
         }
         let Some(draft) = self.table_dialog.clone() else {
             return;
         };
+        if let TableDialogKind::Resize(id) = draft.kind {
+            match parse_range(&draft.range).and_then(|range| self.submit_table_resize(id, range, cx)) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if self.block_table_view_edit(cx) { return; }
         if draft.kind == TableDialogKind::Create && !draft.has_headers {
             let last = self.wb(cx).sheet_by_id(draft.sheet).map(|s| s.rows - 1).unwrap_or(crate::app::NUM_ROWS - 1);
             if self.row_heights.get(&draft.sheet).is_some_and(|h| h.contains_key(&last))
@@ -628,6 +639,9 @@ impl Spreadsheet {
         undo: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::table_resize::is_resize(commit) {
+            return self.replay_table_resize(commit, undo, cx);
+        }
         if crate::table_header_paste::is_header_rename(commit) {
             return self.replay_table_headers(commit, undo, cx);
         }
