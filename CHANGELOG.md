@@ -4,6 +4,7 @@
 
 - Formatting, conditional formatting, comments and freeze panes now work on sheets without active Table criteria while another sheet has a sorted/filtered Table. Their undo/redo follows the target sheet; grouped history is checked before applying. Percent formatting that converts text to numbers retains the workbook-wide guard. Cleared criteria and hidden-button settings no longer enforce an active Table row projection.
 - Freeze-pane undo/redo now restores the sheet where the command ran, even after switching tabs. History rewind also restores frozen panes, including alongside Table structural changes.
+- Desktop native saves now preserve conditional-formatting rules on every sheet; the full-save path previously omitted them.
 
 ## 0.44.0
 
