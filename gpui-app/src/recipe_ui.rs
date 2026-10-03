@@ -47,6 +47,24 @@ pub struct RecipeBlocked {
     pub save_error: Option<String>,
 }
 
+/// What the user is asked to approve: a recipe about to read a source it
+/// has not read before on this computer.
+pub struct RecipeConfirm {
+    pub then: ConfirmThen,
+    pub recipe_path: PathBuf,
+    pub recipe: Recipe,
+    /// (the file, size and modified), or why it cannot be read.
+    pub source: Result<(String, String), String>,
+}
+
+/// What approving does next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmThen {
+    Run(RecipeTarget),
+    /// Open the builder, which previews the source.
+    Edit(Option<TableId>),
+}
+
 /// What a background run hands back to the window.
 struct RunOutcome {
     recipe: Recipe,
@@ -166,6 +184,27 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        // A fresh read of the source: ask first unless this recipe and source
+        // were approved before. (A run with a snapshot re-uses a source the
+        // user already approved or chose.)
+        let recipe = match (recipe, &snapshot) {
+            (recipe, Some(_)) => recipe,
+            (recipe, None) => {
+                let recipe = match recipe.map(Ok).unwrap_or_else(|| Recipe::load(&recipe_path)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.status_message = Some(format!("Couldn't open the recipe: {e}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                if !crate::recipe_trust::is_approved(&recipe_path, &recipe) {
+                    self.ask_to_approve(ConfirmThen::Run(target), recipe_path, recipe, cx);
+                    return;
+                }
+                Some(recipe)
+            }
+        };
         self.recipe_run_in_progress = true;
         self.status_message = Some(format!("Running {}…", file_name(&recipe_path.display().to_string())));
         cx.notify();
@@ -366,6 +405,10 @@ impl Spreadsheet {
                         return;
                     }
                 }
+                // The user picked this file: that is the approval
+                if let Err(e) = crate::recipe_trust::approve(&recipe_path, &recipe) {
+                    this.status_message = Some(format!("Couldn't remember the approval: {e}"));
+                }
                 let snapshot = match Snapshot::read(&chosen) {
                     Ok(s) => s,
                     Err(e) => {
@@ -381,9 +424,72 @@ impl Spreadsheet {
         .detach();
     }
 
+    pub(crate) fn ask_to_approve(&mut self, then: ConfirmThen, recipe_path: PathBuf, recipe: Recipe, cx: &mut Context<Self>) {
+        let source = crate::recipe_trust::describe_source(&recipe_path, &recipe);
+        self.recipe_blocked = None;
+        self.recipe_confirm = Some(RecipeConfirm { then, recipe_path, recipe, source });
+        cx.notify();
+    }
+
+    /// "Load" on the confirmation (Enter): remember the approval, carry on.
+    pub fn approve_recipe_source(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = self.recipe_confirm.take() else { return };
+        if c.source.is_err() {
+            self.recipe_confirm = Some(c);
+            return;
+        }
+        if let Err(e) = crate::recipe_trust::approve(&c.recipe_path, &c.recipe) {
+            self.status_message = Some(format!("Couldn't remember the approval: {e}"));
+        }
+        match c.then {
+            ConfirmThen::Run(target) => self.start_recipe_run(target, c.recipe_path, Some(c.recipe), None, cx),
+            ConfirmThen::Edit(link) => self.open_recipe_builder(&c.recipe_path, link, cx),
+        }
+        cx.notify();
+    }
+
+    /// While the confirmation is open it takes every key: Ctrl+Enter loads,
+    /// Esc cancels, nothing else reaches the grid. Plain Enter does not load,
+    /// so a keypress meant for the sheet cannot approve reading a file.
+    pub(crate) fn intercept_recipe_confirm_keys(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        let this = cx.entity().downgrade();
+        let handle = window.window_handle();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != handle {
+                return;
+            }
+            let Some(this) = this.upgrade() else { return };
+            let handled = this.update(cx, |this, cx| {
+                if this.recipe_confirm.is_none() {
+                    return false;
+                }
+                let k = &event.keystroke;
+                if k.key == "escape" {
+                    this.cancel_recipe_confirm(cx);
+                } else if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) {
+                    this.approve_recipe_source(cx);
+                }
+                true
+            });
+            if handled {
+                cx.stop_propagation();
+            }
+        })
+    }
+
+    pub fn cancel_recipe_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.recipe_confirm.take().is_some() {
+            self.status_message = Some("Nothing was loaded".into());
+            cx.notify();
+        }
+    }
+
     /// Open the recipe file in the system's editor for TOML.
     pub fn edit_recipe_file(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if path.exists() {
+        // Even checking that a network path exists sends credentials on Windows
+        if let Err(e) = recipe::check_local(path, "recipe") {
+            self.status_message = Some(e);
+        } else if path.exists() {
             cx.open_with_system(path);
             self.status_message = Some(format!("Opened {} · Alt+F5 refreshes after you save it", file_name(&path.display().to_string())));
         } else {
