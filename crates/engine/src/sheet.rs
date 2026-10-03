@@ -360,6 +360,10 @@ pub struct Sheet {
     /// Editable Tables. Mutation goes through workbook-level schema commits.
     #[serde(default)]
     pub(crate) data_tables: Vec<crate::table::DataTable>,
+    /// Saved Table view intent. Hosts rebuild projections after calculation;
+    /// storing this does not install a display mapping or mutation guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) table_view_spec: Option<crate::table_view::TableViewSpec>,
     /// Cells recovered without their Table definitions. Never save this view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
@@ -564,6 +568,7 @@ impl Sheet {
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             data_tables: Vec::new(),
+            table_view_spec: None,
             read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
@@ -598,6 +603,7 @@ impl Sheet {
             merged_regions: Vec::new(),
             pivots: Vec::new(),
             data_tables: Vec::new(),
+            table_view_spec: None,
             read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
@@ -1536,6 +1542,21 @@ impl Sheet {
             },
             f,
         )
+    }
+
+    /// Restore an authoritative cell image for guarded history replay. Derived
+    /// spill state and computed caches are rebuilt by the workbook, never saved.
+    pub(crate) fn restore_history_cell(&mut self, row: usize, col: usize, image: Option<Cell>) {
+        self.clear_spill_from(row, col);
+        self.cells.remove(row, col);
+        self.spill_values.remove(&(row, col));
+        if let Some(mut cell) = image {
+            cell.clear_spill_state();
+            cell.format = self.intern_format((*cell.format).clone());
+            self.has_any_borders |= cell.format.has_any_border();
+            self.with_cell(row, col, |target| *target = cell);
+        }
+        self.edit_generation = self.edit_generation.wrapping_add(1);
     }
 
     /// Comments do not affect the cell value, format, or calculation graph.

@@ -40,6 +40,23 @@ fn review_blocked_apply_response(
     }
 }
 
+fn mutation_blocked_apply_response(
+    req: &crate::session_server::ApplyOpsRequest,
+    revision: u64,
+) -> crate::session_server::ApplyOpsResponse {
+    let mut response = review_blocked_apply_response(req, revision);
+    response.error = Some(crate::session_server::ApplyOpsError::OpFailed(
+        visigrid_protocol::OpError {
+            code: "mutation_blocked".into(),
+            message: "Finish cell editing or leave the read-only preview before applying a batch."
+                .into(),
+            op_index: 0,
+            suggestion: None,
+        },
+    ));
+    response
+}
+
 impl Spreadsheet {
     /// Create a bridge handle for the session server.
     /// The handle can be cloned and passed to the TCP server.
@@ -192,6 +209,13 @@ impl Spreadsheet {
                 true,
             );
         }
+        if self.mode.is_editing() || self.is_previewing() {
+            return plan_error(
+                "review_unavailable",
+                "Finish cell editing and return to the live workbook before creating a plan",
+                true,
+            );
+        }
         if self.import_in_progress || self.hub_activity.is_some() {
             return plan_error(
                 "review_unavailable",
@@ -205,7 +229,11 @@ impl Spreadsheet {
         if req.title.trim().is_empty() || req.title.len() > 120 {
             return plan_error("bad_request", "title must be 1–120 bytes", false);
         }
-        if req.description.as_ref().is_some_and(|value| value.len() > 1000) {
+        if req
+            .description
+            .as_ref()
+            .is_some_and(|value| value.len() > 1000)
+        {
             return plan_error(
                 "bad_request",
                 "description must be at most 1000 bytes",
@@ -216,7 +244,11 @@ impl Spreadsheet {
             return plan_error("bad_request", "script must not be empty", false);
         }
         if producer_source.len() > 262_144 {
-            return plan_error("script_too_large", "script exceeds the 256 KiB limit", false);
+            return plan_error(
+                "script_too_large",
+                "script exceeds the 256 KiB limit",
+                false,
+            );
         }
         if req.verification.len() > visigrid_engine::operation_plan::MAX_VERIFICATION_DEFINITIONS {
             return plan_error(
@@ -258,7 +290,9 @@ impl Spreadsheet {
             Err(message) => return plan_error("plan_invalid", message, false),
         };
         let plan_id = format!("pv_{}", uuid::Uuid::new_v4().simple());
-        let script_hash = blake3::hash(producer_source.as_bytes()).to_hex().to_string();
+        let script_hash = blake3::hash(producer_source.as_bytes())
+            .to_hex()
+            .to_string();
         let source_sheet_index = active_sheet;
 
         let result = self
@@ -281,6 +315,7 @@ impl Spreadsheet {
             .ops
             .iter()
             .any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
+            && !self.table_view_installed
             && (self.row_view.is_sorted() || self.filter_state.is_enabled())
         {
             self.mcp_plans.insert(
@@ -309,7 +344,12 @@ impl Spreadsheet {
             &result.ops,
             verification,
         );
-        let prepared = match prepared.and_then(crate::ai_actions::require_visible_plan_changes) {
+        let prepared = match prepared
+            .and_then(crate::ai_actions::require_visible_plan_changes)
+            .and_then(|plan| {
+                self.validate_table_review(&plan)?;
+                Ok(plan)
+            }) {
             Ok(plan) => plan,
             Err(message) => {
                 self.mcp_plans.insert(invalid(message), req.idempotency_key);
@@ -771,6 +811,53 @@ impl Spreadsheet {
         if self.review_mode.is_some() {
             return review_blocked_apply_response(req, self.workbook.read(cx).revision());
         }
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            if self.block_if_previewing_only(cx) || self.mode.is_editing() {
+                return mutation_blocked_apply_response(req, self.wb(cx).revision());
+            }
+            let mut candidate = self.wb(cx).clone();
+            let mut outcome = visigrid_session_host::apply_ops(&mut candidate, req);
+            if outcome.response.error.is_some() || outcome.response.applied == 0 {
+                return outcome.response;
+            }
+            let source = req
+                .client
+                .clone()
+                .map(|client| MutationSource::Agent { client })
+                .unwrap_or(MutationSource::Human);
+            let commit = outcome
+                .guarded_commit
+                .take()
+                .expect("Table batch captures guarded history");
+            if let Err(message) = self.publish_table_batch(
+                candidate,
+                commit,
+                if req.batch_name.is_empty() {
+                    "Session batch".into()
+                } else {
+                    req.batch_name.clone()
+                },
+                source,
+                cx,
+            ) {
+                let mut response = mutation_blocked_apply_response(req, self.wb(cx).revision());
+                response.error = Some(crate::session_server::ApplyOpsError::OpFailed(
+                    visigrid_protocol::OpError {
+                        code: "table_view_unsafe".into(),
+                        message,
+                        op_index: req.ops.len().saturating_sub(1),
+                        suggestion: None,
+                    },
+                ));
+                return response;
+            }
+            outcome.response.current_revision = self.wb(cx).revision();
+            if !outcome.changed_cells.is_empty() {
+                self.session_server
+                    .broadcast_cells(outcome.response.current_revision, outcome.changed_cells);
+            }
+            return outcome.response;
+        }
 
         let source = match &req.client {
             Some(client) => MutationSource::Agent {
@@ -856,6 +943,21 @@ impl Spreadsheet {
             ..Default::default()
         };
 
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx))
+            && !matches!(
+                op,
+                StructureOp::InsertRows { .. }
+                    | StructureOp::DeleteRows { .. }
+                    | StructureOp::InsertCols { .. }
+                    | StructureOp::DeleteCols { .. }
+            )
+        {
+            out.error = Some((
+                "table_view_active".into(),
+                crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into(),
+            ));
+            return out;
+        }
         if self.review_mode.is_some() {
             out.error = Some(plan_under_review_error());
             return out;
@@ -886,11 +988,15 @@ impl Spreadsheet {
                 | StructureOp::CreatePivot { .. }
                 | StructureOp::RefreshPivot { .. }
         );
-        let pivot_op = matches!(op, StructureOp::CreatePivot { .. } | StructureOp::RefreshPivot { .. });
+        let pivot_op = matches!(
+            op,
+            StructureOp::CreatePivot { .. } | StructureOp::RefreshPivot { .. }
+        );
         if pivot_op && self.pivot_panel.is_some() {
             out.error = Some((
                 "invalid_op".to_string(),
-                "the pivot field list is open in the window — wait for the user to close it".to_string(),
+                "the pivot field list is open in the window — wait for the user to close it"
+                    .to_string(),
             ));
             return out;
         }
@@ -908,6 +1014,7 @@ impl Spreadsheet {
         // Row/column ops route through the GUI's own methods (so view state
         // and undo stay right), and those methods record the F4 repeat slot.
         // An agent's insert must not become what the user's F4 repeats.
+        let history_before = self.history.canonical_entries().last().map(|entry| entry.id);
         self.suppress_repeat_capture = true;
         let description = match op {
             StructureOp::InsertRows { at, count, .. } => {
@@ -949,7 +1056,8 @@ impl Spreadsheet {
                 format!("Renamed sheet \"{}\" to \"{}\"", old, new_name)
             }
             StructureOp::CreatePivot { .. } => {
-                let resolved = visigrid_session_host::resolve_create_pivot(op, self.workbook.read(cx));
+                let resolved =
+                    visigrid_session_host::resolve_create_pivot(op, self.workbook.read(cx));
                 let result = match resolved {
                     Ok((source, definition)) => self.session_create_pivot(source, definition, cx),
                     Err((_, msg)) => Err(msg),
@@ -957,7 +1065,8 @@ impl Spreadsheet {
                 match result {
                     Ok(desc) => {
                         if let Some(client) = client.clone() {
-                            self.history.retag_last_source(MutationSource::Agent { client });
+                            self.history
+                                .retag_last_source(MutationSource::Agent { client });
                         }
                         desc
                     }
@@ -969,7 +1078,10 @@ impl Spreadsheet {
                 }
             }
             StructureOp::RefreshPivot { pivot } => {
-                let ids = visigrid_session_host::resolve_refresh_pivots(pivot.as_deref(), self.workbook.read(cx));
+                let ids = visigrid_session_host::resolve_refresh_pivots(
+                    pivot.as_deref(),
+                    self.workbook.read(cx),
+                );
                 let mut done = Vec::new();
                 let mut failure = None;
                 match ids {
@@ -978,7 +1090,8 @@ impl Spreadsheet {
                             match self.session_refresh_pivot(id, cx) {
                                 Ok(d) => {
                                     if let Some(client) = client.clone() {
-                                        self.history.retag_last_source(MutationSource::Agent { client });
+                                        self.history
+                                            .retag_last_source(MutationSource::Agent { client });
                                     }
                                     done.push(d);
                                 }
@@ -993,7 +1106,11 @@ impl Spreadsheet {
                 }
                 if let Some(msg) = failure {
                     self.suppress_repeat_capture = false;
-                    let msg = if done.is_empty() { msg } else { format!("{} (already refreshed: {})", msg, done.join(", ")) };
+                    let msg = if done.is_empty() {
+                        msg
+                    } else {
+                        format!("{} (already refreshed: {})", msg, done.join(", "))
+                    };
                     out.error = Some(("invalid_op".to_string(), msg));
                     out.revision = self.workbook.read(cx).revision();
                     return out;
@@ -1003,6 +1120,16 @@ impl Spreadsheet {
         };
 
         self.suppress_repeat_capture = false;
+
+        if row_col_op && self.history.canonical_entries().last().map(|entry| entry.id) == history_before {
+            out.error = Some((
+                "invalid_op".into(),
+                self.status_message
+                    .clone()
+                    .unwrap_or_else(|| "Structural edit was not applied.".into()),
+            ));
+            return out;
+        }
 
         // Attribute the undo entry the GUI method just recorded (row/col ops
         // record one; sheet ops record none, matching the GUI's own behavior).
@@ -1046,12 +1173,27 @@ impl Spreadsheet {
             return out;
         }
 
+        if self.block_if_previewing_only(cx) {
+            out.error = Some((
+                "history_blocked".into(),
+                self.status_message.clone().unwrap_or_default(),
+            ));
+            return out;
+        }
         for _ in 0..steps {
+            let before = self.history.undo_count();
             if redo {
                 if !self.history.can_redo() {
                     break;
                 }
                 self.redo(cx);
+                if self.history.undo_count() == before {
+                    out.error = Some((
+                        "history_blocked".into(),
+                        self.status_message.clone().unwrap_or_default(),
+                    ));
+                    break;
+                }
                 out.applied += 1;
             } else {
                 if !self.history.can_undo() {
@@ -1072,10 +1214,18 @@ impl Spreadsheet {
                     }
                     break;
                 }
-                if let Some(desc) = self.history.peek_undo_description() {
-                    out.descriptions.push(desc);
-                }
+                let description = self.history.peek_undo_description();
                 self.undo(cx);
+                if self.history.undo_count() == before {
+                    out.error = Some((
+                        "history_blocked".into(),
+                        self.status_message.clone().unwrap_or_default(),
+                    ));
+                    break;
+                }
+                if let Some(description) = description {
+                    out.descriptions.push(description);
+                }
                 out.applied += 1;
             }
         }
@@ -1337,6 +1487,33 @@ mod review_block_tests {
             Some(crate::session_server::ApplyOpsError::OpFailed(
                 visigrid_protocol::OpError { ref code, .. }
             )) if code == "plan_under_review"
+        ));
+    }
+
+    #[test]
+    fn blocked_batch_response_is_explicit_and_non_mutating() {
+        let request = crate::session_server::ApplyOpsRequest {
+            request_id: "request-1".into(),
+            batch_name: "Agent edit".into(),
+            atomic: true,
+            expected_revision: Some(7),
+            ops: vec![visigrid_protocol::Op::SetCellValue {
+                sheet: 0,
+                row: 0,
+                col: 0,
+                value: "blocked".into(),
+            }],
+            client: Some("Test agent".into()),
+        };
+        let response = super::mutation_blocked_apply_response(&request, 7);
+        assert_eq!(response.applied, 0);
+        assert_eq!(response.total, 1);
+        assert_eq!(response.current_revision, 7);
+        assert!(matches!(
+            response.error,
+            Some(crate::session_server::ApplyOpsError::OpFailed(
+                visigrid_protocol::OpError { ref code, .. }
+            )) if code == "mutation_blocked"
         ));
     }
 

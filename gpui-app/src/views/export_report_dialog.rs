@@ -13,6 +13,9 @@ use crate::ui::{modal_overlay, Button, DialogFrame, DialogSize, dialog_header_wi
 
 /// Render the Export Report dialog overlay
 pub fn render_export_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    if let Some(warnings) = &app.pending_xlsx_export {
+        return render_export_review(app, warnings, cx);
+    }
     let Some(export_result) = &app.export_result else {
         return div().into_any_element();
     };
@@ -31,7 +34,9 @@ pub fn render_export_report_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
     let body = div()
         .child(render_summary_section(export_result, text_primary, text_muted))
         .child(render_formula_conversions(export_result, text_primary, text_muted, warning_color))
-        .child(render_precision_warnings(export_result, text_primary, text_muted, warning_color));
+        .child(render_precision_warnings(export_result, text_primary, text_muted, warning_color))
+        .child(div().flex().flex_col().gap_2().children(export_result.warnings.iter().map(|warning|
+            div().text_size(px(12.0)).text_color(warning_color).child(warning.clone()))));
 
     // Footer with buttons
     let copy_button = if export_result.has_warnings() {
@@ -92,6 +97,7 @@ fn render_summary_section(er: &ExportResult, text_primary: Hsla, text_muted: Hsl
                 .child(stat_item("Sheets", er.sheets_exported, text_muted))
                 .child(stat_item("Cells", er.cells_exported, text_muted))
                 .child(stat_item("Formulas", er.formulas_exported, text_muted))
+                .child(stat_item("Tables", er.tables_exported, text_muted))
         )
         .child(
             div()
@@ -288,4 +294,38 @@ fn format_number(n: usize) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+/// Review losses in the app's scrollable modal instead of the platform prompt,
+/// whose Linux fallback clips long paragraphs.
+fn render_export_review(app: &Spreadsheet, warnings: &[String], cx: &mut Context<Spreadsheet>) -> AnyElement {
+    let panel = app.token(TokenKey::PanelBg);
+    let border = app.token(TokenKey::PanelBorder);
+    let text = app.token(TokenKey::TextPrimary);
+    let muted = app.token(TokenKey::TextMuted);
+    let warn = app.token(TokenKey::Warn);
+    let width: f32 = app.window_size.width.into();
+    let height: f32 = app.window_size.height.into();
+    let cancel = Button::new("xlsx-review-cancel", "Cancel")
+        .secondary(border, muted)
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.hide_export_report(cx)));
+    let export = Button::new("xlsx-review-export", "Continue to export…")
+        .primary(app.token(TokenKey::Accent), app.token(TokenKey::TextInverse))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.confirm_xlsx_export(cx)));
+    modal_overlay("xlsx-export-review", |this, cx| this.hide_export_report(cx),
+        div().w(px(620.0_f32.min((width - 48.0).max(280.0))))
+            .max_h(px(640.0_f32.min((height - 64.0).max(240.0))))
+            .bg(panel).border_1().border_color(border).rounded_lg().shadow_xl()
+            .overflow_hidden().flex().flex_col()
+            .child(div().px_5().py_4().flex_shrink_0().border_b_1().border_color(border)
+                .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(text).child("Review Excel export"))
+                .child(div().mt_1().text_size(px(12.0)).text_color(muted).child("Some workbook features will change in the Excel copy.")))
+            .child(div().id("xlsx-export-review-scroll").min_h_0().overflow_y_scroll()
+                .p_5().flex().flex_col().gap_3()
+                .children(warnings.iter().map(|warning| div().p_3().rounded_md()
+                    .bg(warn.opacity(0.05)).border_1().border_color(warn.opacity(0.3))
+                    .text_size(px(12.0)).text_color(text).child(warning.clone()))))
+            .child(div().px_5().py_4().flex_shrink_0().border_t_1().border_color(border)
+                .child(div().mb_3().text_size(px(12.0)).text_color(muted).child("Your original workbook stays unchanged."))
+                .child(div().flex().justify_end().gap_2().child(cancel).child(export))), cx).into_any_element()
 }

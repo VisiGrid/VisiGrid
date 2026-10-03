@@ -11,6 +11,8 @@ pub(crate) fn bind(
         // Navigation actions (formula mode: insert references, edit mode: move cursor, nav mode: move selection)
         .on_action(cx.listener(|this, _: &MoveUp, window, cx| {
             if this.guard_terminal_focus(window, cx, "MoveUp") { return; }
+            if this.rewind_confirm.visible { return; }
+            if this.is_previewing() { this.scrub_preview(-1, cx); return; }
             if this.open_menu.is_some() {
                 this.menu_highlight_prev(cx);
                 return;
@@ -42,6 +44,12 @@ pub(crate) fn bind(
             if this.lua_console.visible {
                 this.lua_console.history_prev();
                 cx.notify();
+                return;
+            }
+            // Table completions own Up/Down while visible; dismiss them to
+            // resume reference pointing. Keep legacy function-only routing.
+            if this.autocomplete_visible && this.autocomplete_suggestions(cx).iter().any(|entry| matches!(entry, crate::autocomplete::AutocompleteEntry::Table(_))) {
+                this.autocomplete_up(cx);
                 return;
             }
             // Formula mode: Point submode does ref-pick, Caret submode is no-op for Up/Down
@@ -83,6 +91,8 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &MoveDown, window, cx| {
             if this.guard_terminal_focus(window, cx, "MoveDown") { return; }
+            if this.rewind_confirm.visible { return; }
+            if this.is_previewing() { this.scrub_preview(1, cx); return; }
             if this.open_menu.is_some() {
                 this.menu_highlight_next(cx);
                 return;
@@ -113,6 +123,12 @@ pub(crate) fn bind(
             if this.lua_console.visible {
                 this.lua_console.history_next();
                 cx.notify();
+                return;
+            }
+            // Table completions own Up/Down while visible; dismiss them to
+            // resume reference pointing. Keep legacy function-only routing.
+            if this.autocomplete_visible && this.autocomplete_suggestions(cx).iter().any(|entry| matches!(entry, crate::autocomplete::AutocompleteEntry::Table(_))) {
+                this.autocomplete_down(cx);
                 return;
             }
             // Formula mode: Point submode does ref-pick, Caret submode is no-op for Up/Down

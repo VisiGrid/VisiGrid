@@ -10,6 +10,7 @@ pub mod table_recovery;
 pub mod truth;
 pub mod xlsx;
 mod xlsx_comments;
+mod xlsx_tables;
 pub mod xlsx_styles;
 pub mod xlsx_validation;
 

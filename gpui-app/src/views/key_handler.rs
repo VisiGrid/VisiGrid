@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if this.rewind_confirm.visible {
+        if event.keystroke.key == "escape" { this.cancel_rewind(cx); }
+        cx.stop_propagation();
+        return;
+    }
     if this.pending_table_recovery.is_some() {
         if event.keystroke.key == "escape" { this.pending_table_recovery = None; cx.notify(); }
         cx.stop_propagation();
@@ -286,22 +291,7 @@ pub(crate) fn handle_key_down(
                 return;
             }
             "enter" => {
-                let status = match this.terminal.pending_result.as_ref() {
-                    Some(crate::terminal::state::PendingResult::LuaPreview(preview)) => preview
-                        .prepared_plan
-                        .as_ref()
-                        .and_then(|prepared| this.review_apply_status(prepared, cx)),
-                    _ => None,
-                };
-                if status.is_some_and(|status| status.can_apply()) {
-                    this.apply_lua_to_current_sheet(window, cx);
-                } else {
-                    this.status_message = status
-                        .and_then(|status| status.disabled_reason())
-                        .map(str::to_string)
-                        .or_else(|| Some("This proposal cannot be applied yet.".into()));
-                    cx.notify();
-                }
+                this.apply_review_if_ready(window, cx);
                 return;
             }
             "[" => {
@@ -335,7 +325,6 @@ pub(crate) fn handle_key_down(
         && !this.mode.is_editing()
         && !this.is_previewing()
         && this.selected_history_id.is_some()
-        && this.history_highlight_range.is_some()
     {
         if let Err(e) = this.enter_preview(cx) {
             this.status_message = Some(format!("Preview failed: {}", e));

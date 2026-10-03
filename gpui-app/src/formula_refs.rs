@@ -38,10 +38,12 @@ impl RefKey {
 #[derive(Clone, Debug)]
 pub struct FormulaRef {
     pub key: RefKey,
+    /// Canonical coordinates on this sheet; None is a legacy view-space preview.
+    pub sheet: Option<visigrid_engine::sheet::SheetId>,
     pub start: (usize, usize),                // top-left of range
     pub end: Option<(usize, usize)>,          // bottom-right (None for single cell)
     pub color_index: usize,                   // 0-7 rotating
-    pub text_byte_range: std::ops::Range<usize>,  // byte range in formula text
+    pub text_char_range: std::ops::Range<usize>,  // Character range in formula text (same units as syntax tokens)
 }
 
 /// Color palette for formula references (Excel-like)
@@ -166,6 +168,8 @@ impl Spreadsheet {
 
         // Check the highlighted refs from parsed formula
         for fref in &self.formula_highlighted_refs {
+            if fref.sheet.is_some_and(|sheet| sheet != self.cached_sheet_id()) { continue; }
+            let row = if fref.sheet.is_some() { self.row_view.row_order().get(row).copied().unwrap_or(row) } else { row };
             if let Some((end_row, end_col)) = fref.end {
                 // Range - check if cell is within
                 if row >= fref.start.0 && row <= end_row && col >= fref.start.1 && col <= end_col {
@@ -196,6 +200,8 @@ impl Spreadsheet {
 
         // Check the highlighted refs (already sorted by text position, so first match = earliest)
         for fref in &self.formula_highlighted_refs {
+            if fref.sheet.is_some_and(|sheet| sheet != self.cached_sheet_id()) { continue; }
+            let row = if fref.sheet.is_some() { self.row_view.row_order().get(row).copied().unwrap_or(row) } else { row };
             if let Some((end_row, end_col)) = fref.end {
                 // Range
                 if row >= fref.start.0 && row <= end_row && col >= fref.start.1 && col <= end_col {
@@ -249,6 +255,8 @@ impl Spreadsheet {
 
         // Check the highlighted refs from parsed formula
         for fref in &self.formula_highlighted_refs {
+            if fref.sheet.is_some_and(|sheet| sheet != self.cached_sheet_id()) { continue; }
+            let row = if fref.sheet.is_some() { self.row_view.row_order().get(row).copied().unwrap_or(row) } else { row };
             if let Some((end_row, end_col)) = fref.end {
                 if row >= fref.start.0 && row <= end_row && col >= fref.start.1 && col <= end_col {
                     if row == fref.start.0 { top = true; }
@@ -306,7 +314,7 @@ impl Spreadsheet {
         }
 
         let tokens = tokenize_for_highlight(formula);
-        // Collect raw refs with text ranges: (RefKey, start, end, text_byte_range)
+        // Collect raw refs with text ranges: (RefKey, start, end, text_char_range)
         let mut parsed_refs: Vec<(RefKey, (usize, usize), Option<(usize, usize)>, std::ops::Range<usize>)> = Vec::new();
         let mut i = 0;
 
@@ -373,10 +381,10 @@ impl Spreadsheet {
                                 let r2 = start_cell.0.max(end_cell.0);
                                 let c2 = start_cell.1.max(end_cell.1);
                                 let key = RefKey::new(r1, c1, r2, c2);  // collapses A1:A1 to Cell
-                                let text_byte_range = range.start..range2.end;
+                                let text_char_range = range.start..range2.end;
                                 // For collapsed single-cell ranges, end should be None
                                 let end = if r1 == r2 && c1 == c2 { None } else { Some((r2, c2)) };
-                                parsed_refs.push((key, (r1, c1), end, text_byte_range));
+                                parsed_refs.push((key, (r1, c1), end, text_char_range));
                                 i += 3;  // Skip the whole range
                                 continue;
                             }
@@ -391,7 +399,7 @@ impl Spreadsheet {
         }
 
         // Sort by text position (left-to-right in formula) for deterministic color assignment
-        parsed_refs.sort_by_key(|(_, _, _, text_byte_range)| text_byte_range.start);
+        parsed_refs.sort_by_key(|(_, _, _, text_char_range)| text_char_range.start);
         parsed_refs
     }
 
@@ -410,25 +418,66 @@ impl Spreadsheet {
         color_map.retain(|k, _| present_keys.contains(k));
 
         // Assign colors: existing refs keep their colors, new refs get next available
-        parsed.into_iter().map(|(key, start, end, text_byte_range)| {
+        parsed.into_iter().map(|(key, start, end, text_char_range)| {
             let color_index = *color_map.entry(key.clone()).or_insert_with(|| {
                 let c = *next_color;
                 *next_color = (*next_color + 1) % 8;
                 c
             });
-            FormulaRef { key, start, end, color_index, text_byte_range }
+            FormulaRef { key, sheet: None, start, end, color_index, text_char_range }
         }).collect()
     }
 
     /// Parse and assign colors using persistent map from self.
     /// This is the main entry point for formula editing.
-    pub(crate) fn update_formula_refs(&mut self) {
-        let parsed = Self::parse_formula_refs_raw(&self.edit_value);
-        self.formula_highlighted_refs = Self::assign_ref_colors(
-            parsed,
-            &mut self.formula_ref_color_map,
-            &mut self.formula_ref_next_color,
-        );
+    pub(crate) fn table_formula_context(&self, cx: &gpui::App) -> (visigrid_engine::sheet::SheetId, (usize, usize)) {
+        let wb = self.wb(cx);
+        if let Some((sheet, row, col, _)) = self.table_edit_target {
+            if let Some(sheet) = wb.sheet(sheet) { return (sheet.id, (row, col)); }
+        }
+        let home = self.formula_home_sheet.unwrap_or(wb.active_sheet_index());
+        let sheet = wb.sheet(home).unwrap_or(wb.active_sheet());
+        let (row, col) = self.formula_edit_cell.unwrap_or(self.view_state.selected);
+        let row = if home == wb.active_sheet_index() { self.row_view.row_order().get(row).copied().unwrap_or(row) } else { row };
+        (sheet.id, (row,col))
+    }
+
+    pub(crate) fn update_formula_refs(&mut self, cx: &gpui::App) {
+        let (home, cell) = self.table_formula_context(cx);
+        let mut parsed = Self::parse_formula_refs_raw(&self.edit_value);
+        let mut resolved = crate::table_formula_editor::references(&self.edit_value, self.wb(cx), home, cell);
+        if self.autocomplete_visible && !self.autocomplete_suppressed {
+            if let Some(crate::autocomplete::AutocompleteEntry::Table(s)) = self.autocomplete_suggestions(cx).get(self.autocomplete_selected) {
+                {
+                    let preview = if s.opens_columns { &s.label } else { &s.replacement };
+                    let span = self.edit_value[..s.range.start].chars().count()..self.edit_value[..s.range.end].chars().count();
+                    resolved.retain(|r| r.span != span);
+                    for mut r in crate::table_formula_editor::references(preview, self.wb(cx), home, cell) {
+                        r.span = span.clone(); resolved.push(r);
+                    }
+                }
+            }
+        }
+        let sheets: Vec<_> = resolved.iter().map(|r| (r.span.clone(), r.sheet)).collect();
+        parsed.retain(|r| !resolved.iter().any(|t| t.span == r.3));
+        for r in resolved {
+            let end = (r.start != r.end).then_some(r.end);
+            parsed.push((RefKey::new(r.start.0,r.start.1,r.end.0,r.end.1),r.start,end,r.span));
+        }
+        parsed.sort_by_key(|r| r.3.start);
+        self.formula_highlighted_refs = Self::assign_ref_colors(parsed, &mut self.formula_ref_color_map, &mut self.formula_ref_next_color);
+        for r in &mut self.formula_highlighted_refs {
+            r.sheet = Some(sheets.iter().find(|(span,_)| *span == r.text_char_range).map_or(home, |(_,sid)| *sid));
+        }
+    }
+
+    pub(crate) fn parse_table_formula_refs(formula: &str, wb: &visigrid_engine::workbook::Workbook, home: visigrid_engine::sheet::SheetId, cell: (usize,usize)) -> Vec<FormulaRef> {
+        let mut parsed = Self::parse_formula_refs_raw(formula);
+        let resolved = crate::table_formula_editor::references(formula,wb,home,cell);
+        parsed.retain(|r| !resolved.iter().any(|t| t.span == r.3));
+        for r in resolved { parsed.push((RefKey::new(r.start.0,r.start.1,r.end.0,r.end.1),r.start,(r.start != r.end).then_some(r.end),r.span)); }
+        parsed.sort_by_key(|r| r.3.start);
+        Self::assign_ref_colors(parsed,&mut HashMap::new(),&mut 0)
     }
 
     /// Parse and assign colors with a fresh (non-persistent) color map.
@@ -461,7 +510,7 @@ mod tests {
         let refs = Spreadsheet::parse_formula_refs(formula);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].key, RefKey::Cell { row: 2, col: 1 });
-        assert_eq!(&formula[refs[0].text_byte_range.clone()], "B3");
+        assert_eq!(&formula[refs[0].text_char_range.clone()], "B3");
     }
 
     #[test]

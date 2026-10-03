@@ -9,11 +9,12 @@ use crate::app::Spreadsheet;
 use crate::formula_context;
 use crate::mode::Mode;
 
-/// An autocomplete entry — either a built-in function or a custom (user-defined) one.
+/// An autocomplete entry for a function, Table, column or section selector.
 #[derive(Debug, Clone)]
 pub enum AutocompleteEntry {
     BuiltIn(&'static formula_context::FunctionInfo),
     Custom { name: String },
+    Table(crate::table_formula_editor::Suggestion),
 }
 
 impl AutocompleteEntry {
@@ -21,6 +22,7 @@ impl AutocompleteEntry {
         match self {
             AutocompleteEntry::BuiltIn(f) => f.name,
             AutocompleteEntry::Custom { name } => name,
+            AutocompleteEntry::Table(s) => &s.label,
         }
     }
 
@@ -46,14 +48,21 @@ impl Spreadsheet {
     // ========================================================================
 
     /// Get filtered autocomplete suggestions based on current edit value.
-    /// Returns both built-in and custom function entries.
-    pub fn autocomplete_suggestions(&self) -> Vec<AutocompleteEntry> {
+    /// Returns function and structured-reference entries for the current caret context.
+    pub fn autocomplete_suggestions(&self, cx: &App) -> Vec<AutocompleteEntry> {
         // Only show autocomplete for formula mode
         if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
             return Vec::new();
         }
 
-        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
+        let cursor = self.edit_value[..self.edit_cursor.min(self.edit_value.len())].chars().count();
+        let ctx = formula_context::analyze(&self.edit_value, cursor);
+
+        let (home, cell) = self.table_formula_context(cx);
+        let table_entries = crate::table_formula_editor::suggestions(&self.edit_value, self.edit_cursor, self.wb(cx), home, cell);
+        if ctx.token_at_cursor.as_ref().is_some_and(|t| t.token_type == formula_context::TokenType::StructuredRef) {
+            return table_entries.into_iter().map(AutocompleteEntry::Table).collect();
+        }
 
         // Check mode and identifier length
         let prefix = match ctx.mode {
@@ -77,7 +86,7 @@ impl Spreadsheet {
         };
 
         let Some(prefix) = prefix else {
-            return Vec::new();
+            return table_entries.into_iter().map(AutocompleteEntry::Table).collect();
         };
 
         // Built-in functions
@@ -94,6 +103,8 @@ impl Spreadsheet {
             }
         }
 
+        entries.extend(table_entries.into_iter().map(AutocompleteEntry::Table));
+
         // Sort all entries by name for stable ordering
         entries.sort_by(|a, b| a.name().cmp(b.name()));
 
@@ -105,30 +116,46 @@ impl Spreadsheet {
         // Only in formula mode
         if !self.mode.is_formula() && !self.edit_value.starts_with('=') {
             self.autocomplete_visible = false;
+            self.update_formula_refs(cx);
             return;
         }
 
         // Don't reopen autocomplete if suppressed (user is navigating refs)
         if self.autocomplete_suppressed {
             self.autocomplete_visible = false;
+            self.update_formula_refs(cx);
             return;
         }
 
-        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
-        let suggestions = self.autocomplete_suggestions();
+        let cursor = self.edit_value[..self.edit_cursor.min(self.edit_value.len())].chars().count();
+        let ctx = formula_context::analyze(&self.edit_value, cursor);
+        let suggestions = self.autocomplete_suggestions(cx);
 
         if suggestions.is_empty() {
             self.autocomplete_visible = false;
             self.autocomplete_selected = 0;
         } else {
             self.autocomplete_visible = true;
-            self.autocomplete_replace_range = ctx.replace_range.clone();
+            self.autocomplete_replace_range = formula_context::char_index_to_byte_offset(&self.edit_value, ctx.replace_range.start)..formula_context::char_index_to_byte_offset(&self.edit_value, ctx.replace_range.end);
             // Clamp selected index
             if self.autocomplete_selected >= suggestions.len() {
                 self.autocomplete_selected = 0;
             }
         }
+        self.update_formula_refs(cx);
         cx.notify();
+    }
+
+    /// Keep an already-open list aligned with caret movement without reopening it.
+    pub(crate) fn refresh_autocomplete_at_caret(&mut self, cx: &mut Context<Self>) {
+        if self.autocomplete_visible {
+            if self.edit_selection_anchor.is_some_and(|anchor| anchor != self.edit_cursor) {
+                self.autocomplete_dismiss(cx);
+            } else {
+                self.autocomplete_selected = 0;
+                self.update_autocomplete(cx);
+            }
+        }
     }
 
     /// Move autocomplete selection up
@@ -136,7 +163,7 @@ impl Spreadsheet {
         if !self.autocomplete_visible {
             return;
         }
-        let suggestions = self.autocomplete_suggestions();
+        let suggestions = self.autocomplete_suggestions(cx);
         if suggestions.is_empty() {
             return;
         }
@@ -145,6 +172,7 @@ impl Spreadsheet {
         } else {
             self.autocomplete_selected -= 1;
         }
+        self.update_formula_refs(cx);
         cx.notify();
     }
 
@@ -153,11 +181,12 @@ impl Spreadsheet {
         if !self.autocomplete_visible {
             return;
         }
-        let suggestions = self.autocomplete_suggestions();
+        let suggestions = self.autocomplete_suggestions(cx);
         if suggestions.is_empty() {
             return;
         }
         self.autocomplete_selected = (self.autocomplete_selected + 1) % suggestions.len();
+        self.update_formula_refs(cx);
         cx.notify();
     }
 
@@ -167,43 +196,26 @@ impl Spreadsheet {
             return;
         }
 
-        let suggestions = self.autocomplete_suggestions();
+        let suggestions = self.autocomplete_suggestions(cx);
         if suggestions.is_empty() || self.autocomplete_selected >= suggestions.len() {
             self.autocomplete_visible = false;
+            self.update_formula_refs(cx);
             return;
         }
 
         let entry = &suggestions[self.autocomplete_selected];
-        let func_name = entry.name();
-
-        // Build replacement text: function name + opening paren
-        let replacement = format!("{}(", func_name);
-
-        // Replace the identifier at replace_range
-        let range = self.autocomplete_replace_range.clone();
-
-        // Convert char positions to byte positions
-        // Note: when position is at or past the end, use string length (for insertion at end)
-        let char_count = self.edit_value.chars().count();
-        let start_byte = if range.start >= char_count {
-            self.edit_value.len()
-        } else {
-            self.edit_value.char_indices()
-                .nth(range.start)
-                .map(|(i, _)| i)
-                .unwrap_or(self.edit_value.len())
+        let (replacement, range, opens_columns) = match entry {
+            AutocompleteEntry::Table(s) => (s.replacement.clone(), s.range.clone(), s.opens_columns),
+            _ => (format!("{}(",entry.name()),self.autocomplete_replace_range.clone(),false),
         };
-        let end_byte = if range.end >= char_count {
-            self.edit_value.len()
-        } else {
-            self.edit_value.char_indices()
-                .nth(range.end)
-                .map(|(i, _)| i)
-                .unwrap_or(self.edit_value.len())
-        };
-
-        self.edit_value.replace_range(start_byte..end_byte, &replacement);
-        self.edit_cursor = range.start + replacement.chars().count();
+        self.edit_value.replace_range(range.clone(), &replacement);
+        self.edit_cursor = range.start + replacement.len();
+        self.clear_edit_marks();
+        self.edit_scroll_dirty = true;
+        self.formula_bar_cache_dirty = true;
+        self.reset_caret_activity();
+        self.clear_formula_nav_override();
+        self.update_formula_nav_mode();
 
         // Close autocomplete
         self.autocomplete_visible = false;
@@ -214,6 +226,9 @@ impl Spreadsheet {
             self.mode = Mode::Formula;
         }
 
+        self.autocomplete_suppressed = !opens_columns;
+        self.update_formula_refs(cx);
+        if opens_columns { self.update_autocomplete(cx); }
         cx.notify();
     }
 
@@ -221,7 +236,9 @@ impl Spreadsheet {
     pub fn autocomplete_dismiss(&mut self, cx: &mut Context<Self>) {
         if self.autocomplete_visible {
             self.autocomplete_visible = false;
+            self.autocomplete_suppressed = true;
             self.autocomplete_selected = 0;
+            self.update_formula_refs(cx);
             cx.notify();
         }
     }
@@ -247,7 +264,8 @@ impl Spreadsheet {
             return None;
         }
 
-        let ctx = formula_context::analyze(&self.edit_value, self.edit_cursor);
+        let cursor = self.edit_value[..self.edit_cursor.min(self.edit_value.len())].chars().count();
+        let ctx = formula_context::analyze(&self.edit_value, cursor);
 
         // Only show in ArgList mode
         if !matches!(ctx.mode, formula_context::FormulaEditMode::ArgList) {

@@ -525,6 +525,26 @@ mod review_navigation_tests {
 }
 
 impl Spreadsheet {
+    /// Shared by bound Enter and raw Review keys; keep disabled proposals frozen.
+    pub(crate) fn apply_review_if_ready(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let status = match self.terminal.pending_result.as_ref() {
+            Some(crate::terminal::state::PendingResult::LuaPreview(preview)) => preview
+                .prepared_plan
+                .as_ref()
+                .and_then(|prepared| self.review_apply_status(prepared, cx)),
+            _ => None,
+        };
+        if status.is_some_and(|status| status.can_apply()) {
+            self.apply_lua_to_current_sheet(window, cx);
+        } else {
+            self.status_message = status
+                .and_then(|status| status.disabled_reason())
+                .map(str::to_string)
+                .or_else(|| Some("This proposal cannot be applied yet.".into()));
+            cx.notify();
+        }
+    }
+
     /// Review Mode and asynchronous workbook replacement are mutually
     /// exclusive. This closes the race where a pull/import starts first and
     /// replaces the reviewed workbook after materialization.
@@ -532,6 +552,12 @@ impl Spreadsheet {
         &mut self,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
+        if self.block_read_only_recovery(cx) { return true; }
+        if self.is_previewing() {
+            self.status_message = Some("Return to the live workbook before entering Review Mode.".into());
+            cx.notify();
+            return true;
+        }
         if !self.import_in_progress && self.hub_activity.is_none() {
             return false;
         }
@@ -642,6 +668,7 @@ impl Spreadsheet {
     /// Select and reveal the first visible review item. Review Mode should
     /// never open with its explanation disconnected from the grid.
     pub fn focus_first_review_change(&mut self, cx: &mut gpui::Context<Self>) {
+        self.sync_table_view(cx);
         let Some(source_sheet_id) = self.review_mode.as_ref().map(|state| state.source_sheet_id)
         else {
             return;

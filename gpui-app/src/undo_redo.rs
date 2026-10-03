@@ -34,8 +34,23 @@ impl Spreadsheet {
 
     // Undo/Redo
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
+            if crate::pivot_ui::is_pivot_history(&entry.action) {
+                if let Err(error) = self.preflight_pivot_history(&entry.action, true, cx) {
+                    self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+                }
+            }
+            if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
+                && !matches!(
+                    &entry.action,
+                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. }
+                )
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
+                && !crate::pivot_ui::is_pivot_history(&entry.action)
+                && self.block_table_view_edit(cx) {
+                self.history.redo(); return;
+            }
             if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
                 if let Err(error) = self.wb(cx).validate_table_row_history(history, true) {
                     self.history.redo();
@@ -151,6 +166,29 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                     self.finish_workbook_snapshot_restore(before_row_view, cx);
                     self.status_message = Some(format!("Undo: {}", commit.description));
+                }
+                UndoAction::TableStructureChanged {
+                    history,
+                    description,
+                    ..
+                } => {
+                    if !self.replay_table_structure(&history, true, cx) {
+                        self.history.redo();
+                        return;
+                    }
+                    self.status_message = Some(format!("Undo: {description}"));
+                }
+                UndoAction::TableBatchChanged { commit, description, .. } => {
+                    if !self.replay_table_batch(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
+                }
+                UndoAction::TableCellsChanged { commit, description, .. } => {
+                    if !self.replay_table_cells(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
+                }
+                UndoAction::TableViewChanged { commit, description, .. } => {
+                    if !self.replay_table_view(&commit, true, cx) { self.history.redo(); return; }
+                    self.status_message = Some(format!("Undo: {description}"));
                 }
                 UndoAction::TableCommit { commit, description, .. } => {
                     if !self.replay_table_commit(&commit, true, cx) { self.history.redo(); return; }
@@ -619,8 +657,24 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.undo_into(workbook));
                 self.finish_workbook_snapshot_restore(before_row_view, cx);
             }
-            UndoAction::TableCommit { commit, .. } => { self.replay_table_commit(&commit, true, cx); }
-            UndoAction::PivotCommit { commit, created_sheet, .. } => {
+            UndoAction::TableBatchChanged { commit, .. } => { self.replay_table_batch(&commit, true, cx); }
+            UndoAction::TableStructureChanged { history, .. } => {
+                self.replay_table_structure(&history, true, cx);
+            }
+            UndoAction::TableCellsChanged { commit, .. } => {
+                self.replay_table_cells(&commit, true, cx);
+            }
+            UndoAction::TableViewChanged { commit, .. } => {
+                self.replay_table_view(&commit, true, cx);
+            }
+            UndoAction::TableCommit { commit, .. } => {
+                self.replay_table_commit(&commit, true, cx);
+            }
+            UndoAction::PivotCommit {
+                commit,
+                created_sheet,
+                ..
+            } => {
                 self.pivot_undo(&commit, &created_sheet, cx);
             }
             UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, print_setup_before, formula_rewrites } => {
@@ -1014,8 +1068,32 @@ impl Spreadsheet {
                 self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                 self.finish_workbook_snapshot_restore(after_row_view, cx);
             }
-            UndoAction::TableCommit { commit, .. } => { if !self.replay_table_commit(&commit, false, cx) { return false; } }
-            UndoAction::PivotCommit { commit, created_sheet, .. } => {
+            UndoAction::TableBatchChanged { commit, .. } => { if !self.replay_table_batch(&commit, false, cx) { return false; } }
+            UndoAction::TableStructureChanged { history, .. } => {
+                if !self.replay_table_structure(&history, false, cx) {
+                    return false;
+                }
+            }
+            UndoAction::TableCellsChanged { commit, .. } => {
+                if !self.replay_table_cells(&commit, false, cx) {
+                    return false;
+                }
+            }
+            UndoAction::TableViewChanged { commit, .. } => {
+                if !self.replay_table_view(&commit, false, cx) {
+                    return false;
+                }
+            }
+            UndoAction::TableCommit { commit, .. } => {
+                if !self.replay_table_commit(&commit, false, cx) {
+                    return false;
+                }
+            }
+            UndoAction::PivotCommit {
+                commit,
+                created_sheet,
+                ..
+            } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
             }
             UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, formula_rewrites, .. } => {
@@ -1228,8 +1306,23 @@ impl Spreadsheet {
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
+            if crate::pivot_ui::is_pivot_history(&entry.action) {
+                if let Err(error) = self.preflight_pivot_history(&entry.action, false, cx) {
+                    self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+                }
+            }
+            if !matches!(&entry.action, UndoAction::TableViewChanged { .. })
+                && !matches!(
+                    &entry.action,
+                    UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. }
+                )
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit))
+                && !crate::pivot_ui::is_pivot_history(&entry.action)
+                && self.block_table_view_edit(cx) {
+                self.history.undo(); return;
+            }
             if let UndoAction::RowsInserted { table_rows: Some(history), .. } | UndoAction::RowsDeleted { table_rows: Some(history), .. } = &entry.action {
                 if let Err(error) = self.wb(cx).validate_table_row_history(history, false) {
                     self.history.undo();
@@ -1346,6 +1439,29 @@ impl Spreadsheet {
                     self.workbook.update(cx, |workbook, _| commit.redo_into(workbook));
                     self.finish_workbook_snapshot_restore(after_row_view, cx);
                     self.status_message = Some(format!("Redo: {}", commit.description));
+                }
+                UndoAction::TableStructureChanged {
+                    history,
+                    description,
+                    ..
+                } => {
+                    if !self.replay_table_structure(&history, false, cx) {
+                        self.history.undo();
+                        return;
+                    }
+                    self.status_message = Some(format!("Redo: {description}"));
+                }
+                UndoAction::TableBatchChanged { commit, description, .. } => {
+                    if !self.replay_table_batch(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
+                }
+                UndoAction::TableCellsChanged { commit, description, .. } => {
+                    if !self.replay_table_cells(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
+                }
+                UndoAction::TableViewChanged { commit, description, .. } => {
+                    if !self.replay_table_view(&commit, false, cx) { self.history.undo(); return; }
+                    self.status_message = Some(format!("Redo: {description}"));
                 }
                 UndoAction::TableCommit { commit, description, .. } => {
                     if !self.replay_table_commit(&commit, false, cx) { self.history.undo(); return; }

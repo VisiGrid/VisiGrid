@@ -6,6 +6,7 @@ mod toolbar;
 mod desktop_keytips;
 mod pivot_ui;
 mod table_ui;
+mod table_header_paste;
 mod ai;
 mod ai_cli;
 mod ai_dialog_state;
@@ -17,6 +18,7 @@ mod rewind;
 mod ai_actions;
 mod app;
 mod autocomplete;
+mod table_formula_editor;
 mod clipboard;
 mod comments;
 mod comment_sidebar;
@@ -83,6 +85,20 @@ mod settings;
 mod structured_results;
 mod sheet_ops;
 mod sort_filter;
+mod table_filter_ui;
+mod table_edit;
+mod table_structure;
+mod table_batch;
+mod table_review;
+#[cfg(test)]
+mod table_outside_edit_tests;
+#[cfg(test)]
+mod table_outside_fill_tests;
+mod table_cut;
+#[cfg(test)]
+mod table_rewind_tests;
+mod table_cell_history;
+mod table_fill;
 mod split_view;
 mod theme;
 mod trace;

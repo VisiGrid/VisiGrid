@@ -611,6 +611,7 @@ fn write_fresh_db(
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
     if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
+    sheet.validate_table_view_spec()?;
     if sheet.has_table_history() {
         return save_workbook(&Workbook::from_sheets(vec![sheet.clone()], 0), path);
     }
@@ -942,6 +943,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 /// Save a complete workbook including all sheets and named ranges
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     workbook.ensure_writable()?;
+    workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook(conn, workbook))
 }
 
@@ -1101,6 +1103,7 @@ pub fn save_workbook_with_metadata(
     path: &Path,
 ) -> Result<(), String> {
     workbook.ensure_writable()?;
+    workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook_with_metadata(conn, workbook, metadata))
 }
 
@@ -2658,6 +2661,7 @@ pub fn save_workbook_full(
     path: &Path,
 ) -> Result<(), String> {
     workbook.ensure_writable()?;
+    workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook_full(conn, workbook, metadata, scripts, run_records))
 }
 
@@ -2795,6 +2799,7 @@ fn write_workbook_full(
 
     save_sheet_defaults(conn, workbook)?;
 
+    save_pivots(conn, workbook)?;
     save_tables(conn, workbook)?;
 
     // Save scripts
@@ -3945,12 +3950,12 @@ mod tests {
         let t = PivotTable {
             id: wb.next_pivot_id(),
             name: wb.next_pivot_name(),
-            source: PivotSource { sheet_id: data_id, start_row: 0, start_col: 0, end_row: 2, end_col: 1 },
+            source: PivotSource { table_id: None, sheet_id: data_id, start_row: 0, start_col: 0, end_row: 2, end_col: 1 },
             definition: PivotDefinition {
-                rows: vec![PivotField { offset: 0, header: "Region".into() }],
+                rows: vec![PivotField { column_id: None, offset: 0, header: "Region".into() }],
                 column: None,
                 values: vec![PivotValueField {
-                    field: PivotField { offset: 1, header: "Amount".into() },
+                    field: PivotField { column_id: None, offset: 1, header: "Amount".into() },
                     aggregation: Aggregation::Sum,
                     number_format: Some(money.clone()),
                 }],
@@ -3962,7 +3967,7 @@ mod tests {
             stale: false,
             source_generation: None,
         };
-        let (snap, gen) = wb.pivot_snapshot(&t).unwrap();
+        let (t, snap, gen) = wb.pivot_snapshot(&t).unwrap();
         let output = aggregate(&t.definition, &snap).unwrap();
         let commit = wb.prepare_pivot_commit(out_id, t.clone(), &output, gen, 1_790_000_000).unwrap();
         wb.apply_pivot_state(&commit.after).unwrap();

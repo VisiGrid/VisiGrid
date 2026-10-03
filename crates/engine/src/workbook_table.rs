@@ -90,6 +90,8 @@ pub struct SavedTableSheet {
     pub tables: Vec<DataTable>,
     #[serde(default)]
     pub column_allocators: BTreeMap<u64, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<crate::table_view::TableViewSpec>,
 }
 
 /// Versioned, workbook-wide envelope. Sheet IDs are remapped on load; Table
@@ -777,6 +779,11 @@ impl Workbook {
             .sheet_by_id(commit.sheet_id)
             .ok_or("Table sheet no longer exists.")?;
         let current = sheet.tables().iter().find(|t| t.id == commit.id);
+        if let Some(spec) = sheet.table_view_spec().filter(|spec| spec.table == commit.id) {
+            let table = target.table.as_ref()
+                .ok_or("Clear the saved Table view before removing its Table.")?;
+            spec.validate_schema(table)?;
+        }
         let same_schema = match (current, expected.table.as_ref()) {
             (Some(a), Some(b)) => {
                 let mut a = a.clone();
@@ -970,7 +977,11 @@ impl Workbook {
 
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
-            version: if self
+            version: if self.sheets.iter().any(|s| {
+                s.table_view_spec().is_some_and(|v| v.requires_persistence())
+            }) {
+                3
+            } else if self
                 .tables()
                 .any(|(_, t)| t.columns.iter().any(|c| c.formula.is_some()))
             {
@@ -988,6 +999,7 @@ impl Workbook {
                     sheet: i,
                     tables: s.tables().to_vec(),
                     column_allocators: s.table_column_allocators.clone(),
+                    view: s.table_view_spec.clone().filter(|v| v.requires_persistence()),
                 })
                 .collect(),
         }
@@ -996,7 +1008,7 @@ impl Workbook {
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
     /// before recalculation. Reject corrupt metadata, never discard silently.
     pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
-        if ![1, 2].contains(&saved.version) || saved.next_table_id == 0 {
+        if ![1, 2, 3].contains(&saved.version) || saved.next_table_id == 0 {
             return Err("Unsupported or invalid Tables metadata version/allocator.".into());
         }
         let mut names = HashSet::new();
@@ -1009,6 +1021,14 @@ impl Workbook {
             let sheet = self
                 .sheet(entry.sheet)
                 .ok_or("Table references a missing sheet.")?;
+            if let Some(spec) = &entry.view {
+                if saved.version < 3 {
+                    return Err("Table views require Tables metadata version 3.".into());
+                }
+                let table = entry.tables.iter().find(|t| t.id == spec.table)
+                    .ok_or("Saved Table view refers to a missing Table on this sheet.")?;
+                spec.validate_schema(table)?;
+            }
             if entry
                 .column_allocators
                 .iter()
@@ -1074,6 +1094,7 @@ impl Workbook {
         }
         for sheet in &mut self.sheets {
             sheet.data_tables.clear();
+            sheet.table_view_spec = None;
         }
         for entry in saved.sheets {
             let sheet = &mut self.sheets[entry.sheet];
@@ -1082,6 +1103,7 @@ impl Workbook {
                 *current = (*current).max(next);
             }
             sheet.data_tables = entry.tables;
+            sheet.table_view_spec = entry.view;
             for table in &mut sheet.data_tables {
                 let next = sheet.table_column_allocators.entry(table.id.0).or_insert(1);
                 *next = (*next).max(table.next_column_id);
@@ -1094,6 +1116,9 @@ impl Workbook {
             sheet.table_id_high_water = self.next_table_id - 1;
         }
         self.refresh_table_name_reservations();
+        // Pivots load before Tables; establish their metadata-aware baseline
+        // only once the complete source catalog is available.
+        self.update_pivot_staleness();
         Ok(())
     }
 }

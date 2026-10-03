@@ -211,6 +211,7 @@ impl Spreadsheet {
             || self.lua_console.visible
             || self.close_confirm_visible
             || self.filter_dropdown_col.is_some()
+            || self.table_filter_dropdown.is_some()
             || self.is_validation_dropdown_open()
             || self.renaming_sheet.is_some()
         {
@@ -260,12 +261,13 @@ impl Spreadsheet {
         // deletes back past the '=' should leave it.
         self.recompute_edit_mode();
         if self.mode.is_formula() {
-            self.update_formula_refs();
+            self.update_formula_refs(cx);
             self.clear_formula_nav_override();
             self.update_formula_nav_mode();
         }
 
         self.autocomplete_suppressed = false;
+        self.autocomplete_selected = 0;
         self.reset_caret_activity();
         self.edit_scroll_dirty = true;
         self.formula_bar_cache_dirty = true;
@@ -293,7 +295,7 @@ impl EntityInputHandler for Spreadsheet {
             let names_filter =
                 self.inspector_visible && self.inspector_tab == InspectorTab::Names;
             let history_peek =
-                self.selected_history_id.is_some() && self.history_highlight_range.is_some();
+                self.selected_history_id.is_some();
             if names_filter || history_peek || self.vim_mode_enabled(cx) {
                 return false;
             }

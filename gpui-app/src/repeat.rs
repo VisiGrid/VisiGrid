@@ -122,6 +122,57 @@ impl Spreadsheet {
             cx.notify();
             return;
         };
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            use visigrid_engine::{structural::Axis, workbook::StructureStep};
+            let (axis, count, delete) = match action {
+                RepeatAction::InsertRows(n) => (Axis::Row, n, false),
+                RepeatAction::DeleteRows(n) => (Axis::Row, n, true),
+                RepeatAction::InsertCols(n) => (Axis::Col, n, false),
+                RepeatAction::DeleteCols(n) => (Axis::Col, n, true),
+                _ => {
+                    self.block_table_view_edit(cx);
+                    return;
+                }
+            };
+            if self.block_if_previewing_only(cx) {
+                return;
+            }
+            self.sync_table_view(cx);
+            let (row, col) = self.view_state.selected;
+            let steps = if axis == Axis::Row {
+                self.row_view
+                    .visible_index_of(row)
+                    .and_then(|first| {
+                        self.row_view
+                            .visible_rows()
+                            .get(first + count.saturating_sub(1))
+                            .copied()
+                    })
+                    .ok_or_else(|| "Not enough visible rows to repeat this operation.".to_string())
+                    .and_then(|end| {
+                        crate::table_structure::selected_row_steps(&self.row_view, row, end, delete)
+                    })
+            } else {
+                Ok(vec![StructureStep {
+                    axis,
+                    at: col,
+                    count,
+                    delete,
+                }])
+            };
+            match steps {
+                Ok(steps) => {
+                    self.suppress_repeat_capture = true;
+                    self.apply_table_structure(steps, cx);
+                    self.suppress_repeat_capture = false;
+                }
+                Err(error) => {
+                    self.status_message = Some(error);
+                    cx.notify();
+                }
+            }
+            return;
+        }
         if self.block_if_previewing(cx) {
             return;
         }
