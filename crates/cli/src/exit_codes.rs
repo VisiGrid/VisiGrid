@@ -259,6 +259,18 @@ impl SessionErrorOutput {
     }
 }
 
+// =============================================================================
+// Recipe (70-79) — vgrid recipe run
+// =============================================================================
+
+/// The recipe ran but its result failed validation (a missing column, values
+/// that did not fit their type, drift the recipe says to fail on). Nothing
+/// was written; any previous output is untouched.
+pub const EXIT_RECIPE_FAILED: u8 = 70;
+
+/// The recipe file could not be read or is not a valid recipe.
+pub const EXIT_RECIPE_INVALID: u8 = 71;
+
 #[cfg(test)]
 mod tests {
     use super::*;

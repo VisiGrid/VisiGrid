@@ -17,6 +17,7 @@ mod mcp;
 mod parse;
 mod pivot;
 mod recon;
+mod recipe_cmd;
 mod replay;
 mod scripts;
 mod session;
@@ -169,6 +170,10 @@ Examples:
         #[command(flatten)]
         csv: csv_args::CsvImportArgs,
     },
+
+    /// Run saved import recipes (source + steps) without the app
+    #[command(subcommand)]
+    Recipe(RecipeCommands),
 
     /// List all supported functions
     ListFunctions,
@@ -1372,6 +1377,44 @@ enum AiCommands {
     },
 }
 
+/// Import recipe subcommands.
+#[derive(Subcommand)]
+enum RecipeCommands {
+    /// Run a recipe: read its source, apply its steps, write the result
+    #[command(after_help = "\
+The recipe is a TOML file saved from VisiGrid (or written by hand): a source
+and an ordered list of steps. Its source path is relative to the recipe file.
+
+Diagnostics (rows in and out per step, columns that changed, values that did
+not fit their type) go to stderr. If any check fails, nothing is written and
+the exit status is 70, so an earlier output file is left as it was.
+
+Examples:
+  vgrid recipe run orders.recipe.toml -o orders.csv
+  vgrid recipe run orders.recipe.toml --source exports/october.csv -o october.xlsx
+  vgrid recipe run orders.recipe.toml --report run.json > orders.csv")]
+    Run {
+        /// Recipe file (.toml)
+        recipe: PathBuf,
+
+        /// Read this source file instead of the one the recipe names
+        #[arg(long)]
+        source: Option<PathBuf>,
+
+        /// Output file (.csv, .tsv, .json, .xlsx, .sheet); CSV to stdout if omitted
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+
+        /// Also write the run report as JSON to this file
+        #[arg(long)]
+        report: Option<PathBuf>,
+
+        /// Print diagnostics only when the run fails
+        #[arg(long, short = 'q')]
+        quiet: bool,
+    },
+}
+
 /// Scripts subcommands for listing and running Lua scripts.
 #[derive(Subcommand)]
 enum ScriptsCommands {
@@ -1843,6 +1886,9 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some(Commands::ListFunctions) => cmd_list_functions(),
+        Some(Commands::Recipe(RecipeCommands::Run { recipe, source, output, report, quiet })) => {
+            recipe_cmd::cmd_recipe_run(recipe, source, output, report, quiet)
+        }
         Some(Commands::Convert {
             input,
             from,
