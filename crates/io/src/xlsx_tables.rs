@@ -472,7 +472,7 @@ pub(crate) fn export_warnings(wb: &Workbook) -> Result<Vec<String>, String> {
             .filter(|v| v.table == table.id)
         {
             if view.sort.is_some() {
-                warnings.push(format!("Table {}: Excel export includes every record in stored order. VisiGrid view sorting is not exported; formulas keep their stored coordinates.", table.name));
+                warnings.push(format!("Table {}: Excel export saves the sort definition and every record in stored order to preserve formula coordinates. Use Reapply in Excel to apply the saved sort; text and mixed-type ordering may differ from VisiGrid.", table.name));
             }
             if let Err(reason) =
                 super::xlsx_table_filters::export_filters(wb.sheet_by_id(sheet_id).unwrap(), table)
@@ -640,6 +640,16 @@ pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
                                 &mut writer,
                             )?;
                             continue;
+                        }
+                    }
+                    if e.local_name().as_ref() == b"tableColumns" {
+                        if let Some(t) = table {
+                            let (sid, _) = wb.table(t.id).ok_or("Missing exported Table")?;
+                            super::xlsx_table_sorts::write(
+                                wb.sheet_by_id(sid).unwrap(),
+                                t,
+                                &mut writer,
+                            )?;
                         }
                     }
                     if e.local_name().as_ref() == b"tableColumn" {

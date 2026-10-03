@@ -338,7 +338,7 @@ fn xml_escaping_and_at_signs_in_headers_and_literals_survive() {
 }
 
 #[test]
-fn sort_loss_is_reported_but_checkbox_filters_import_and_all_records_survive() {
+fn saved_sort_and_checkbox_filters_import_without_moving_stored_records() {
     use visigrid_engine::{
         filter::SortDirection,
         table_view::{TableSort, TableViewSpec},
@@ -777,7 +777,7 @@ fn importing_filters_respects_adjacent_cells_row_heights_and_freeze_boundaries()
             report
                 .warnings
                 .iter()
-                .any(|w| w.contains("saved filters/button settings were not imported")),
+                .any(|w| w.contains("saved sort/filter/button settings were not imported")),
             "mode {mode}: {:?}",
             report.warnings
         );
@@ -1024,5 +1024,393 @@ fn numeric_filter_spellings_match_numbers_even_with_a_matching_text_record() {
         wb.sheet(0).unwrap().table_view_spec(),
         "{:?}",
         report.warnings
+    );
+}
+
+fn set_saved_sort(wb: &mut Workbook, id: TableId, offset: usize, descending: bool, buttons: bool) {
+    use visigrid_engine::{
+        filter::SortDirection,
+        table_view::{TableSort, TableViewSpec},
+    };
+    let (sid, table) = wb.table(id).unwrap();
+    let mut spec = wb
+        .sheet_by_id(sid)
+        .unwrap()
+        .table_view_spec()
+        .cloned()
+        .unwrap_or_else(|| TableViewSpec::new(id));
+    spec.sort = Some(TableSort {
+        column: table.columns[offset].id,
+        direction: if descending {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
+        },
+    });
+    spec.show_filter_buttons = buttons;
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+}
+
+#[test]
+fn saved_sort_roundtrips_both_directions_and_buttons_without_moving_cells_or_formulas() {
+    use visigrid_engine::table_view::TableView;
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain.xlsx");
+    let file = dir.path().join("sorted.xlsx");
+    let native_file = dir.path().join("sorted.sheet");
+    for descending in [false, true] {
+        for buttons in [false, true] {
+            let (mut wb, id) = book();
+            xlsx::export(&wb, &plain, None).unwrap();
+            set_saved_sort(&mut wb, id, 2, descending, buttons);
+            for _ in 0..2 {
+                let original = serde_json::to_value(wb.saved_tables()).unwrap();
+                let report = xlsx::export(&wb, &file, None).unwrap();
+                assert_eq!(serde_json::to_value(wb.saved_tables()).unwrap(), original);
+                assert_eq!(report.warnings.len(), 1);
+                assert!(report.warnings[0].contains("saves the sort definition"));
+                assert!(report.warnings[0].contains("Reapply"));
+                assert_eq!(
+                    xml(&file, "xl/worksheets/sheet1.xml"),
+                    xml(&plain, "xl/worksheets/sheet1.xml")
+                );
+                assert_eq!(
+                    xml(&file, "xl/worksheets/sheet2.xml"),
+                    xml(&plain, "xl/worksheets/sheet2.xml")
+                );
+                let meta = xml(&file, "xl/tables/table1.xml");
+                assert!(
+                    meta.contains("<sortState ref=\"B4:D8\"><sortCondition ref=\"D4:D8\""),
+                    "{meta}"
+                );
+                assert!(meta.find("<sortState").unwrap() < meta.find("<tableColumns").unwrap());
+                assert_eq!(meta.contains("<autoFilter"), buttons);
+                let (mut loaded, report) = xlsx::import(&file).unwrap();
+                assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+                let sheet = loaded.sheet(0).unwrap();
+                let spec = sheet.table_view_spec().unwrap().clone();
+                assert_eq!(Some(&spec), wb.sheet(0).unwrap().table_view_spec());
+                let view = TableView::build(sheet, spec, 10, None).unwrap();
+                let rows: Vec<_> = (3..8).map(|r| view.rows().view_to_data(r)).collect();
+                assert_eq!(
+                    rows,
+                    if descending {
+                        vec![4, 7, 3, 6, 5]
+                    } else {
+                        vec![6, 3, 7, 4, 5]
+                    }
+                );
+                assert_eq!(sheet.get_raw(4, 3), "777");
+                assert_eq!(sheet.get_raw(5, 3), "");
+                assert_eq!(loaded.sheet(1).unwrap().get_display(0, 0), "860");
+                let imported = serde_json::to_value(loaded.saved_tables()).unwrap();
+                native::save_workbook(&loaded, &native_file).unwrap();
+                loaded = native::load_workbook(&native_file).unwrap();
+                assert_eq!(
+                    serde_json::to_value(loaded.saved_tables()).unwrap(),
+                    imported
+                );
+                wb = loaded;
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_sort_states_bind_offsets_to_column_ids_at_either_ooxml_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("external.xlsx");
+    let changed = dir.path().join("external-sorted.xlsx");
+    let mut external = rust_xlsxwriter::Workbook::new();
+    let ws = external.add_worksheet();
+    ws.write_number(3, 2, 20).unwrap();
+    ws.write_number(4, 2, 10).unwrap();
+    ws.add_table(
+        2,
+        2,
+        4,
+        3,
+        &rust_xlsxwriter::Table::new()
+            .set_name("Orders")
+            .set_style(rust_xlsxwriter::TableStyle::Medium2),
+    )
+    .unwrap();
+    external.save(&file).unwrap();
+    for nested in [false, true] {
+        for header_in_range in [false, true] {
+            let state = format!("<sortState ref=\"$C${}:$D$5\"><sortCondition ref=\"$C$4:$C$5\" sortBy=\"value\"/></sortState>", if header_in_range { 3 } else { 4 });
+            rewrite(&file, &changed, |name, data| {
+                (
+                    name.into(),
+                    if name == "xl/tables/table1.xml" {
+                        let data = data.replace("<tableColumn id=\"1\"", "<tableColumn id=\"101\"");
+                        if nested {
+                            data.replace(
+                                "<autoFilter ref=\"C3:D5\"/>",
+                                &format!("<autoFilter ref=\"C3:D5\">{state}</autoFilter>"),
+                            )
+                        } else {
+                            data.replace("<tableColumns", &format!("{state}<tableColumns"))
+                        }
+                    } else {
+                        data
+                    },
+                )
+            });
+            let (wb, report) = xlsx::import(&changed).unwrap();
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            let table = wb.table_by_name("Orders").unwrap().1;
+            assert_eq!(table.columns[0].id.0, 101);
+            let sort = wb
+                .sheet(0)
+                .unwrap()
+                .table_view_spec()
+                .unwrap()
+                .sort
+                .as_ref()
+                .unwrap();
+            assert_eq!(sort.column, table.columns[0].id);
+            assert_eq!(
+                sort.direction,
+                visigrid_engine::filter::SortDirection::Ascending
+            );
+            assert_eq!(wb.sheet(0).unwrap().get_raw(3, 2), "20");
+        }
+    }
+}
+
+#[test]
+fn unsupported_and_malformed_sorts_keep_filters_instead_of_applying_only_the_first_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("filtered.xlsx");
+    let changed = dir.path().join("sort.xlsx");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 0, &[3], true);
+    xlsx::export(&wb, &file, None).unwrap();
+    let state = |attrs: &str, children: &str| {
+        format!("<sortState ref=\"B4:D8\" {attrs}>{children}</sortState>")
+    };
+    let key = "<sortCondition ref=\"B4:B8\"/>";
+    let cases = [
+        state("caseSensitive=\"1\"", key),
+        state("columnSort=\"true\"", key),
+        state("sortMethod=\"stroke\"", key),
+        state("", &format!("{key}<sortCondition ref=\"C4:C8\"/>")),
+        state(
+            "",
+            "<sortCondition ref=\"B4:B8\" customList=\"East,West\"/>",
+        ),
+        state(
+            "",
+            "<sortCondition ref=\"B4:B8\" sortBy=\"cellColor\" dxfId=\"1\"/>",
+        ),
+        state(
+            "",
+            "<sortCondition ref=\"B4:B8\" sortBy=\"icon\" iconId=\"0\"/>",
+        ),
+        state("", "<sortCondition ref=\"A4:A8\"/>"),
+        state("", "<sortCondition ref=\"B4:C8\"/>"),
+        state("", "<sortCondition ref=\"B5:B8\"/>"),
+        state("", "<sortCondition ref=\"B4:B7\"/>"),
+        state("", "<sortCondition ref=\"B4:B8\" descending=\"bad\"/>"),
+        state("", ""),
+        state("", &format!("{key}<extLst/>")),
+        format!("{}{}", state("", key), state("", key)),
+        "<sortState ref=\"B4:D7\"><sortCondition ref=\"B4:B7\"/></sortState>".into(),
+        "<sortState><sortCondition ref=\"B4:B8\"/></sortState>".into(),
+    ];
+    for state in cases {
+        rewrite(&file, &changed, |name, data| {
+            (
+                name.into(),
+                if name == "xl/tables/table1.xml" {
+                    data.replace("<tableColumns", &format!("{state}<tableColumns"))
+                } else {
+                    data
+                },
+            )
+        });
+        let (loaded, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1);
+        assert_eq!(
+            loaded.sheet(0).unwrap().table_view_spec(),
+            wb.sheet(0).unwrap().table_view_spec(),
+            "{state}: {:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("saved Excel sorting was not imported")),
+            "{state}: {:?}",
+            report.warnings
+        );
+        assert!(report.imported_layouts[0].hidden_rows.is_empty());
+        assert_eq!(loaded.sheet(1).unwrap().get_display(0, 0), "860");
+    }
+}
+
+#[test]
+fn sort_and_filters_are_independent_when_filter_metadata_is_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sorted.xlsx");
+    let changed = dir.path().join("advanced-filter.xlsx");
+    let (mut wb, id) = book();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    xlsx::export(&wb, &file, None).unwrap();
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name == "xl/tables/table1.xml" {
+                data.replace(
+                    "</autoFilter>",
+                    "<filterColumn colId=\"0\"><top10 val=\"2\"/></filterColumn></autoFilter>",
+                )
+            } else if name == "xl/worksheets/sheet1.xml" {
+                data.replace("<row r=\"5\"", "<row hidden=\"1\" r=\"5\"")
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec(),
+        wb.sheet(0).unwrap().table_view_spec(),
+        "{:?}",
+        report.warnings
+    );
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("saved filters/button settings were not imported")));
+    assert!(report.imported_layouts[0].hidden_rows.is_empty());
+    // The export-side fallback also retains the independent sort definition.
+    select_values(&mut wb, id, 0, &[], true);
+    set_saved_sort(&mut wb, id, 0, true, true);
+    let report = xlsx::export(&wb, &file, None).unwrap();
+    assert_eq!(report.warnings.len(), 2);
+    assert!(xml(&file, "xl/tables/table1.xml").contains("<sortState"));
+    assert!(!xml(&file, "xl/tables/table1.xml").contains("<filters"));
+}
+
+#[test]
+fn clearing_sort_removes_excel_metadata_but_retains_filters_and_buttons() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("cleared.xlsx");
+    let (mut wb, id) = book();
+    select_values(&mut wb, id, 0, &[3], false);
+    set_saved_sort(&mut wb, id, 2, true, false);
+    xlsx::export(&wb, &file, None).unwrap();
+    let (mut wb, report) = xlsx::import(&file).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let mut spec = wb.sheet(0).unwrap().table_view_spec().unwrap().clone();
+    assert!(spec.sort.is_some());
+    spec.sort = None;
+    wb.set_table_view_spec(SheetId(1), Some(spec.clone()))
+        .unwrap();
+    assert!(xlsx::export(&wb, &file, None).unwrap().warnings.is_empty());
+    assert!(!xml(&file, "xl/tables/table1.xml").contains("sortState"));
+    let (loaded, _) = xlsx::import(&file).unwrap();
+    assert_eq!(loaded.sheet(0).unwrap().table_view_spec(), Some(&spec));
+}
+
+#[test]
+fn sort_only_import_refuses_unsafe_layouts_and_preserves_manual_hidden_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sort-only.xlsx");
+    let changed = dir.path().join("unsafe-sort.xlsx");
+    let (mut wb, id) = book();
+    set_saved_sort(&mut wb, id, 0, true, true);
+    xlsx::export(&wb, &file, None).unwrap();
+    for mode in 0..4 {
+        rewrite(&file, &changed, |name, data| {
+            (
+                name.into(),
+                if name == "xl/worksheets/sheet1.xml" {
+                    match mode {
+                0 => data.replace("<row r=\"4\"", "<row r=\"4\" hidden=\"1\""),
+                1 => data.replace("<row r=\"4\"", "<row r=\"4\" ht=\"24\" customHeight=\"1\""),
+                2 => data.replace("workbookViewId=\"0\"/>", "workbookViewId=\"0\"><pane ySplit=\"4\" topLeftCell=\"A5\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView>"),
+                _ => {
+                    let start = data.find("<row r=\"4\"").unwrap();
+                    let end = start + data[start..].find("</row>").unwrap();
+                    let mut data = data;
+                    data.insert_str(end, "<c r=\"F4\" t=\"inlineStr\"><is><t>Keep me</t></is></c>");
+                    data
+                }
+            }
+                } else {
+                    data
+                },
+            )
+        });
+        let (loaded, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1);
+        assert!(
+            loaded.sheet(0).unwrap().table_view_spec().is_none(),
+            "mode {mode}"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("saved sort/filter/button settings were not imported")),
+            "mode {mode}: {:?}",
+            report.warnings
+        );
+        if mode == 0 {
+            assert!(report.imported_layouts[0].hidden_rows.contains(&3));
+        }
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "2");
+    }
+}
+
+#[test]
+fn multiple_sorted_tables_respect_the_single_view_owner_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("two-sorts.xlsx");
+    let changed = dir.path().join("external.xlsx");
+    let mut external = rust_xlsxwriter::Workbook::new();
+    let ws = external.add_worksheet();
+    for (row, name) in [(0, "FirstData"), (5, "OtherData")] {
+        ws.write_number(row + 1, 0, 2).unwrap();
+        ws.write_number(row + 2, 0, 1).unwrap();
+        ws.add_table(
+            row,
+            0,
+            row + 2,
+            0,
+            &rust_xlsxwriter::Table::new().set_name(name),
+        )
+        .unwrap();
+    }
+    external.save(&file).unwrap();
+    rewrite(&file, &changed, |name, data| {
+        (
+            name.into(),
+            if name.starts_with("xl/tables/") {
+                let r = if name.ends_with("table1.xml") {
+                    "A2:A3"
+                } else {
+                    "A7:A8"
+                };
+                data.replace("<tableColumns", &format!("<sortState ref=\"{r}\"><sortCondition ref=\"{r}\"/></sortState><tableColumns"))
+            } else {
+                data
+            },
+        )
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 2);
+    assert!(loaded.sheet(0).unwrap().table_view_spec().is_none());
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("More than one Table"))
+            .count(),
+        2
     );
 }

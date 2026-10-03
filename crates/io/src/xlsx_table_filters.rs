@@ -13,7 +13,7 @@ use visigrid_engine::{
     filter::{ColumnFilter, FilterKey, NormalizedFilterKey},
     sheet::Sheet,
     table::{DataTable, TableId},
-    table_view::{TableFilter, TableViewSpec},
+    table_view::{TableFilter, TableSort, TableViewSpec},
     workbook::Workbook,
 };
 
@@ -70,7 +70,9 @@ fn encode_value(value: &str) -> String {
 pub(super) struct ImportedView {
     filters: Vec<(usize, Values)>,
     buttons: bool,
-    sorted: bool,
+    sort: Option<TableSort>,
+    sort_warning: Option<String>,
+    filter_warning: Option<String>,
     mixed_buttons: bool,
 }
 #[derive(Default)]
@@ -84,7 +86,7 @@ pub(super) struct PendingView {
     pub view: Result<ImportedView, String>,
 }
 
-pub(super) fn parse(xml: &str, table: &DataTable) -> Result<ImportedView, String> {
+fn parse_filters(xml: &str, table: &DataTable) -> Result<ImportedView, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
     let mut path = Vec::<String>::new();
@@ -167,7 +169,7 @@ pub(super) fn parse(xml: &str, table: &DataTable) -> Result<ImportedView, String
                             .values
                             .insert(value);
                     }
-                    (Some("table" | "autoFilter"), "sortState") => view.sorted = true,
+                    (Some("table" | "autoFilter"), "sortState") => {}
                     (Some("filterColumn" | "filters" | "autoFilter"), _) => {
                         return Err(format!("Unsupported Excel filter element: {tag}"));
                     }
@@ -197,6 +199,19 @@ pub(super) fn parse(xml: &str, table: &DataTable) -> Result<ImportedView, String
     if !hidden.is_empty() {
         view.mixed_buttons = hidden.len() != table.columns.len();
         view.buttons = view.mixed_buttons;
+    }
+    Ok(view)
+}
+
+pub(super) fn parse(xml: &str, table: &DataTable) -> Result<ImportedView, String> {
+    let mut view = parse_filters(xml, table).unwrap_or_else(|reason| ImportedView {
+        buttons: true,
+        filter_warning: Some(reason),
+        ..Default::default()
+    });
+    match super::xlsx_table_sorts::parse(xml, table) {
+        Ok(sort) => view.sort = sort,
+        Err(reason) => view.sort_warning = Some(reason),
     }
     Ok(view)
 }
@@ -267,7 +282,7 @@ pub(super) fn finish_import(
     for p in &pending {
         if p.view
             .as_ref()
-            .is_ok_and(|v| !v.filters.is_empty() || !v.buttons)
+            .is_ok_and(|v| v.sort.is_some() || !v.filters.is_empty() || !v.buttons)
         {
             *owners.entry(p.sheet).or_default() += 1;
         }
@@ -291,7 +306,9 @@ pub(super) fn finish_import(
                     .collect()
             })
             .unwrap_or_default();
-        let has_filters = p.view.as_ref().map_or(true, |v| !v.filters.is_empty());
+        let has_filters = p.view.as_ref().map_or(true, |v| {
+            v.filter_warning.is_some() || !v.filters.is_empty()
+        });
         // Excel hides whole rows for filters. Those bits must not become
         // manual hidden rows, which would survive Clear Filters in VisiGrid.
         if has_filters {
@@ -303,22 +320,26 @@ pub(super) fn finish_import(
         }
         let installed: Result<(), String> = (|| {
             let view = p.view?;
-            if view.sorted {
-                result.warnings.push(format!("Table {name}: saved Excel sorting was not imported. Records retain their physically stored order."));
+            if let Some(reason) = &view.filter_warning {
+                result.warnings.push(format!("Table {name}: saved filters/button settings were not imported ({reason}). Filter-hidden body rows were made visible; supported sorting is retained when the layout permits."));
+            }
+            if let Some(reason) = &view.sort_warning {
+                result.warnings.push(format!("Table {name}: saved Excel sorting was not imported ({reason}). Records retain their physically stored order; supported filters are retained."));
             }
             if view.mixed_buttons {
                 result.warnings.push(format!("Table {name}: mixed per-column filter-button visibility is unsupported; all buttons are shown."));
             }
-            if view.filters.is_empty() && view.buttons {
+            if view.sort.is_none() && view.filters.is_empty() && view.buttons {
                 return Ok(());
             }
             if owners.get(&p.sheet).copied().unwrap_or(0) > 1 {
                 return Err(
-                    "More than one Table on this sheet needs saved filter/button settings".into(),
+                    "More than one Table on this sheet needs saved sort/filter/button settings"
+                        .into(),
                 );
             }
             let sheet = wb.sheet_by_id(sid).unwrap();
-            if !view.filters.is_empty() {
+            if view.sort.is_some() || !view.filters.is_empty() {
                 if result.imported_layouts.get(p.sheet).is_some_and(|layout| {
                     layout
                         .row_heights
@@ -326,12 +347,14 @@ pub(super) fn finish_import(
                         .any(|r| *r > range.start_row && *r <= range.end_row)
                         || (layout.frozen_rows > range.start_row + 1
                             && layout.frozen_rows <= range.end_row)
-                }) {
-                    return Err("Table body has custom row heights or a freeze boundary".into());
+                }) || (!has_filters && !previously_hidden.is_empty())
+                {
+                    return Err("Table body has custom row heights, manually hidden rows or a freeze boundary".into());
                 }
             }
             let mut spec = TableViewSpec::new(p.table);
             spec.show_filter_buttons = view.buttons;
+            spec.sort = view.sort;
             for (offset, values) in view.filters {
                 spec.filters.push(TableFilter {
                     column: table.columns[offset].id,
@@ -361,7 +384,7 @@ pub(super) fn finish_import(
             Ok(())
         })();
         if let Err(reason) = installed {
-            result.warnings.push(format!("Table {name}: saved filters/button settings were not imported ({reason}). All records are shown in their stored order; hidden body rows were made visible."));
+            result.warnings.push(format!("Table {name}: saved sort/filter/button settings were not imported ({reason}). Records retain their stored order; filter-hidden body rows were made visible."));
         }
     }
 }

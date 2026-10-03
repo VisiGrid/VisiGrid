@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Excel Table round trips now preserve built-in style identities, stripe/emphasis options, checkbox-value filters and uniform filter-button visibility, including through native saves. Export hides records that fail supported filters while retaining their cells and formulas. Unsupported or ambiguous filters and unsafe import layouts produce explicit warnings; view sorting and custom styles/themes remain limited. Table names over Excel's 255-character limit refuse export before writing.
+- Excel Tables now retain saved single-column ascending/descending sorts through XLSX and native round trips, including with filters or hidden header controls. Export preserves every record and formula coordinate and explains that Excel needs Reapply to display the saved order. Unsupported or unsafe sorts warn without partially applying their keys; supported filter metadata is handled separately.
+
+- Excel Table round trips now preserve built-in style identities, stripe/emphasis options, checkbox-value filters and uniform filter-button visibility, including through native saves. Export hides records that fail supported filters while retaining their cells and formulas. Unsupported or ambiguous filters and unsafe import layouts produce explicit warnings; custom styles/themes remain limited. Table names over Excel's 255-character limit refuse export before writing.
 
 - Copy a complete reviewed sheet without clearing Table sorting/filtering, including hidden records. Copied Tables and pivots get fresh identities, internal structured references follow the copies, and row layout follows reviewed deletions. The copy has atomic validation, one-step undo/redo and history rewind; external formulas remain live.
 
