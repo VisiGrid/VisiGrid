@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- **Recipes read Parquet files and DuckDB tables.** Columns keep the types the file declares (numbers, dates, date-times, times, text), and the values come through exactly as when opening the file. The builder shows the settings each source has, with a Table setting for DuckDB. Start one with **New Import Recipe…** from an open Parquet file or by choosing a `.parquet` or `.duckdb` file. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
+- Fixed a recipe named like a function (`db`, `sum`, `date`) failing to create its Table; the Table is named `db_table` instead. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
+
 ## 0.46.0
 
 ### Formulas
