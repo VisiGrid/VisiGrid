@@ -329,6 +329,13 @@ pub struct Sheet {
     /// once the pass is done.
     #[serde(skip)]
     pending_spills: RefCell<Vec<(usize, usize, crate::formula::eval::Array2D)>>,
+    /// Anchors currently showing #SPILL!, with the extent they were refused
+    /// (rows, cols). A write inside that extent can move the obstruction, so
+    /// the workbook re-evaluates the anchor; without this a cleared blocker
+    /// left the anchor #SPILL! until a full recalc. Runtime state, rebuilt by
+    /// placement; stale entries (the cell is no longer blocked) are ignored.
+    #[serde(skip)]
+    blocked_spill_extents: HashMap<(usize, usize), (usize, usize)>,
     /// Data validation rules for cells
     #[serde(default)]
     pub validations: ValidationStore,
@@ -561,6 +568,7 @@ impl Sheet {
             spill_values: HashMap::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
+            blocked_spill_extents: HashMap::new(),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
@@ -596,6 +604,7 @@ impl Sheet {
             spill_values: HashMap::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
+            blocked_spill_extents: HashMap::new(),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
@@ -1036,6 +1045,7 @@ impl Sheet {
                 self.cells.update(row, col, |cell| {
                     cell.set_spill_error(Some(SpillError { blocked_by }));
                 });
+                self.blocked_spill_extents.insert((row, col), (array.rows(), array.cols()));
             }
         }
     }
@@ -1051,9 +1061,66 @@ impl Sheet {
 
     /// Forget a #SPILL! on a cell, whatever it currently holds.
     pub fn clear_spill_error(&mut self, row: usize, col: usize) {
+        self.blocked_spill_extents.remove(&(row, col));
         self.cells.update(row, col, |cell| {
             cell.set_spill_error(None);
         });
+    }
+
+    /// Anchors showing #SPILL! whose refused extent contains (row, col): the
+    /// anchors a write there could unblock (or newly block). Excludes the
+    /// cell itself. Ordered, so the caller's recalc order is stable.
+    pub fn blocked_spill_anchors_covering(&self, row: usize, col: usize) -> Vec<(usize, usize)> {
+        let mut anchors: Vec<(usize, usize)> = self
+            .blocked_spill_extents
+            .iter()
+            .filter(|(&(ar, ac), &(rows, cols))| {
+                (ar, ac) != (row, col)
+                    && row >= ar
+                    && row < ar + rows
+                    && col >= ac
+                    && col < ac + cols
+                    && self.cells.get(ar, ac).is_some_and(|c| c.spill_error().is_some())
+            })
+            .map(|(&anchor, _)| anchor)
+            .collect();
+        anchors.sort_unstable();
+        anchors
+    }
+
+    /// Retire every spill on the sheet: receivers emptied, parents no longer
+    /// marked as spilling, the blocked-spill index forgotten. Spill state is
+    /// keyed by absolute position, so a structural edit must drop it before
+    /// cells move; the recompute that follows re-places each array from its
+    /// anchor's new position.
+    pub fn retire_all_spills(&mut self) {
+        let mut parents: Vec<(usize, usize)> = self
+            .cells_iter()
+            .filter(|(_, cell)| cell.spill_info().is_some())
+            .map(|(pos, _)| pos)
+            .collect();
+        parents.sort_unstable();
+        for (row, col) in parents {
+            self.clear_spill_from(row, col);
+        }
+        self.spill_values.clear();
+        self.blocked_spill_extents.clear();
+    }
+
+    /// The cells a spill parent currently fills, excluding the parent itself.
+    pub fn spill_receivers_of(&self, row: usize, col: usize) -> Vec<(usize, usize)> {
+        let Some(info) = self.cells.get(row, col).and_then(|c| c.spill_info().cloned()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(info.rows * info.cols);
+        for dr in 0..info.rows {
+            for dc in 0..info.cols {
+                if dr != 0 || dc != 0 {
+                    out.push((row + dr, col + dc));
+                }
+            }
+        }
+        out
     }
 
     /// Whether any array recorded during evaluation is still waiting to be placed.

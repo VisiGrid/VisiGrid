@@ -1,4 +1,5 @@
 mod timing;
+pub use timing::RecalcClock;
 pub mod cell;
 pub mod cell_id;
 pub mod cond_format;
