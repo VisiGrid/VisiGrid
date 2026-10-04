@@ -15,6 +15,7 @@ members = [
     "crates/recon",
     "crates/cli",
     "crates/scripting",
+    "crates/collab",
     "gpui-app",
 ]
 

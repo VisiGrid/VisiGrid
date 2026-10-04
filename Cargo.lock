@@ -7985,6 +7985,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "visigrid-collab"
+version = "0.45.0"
+dependencies = [
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "uuid",
+ "visigrid-engine",
+ "visigrid-protocol",
+]
+
+[[package]]
 name = "visigrid-config"
 version = "0.45.0"
 dependencies = [

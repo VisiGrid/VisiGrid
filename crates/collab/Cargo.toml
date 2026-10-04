@@ -1,0 +1,19 @@
+[package]
+name = "visigrid-collab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Collaborative workbook model: operations, transform, sequencer, replicas and a convergence simulator"
+
+[dependencies]
+visigrid-engine = { workspace = true }
+visigrid-protocol = { path = "../protocol" }
+serde = { workspace = true }
+serde_json = "1"
+uuid = { version = "1", features = ["serde"] }
+rand = "0.8"
+
+[features]
+# Long fuzz runs read COLLAB_FUZZ_SEEDS; this feature only exists so CI can
+# opt a job in without an environment variable.
+long-fuzz = []
