@@ -85,29 +85,22 @@ fn run_job(recipe_path: &Path, recipe: Option<Recipe>, snapshot: Option<Snapshot
         None => Recipe::load(recipe_path)?,
     };
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
-    let source_path = match &snapshot {
-        Some(s) => s.path.clone(),
-        None => match recipe.resolve_source(dir, None) {
-            Ok(p) => p,
+    // One file, or every file an appending recipe matches, read once
+    let snapshot = match snapshot {
+        Some(s) => s,
+        None => match recipe.read_snapshot(dir, None) {
+            Ok(s) => s,
             Err(e) => {
+                // Unreadable source: a failed run with nothing to retry against
                 let report = RunReport::unreadable(&recipe.source_path(dir, None), e);
                 return Ok(RunOutcome { recipe, snapshot: None, output: RecipeOutput::empty(), report, source_path: dir.to_path_buf() });
             }
         },
     };
-    let snapshot = match snapshot {
-        Some(s) => Some(s),
-        None => match Snapshot::read(&source_path) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                // Unreadable source: a failed run with nothing to retry against
-                let report = RunReport::unreadable(&source_path, e);
-                return Ok(RunOutcome { recipe, snapshot: None, output: RecipeOutput::empty(), report, source_path });
-            }
-        },
-    };
-    let result = recipe::run(&recipe, snapshot.as_ref().unwrap());
-    Ok(RunOutcome { recipe, snapshot, output: result.output, report: result.report, source_path })
+    // What the stamp says it read: the file, or the pattern it appended
+    let source_path = if snapshot.more.is_empty() { snapshot.path.clone() } else { recipe.source_path(dir, None) };
+    let result = recipe::run(&recipe, &snapshot);
+    Ok(RunOutcome { recipe, snapshot: Some(snapshot), output: result.output, report: result.report, source_path })
 }
 
 /// The rename the banner suggests first: a missing column, in the earliest

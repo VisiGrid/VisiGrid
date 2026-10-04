@@ -59,6 +59,21 @@ pub fn approve(recipe_path: &Path, recipe: &Recipe) -> Result<(), String> {
 /// matches now. Err when it cannot be read at all (then only Cancel).
 pub fn describe_source(recipe_path: &Path, recipe: &Recipe) -> Result<(String, String), String> {
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
+    if recipe.source.combine() && recipe.source_is_pattern() {
+        let files = recipe.resolve_sources(dir, None)?;
+        let pattern = recipe.source_path(dir, None);
+        let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+        return Ok((
+            format!(
+                "every file matching {} in {}; now {} file{}",
+                pattern.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                pattern.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            ),
+            format!("{} KB in all", total / 1024),
+        ));
+    }
     let resolved = recipe.resolve_source(dir, None)?;
     let meta = std::fs::metadata(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?;
     if !meta.is_file() {

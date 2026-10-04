@@ -297,7 +297,14 @@ fn problems(b: &RecipeBlocked, c: &Colors, cx: &mut Context<Spreadsheet>) -> Vec
         };
         let count = if capped_single { b.report.error_count } else { errors.len() };
         let reason = errors[0].reason.clone();
-        let examples: Vec<String> = errors.iter().take(3).map(|e| format!("line {} \"{}\"", e.line, e.value)).collect();
+        let examples: Vec<String> = errors
+            .iter()
+            .take(3)
+            .map(|e| {
+                let file = if e.file.is_empty() { String::new() } else { format!("{} ", e.file) };
+                format!("{file}line {} \"{}\"", e.line, e.value)
+            })
+            .collect();
         out.push(Problem {
             title: format!(
                 "{count} value{} in {} {} {reason} (step {step}, {})",
