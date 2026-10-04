@@ -1999,3 +1999,27 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
         assert_eq!(authored_snapshot(&wb), before);
     }
 }
+
+/// Formulas are saved with their computed results. Excel recalculates on
+/// open, but readers of saved results (pandas, previews, recipes) used to
+/// see 0 for every formula.
+#[test]
+fn exported_formulas_carry_their_computed_results() {
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "7");
+    wb.set_cell_value_tracked(0, 0, 1, "=A1*3");
+    wb.set_cell_value_tracked(0, 0, 2, "=\"id-\"&A1");
+    wb.set_cell_value_tracked(0, 0, 3, "=A1>5");
+    wb.set_cell_value_tracked(0, 0, 4, "=1/0");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("results.xlsx");
+    xlsx::export(&wb, &path, None).unwrap();
+    let sheet = xml(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<f>A1*3</f><v>21</v>"), "{sheet}");
+    assert!(sheet.contains("<v>id-7</v>"), "{sheet}");
+    assert!(sheet.contains("<v>TRUE</v>"), "{sheet}");
+    assert!(sheet.contains("<v>#DIV/0!</v>"), "{sheet}");
+    // And they import as formulas again, with the same results
+    let (back, _) = xlsx::import(&path).unwrap();
+    assert_eq!(back.sheet(0).unwrap().get_display(0, 1), "21");
+}

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Excel interchange
+
+- **Exported formulas keep their results.** Excel files saved by VisiGrid stored 0 as every formula's result; Excel recalculated on open, but pandas, file previews and other tools that read saved results saw zeros. Each formula now carries its computed value. ([#99](https://github.com/VisiGrid/VisiGrid/pull/99))
+
 ## 0.46.0
 
 ### Formulas
