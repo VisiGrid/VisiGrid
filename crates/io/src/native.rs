@@ -1797,7 +1797,10 @@ fn load_tables(conn: &Connection, workbook: &mut Workbook, dir: Option<&Path>) -
             for sheet in &mut saved.sheets {
                 for table in &mut sheet.tables {
                     if let Some(source) = &mut table.source {
-                        if Path::new(&source.recipe).is_relative() {
+                        // Only a truly relative link: on Windows `/data/x` has a
+                        // root but no drive, and must not be moved under this one
+                        let link = Path::new(&source.recipe);
+                        if link.is_relative() && !link.has_root() {
                             source.recipe = dir.join(&source.recipe).display().to_string();
                         }
                     }

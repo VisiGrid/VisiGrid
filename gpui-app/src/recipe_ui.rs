@@ -163,7 +163,8 @@ impl Spreadsheet {
     pub(crate) fn recipe_link_path(&self, recipe: &str) -> PathBuf {
         let path = Path::new(recipe);
         match self.current_file.as_ref().and_then(|f| f.parent()) {
-            Some(dir) if path.is_relative() => dir.join(path),
+            // A rooted path without a drive (Windows `/data/x`) is not relative
+            Some(dir) if path.is_relative() && !path.has_root() => dir.join(path),
             _ => path.to_path_buf(),
         }
     }

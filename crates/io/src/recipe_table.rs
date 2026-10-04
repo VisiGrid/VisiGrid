@@ -339,6 +339,8 @@ columns = { Amount = "number" }
         crate::native::save_workbook(&wb, &path).unwrap();
         let back = crate::native::load_workbook(&path).unwrap();
         let (_, t) = table(&back);
+        // Kept as written on every platform: on Windows `/data/…` has no drive,
+        // and must not be moved under the workbook's
         assert_eq!(t.source.unwrap().recipe, "/data/orders.recipe.toml");
     }
 
