@@ -186,6 +186,8 @@ impl McpServer {
             "rename_sheet" => self.tool_structure(args, "rename_sheet"),
             "create_pivot" => self.tool_structure(args, "create_pivot"),
             "refresh_pivot" => self.tool_structure(args, "refresh_pivot"),
+            "refresh_table" => self.tool_structure(args, "refresh_table"),
+            "run_recipe" => self.tool_run_recipe(args),
             "undo" => self.tool_history(args, false),
             "redo" => self.tool_history(args, true),
             "plan_script" => self.tool_plan_script(args),
@@ -555,6 +557,9 @@ impl McpServer {
             "refresh_pivot" => StructureOp::RefreshPivot {
                 pivot: args.get("pivot").and_then(|v| v.as_str()).map(str::to_string),
             },
+            "refresh_table" => StructureOp::RefreshRecipeTable {
+                table: args.get("table").and_then(|v| v.as_str()).map(str::to_string),
+            },
             other => return Err(format!("unknown structure op: {}", other)),
         };
 
@@ -582,6 +587,74 @@ impl McpServer {
             "revision": r.revision,
             "sheet_count": r.sheet_count,
             "active_sheet": r.active_sheet,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    /// Run an import recipe here, as `vgrid recipe run` does: no window
+    /// needed. Only a recipe whose source the user approved in VisiGrid: a
+    /// recipe can name any file, and an agent shouldn't read one the user
+    /// never agreed to.
+    fn tool_run_recipe(&mut self, args: &Value) -> Result<String, String> {
+        use visigrid_io::recipe::{self, Recipe};
+        reject_unknown(args, &["recipe", "output", "preview_rows"])?;
+        let recipe_path = std::path::absolute(require_str(args, "recipe")?).map_err(|e| e.to_string())?;
+        let recipe = Recipe::load(&recipe_path)?;
+        if !visigrid_io::recipe_trust::is_approved(&recipe_path, &recipe) {
+            return Err(format!(
+                "the user hasn't approved what {} reads; ask them to open it once in VisiGrid and confirm the file",
+                recipe_path.display()
+            ));
+        }
+        let dir = recipe_path.parent().unwrap_or(std::path::Path::new("."));
+        let sources = recipe.resolve_sources(dir, None)?;
+        let output = args.get("output").and_then(|v| v.as_str()).map(|p| std::path::absolute(p).unwrap_or_else(|_| p.into()));
+        // An agent only ever creates a file: it can't replace the user's work,
+        // and can't write where VisiGrid keeps its settings and approvals
+        if let Some(path) = &output {
+            if path.symlink_metadata().is_ok() {
+                return Err(format!("{} already exists; run_recipe only writes new files, so choose a new name", path.display()));
+            }
+            let settings = visigrid_io::recipe_trust::config_dir();
+            let settings = settings.canonicalize().unwrap_or(settings);
+            let parent = path.parent().map(|d| d.canonicalize().unwrap_or_else(|_| d.to_path_buf())).unwrap_or_default();
+            if parent.starts_with(&settings) {
+                return Err(format!("{} is in VisiGrid's settings folder; write the result somewhere else", path.display()));
+            }
+        }
+        for source in &sources {
+            crate::recipe_cmd::check_paths(&recipe_path, source, output.as_deref(), None).map_err(|e| e.message)?;
+        }
+        let snapshot = recipe::Snapshot::read_all(&sources)?;
+        let result = recipe::run(&recipe, &snapshot);
+        let report = &result.report;
+        let written = match (&output, report.ok) {
+            (Some(path), true) => {
+                // Claim the name first, so a file that appeared meanwhile is
+                // never replaced; the result then moves onto the empty claim
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                if let Err(e) = crate::recipe_cmd::write_output(&result.output.to_sheet(), path) {
+                    let _ = std::fs::remove_file(path);
+                    return Err(e.message);
+                }
+                Some(path.display().to_string())
+            }
+            _ => None,
+        };
+        let limit = args.get("preview_rows").and_then(|v| v.as_u64()).unwrap_or(20).min(200) as usize;
+        serde_json::to_string_pretty(&json!({
+            "ok": report.ok,
+            "summary": report.summary(),
+            "rows": report.rows,
+            "columns": result.output.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            "preview": result.output.rows.iter().take(limit).collect::<Vec<_>>(),
+            "output_written": written,
+            "failures": report.failures,
+            "warnings": report.warnings,
         }))
         .map_err(|e| e.to_string())
     }
@@ -1228,6 +1301,36 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "refresh_table",
+            "title": "Refresh a Table from its import recipe",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
+            "description": "Re-run the import recipe a Table is linked to and replace the Table's records, as Refresh (Alt+F5) does in VisiGrid. Changes nothing if any check fails, and returns the problems; the user sees them in the window too. Only for a recipe source the user has approved in VisiGrid. One undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table": { "type": "string", "description": "The Table's name; omit when the workbook has one recipe-linked Table" },
+                    "session": { "type": "string", "description": "Session ID (prefix ok). Omit when one session is running." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "run_recipe",
+            "title": "Run an import recipe",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
+            "description": "Run a .recipe.toml without a window, like `vgrid recipe run`: read its source (the newest or every matching file for a pattern), apply its steps and checks, and return the result's columns, a preview and the run report. With `output`, also write the result to a new file (.csv, .tsv, .json, .xlsx, .sheet), only if every check passes; an existing file is never replaced. Only for a recipe whose source the user has approved in VisiGrid.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "recipe": { "type": "string", "description": "Path to the .recipe.toml" },
+                    "output": { "type": "string", "description": "Optional new file to write the result to (an existing file is never replaced); not written when a check fails" },
+                    "preview_rows": { "type": "integer", "description": "Rows of the result to return (default 20, at most 200)" }
+                },
+                "required": ["recipe"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "plan_script",
             "title": "Propose workbook changes",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
@@ -1443,6 +1546,8 @@ mod tests {
                 "rename_sheet",
                 "create_pivot",
                 "refresh_pivot",
+                "refresh_table",
+                "run_recipe",
                 "plan_script",
                 "get_plan",
                 "list_plan_changes",

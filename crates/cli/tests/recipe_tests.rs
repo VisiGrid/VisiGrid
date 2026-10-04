@@ -146,3 +146,29 @@ fn recipe_xlsx_output_uses_shared_headless_writer() {
     assert_eq!(wb.active_sheet().get_raw(1, 1), "120.5");
     assert_eq!(wb.active_sheet().get_raw(2, 0), "");
 }
+
+/// An appending recipe reads every matching file, and later steps can use
+/// the Source file column it adds.
+#[test]
+fn recipe_run_appends_a_folder_and_groups_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for (name, body) in [("sales-01.csv", "Region,Amount\nWest,1\nEast,2\n"), ("sales-02.csv", "Region,Amount\nWest,3\n")] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+    }
+    std::fs::write(
+        dir.path().join("sales.recipe.toml"),
+        "version = 1\n[source]\nkind = \"csv\"\npath = \"sales-*.csv\"\ncombine = true\n[[step]]\nop = \"group\"\nby = [\"Region\"]\ntotals = [{ fn = \"sum\", column = \"Amount\", as = \"Total\" }, { fn = \"distinct\", column = \"Source file\", as = \"Files\" }]\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vgrid"))
+        .args(["recipe", "run", "sales.recipe.toml", "-q"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let csv = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(csv.lines().collect::<Vec<_>>(), ["Region,Total,Files", "West,4,2", "East,2,1"]);
+}

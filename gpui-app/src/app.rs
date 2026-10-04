@@ -2586,7 +2586,7 @@ impl Spreadsheet {
             },
             CommandId::EditRecipe => match self.recipe_strip_table(cx) {
                 Some(t) => {
-                    let path = std::path::PathBuf::from(&t.source.as_ref().unwrap().recipe);
+                    let path = self.recipe_link_path(&t.source.as_ref().unwrap().recipe);
                     self.open_recipe_builder(&path, Some(t.id), cx)
                 }
                 None => {
