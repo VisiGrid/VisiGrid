@@ -7,6 +7,9 @@
 - **Append a folder of files.** Set **Each refresh reads** to **All matching files** to read every file a pattern matches and stack them, columns lined up by name, with a **Source file** column. A file missing a column is noted, not dropped, and errors name the file as well as the line. CSV, Excel and Parquet sources. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
 - **Group by** step: one row per group with named totals (sum, count, count rows, average, min, max, distinct count, first, last). A sum of something that isn't a number fails the run and says where. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
 - **Unpivot** step: keep some columns and turn every other column into rows, so a column added to next month's file is unpivoted too. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+- Fixes saved into a recipe (from the blocked banner, Choose file or the builder) keep the file's comments and layout; only what changed is rewritten. ([#102](https://github.com/VisiGrid/VisiGrid/pull/102))
+- A workbook saves a linked recipe's path relative to itself when the recipe is in the same folder or below, so they can be moved together. ([#102](https://github.com/VisiGrid/VisiGrid/pull/102))
+- Fixed the session list (MCP, `vgrid session`) naming documents opened after start-up "Book1" with no path. ([#102](https://github.com/VisiGrid/VisiGrid/pull/102))
 
 ## 0.47.0
 
