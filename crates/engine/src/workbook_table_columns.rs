@@ -1,6 +1,6 @@
-//! Sparse schema history for worksheet column edits. Cell payloads remain in
-//! ordinary column history; only schema and calculated rules are retained here.
-use super::{calculated::RuleChange, same_schema};
+//! Worksheet column schema and sparse history. Ordinary edits retain schema
+//! and rules; totals delegate to guarded history to restore protected footers.
+use super::{calculated::RuleChange, same_schema, TotalsReferenceChange};
 use crate::{
     cell::CellValue,
     sheet::{Sheet, SheetId},
@@ -18,6 +18,7 @@ pub struct TableColumnHistory {
     before: Vec<DataTable>,
     after: Vec<DataTable>,
     rules: Vec<RuleChange>,
+    guarded: Option<Box<crate::workbook::GuardedStructureCommit>>,
 }
 
 impl Sheet {
@@ -32,6 +33,11 @@ impl Sheet {
             let start = table.range.start_col;
             let end = table.range.end_col;
             if delete {
+                if let Some(totals) = &mut table.totals {
+                    totals.columns = totals.columns.iter().enumerate()
+                        .filter(|(i, _)| start + i < at || start + i >= at + count)
+                        .map(|(_, total)| total.clone()).collect();
+                }
                 table.columns = table
                     .columns
                     .iter()
@@ -72,6 +78,10 @@ impl Sheet {
                     });
                 }
                 table.columns.splice(at - start..at - start, columns);
+                if let Some(totals) = &mut table.totals {
+                    totals.columns.splice(at - start..at - start,
+                        std::iter::repeat_with(Default::default).take(count));
+                }
             }
             let (start, end) = crate::structural::shift_span(start, end, at, count, delete)
                 .ok_or("Cannot remove a Table's last column.")?;
@@ -109,6 +119,44 @@ impl Sheet {
 }
 
 impl Workbook {
+    pub(crate) fn column_totals_changes(
+        &self, index: usize, at: usize, count: usize, delete: bool,
+        before: &[DataTable], after: &[DataTable],
+    ) -> Result<Vec<TotalsReferenceChange>, String> {
+        let owner = &self.sheets[index];
+        let edit = crate::structural::StructuralEdit {
+            sheet_name: owner.name.clone(), axis: Axis::Col, at, count, delete,
+        };
+        // Dormant totals need the same local structured-reference context as a
+        // visible footer, including when a deleted field becomes #REF!.
+        let visible = |tables: &[DataTable]| tables.iter().cloned().map(|mut t| {
+            if let Some(totals) = &mut t.totals { totals.visible = true; }
+            t
+        }).collect::<Vec<_>>();
+        let contexts = visible(before);
+        let targets = visible(after);
+        let mut changes = Vec::new();
+        for (sheet, table) in self.tables() {
+            let Some(old) = &table.totals else { continue; };
+            let target = if sheet == owner.id {
+                after.iter().find(|t| t.id == table.id).unwrap()
+            } else { table };
+            let mut new = target.totals.clone().unwrap();
+            for (i, column) in target.columns.iter().enumerate() {
+                let Some(source) = &mut new.columns[i].formula else { continue; };
+                let old_col = table.columns.iter().position(|c| c.id == column.id).unwrap();
+                let rewritten = self.rewrite_column_schema_source(owner.id, &contexts, &targets,
+                    sheet, table.range.end_row + 1, table.range.start_col + old_col, source)?;
+                *source = crate::structural::adjust_formula_text(&rewritten, &edit,
+                    &self.sheet_by_id(sheet).unwrap().name).unwrap_or(rewritten);
+            }
+            if new != *old {
+                changes.push(TotalsReferenceChange { sheet, table: table.id, before: old.clone(), after: new });
+            }
+        }
+        Ok(changes)
+    }
+
     pub(crate) fn rewrite_column_schema_source(
         &self,
         owner: SheetId,
@@ -205,6 +253,15 @@ impl Workbook {
     ) -> Result<Option<TableColumnHistory>, String> {
         self.validate_structural_edit(index, Axis::Col, at, count, delete)?;
         let sheet = &self.sheets[index];
+        if self.tables().any(|(_, t)| t.totals.is_some()) {
+            let (_, guarded) = self.prepare_guarded_structure(index, vec![crate::workbook::StructureStep {
+                axis: Axis::Col, at, count, delete,
+            }])?;
+            return Ok(Some(TableColumnHistory {
+                sheet: sheet.id, at, count, delete, before: Vec::new(), after: Vec::new(),
+                rules: Vec::new(), guarded: Some(Box::new(guarded)),
+            }));
+        }
         let before = sheet.tables().to_vec();
         let mut after = sheet.tables_after_column_edit(at, count, delete)?;
         let rules = self.column_rule_changes(index, at, count, delete, &before, &after)?;
@@ -229,6 +286,7 @@ impl Workbook {
             before,
             after,
             rules,
+            guarded: None,
         }))
     }
 
@@ -237,6 +295,9 @@ impl Workbook {
         history: &TableColumnHistory,
         undo: bool,
     ) -> Result<(), String> {
+        if let Some(guarded) = &history.guarded {
+            return guarded.candidate(self, undo).map(|_| ());
+        }
         let index = self
             .sheet_index_by_id(history.sheet)
             .ok_or("Table sheet no longer exists.")?;
@@ -270,6 +331,11 @@ impl Workbook {
         history: &TableColumnHistory,
         undo: bool,
     ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        if let Some(guarded) = &history.guarded {
+            let candidate = guarded.candidate(self, undo)?;
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(Vec::new());
+        }
         self.validate_table_column_history(history, undo)?;
         let index = self.sheet_index_by_id(history.sheet).unwrap();
         let rewrites = self.structural_edit_with_rules(

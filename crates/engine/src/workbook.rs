@@ -2330,6 +2330,10 @@ impl Workbook {
             self.column_rule_changes(sheet_index, at, count, delete, before, after)?
         } else { self.structural_rule_changes(sheet_index, axis, at, count, delete) };
 
+        let totals_changes = if let Some((before, after)) = &column_tables {
+            self.column_totals_changes(sheet_index, at, count, delete, before, after)?
+        } else { Vec::new() };
+
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
             let sheet = &mut self.sheets[sheet_index];
@@ -2391,13 +2395,26 @@ impl Workbook {
             }
         }
         for (idx, row, col, new_raw) in writes {
-            self.sheets[idx].set_value(row, col, &new_raw);
+            if self.sheets[idx].table_at(row, col).is_some_and(|t| t.totals_row() == Some(row)) {
+                self.sheets[idx].write_table_header(row, col, crate::cell::CellValue::from_input(&new_raw));
+            } else {
+                self.sheets[idx].set_value(row, col, &new_raw);
+            }
+        }
+        for change in totals_changes {
+            let sheet = self.sheet_index_by_id(change.sheet).unwrap();
+            self.sheets[sheet].data_tables.iter_mut().find(|t| t.id == change.table).unwrap()
+                .totals = Some(change.after);
         }
 
         self.apply_rule_changes(&rule_changes, false);
         if fill_rules && is_row && !delete { self.fill_inserted_calculated_rows(sheet_index, at, count); }
         self.rebuild_dep_graph();
         self.recompute_full_ordered();
+        if !is_row && self.tables().any(|(_, t)| t.totals.is_some()) {
+            // Footer changes can alter indirect pivot sources on other sheets.
+            for sheet in &mut self.sheets { sheet.mark_table_changed(); }
+        }
         self.increment_revision();
         Ok(rewrites)
     }
@@ -2410,10 +2427,10 @@ impl Workbook {
         if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
             return Err("Structural edit exceeds the sheet boundary.".into());
         }
-        // Footer cells are protected from ordinary setters. Refuse any edit
-        // that would require rewriting their formulas or dormant metadata.
+        // Column edits rewrite visible and dormant totals explicitly. Row
+        // relocation still refuses edits that would rewrite footer formulas.
         let edit = crate::structural::StructuralEdit { sheet_name: sheet.name.clone(), axis, at, count, delete };
-        for owner in &self.sheets {
+        for owner in self.sheets.iter().filter(|_| is_row) {
             for table in owner.tables() {
                 if let Some(totals) = &table.totals {
                     for (offset, total) in totals.columns.iter().enumerate() {

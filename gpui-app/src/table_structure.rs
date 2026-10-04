@@ -896,4 +896,38 @@ mod metadata_tests {
             .prepare_guarded_structure(index, vec![step(Axis::Row, region.0, 1, true)])
             .is_err());
     }
+    #[test]
+    fn totals_columns_keep_filtered_records_and_history_rewind() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_table_total(id, 2, visigrid_engine::table::TableTotal {
+            function: Some("sum".into()), ..Default::default()
+        }).unwrap();
+        let spec = base.active_sheet().table_view_spec().cloned();
+        let (mut after, commit) = base.prepare_guarded_structure(0,
+            vec![step(Axis::Col, 2, 1, false)]).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 3), "90");
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        assert_eq!(after.active_sheet().get_raw(4, 3), "10");
+        let mut history = crate::history::History::new();
+        history.record_action_with_provenance(crate::history::UndoAction::TableStructureChanged {
+            sheet_index: 0, description: "Insert totals column".into(),
+            history: Box::new(TableStructureHistory { commit: commit.clone(), source_frozen: None,
+                before: StructureLayout::default(), after: StructureLayout::default() }),
+        }, None);
+        let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().get_display(7, 3), "90");
+        commit.replay(&mut after, true).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 2), "90");
+        commit.replay(&mut after, false).unwrap();
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        assert!(after.prepare_guarded_structure(0, vec![step(Axis::Col, 3, 1, true)]).is_err());
+        let (mut removed, deletion) = after.prepare_guarded_structure(0,
+            vec![step(Axis::Col, 4, 1, true)]).unwrap();
+        assert_eq!(removed.active_sheet().tables()[0].totals.as_ref().unwrap().columns.len(), 3);
+        deletion.replay(&mut removed, true).unwrap();
+        assert_eq!(removed.active_sheet().get_display(7, 4), "180");
+    }
+
 }

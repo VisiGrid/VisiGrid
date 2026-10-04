@@ -736,7 +736,7 @@ impl Sheet {
         if count == 0 { return None; }
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
         for t in self.tables() {
-            if t.totals.is_some() && at <= if is_row { t.full_range().end_row.max(t.totals.as_ref().and_then(|t| t.hidden_rows.last().copied()).unwrap_or(0)) } else { t.range.end_col } {
+            if is_row && t.totals.is_some() && at <= t.full_range().end_row.max(t.totals.as_ref().and_then(|t| t.hidden_rows.last().copied()).unwrap_or(0)) {
                 return Some("Structural edits affecting totals-row Tables are not supported yet. Convert the Table to a range first.".into());
             }
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }

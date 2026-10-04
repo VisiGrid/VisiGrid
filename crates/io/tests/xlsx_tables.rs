@@ -2433,3 +2433,35 @@ fn edited_calculated_rules_with_totals_roundtrip_and_fill_after_append() {
         assert_eq!(loaded.sheet(0).unwrap().get_display(9, 3).parse::<f64>().unwrap(), total + 100.0);
     }
 }
+
+#[test]
+fn totals_column_structure_roundtrips_through_native_and_excel() {
+    use visigrid_engine::{structural::Axis, table::TableTotal};
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 3, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM([Qty])+C4".into()), label: None,
+        }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.structural_edit(0, Axis::Col, 2, 1, false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("columns.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("columns.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        let table = loaded.table(id).unwrap().1;
+        assert_eq!(table.columns.len(), 4);
+        assert_eq!(table.totals.as_ref().unwrap().columns[3].formula.as_deref(), Some("=SUM([Qty])+D4"));
+        assert_eq!(table.totals.as_ref().unwrap().visible, visible);
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 4), "=SUM([Qty])+D4");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 4), "30");
+        loaded.structural_edit(0, Axis::Col, 2, 1, true).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 3), "=SUM([Qty])+C4");
+    }
+}

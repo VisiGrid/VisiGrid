@@ -326,7 +326,7 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
                     axis: visigrid_engine::structural::Axis::Col,
@@ -394,7 +394,7 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
                     axis: visigrid_engine::structural::Axis::Col,
