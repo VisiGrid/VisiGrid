@@ -777,6 +777,10 @@ impl Sheet {
         self.with_cell(row, col, |cell| { cell.value = value; cell.clear_spill_state(); });
     }
 
+    pub(crate) fn empty_table_footer_cell(&self, row: usize, col: usize) -> Cell {
+        Cell::with_format(std::sync::Arc::new(self.inherited_format(row, col)))
+    }
+
     /// Write one pivot output cell, bypassing the ownership guard. Numbers stay
     /// numbers; text is stored as text without type inference (numeric-looking
     /// labels stay text); booleans and errors are written the way Paste Values

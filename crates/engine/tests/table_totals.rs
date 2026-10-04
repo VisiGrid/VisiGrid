@@ -88,6 +88,249 @@ fn native_book() -> (Workbook, visigrid_engine::table::TableId) {
 }
 
 #[test]
+fn append_moves_footer_values_format_and_comments_in_one_replayable_commit() {
+    use visigrid_engine::cell::{CellComment, NumberFormat};
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    let mut format = wb.sheet(0).unwrap().get_format(4, 1);
+    format.bold = true;
+    format.number_format = NumberFormat::Number {
+        decimals: 2,
+        thousands: true,
+        negative: Default::default(),
+    };
+    wb.sheet_mut(0).unwrap().set_format(4, 1, format.clone());
+    wb.sheet_mut(0).unwrap().set_comment(
+        4,
+        1,
+        Some(CellComment {
+            text: "Visible records only".into(),
+            author: "QA".into(),
+        }),
+    );
+    let summary = wb.add_sheet_named("Summary").unwrap();
+    wb.set_cell_value_tracked(summary, 0, 0, "=SUM(Sales[[#Totals],[Amount]])");
+    wb.set_cell_value_tracked(0, 4, 4, "Neighbor");
+    wb.set_cell_value_tracked(0, 8, 0, "Notes below");
+    let generation = wb.sheet(summary).unwrap().edit_generation();
+    let append = wb
+        .append_table_rows(
+            id,
+            3,
+            &[
+                (4, 0, "North".into()),
+                (4, 1, "40".into()),
+                (6, 1, "50".into()),
+            ],
+        )
+        .unwrap();
+    assert_eq!(wb.table(id).unwrap().1.totals_row(), Some(7));
+    assert_eq!(wb.sheet(0).unwrap().get_display(7, 1), "150");
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "150");
+    assert!(wb.sheet(summary).unwrap().edit_generation() > generation);
+    assert_eq!(wb.sheet(0).unwrap().get_format(7, 1), format);
+    assert_eq!(
+        wb.sheet(0).unwrap().get_cell(7, 1).comment().unwrap().text,
+        "Visible records only"
+    );
+    assert!(wb.sheet(0).unwrap().get_cell(4, 1).comment().is_none());
+    assert!(!wb.sheet(0).unwrap().get_format(4, 1).bold);
+    assert_eq!(wb.sheet(0).unwrap().get_raw(5, 1), "");
+    wb.apply_table_commit(&append, true).unwrap();
+    assert_eq!(wb.table(id).unwrap().1.totals_row(), Some(4));
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+    assert_eq!(wb.sheet(0).unwrap().get_format(4, 1), format);
+    assert!(wb.sheet(0).unwrap().get_cell(4, 1).comment().is_some());
+    assert!(wb.sheet(0).unwrap().get_cell(7, 1).comment().is_none());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(6, 1), "");
+    assert!(wb.sheet(0).unwrap().get_cell_opt(7, 1).is_none());
+    wb.apply_table_commit(&append, false).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(7, 1), "150");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 4), "Neighbor");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(8, 0), "Notes below");
+}
+
+#[test]
+fn footer_resize_expands_over_existing_records_and_shrinks_only_into_empty_cells() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    wb.set_cell_value_tracked(0, 5, 1, "25");
+    let range = wb.table(id).unwrap().1.range;
+    let grow = wb
+        .resize_table(
+            id,
+            TableRange {
+                end_row: 5,
+                ..range
+            },
+        )
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "");
+    assert_eq!(wb.sheet(0).unwrap().get_display(6, 1), "85");
+    assert!(wb
+        .resize_table(
+            id,
+            TableRange {
+                end_row: 4,
+                ..range
+            }
+        )
+        .is_err());
+    let shrink = wb.resize_table(id, range).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+    assert_eq!(
+        wb.sheet(0).unwrap().get_raw(5, 1),
+        "25",
+        "released records stay in place"
+    );
+    assert_eq!(wb.sheet(0).unwrap().get_raw(6, 1), "");
+    wb.apply_table_commit(&shrink, true).unwrap();
+    wb.apply_table_commit(&grow, true).unwrap();
+    wb.apply_table_commit(&grow, false).unwrap();
+    wb.apply_table_commit(&shrink, false).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+}
+
+#[test]
+fn footer_collision_and_stale_presentation_replay_fail_before_any_writes() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    wb.set_cell_value_tracked(0, 5, 1, "Note");
+    let revision = wb.revision();
+    assert!(wb
+        .append_table_rows(id, 1, &[(1, 1, "999".into())])
+        .is_err());
+    assert_eq!(wb.revision(), revision);
+    assert_eq!(wb.sheet(0).unwrap().get_raw(1, 1), "10");
+    wb.clear_cell_tracked(0, 5, 1);
+    let append = wb.append_table_rows(id, 1, &[]).unwrap();
+    wb.sheet_mut(0).unwrap().toggle_bold(5, 1);
+    let revision = wb.revision();
+    assert!(wb.apply_table_commit(&append, true).is_err());
+    assert_eq!(wb.revision(), revision);
+    assert_eq!(wb.table(id).unwrap().1.totals_row(), Some(5));
+    wb.sheet_mut(0).unwrap().toggle_bold(5, 1);
+    wb.apply_table_commit(&append, true).unwrap();
+    wb.set_cell_value_tracked(0, 5, 1, "Later note");
+    assert!(wb.apply_table_commit(&append, false).is_err());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(5, 1), "Later note");
+}
+
+#[test]
+fn fixed_footer_references_refuse_movement_but_structured_references_follow() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    let summary = wb.add_sheet_named("Summary").unwrap();
+    let name = wb.sheet(0).unwrap().name.clone();
+    wb.set_cell_value_tracked(summary, 0, 0, &format!("='{name}'!$B$5"));
+    assert!(wb
+        .append_table_rows(id, 1, &[])
+        .unwrap_err()
+        .contains("#Totals"));
+    wb.set_cell_value_tracked(summary, 0, 0, "=SUM(Sales[[#Totals],[Amount]])");
+    let append = wb.append_table_rows(id, 1, &[(4, 1, "10".into())]).unwrap();
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "70");
+    // A later fixed reference to the old footer now means a body record.
+    // Undo must not silently turn that reference into a link to totals.
+    wb.set_cell_value_tracked(summary, 1, 0, &format!("='{name}'!$B$5"));
+    let revision = wb.revision();
+    assert!(wb.apply_table_commit(&append, true).unwrap_err().contains("#Totals"));
+    assert_eq!(wb.revision(), revision);
+    assert_eq!(wb.sheet(summary).unwrap().get_display(1, 0), "10");
+    wb.clear_cell_tracked(summary, 1, 0);
+    wb.apply_table_commit(&append, true).unwrap();
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "60");
+    for source in ["=INDIRECT(\"B5\")", "=OFFSET(B1,4,0)", "=SUM(B6:B4)"] {
+        wb.set_cell_value_tracked(0, 0, 4, source);
+        let revision = wb.revision();
+        assert!(wb.append_table_rows(id, 1, &[]).is_err(), "{source}");
+        assert_eq!(wb.revision(), revision);
+    }
+    wb.clear_cell_tracked(0, 0, 4);
+    assert!(
+        wb.table_append_target(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: 4,
+                end_row: 4,
+                start_col: 0,
+                end_col: 0
+            }
+        )
+        .is_err(),
+        "typing in totals must not turn the footer into data"
+    );
+}
+
+#[test]
+fn footer_destination_ownership_visibility_and_bounds_are_preflighted() {
+    use visigrid_engine::sheet::MergedRegion;
+    for case in 0..4 {
+        let (mut wb, id) = native_book();
+        wb.set_table_totals_visible(
+            id,
+            true,
+            if case == 2 {
+                [5].into_iter().collect()
+            } else {
+                Default::default()
+            },
+        )
+        .unwrap();
+        match case {
+            0 => {
+                wb.sheet_mut(0)
+                    .unwrap()
+                    .add_merge(MergedRegion::new(5, 0, 5, 1))
+                    .unwrap();
+            }
+            1 => {
+                wb.create_table(
+                    wb.active_sheet_id(),
+                    TableRange {
+                        start_row: 5,
+                        end_row: 6,
+                        start_col: 0,
+                        end_col: 1,
+                    },
+                    "Below",
+                )
+                .unwrap();
+            }
+            2 => {}
+            _ => wb.sheet_mut(0).unwrap().rows = 5,
+        }
+        let revision = wb.revision();
+        assert!(wb.append_table_rows(id, 1, &[]).is_err(), "case {case}");
+        assert_eq!(wb.table(id).unwrap().1.totals_row(), Some(4));
+        assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+        assert_eq!(wb.revision(), revision);
+    }
+}
+
+#[test]
+fn dormant_totals_allow_row_growth_without_creating_a_footer() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    wb.set_table_totals_visible(id, false, Default::default())
+        .unwrap();
+    let append = wb.append_table_rows(id, 1, &[(4, 1, "10".into())]).unwrap();
+    assert!(wb.table(id).unwrap().1.totals_row().is_none());
+    let show = wb
+        .set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(5, 1), "70");
+    wb.apply_table_commit(&show, true).unwrap();
+    wb.apply_table_commit(&append, true).unwrap();
+    assert_eq!(wb.table(id).unwrap().1.range.end_row, 3);
+}
+
+#[test]
 fn native_totals_show_edit_hide_and_replay_preserve_body_and_settings() {
     let (mut wb, id) = native_book();
     let show = wb
@@ -436,7 +679,8 @@ fn totals_ownership_and_conversion_preserve_formulas_and_history() {
     let id = wb.tables().next().unwrap().1.id;
     let before = wb.saved_tables();
     assert!(wb.rename_table(id, "Renamed").is_err());
-    assert!(wb.append_table_rows(id, 1, &[]).is_err());
+    let append = wb.append_table_rows(id, 1, &[]).unwrap();
+    wb.apply_table_commit(&append, true).unwrap();
     assert!(wb
         .prepare_sheet_copy(&wb, wb.active_sheet_id(), "Copy")
         .is_err());

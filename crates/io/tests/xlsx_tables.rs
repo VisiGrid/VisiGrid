@@ -83,6 +83,32 @@ fn native_authored_totals_survive_native_and_excel_roundtrip() {
     assert_eq!(wb.sheet(0).unwrap().get_display(8, 2), "100");
     assert_eq!(wb.sheet(0).unwrap().get_raw(8, 1), "Grand total");
 }
+
+#[test]
+fn moved_totals_survive_native_and_excel_with_comments_and_custom_formulas() {
+    use visigrid_engine::table::TableTotal;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 2, TableTotal { function: Some("custom".into()), formula: Some("=SUM([Price])*2".into()), label: None }).unwrap();
+    wb.sheet_mut(0).unwrap().set_comment(8, 2, Some(CellComment { text: "Custom total".into(), author: "QA".into() }));
+    wb.sheet_mut(0).unwrap().toggle_bold(8, 2);
+    wb.append_table_rows(id, 2, &[(8, 1, "8".into()), (8, 2, "15".into()), (9, 1, "9".into()), (9, 2, "20".into())]).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(10, 2), "170");
+    let native_path = dir.path().join("moved.sheet");
+    native::save_workbook(&wb, &native_path).unwrap();
+    let wb = native::load_workbook(&native_path).unwrap();
+    let path = dir.path().join("moved.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (loaded, _) = xlsx::import(&path).unwrap();
+    assert_eq!(loaded.tables().next().unwrap().1.totals_row(), Some(10));
+    assert_eq!(loaded.sheet(0).unwrap().get_display(10, 2), "170");
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(10, 2), "=SUM([Price])*2");
+    assert!(loaded.sheet(0).unwrap().get_format(10, 2).bold);
+    assert_eq!(loaded.sheet(0).unwrap().comment(10, 2).unwrap().text, "Custom total");
+    assert!(loaded.sheet(0).unwrap().comment(8, 2).is_none());
+    assert_eq!(loaded.sheet(0).unwrap().get_display(9, 3), "180");
+}
 fn xml(path: &Path, name: &str) -> String {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
     let mut out = String::new();
@@ -2220,16 +2246,12 @@ fn totals_keep_manual_hidden_rows_and_refuse_unsafe_authoring() {
     let (sid, t) = wb.tables().next().unwrap();
     let id = t.id;
     let range = t.range;
-    assert!(wb
-        .resize_table(
-            id,
-            TableRange {
-                end_row: 4,
-                ..range
-            }
-        )
-        .is_err());
-    assert!(wb.append_table_rows(id, 1, &[]).is_err());
+    let resize = wb.resize_table(id, TableRange { end_row: 4, ..range }).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(5, 1), "10");
+    wb.apply_table_commit(&resize, true).unwrap();
+    let append = wb.append_table_rows(id, 1, &[]).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "10");
+    wb.apply_table_commit(&append, true).unwrap();
     assert!(wb.remove_table(id).is_err());
     assert!(wb
         .sheet(0)

@@ -45,6 +45,9 @@ pub(crate) fn plan_bulk_append(
     }) else {
         return Ok(None);
     };
+    if table.totals_row() == Some(data_row) {
+        return Err("The totals row is protected. Use Add row or paste from an existing body record to add records above it.".into());
+    }
     if !rows.is_view_row_visible(start.0) {
         return Err("Select a visible cell before pasting.".into());
     }
@@ -281,6 +284,30 @@ mod tests {
         rows.iter()
             .map(|r| r.iter().map(|s| s.to_string()).collect())
             .collect()
+    }
+
+    #[test]
+    fn filtered_overflow_paste_moves_footer_and_replays_all_values() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let footer = before.active_sheet().get_raw(7, 3);
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
+        assert_eq!(after.active_sheet().get_raw(9, 3), footer);
+        assert_eq!(after.active_sheet().get_display(9, 3), "100");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        assert_eq!(after.active_sheet().get_raw(10, 1), "Notes stay below");
+        let restored = entry.replay(&after, true).unwrap();
+        for row in 2..=10 { for col in 1..=3 {
+            assert_eq!(restored.active_sheet().get_raw(row, col), before.active_sheet().get_raw(row, col));
+        } }
+        let redone = entry.replay(&restored, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(9, 3), "100");
+        let rows = before.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        assert!(plan_bulk_append(before.active_sheet(), rows.rows(), (7, 1), 1, 2).is_err());
     }
 
     #[test]

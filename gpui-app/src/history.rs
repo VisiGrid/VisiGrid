@@ -1218,12 +1218,16 @@ impl History {
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::ReviewCopy { history } => (Some(history.index), vec![], None),
             UndoAction::TableAppend { sheet_index, history, .. } => {
-                let r = history.table.after_table().unwrap().range;
+                let r = history.table.after_table().unwrap().full_range();
                 (Some(*sheet_index), vec![], Some((r.start_row, r.start_col, r.end_row, r.end_col)))
             }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
                 let range=commit.after_table().or_else(||commit.before_table()).map(|t| {
                     let mut range = t.full_range();
+                    if let Some(before) = commit.before_table() {
+                        range.end_row = range.end_row.max(before.full_range().end_row);
+                        range.end_col = range.end_col.max(before.full_range().end_col);
+                    }
                     if commit.is_totals_change() { range.end_row = t.range.end_row + 1; }
                     (range.start_row,range.start_col,range.end_row,range.end_col)
                 });

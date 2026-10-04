@@ -187,6 +187,25 @@ mod tests {
     }
 
     #[test]
+    fn resize_moves_totals_with_saved_criteria_and_replays() {
+        let mut before = fixture(true);
+        let id = before.active_sheet().tables()[0].id;
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 8, 1, "West");
+        before.set_cell_value_tracked(0, 8, 3, "25");
+        let (after, commit) = resize(&before, 8, 3).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
+        assert_eq!(after.active_sheet().get_display(9, 3), "205");
+        assert_eq!(after.active_sheet().get_raw(7, 3), "");
+        assert_eq!(after.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        let restored = prepare_resize_replay(&after, &commit, true).unwrap();
+        assert_eq!(restored.table(id).unwrap().1.totals_row(), Some(7));
+        assert_eq!(restored.active_sheet().get_raw(8, 3), "25");
+        let redone = prepare_resize_replay(&restored, &commit, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(9, 3), "205");
+    }
+
+    #[test]
     fn includes_existing_records_without_filling_or_touching_hidden_overrides() {
         let mut before = fixture(true);
         let id = before.active_sheet().tables()[0].id;

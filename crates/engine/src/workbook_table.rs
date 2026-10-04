@@ -11,6 +11,8 @@ pub use columns::TableColumnHistory;
 mod create;
 #[path = "workbook_table_totals.rs"]
 mod totals;
+#[path = "workbook_table_footer.rs"]
+mod footer;
 
 use super::table_refs::TableFormulaChange;
 use super::Workbook;
@@ -49,6 +51,7 @@ pub struct TableCommit {
     header_insertion: Option<Box<create::HeaderInsertion>>,
     rules: Vec<calculated::RuleChange>,
     totals_edit: bool,
+    footer_move: Option<footer::FooterMove>,
 }
 
 impl TableCommit {
@@ -497,6 +500,9 @@ impl Workbook {
         range.validate(sheet.rows, sheet.cols)?;
         let mut target = None;
         for table in sheet.tables() {
+            if table.totals_row() == Some(range.start_row) && range.start_col <= table.range.end_col && range.end_col >= table.range.start_col {
+                return Err("The totals row is protected. Use Add row or paste from an existing body record to add records above it.".into());
+            }
             let r = table.range;
             if range.start_row > r.start_row
                 && range.start_row <= r.end_row.saturating_add(1)
@@ -552,15 +558,15 @@ impl Workbook {
             .end_row
             .checked_add(count)
             .ok_or("Append exceeds the sheet boundary.")?;
-        self.validate_table_region(sheet_id, new.range, Some(id))?;
+        self.validate_table_region(sheet_id, new.full_range(), Some(id))?;
         let region = TableRange {
             start_row: old.range.end_row + 1,
             ..new.range
         };
-        self.validate_empty_table_append(sheet_id, region)?;
+        self.validate_empty_table_append_except_footer(sheet_id, region, old.totals_row())?;
         let mut inferred = None;
         let sheet = self.sheet_by_id(sheet_id).unwrap();
-        if infer_rule && writes.len() == 1 {
+        if infer_rule && old.totals.is_none() && writes.len() == 1 {
             let (row, col, source) = &writes[0];
             if new.range.contains(*row, *col)
                 && *row > new.range.start_row
@@ -630,7 +636,13 @@ impl Workbook {
             }
         }
         let mut commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
-        commit.cells = cells;
+        let footer_cells: BTreeMap<_, _> = commit.cells.iter().enumerate()
+            .map(|(index, (cell, _))| ((cell.row, cell.col), index)).collect();
+        for (before, after) in cells {
+            if let Some(index) = footer_cells.get(&(before.row, before.col)) {
+                commit.cells[*index].1 = after;
+            } else { commit.cells.push((before, after)); }
+        }
         commit.append_region = Some(region);
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
@@ -641,11 +653,13 @@ impl Workbook {
         sheet_id: SheetId,
         region: TableRange,
     ) -> Result<(), String> {
-        let sheet = self
-            .sheet_by_id(sheet_id)
-            .ok_or("Sheet no longer exists.")?;
+        self.validate_empty_table_append_except_footer(sheet_id, region, None)
+    }
+
+    fn validate_empty_table_append_except_footer(&self, sheet_id: SheetId, region: TableRange, footer: Option<usize>) -> Result<(), String> {
+        let sheet = self.sheet_by_id(sheet_id).ok_or("Sheet no longer exists.")?;
         for ((row, col), cell) in sheet.cells_iter() {
-            if region.contains(row, col)
+            if Some(row) != footer && region.contains(row, col)
                 && (!matches!(cell.value(), ValueRef::Empty) || cell.comment().is_some())
             {
                 return Err(format!("Cannot append: {} already contains data. Resize the Table to include existing records.", crate::cell_id::CellId::new(sheet_id, row, col)));
@@ -702,8 +716,8 @@ impl Workbook {
         mut after: Option<DataTable>,
     ) -> Result<TableCommit, String> {
         if before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
-            && (a.range != b.range || a.name != b.name || a.columns != b.columns)) {
-            return Err("Resizing or changing the schema of a totals-row Table is not supported yet. Convert it to a range first.".into());
+            && (a.range.start_row != b.range.start_row || a.range.start_col != b.range.start_col || a.range.end_col != b.range.end_col || a.name != b.name || a.columns != b.columns)) {
+            return Err("Changing columns or names of a totals-row Table is not supported yet. Convert it to a range first.".into());
         }
         let sheet = self
             .sheet_by_id(sheet_id)
@@ -757,7 +771,7 @@ impl Workbook {
         } else {
             None
         };
-        let formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
+        let mut formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
         let rules = self.schema_rule_changes(sheet_id, before.as_ref(), after.as_ref())?;
         // The operation's own rule changes are part of its primary schema state.
         if let Some(table) = &mut after {
@@ -769,10 +783,19 @@ impl Workbook {
             }
         }
         let rules = rules.into_iter().filter(|r| r.table != id).collect();
+        let footer_move = match before.as_ref().zip(after.as_ref()) {
+            Some((old, new)) => self.prepare_footer_move(sheet_id, old, new)?,
+            None => None,
+        };
+        let cells = footer_move.as_ref().map_or_else(Vec::new, |m| m.values());
+        if let Some(movement) = &footer_move {
+            formulas.retain(|change| change.cell.sheet != sheet_id || !movement.owns(change.cell.row, change.cell.col));
+        }
         Ok(TableCommit {
+            footer_move,
             totals_edit: false,
             rules,
-            cells: Vec::new(),
+            cells,
             append_region: None,
             header_insertion: None,
             creation_references,
@@ -848,8 +871,11 @@ impl Workbook {
                     }
                 }
             } else {
-                self.validate_empty_table_append(commit.sheet_id, region)?;
+                self.validate_empty_table_append_except_footer(commit.sheet_id, region, commit.footer_move.as_ref().map(|m| m.before_row))?;
             }
+        }
+        if let Some(movement) = &commit.footer_move {
+            self.validate_footer_move_replay(commit, movement, undo)?;
         }
         for (before, after) in &commit.cells {
             let cell = if undo { after } else { before };
@@ -969,7 +995,7 @@ impl Workbook {
         }
         // A pivot can source a formula on another sheet that depends on this
         // footer. Recalculation alone doesn't advance that sheet's generation.
-        let totals_dependents: Vec<_> = if commit.is_totals_change() {
+        let totals_dependents: Vec<_> = if commit.is_totals_change() || commit.footer_move.is_some() {
             self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
                 sheet.cells_iter().filter_map(move |((row, col), cell)| {
                     matches!(cell.value(), ValueRef::Formula { .. })
@@ -1018,6 +1044,21 @@ impl Workbook {
             self.sheet_by_id_mut(commit.sheet_id)
                 .unwrap()
                 .write_table_header(cell.row, cell.col, cell.value.clone());
+        }
+        if let Some(movement) = &commit.footer_move {
+            let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
+            for patch in &movement.cells {
+                let present = if undo { patch.before_present } else { patch.after_present };
+                if !present {
+                    sheet.restore_history_cell(patch.row, patch.col, None);
+                } else {
+                    let mut cell = if undo { patch.before.clone() } else { patch.after.clone() };
+                    // Appended values/calculated fills own the value at the old
+                    // footer; the movement owns its formatting and comments.
+                    cell.value = sheet.get_cell(patch.row, patch.col).value;
+                    sheet.restore_history_cell(patch.row, patch.col, Some(cell));
+                }
+            }
         }
         self.apply_rule_changes(&commit.rules, undo);
         // Membership changes affect symbolic shape dependencies even when no

@@ -391,6 +391,27 @@ mod tests {
     }
 
     #[test]
+    fn filtered_append_moves_footer_and_rewinds_without_touching_hidden_overrides() {
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let (after, entry) = prepare_append(&before, id, None).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(8));
+        assert_eq!(after.active_sheet().get_raw(7, 3), "=[@Amount]*2");
+        assert_eq!(after.active_sheet().get_raw(8, 3), before.active_sheet().get_raw(7, 3));
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        assert_eq!(after.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        let restored = entry.replay(&after, true).unwrap();
+        assert_eq!(restored.table(id).unwrap().1.totals_row(), Some(7));
+        let redone = entry.replay(&restored, false).unwrap();
+        assert_eq!(redone.active_sheet().get_raw(8, 3), after.active_sheet().get_raw(8, 3));
+        let mut history = History::new();
+        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with totals".into() }, None);
+        let preview = history.build_workbook_before(1, Some(&before), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.table(id).unwrap().1.totals_row(), Some(8));
+        assert_eq!(preview.workbook.active_sheet().get_raw(4, 3), "999");
+    }
+
+    #[test]
     fn filtered_append_fills_formula_preserves_criteria_and_replays_in_one_step() {
         let (before, id) = book(true);
         let spec = before.active_sheet().table_view_spec().cloned();
