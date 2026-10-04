@@ -241,3 +241,20 @@ pub fn from_protocol(
         _ => return None,
     })
 }
+
+/// The opaque `op` payload of protocol v2 and the engine host protocol: the
+/// envelope's atomic op list as a JSON array. A single op object is accepted
+/// on input too, so a writer with one op need not wrap it.
+pub fn ops_from_json(v: &serde_json::Value) -> Result<Vec<CollabOp>, String> {
+    if v.is_array() {
+        serde_json::from_value(v.clone()).map_err(|e| format!("invalid op list: {e}"))
+    } else {
+        serde_json::from_value::<CollabOp>(v.clone())
+            .map(|op| vec![op])
+            .map_err(|e| format!("invalid op: {e}"))
+    }
+}
+
+pub fn ops_to_json(ops: &[CollabOp]) -> serde_json::Value {
+    serde_json::to_value(ops).expect("ops serialize")
+}

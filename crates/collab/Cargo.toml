@@ -12,8 +12,20 @@ serde = { workspace = true }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
 rand = "0.8"
+sha2 = { workspace = true }
+
+# Remote simulator (drives a real server over WebSocket protocol v2). Off by
+# default so nothing that depends on this crate pulls in a WebSocket stack.
+tungstenite = { version = "0.24", optional = true }
+url = { version = "2", optional = true }
+
+[[bin]]
+name = "collab-sim-remote"
+path = "src/bin/collab_sim_remote.rs"
+required-features = ["remote"]
 
 [features]
+remote = ["dep:tungstenite", "dep:url"]
 # Long fuzz runs read COLLAB_FUZZ_SEEDS; this feature only exists so CI can
 # opt a job in without an environment variable.
 long-fuzz = []

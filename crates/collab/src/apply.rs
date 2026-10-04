@@ -121,12 +121,12 @@ pub fn apply_ops(wb: &mut Workbook, ops: &[CollabOp]) -> Vec<Skipped> {
 
 /// Everything convergence compares: tab order, ids and names, then every
 /// non-empty cell's raw text, cached computed display, and bold flag.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Fingerprint {
     pub sheets: Vec<SheetPrint>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct SheetPrint {
     pub id: u64,
     pub name: String,
@@ -161,6 +161,19 @@ pub fn fingerprint(wb: &Workbook) -> Fingerprint {
         })
         .collect();
     Fingerprint { sheets }
+}
+
+/// The convergence checksum the server publishes (protocol v2 `checksum`):
+/// lowercase hex SHA-256 of the fingerprint's JSON form. Field order is fixed
+/// by the struct definitions, so every build computes the same bytes.
+pub fn checksum(wb: &Workbook) -> String {
+    checksum_of(&fingerprint(wb))
+}
+
+pub fn checksum_of(print: &Fingerprint) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(print).expect("fingerprint serializes");
+    format!("{:x}", Sha256::digest(&bytes))
 }
 
 /// First difference between two fingerprints, for failure reports.

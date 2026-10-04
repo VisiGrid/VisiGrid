@@ -170,6 +170,41 @@ impl Client {
         }
     }
 
+    /// Protocol v2 `ack{client_op_id, seq}` for our in-flight envelope. Its
+    /// effect is already local: by FIFO we have applied every op sequenced
+    /// before it and transformed the envelope past each, exactly as the
+    /// server did, so the committed form equals our pending form.
+    pub fn ack(&mut self, client_op_id: Uuid, seq: u64) {
+        let ops = match &self.inflight {
+            Some(p) if p.client_op_id == client_op_id => p.ops.clone(),
+            _ => return, // a duplicate ack, or one for an envelope already resolved
+        };
+        self.on_op(Committed {
+            seq,
+            client_op_id,
+            actor: self.actor,
+            ops,
+        });
+    }
+
+    /// Protocol v2 `rejected{result: "dropped"}`: the server applied nothing
+    /// and assigned no sequence number. Our own transform saw the same ops
+    /// and normally reduced the envelope to nothing as well; if it did not,
+    /// refresh rather than keep an effect the server does not have.
+    pub fn dropped(&mut self, client_op_id: Uuid) {
+        match &self.inflight {
+            Some(p) if p.client_op_id == client_op_id => {
+                if p.ops.is_empty() {
+                    self.inflight = None;
+                    self.stats.acked += 1;
+                } else {
+                    self.refuse_from(0);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn on_op(&mut self, c: Committed) {
         if c.seq <= self.last_seen {
             return; // already have it (overlapping catch-up)
