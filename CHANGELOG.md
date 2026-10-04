@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- **Append a folder of files.** Set **Each refresh reads** to **All matching files** to read every file a pattern matches and stack them, columns lined up by name, with a **Source file** column. A file missing a column is noted, not dropped, and errors name the file as well as the line. CSV, Excel and Parquet sources. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+- **Group by** step: one row per group with named totals (sum, count, count rows, average, min, max, distinct count, first, last). A sum of something that isn't a number fails the run and says where. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+- **Unpivot** step: keep some columns and turn every other column into rows, so a column added to next month's file is unpivoted too. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+
 ## 0.47.0
 
 ### Import recipes
