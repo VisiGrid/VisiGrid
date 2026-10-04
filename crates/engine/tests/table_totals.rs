@@ -907,3 +907,80 @@ fn renaming_a_header_invalidates_cross_sheet_pivot_sources_when_custom_totals_ch
     assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "1");
     assert!(wb.sheet(summary).unwrap().edit_generation() > generation);
 }
+
+#[test]
+fn manual_visibility_updates_totals_and_dependents_with_guarded_replay() {
+    let mut wb = book();
+    wb.set_cell_value_tracked(0, 6, 1, "=SUBTOTAL(9,Sales[Amount])");
+    let other = wb.add_sheet_named("Dependents").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "=SUM(Sales[#Totals])*2");
+    let generation = wb.sheet(other).unwrap().edit_generation();
+    let (mut after, commit) = wb.prepare_table_row_visibility(wb.sheet(0).unwrap().id, [2].into_iter().collect()).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+    assert_eq!(after.sheet(0).unwrap().get_display(4, 1), "40");
+    assert_eq!(after.sheet(0).unwrap().get_display(6, 1), "60");
+    assert_eq!(after.sheet(other).unwrap().get_display(0, 0), "80");
+    assert!(after.sheet(other).unwrap().edit_generation() > generation);
+    assert_eq!(commit.changed_cell_count(), 0);
+    commit.replay(&mut after, true).unwrap();
+    assert_eq!(after.sheet(0).unwrap().get_display(4, 1), "60");
+    assert_eq!(after.sheet(other).unwrap().get_display(0, 0), "120");
+    commit.replay(&mut after, false).unwrap();
+    assert_eq!(after.sheet(0).unwrap().get_display(4, 1), "40");
+    after.set_cell_value_tracked(0, 1, 1, "123");
+    assert!(commit.replay(&mut after, true).is_err());
+}
+
+#[test]
+fn manual_visibility_keeps_dormant_settings_and_can_hide_or_unhide_footer() {
+    let mut wb = book();
+    let id = wb.tables().next().unwrap().1.id;
+    wb.set_table_totals_visible(id, false, Default::default()).unwrap();
+    let (mut hidden, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [2].into_iter().collect()).unwrap();
+    assert!(!hidden.table(id).unwrap().1.totals.as_ref().unwrap().visible);
+    hidden.set_table_totals_visible(id, true, [2].into_iter().collect()).unwrap();
+    assert_eq!(hidden.active_sheet().get_display(4, 1), "40");
+    let (mut hidden, _) = hidden.prepare_table_row_visibility(hidden.active_sheet_id(), [2, 4].into_iter().collect()).unwrap();
+    assert!(hidden.append_table_rows(id, 1, &[]).is_err());
+    let (mut shown, _) = hidden.prepare_table_row_visibility(hidden.active_sheet_id(), Default::default()).unwrap();
+    assert_eq!(shown.active_sheet().get_display(4, 1), "60");
+    shown.append_table_rows(id, 1, &[]).unwrap();
+    assert_eq!(shown.active_sheet().get_display(5, 1), "60");
+}
+
+#[test]
+fn manual_visibility_bounds_and_recovery_refuse_without_mutation() {
+    let mut wb = book();
+    let before = serde_json::to_value(wb.saved_tables()).unwrap();
+    let revision = wb.revision();
+    assert!(wb.prepare_table_row_visibility(wb.active_sheet_id(), [visigrid_engine::sheet::NUM_ROWS].into_iter().collect()).is_err());
+    assert!(wb.prepare_table_row_visibility(visigrid_engine::sheet::SheetId(999), Default::default()).is_err());
+    wb.active_sheet_mut().read_only_reason = Some("Recovery".into());
+    assert!(wb.prepare_table_row_visibility(wb.active_sheet_id(), [2].into_iter().collect()).is_err());
+    assert_eq!(wb.revision(), revision);
+    assert_eq!(serde_json::to_value(wb.saved_tables()).unwrap(), before);
+}
+
+#[test]
+fn manual_visibility_updates_all_totals_on_the_sheet_without_stale_flags() {
+    let mut wb = book();
+    for (row, label, amount) in [(8, "Region", "Amount"), (9, "West", "5"), (10, "East", "15")] {
+        wb.set_cell_value_tracked(0, row, 0, label);
+        wb.set_cell_value_tracked(0, row, 1, amount);
+    }
+    let id = wb.create_table(wb.active_sheet_id(), TableRange {
+        start_row: 8, end_row: 10, start_col: 0, end_col: 1,
+    }, "OtherData").unwrap().table_id();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let flags = [2, 10].into_iter().collect();
+    let (hidden, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), flags).unwrap();
+    assert_eq!(hidden.active_sheet().get_display(4, 1), "40");
+    assert_eq!(hidden.active_sheet().get_display(11, 1), "5");
+    for (_, table) in hidden.tables() {
+        assert_eq!(table.totals.as_ref().unwrap().hidden_rows, [2, 10].into_iter().collect());
+    }
+    let (shown, _) = hidden.prepare_table_row_visibility(hidden.active_sheet_id(), Default::default()).unwrap();
+    assert_eq!(shown.active_sheet().get_display(4, 1), "60");
+    assert_eq!(shown.active_sheet().get_display(11, 1), "20");
+    assert!(shown.tables().all(|(_, t)| t.totals.as_ref().unwrap().hidden_rows.is_empty()));
+}

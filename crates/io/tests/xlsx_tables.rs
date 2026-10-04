@@ -2720,3 +2720,25 @@ fn unreadable_table_sheet_does_not_discard_valid_tables_on_later_sheets() {
     assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 0), "42");
     assert!(report.warnings.iter().any(|w| w.contains("on OversizedData") && w.contains("too large")));
 }
+
+#[test]
+fn changed_manual_visibility_recalculates_and_roundtrips_native_and_excel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let original = wb.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap();
+    let (hidden, _) = wb.prepare_table_row_visibility(SheetId(1), [4].into_iter().collect()).unwrap();
+    assert_eq!(hidden.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original - 777.0);
+    let path = dir.path().join("manual-visibility.sheet");
+    native::save_workbook(&hidden, &path).unwrap();
+    let hidden = native::load_workbook(&path).unwrap();
+    let path = dir.path().join("manual-visibility.xlsx");
+    xlsx::export_with_order(&hidden, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (loaded, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+    assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original - 777.0);
+    assert!(loaded.sheet(0).unwrap().tables()[0].totals.as_ref().unwrap().hidden_rows.contains(&4));
+    let (shown, _) = loaded.prepare_table_row_visibility(loaded.sheet(0).unwrap().id, Default::default()).unwrap();
+    assert_eq!(shown.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
+}

@@ -366,12 +366,20 @@ impl Spreadsheet {
                 self.workbook
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.install_structure_layout(id, &layout);
-                self.finish_table_structure(
-                    index,
-                    history.commit.steps[0].axis,
-                    history.commit.steps.iter().map(|s| s.count).sum(),
-                    cx,
-                );
+                if let Some(first) = history.commit.steps.first() {
+                    self.finish_table_structure(
+                        index, first.axis, history.commit.steps.iter().map(|s| s.count).sum(), cx,
+                    );
+                } else {
+                    // Visibility changes share guarded workbook/layout history,
+                    // but do not insert/delete rows or replace the selection.
+                    if self.sheet_index(cx) != index { self.activate_sheet(index, cx); }
+                    self.sync_table_view(cx);
+                    self.table_filter_dropdown = None;
+                    self.bump_cells_rev();
+                    self.ensure_visible(cx);
+                    cx.notify();
+                }
                 true
             }
             Err(error) => {

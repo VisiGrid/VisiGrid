@@ -100,6 +100,7 @@ mod sort_filter;
 mod table_filter_ui;
 mod table_edit;
 mod table_structure;
+mod table_visibility;
 mod table_batch;
 mod table_review;
 mod review_copy;

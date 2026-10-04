@@ -43,6 +43,46 @@ fn value(table: &DataTable, offset: usize, total: &TableTotal) -> Result<CellVal
 }
 
 impl Workbook {
+    /// Synchronize a host's canonical manual row visibility with every totals
+    /// definition on the sheet. Criteria masks are separate and never changed.
+    pub fn prepare_table_row_visibility(
+        &self, sheet_id: crate::sheet::SheetId, hidden: BTreeSet<usize>,
+    ) -> Result<(Workbook, super::super::GuardedStructureCommit), String> {
+        self.ensure_writable()?;
+        let sheet = self.sheet_by_id(sheet_id).ok_or("Visibility sheet no longer exists.")?;
+        if hidden.iter().any(|row| *row >= sheet.rows.min(crate::sheet::NUM_ROWS)) {
+            return Err("Hidden rows exceed the worksheet boundary.".into());
+        }
+        let mut candidate = self.clone();
+        let changed = sheet.tables().iter().any(|t| t.totals.as_ref().is_some_and(|totals| totals.hidden_rows != hidden));
+        if changed {
+            let values: Vec<_> = self.sheets().iter().flat_map(|sheet| {
+                sheet.cells_iter().filter_map(move |((row, col), cell)| {
+                    matches!(cell.value(), crate::cell::ValueRef::Formula { .. })
+                        .then(|| (sheet.id, row, col, sheet.get_computed_value(row, col)))
+                })
+            }).collect();
+            let sheet = candidate.sheet_by_id_mut(sheet_id).unwrap();
+            for table in &mut sheet.data_tables {
+                if let Some(totals) = &mut table.totals { totals.hidden_rows = hidden.clone(); }
+            }
+            sheet.mark_table_changed();
+            candidate.rebuild_dep_graph();
+            candidate.recompute_full_ordered();
+            let changed: std::collections::HashSet<_> = values.into_iter().filter_map(|(id, row, col, before)| {
+                (candidate.sheet_by_id(id)?.get_computed_value(row, col) != before).then_some(id)
+            }).collect();
+            for id in changed { candidate.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
+            candidate.bump_revision_for_structure();
+        }
+        if let Some(error) = candidate.take_incremental_errors().first() {
+            return Err(format!("Could not recalculate row visibility: {error:?}"));
+        }
+        let mut commit = self.capture_guarded_batch(&candidate)?;
+        commit.sheet = sheet_id;
+        Ok((candidate, commit))
+    }
+
     /// Show a footer only in empty cells. Hiding clears its values, retaining
     /// settings for the next show and exact values in the undo commit.
     /// `hidden_rows` is the host's manual visibility, never its filter mask.
