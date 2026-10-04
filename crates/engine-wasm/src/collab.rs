@@ -117,14 +117,22 @@ pub(crate) struct CollabCore {
 
 impl CollabCore {
     pub(crate) fn new(document: &Value, seq: u64) -> Result<CollabCore, String> {
-        let Loaded { wb, layouts, active } = load(document)?;
+        let loaded = load(document)?;
+        Ok(Self::from_loaded(loaded, seq, true))
+    }
+
+    /// `confirmed`: keep the server-confirmed copy a connected replica
+    /// needs. A replica that never connects (the benchmark) skips it.
+    fn from_loaded(Loaded { wb, layouts, active }: Loaded, seq: u64, confirmed: bool) -> CollabCore {
         let mut client = Client::new(0);
-        client.confirmed = wb.clone();
+        if confirmed {
+            client.confirmed = wb.clone();
+        }
         client.wb = wb;
         client.last_seen = seq;
         client.record_changes();
         client.enable_undo();
-        Ok(CollabCore {
+        CollabCore {
             client,
             layouts,
             active,
@@ -133,7 +141,7 @@ impl CollabCore {
             checksum_mismatch: false,
             need_snapshot: None,
             reconnect: false,
-        })
+        }
     }
 
     pub(crate) fn local(&mut self, ops: &Value) -> Result<Value, String> {
@@ -313,6 +321,159 @@ impl CollabCore {
         Some(wb.sheets()[idx].get_formatted_display(row, col))
     }
 
+    /// The sheets, in tab order: `[{key, name, index}]`.
+    pub(crate) fn sheets(&self) -> Value {
+        let wb = &self.client.wb;
+        Value::Array(
+            wb.sheets().iter().enumerate().map(|(index, s)| json!({"key": s.id.0, "name": s.name, "index": index})).collect(),
+        )
+    }
+
+    /// A sheet's layout for drawing: column widths and row heights that
+    /// differ from the defaults, frozen and hidden rows and columns, and the
+    /// extent of its data (`rows`, `cols`: one past the last used row and
+    /// column).
+    pub(crate) fn layout(&self, sheet: SheetKey) -> Option<Value> {
+        let wb = &self.client.wb;
+        let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
+        let (max_row, max_col) = wb.sheets()[idx].data_extent();
+        let used = !wb.sheets()[idx].get_raw(max_row, max_col).is_empty() || max_row > 0 || max_col > 0;
+        let l = self.layouts.get(&sheet).cloned().unwrap_or_default();
+        Some(json!({
+            "col_widths": l.col_widths,
+            "row_heights": l.row_heights,
+            "frozen_rows": l.frozen_rows,
+            "frozen_cols": l.frozen_cols,
+            "hidden_rows": l.hidden_rows,
+            "hidden_cols": l.hidden_cols,
+            "rows": if used { max_row + 1 } else { 0 },
+            "cols": if used { max_col + 1 } else { 0 },
+        }))
+    }
+
+    /// What the grid draws for the cells of a rectangle (inclusive), read
+    /// straight from the engine: the display string (number formats
+    /// applied), the computed value's kind (`n` number, `t` text, `b`
+    /// boolean, `e` error: general alignment depends on it) and an index
+    /// into `formats` (`-1`: the default format), and `num`, a number's value
+    /// (null otherwise) for selection statistics. Only cells with content
+    /// or a format are listed, as parallel arrays. `row_formats` and
+    /// `col_formats` carry whole-row and whole-column formats in range.
+    pub(crate) fn viewport(&self, sheet: SheetKey, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<Value> {
+        use visigrid_engine::cell::CellFormat;
+        use visigrid_engine::formula::eval::Value as V;
+        let wb = &self.client.wb;
+        let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
+        let s = &wb.sheets()[idx];
+        let default = CellFormat::default();
+        let mut formats: Vec<Value> = Vec::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut format_index = |f: &CellFormat| -> i64 {
+            if *f == default {
+                return -1;
+            }
+            let props = serde_json::to_value(visigrid_collab::undo::props_of(f, None)).expect("props serialize");
+            let key = props.to_string();
+            let next = formats.len();
+            let at = *seen.entry(key).or_insert(next);
+            if at == next {
+                formats.push(props);
+            }
+            at as i64
+        };
+        let mut coords = s.cells_in_range(r0, r1, c0, c1);
+        coords.extend(s.spill_receiver_coords().filter(|&(r, c)| r >= r0 && r <= r1 && c >= c0 && c <= c1));
+        coords.sort_unstable();
+        coords.dedup();
+        let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (r, c) in coords {
+            let shown = s.get_formatted_display(r, c);
+            let f = format_index(&s.get_format(r, c));
+            if shown.is_empty() && f < 0 {
+                continue;
+            }
+            let (k, n) = match s.get_computed_value(r, c) {
+                V::Number(n) => ("n", Some(n)),
+                V::Boolean(_) => ("b", None),
+                V::Error(_) => ("e", None),
+                _ => ("t", None),
+            };
+            rows.push(r);
+            cols.push(c);
+            text.push(shown);
+            kind.push(k);
+            fmt.push(f);
+            num.push(n.filter(|n| n.is_finite()));
+        }
+        let mut row_formats = serde_json::Map::new();
+        for (r, f) in &s.row_formats {
+            if *r >= r0 && *r <= r1 {
+                let i = format_index(f);
+                if i >= 0 {
+                    row_formats.insert(r.to_string(), json!(i));
+                }
+            }
+        }
+        let mut col_formats = serde_json::Map::new();
+        for (c, f) in &s.col_formats {
+            if *c >= c0 && *c <= c1 {
+                let i = format_index(f);
+                if i >= 0 {
+                    col_formats.insert(c.to_string(), json!(i));
+                }
+            }
+        }
+        Some(json!({
+            "rows": rows, "cols": cols, "text": text, "kind": kind, "fmt": fmt, "num": num,
+            "formats": formats, "row_formats": row_formats, "col_formats": col_formats,
+        }))
+    }
+
+    /// A large generated workbook for the grid benchmark: `rows` × `cols`
+    /// of mixed text, integers, decimals with a number format, dates and
+    /// percentages, a bold header row and some coloured cells. Values are
+    /// written without recalculation (there are no formulas).
+    pub(crate) fn synthetic(rows: usize, cols: usize) -> CollabCore {
+        use visigrid_engine::cell::{CellFormat, NumberFormat};
+        let mut wb = Workbook::new();
+        let key = wb.sheets()[0].id.0;
+        if let Some(s) = wb.sheet_mut(0) {
+            let header = CellFormat { bold: true, background_color: Some([244, 242, 237, 255]), ..Default::default() };
+            let money = CellFormat { number_format: NumberFormat::Custom("#,##0.00".into()), ..Default::default() };
+            let pct = CellFormat { number_format: NumberFormat::Custom("0.0%".into()), ..Default::default() };
+            let flagged = CellFormat { font_color: Some([180, 35, 24, 255]), italic: true, ..Default::default() };
+            for c in 0..cols {
+                s.set_value(0, c, &format!("Column {}", c + 1));
+                s.set_format(0, c, header.clone());
+            }
+            for r in 1..rows {
+                for c in 0..cols {
+                    match c % 5 {
+                        0 => s.set_value(r, c, &format!("Item {r}-{c}")),
+                        1 => s.set_value(r, c, &((r * 37 + c * 11) % 100_000).to_string()),
+                        2 => {
+                            s.set_value(r, c, &format!("{}.{:02}", (r * 13 + c) % 9_999, (r + c) % 100));
+                            s.set_format(r, c, money.clone());
+                        }
+                        3 => {
+                            s.set_value(r, c, &format!("0.{:03}", (r * 7 + c) % 1000));
+                            s.set_format(r, c, pct.clone());
+                        }
+                        _ => {
+                            s.set_value(r, c, if (r + c) % 9 == 0 { "TRUE" } else { "pending" });
+                            if (r + c) % 9 == 0 {
+                                s.set_format(r, c, flagged.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let layouts = HashMap::from([(key, SheetLayout { frozen_rows: 1, ..Default::default() })]);
+        Self::from_loaded(Loaded { wb, layouts, active: 0 }, 0, false)
+    }
+
     /// What changed since the last call, for the page to repaint.
     fn effects(&mut self) -> Value {
         let ch: Changes = self.client.take_changes();
@@ -482,6 +643,38 @@ impl CollabClient {
     /// `undefined` for an unknown sheet key.
     pub fn display(&self, sheet: f64, row: usize, col: usize) -> Option<String> {
         self.core.display(sheet as SheetKey, row, col)
+    }
+
+    /// The sheets in tab order: `[{key, name, index}]`.
+    pub fn sheets(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.core.sheets())
+    }
+
+    /// A sheet's layout for drawing (widths, heights, frozen, hidden, extent),
+    /// or `undefined` for an unknown sheet key.
+    pub fn layout(&self, sheet: f64) -> Result<JsValue, JsValue> {
+        match self.core.layout(sheet as SheetKey) {
+            Some(v) => to_js(&v),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// The cells of a rectangle as the grid draws them: parallel arrays
+    /// `rows`, `cols`, `text` (the engine's display), `kind`, `fmt` (an index
+    /// into `formats`, `-1` default), `num` (a number's value, else null),
+    /// plus `row_formats` / `col_formats`.
+    pub fn viewport(&self, sheet: f64, r0: usize, c0: usize, r1: usize, c1: usize) -> Result<JsValue, JsValue> {
+        match self.core.viewport(sheet as SheetKey, r0, c0, r1, c1) {
+            Some(v) => to_js(&v),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// Benchmark only: a generated `rows` × `cols` workbook (no socket, no
+    /// server). See `CollabCore::synthetic`.
+    pub fn synthetic(rows: usize, cols: usize) -> CollabClient {
+        console_error_panic_hook::set_once();
+        CollabClient { core: CollabCore::synthetic(rows, cols) }
     }
 
     /// Fingerprint of the confirmed state, as the server's checksum frames.
@@ -801,5 +994,68 @@ mod tests {
         assert_eq!(clients[0].undo()["undo"]["reason"], Value::Null);
         let empty = CollabCore::new(&doc(), 0).unwrap().undo();
         assert_eq!(empty["undo"]["reason"], "empty");
+    }
+
+    #[test]
+    fn viewport_reports_engine_displays_kinds_and_deduplicated_formats() {
+        let mut c = CollabCore::new(&doc(), 0).unwrap();
+        c.local(&set(0, 1, "0.25")).unwrap();
+        c.local(&set(1, 0, "=1/0")).unwrap();
+        c.local(&set(1, 1, "label")).unwrap();
+        let fmt = json!([{"SetFormat": {"sheet": 1, "rect": {"r0":0,"c0":0,"r1":0,"c1":1},
+            "props": {"number_format": "0%", "bold": true}}}]);
+        c.local(&fmt).unwrap();
+        let v = c.viewport(1, 0, 0, 5, 5).unwrap();
+        let at = |r: u64, col: u64| {
+            let i = (0..v["rows"].as_array().unwrap().len())
+                .find(|&i| v["rows"][i] == r && v["cols"][i] == col)
+                .expect("cell listed");
+            (v["text"][i].clone(), v["kind"][i].clone(), v["fmt"][i].clone())
+        };
+        let (t, k, f) = at(0, 1);
+        assert_eq!((t, k), (json!("25%"), json!("n")));
+        assert_eq!(v["formats"][f.as_u64().unwrap() as usize]["bold"], true);
+        assert_eq!(at(0, 0).2, f, "A1 and B1 share one format entry");
+        assert_eq!(v["formats"].as_array().unwrap().len(), 1);
+        assert_eq!(at(1, 0).1, json!("e"));
+        assert_eq!(at(1, 1), (json!("label"), json!("t"), json!(-1)));
+        // Every listed display is exactly what display() reports.
+        for i in 0..v["rows"].as_array().unwrap().len() {
+            let (r, col) = (v["rows"][i].as_u64().unwrap() as usize, v["cols"][i].as_u64().unwrap() as usize);
+            assert_eq!(v["text"][i], json!(c.display(1, r, col).unwrap()));
+        }
+        assert!(c.viewport(99, 0, 0, 1, 1).is_none());
+    }
+
+    #[test]
+    fn synthetic_workbook_has_its_extent_layout_and_formats() {
+        let c = CollabCore::synthetic(200, 10);
+        let key = c.sheets()[0]["key"].as_u64().unwrap();
+        let l = c.layout(key).unwrap();
+        assert_eq!((l["rows"].clone(), l["cols"].clone(), l["frozen_rows"].clone()), (json!(200), json!(10), json!(1)));
+        let v = c.viewport(key, 0, 0, 3, 4).unwrap();
+        assert_eq!(v["rows"].as_array().unwrap().len(), 20);
+        assert!(v["text"].as_array().unwrap().iter().any(|t| t.as_str().unwrap().ends_with('%')));
+    }
+
+    /// Timing probe for the grid benchmark's sheet:
+    /// `cargo test --release -p visigrid-engine-wasm synthetic_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn synthetic_timing() {
+        let t = std::time::Instant::now();
+        let c = CollabCore::synthetic(100_000, 50);
+        let built = t.elapsed();
+        let key = c.sheets()[0]["key"].as_u64().unwrap();
+        let t = std::time::Instant::now();
+        let l = c.layout(key).unwrap();
+        let laid = t.elapsed();
+        let t = std::time::Instant::now();
+        let mut n = 0;
+        for i in 0..100 {
+            let r0 = i * 997 % 99_950;
+            n += c.viewport(key, r0, 0, r0 + 40, 20).unwrap()["rows"].as_array().unwrap().len();
+        }
+        eprintln!("build {built:?}, layout {laid:?} {l}, 100 viewports (41x21) {:?}, {n} cells", t.elapsed());
     }
 }
