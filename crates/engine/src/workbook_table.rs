@@ -91,9 +91,9 @@ impl TableCommit {
     }
 }
 
-/// Only Table metadata for a whole-row edit; ordinary row history owns the
-/// deleted cells and presentation. Bounds are explicit because undoing a last
-/// body-row deletion inserts at the new bottom edge (normally outside a Table).
+/// Table metadata for ordinary whole-row history, or a guarded sparse commit
+/// when totals require protected-cell restoration. Explicit bounds restore a
+/// deleted last body row even when inverse insertion is outside the Table.
 #[derive(Debug, Clone)]
 pub struct TableRowHistory {
     sheet: SheetId,
@@ -103,6 +103,7 @@ pub struct TableRowHistory {
     before: Vec<DataTable>,
     after: Vec<DataTable>,
     rules: Vec<calculated::RuleChange>,
+    guarded: Option<Box<super::GuardedStructureCommit>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +154,15 @@ impl Workbook {
             delete,
         )?;
         let sheet = &self.sheets[sheet_index];
+        if self.tables().any(|(_, t)| t.totals.is_some()) {
+            let (_, guarded) = self.prepare_guarded_structure(sheet_index, vec![super::StructureStep {
+                axis: crate::structural::Axis::Row, at, count, delete,
+            }])?;
+            return Ok(Some(TableRowHistory {
+                sheet: sheet.id, at, count, delete, before: Vec::new(), after: Vec::new(),
+                rules: Vec::new(), guarded: Some(Box::new(guarded)),
+            }));
+        }
         let rules = self.structural_rule_changes(
             sheet_index,
             crate::structural::Axis::Row,
@@ -192,6 +202,7 @@ impl Workbook {
             }
         }
         Ok(Some(TableRowHistory {
+            guarded: None,
             rules,
             sheet: sheet.id,
             at,
@@ -207,6 +218,7 @@ impl Workbook {
         history: &TableRowHistory,
         undo: bool,
     ) -> Result<(), String> {
+        if let Some(guarded) = &history.guarded { return guarded.candidate(self, undo).map(|_| ()); }
         let index = self
             .sheet_index_by_id(history.sheet)
             .ok_or("Table sheet no longer exists.")?;
@@ -238,6 +250,11 @@ impl Workbook {
         history: &TableRowHistory,
         undo: bool,
     ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        if let Some(guarded) = &history.guarded {
+            let candidate = guarded.candidate(self, undo)?;
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(Vec::new());
+        }
         self.validate_table_row_history(history, undo)?;
         let index = self.sheet_index_by_id(history.sheet).unwrap();
         let rewrites = self.structural_edit_with_rules(

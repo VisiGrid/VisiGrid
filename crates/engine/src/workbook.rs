@@ -2331,8 +2331,12 @@ impl Workbook {
         } else { self.structural_rule_changes(sheet_index, axis, at, count, delete) };
 
         let totals_changes = if let Some((before, after)) = &column_tables {
-            self.column_totals_changes(sheet_index, at, count, delete, before, after)?
-        } else { Vec::new() };
+            self.structural_totals_changes(sheet_index, axis, at, count, delete, before, after)?
+        } else {
+            let after = self.sheets[sheet_index].tables_after_row_edit(at, count, delete)?;
+            self.structural_totals_changes(sheet_index, axis, at, count, delete,
+                self.sheets[sheet_index].tables(), &after)?
+        };
 
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
@@ -2411,7 +2415,7 @@ impl Workbook {
         if fill_rules && is_row && !delete { self.fill_inserted_calculated_rows(sheet_index, at, count); }
         self.rebuild_dep_graph();
         self.recompute_full_ordered();
-        if !is_row && self.tables().any(|(_, t)| t.totals.is_some()) {
+        if self.tables().any(|(_, t)| t.totals.is_some()) {
             // Footer changes can alter indirect pivot sources on other sheets.
             for sheet in &mut self.sheets { sheet.mark_table_changed(); }
         }
@@ -2426,24 +2430,6 @@ impl Workbook {
         let limit = if is_row { sheet.rows } else { sheet.cols };
         if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
             return Err("Structural edit exceeds the sheet boundary.".into());
-        }
-        // Column edits rewrite visible and dormant totals explicitly. Row
-        // relocation still refuses edits that would rewrite footer formulas.
-        let edit = crate::structural::StructuralEdit { sheet_name: sheet.name.clone(), axis, at, count, delete };
-        for owner in self.sheets.iter().filter(|_| is_row) {
-            for table in owner.tables() {
-                if let Some(totals) = &table.totals {
-                    for (offset, total) in totals.columns.iter().enumerate() {
-                        let cell = table.totals_row().map(|row| owner.get_raw(row, table.range.start_col + offset));
-                        for formula in total.formula.iter().chain(cell.as_ref().filter(|s| s.starts_with('='))) {
-                            if crate::structural::adjust_formula_text(formula, &edit, &owner.name)
-                                .is_some_and(|rewritten| rewritten != *formula) {
-                                return Err("This structural edit would rewrite a totals formula. Totals reference rewriting is not supported yet.".into());
-                            }
-                        }
-                    }
-                }
-            }
         }
         // Refuse inserts that would push content off the grid rather than
         // dropping it (Excel's behavior).

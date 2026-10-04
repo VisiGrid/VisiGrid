@@ -930,4 +930,49 @@ mod metadata_tests {
         assert_eq!(removed.active_sheet().get_display(7, 4), "180");
     }
 
+    #[test]
+    fn totals_row_edits_preserve_filtered_records_and_rewind() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_calculated_column(id, 3, 3, "=[@Amount]*2", true).unwrap();
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let spec = base.active_sheet().table_view_spec().cloned();
+        let rows = base.active_sheet().build_saved_table_view(base.active_sheet().rows).unwrap().unwrap();
+        let steps = selected_row_steps(rows.rows(), 3, 6, true).unwrap();
+        let (mut after, commit) = base.prepare_guarded_structure(0, steps).unwrap();
+        assert_eq!(after.active_sheet().tables()[0].totals_row(), Some(4));
+        assert_eq!(after.active_sheet().get_raw(3, 1), "East");
+        assert_eq!(after.active_sheet().get_display(4, 3), "0");
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        let mut history = crate::history::History::new();
+        history.record_named_range_action(UndoAction::TableStructureChanged {
+            sheet_index: 0, description: "Delete visible records".into(),
+            history: Box::new(TableStructureHistory { commit: commit.clone(), source_frozen: None,
+                before: StructureLayout::default(), after: StructureLayout::default() }),
+        });
+        let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().get_display(4, 3), "0");
+        commit.replay(&mut after, true).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 3), "180");
+        commit.replay(&mut after, false).unwrap();
+        assert_eq!(after.active_sheet().get_display(3, 3), "20");
+        let (added, _) = base.prepare_guarded_structure(0, vec![step(Axis::Row, 7, 1, false)]).unwrap();
+        assert_eq!(added.active_sheet().tables()[0].totals_row(), Some(8));
+        assert_eq!(added.active_sheet().get_raw(7, 3), "=[@[Amount]]*2");
+        assert_eq!(added.active_sheet().get_display(8, 3), "180");
+    }
+
+    #[test]
+    fn totals_row_candidates_refuse_spills_without_changing_live_state() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(IF(ROWS(Sales[Amount])=4,1,5))");
+        let revision = base.revision();
+        assert!(base.prepare_guarded_structure(0, vec![step(Axis::Row, 7, 1, false)]).is_err());
+        assert_eq!(base.revision(), revision);
+        assert_eq!(base.active_sheet().tables()[0].totals_row(), Some(7));
+        assert_eq!(base.active_sheet().get_display(7, 3), "180");
+    }
+
 }

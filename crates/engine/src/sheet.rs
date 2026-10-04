@@ -736,9 +736,6 @@ impl Sheet {
         if count == 0 { return None; }
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
         for t in self.tables() {
-            if is_row && t.totals.is_some() && at <= t.full_range().end_row.max(t.totals.as_ref().and_then(|t| t.hidden_rows.last().copied()).unwrap_or(0)) {
-                return Some("Structural edits affecting totals-row Tables are not supported yet. Convert the Table to a range first.".into());
-            }
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };
             if delete && at <= last && end > start && (if is_row { at <= start } else { at <= start && end > last }) {
@@ -746,7 +743,9 @@ impl Sheet {
             }
             if !delete {
                 let limit = if is_row { self.rows } else { self.cols };
-                if at <= last && last.checked_add(count).is_none_or(|v| v >= limit) {
+                let edge = if is_row { t.full_range().end_row.max(t.totals.as_ref()
+                    .and_then(|totals| totals.hidden_rows.last().copied()).unwrap_or(0)) } else { last };
+                if at <= edge && edge.checked_add(count).is_none_or(|v| v >= limit) {
                     return Some(format!("This would push {} past the sheet boundary.", t.name));
                 }
             }
@@ -754,17 +753,31 @@ impl Sheet {
         None
     }
 
-    fn shift_tables(&mut self, is_row: bool, at: usize, count: usize, delete: bool) {
-        if count == 0 || self.data_tables.is_empty() { return; }
-        for t in &mut self.data_tables {
-            let (start, end) = if is_row { (t.range.start_row, t.range.end_row) }
-                else { (t.range.start_col, t.range.end_col) };
-            if let Some((start, end)) = crate::structural::shift_span(start, end, at, count, delete) {
-                if is_row { t.range.start_row = start; t.range.end_row = end; }
-                else { t.range.start_col = start; t.range.end_col = end; }
+    pub(crate) fn tables_after_row_edit(&self, at: usize, count: usize, delete: bool) -> Result<Vec<crate::table::DataTable>, String> {
+        if let Some(error) = self.table_structural_error(true, at, count, delete) { return Err(error); }
+        let mut tables = self.tables().to_vec();
+        if count == 0 { return Ok(tables); }
+        let end = at.checked_add(count).filter(|end| *end <= self.rows)
+            .ok_or("Structural edit exceeds the sheet boundary.")?;
+        for t in &mut tables {
+            let footer = t.totals_row();
+            let (start, last) = crate::structural::shift_span(t.range.start_row, t.range.end_row, at, count, delete)
+                .ok_or("Cannot remove a Table header. Convert to a range first.")?;
+            t.range.start_row = start;
+            t.range.end_row = if !delete && footer == Some(at) { last + count } else { last };
+            if let Some(totals) = &mut t.totals {
+                if delete && footer.is_some_and(|row| row >= at && row < end) {
+                    // Removing the footer hides it but retains its settings.
+                    totals.visible = false;
+                    totals.shown = Some(false);
+                }
+                totals.hidden_rows = totals.hidden_rows.iter().filter_map(|row| {
+                    crate::structural::shift_span(*row, *row, at, count, delete)
+                        .map(|(row, _)| row).filter(|row| *row < self.rows)
+                }).collect();
             }
         }
-        self.mark_table_changed();
+        Ok(tables)
     }
 
     pub(crate) fn mark_table_changed(&mut self) {
@@ -2101,7 +2114,8 @@ impl Sheet {
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
         if self.table_structural_error(true, at_row, count, false).is_some() { return; }
-        self.shift_tables(true, at_row, count, false);
+        let Ok(tables) = self.tables_after_row_edit(at_row, count, false) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(true, at_row, count, false);
         self.cells.insert_rows(at_row, count, self.rows);
 
@@ -2125,7 +2139,8 @@ impl Sheet {
     /// Delete rows at the specified position, shifting remaining rows up
     pub fn delete_rows(&mut self, start_row: usize, count: usize) {
         if self.table_structural_error(true, start_row, count, true).is_some() { return; }
-        self.shift_tables(true, start_row, count, true);
+        let Ok(tables) = self.tables_after_row_edit(start_row, count, true) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(true, start_row, count, true);
         let end_row = start_row + count; // exclusive
 

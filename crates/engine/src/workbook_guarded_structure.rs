@@ -423,6 +423,18 @@ impl GuardedStructureCommit {
         }
         candidate.rebuild_dep_graph();
         candidate.recompute_full_ordered();
+        if candidate.tables().any(|(_, table)| table.totals.is_some()) {
+            // A pivot can source an unchanged formula whose result depends on
+            // the restored footer. Authored-cell patches alone miss that sheet.
+            let changed: Vec<_> = candidate.sheets().iter().filter_map(|sheet| {
+                let before = wb.sheet_by_id(sheet.id)?;
+                sheet.cells_iter().any(|((row, col), cell)| {
+                    matches!(cell.value(), ValueRef::Formula { .. })
+                        && sheet.get_computed_value(row, col) != before.get_computed_value(row, col)
+                }).then_some(sheet.id)
+            }).collect();
+            for id in changed { candidate.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
+        }
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Structural replay failed: {error:?}"));
         }

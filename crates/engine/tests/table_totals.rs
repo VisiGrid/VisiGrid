@@ -689,9 +689,10 @@ fn totals_ownership_and_conversion_preserve_formulas_and_history() {
     wb.sheet_mut(0).unwrap().set_value(4, 1, "999");
     wb.sheet_mut(0).unwrap().clear_cell(4, 1);
     assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
-    assert!(wb
-        .structural_edit(0, visigrid_engine::structural::Axis::Row, 2, 1, false)
-        .is_err());
+    let history = wb.prepare_table_row_history(0, 2, 1, false).unwrap().unwrap();
+    wb.apply_table_row_history(&history, false).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(5, 1), "60");
+    wb.apply_table_row_history(&history, true).unwrap();
     assert_eq!(
         serde_json::to_value(wb.saved_tables()).unwrap(),
         serde_json::to_value(before).unwrap()
@@ -734,7 +735,7 @@ fn totals_catalog_rejects_bad_versions_and_bounds_without_mutation() {
 }
 
 #[test]
-fn cross_sheet_structural_rewrite_of_a_footer_refuses_before_any_mutation() {
+fn cross_sheet_structural_rewrite_of_a_footer_is_undoable() {
     let mut wb = book();
     let other = wb.add_sheet_named("Control").unwrap();
     wb.set_cell_value_tracked(other, 1, 0, "25");
@@ -749,9 +750,12 @@ fn cross_sheet_structural_rewrite_of_a_footer_refuses_before_any_mutation() {
     wb.restore_tables(catalog).unwrap();
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
-    assert!(wb
-        .structural_edit(other, visigrid_engine::structural::Axis::Row, 0, 1, false)
-        .is_err());
+    let history = wb.prepare_table_row_history(other, 0, 1, false).unwrap().unwrap();
+    wb.apply_table_row_history(&history, false).unwrap();
+    assert_eq!(wb.sheet(other).unwrap().get_raw(2, 0), "25");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "=Control!A3");
+    assert_eq!(wb.sheet(0).unwrap().tables()[0].totals.as_ref().unwrap().columns[1].formula.as_deref(), Some("=Control!A3"));
+    wb.apply_table_row_history(&history, true).unwrap();
     assert_eq!(wb.sheet(other).unwrap().get_raw(1, 0), "25");
     assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "=Control!A2");
     assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "25");

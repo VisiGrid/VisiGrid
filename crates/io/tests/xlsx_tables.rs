@@ -2257,7 +2257,7 @@ fn totals_keep_manual_hidden_rows_and_refuse_unsafe_authoring() {
         .sheet(0)
         .unwrap()
         .table_structural_error(true, 2, 1, false)
-        .is_some());
+        .is_none());
     assert!(wb.sheet(0).unwrap().table_value_write_error(3, 1).is_some());
     assert!(wb
         .create_table(
@@ -2463,5 +2463,40 @@ fn totals_column_structure_roundtrips_through_native_and_excel() {
         assert_eq!(loaded.sheet(0).unwrap().get_display(8, 4), "30");
         loaded.structural_edit(0, Axis::Col, 2, 1, true).unwrap();
         assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 3), "=SUM([Qty])+C4");
+    }
+}
+
+
+#[test]
+fn totals_worksheet_row_edits_keep_native_and_excel_metadata_aligned() {
+    use visigrid_engine::{structural::Axis, table::TableTotal};
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 3, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM([Qty])+C4".into()), label: None,
+        }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.structural_edit(0, Axis::Row, 0, 2, false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("rows.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        let table = loaded.table(id).unwrap().1;
+        assert_eq!(table.range.start_row, 4);
+        assert_eq!(table.range.end_row, 9);
+        assert_eq!(table.totals.as_ref().unwrap().columns[2].formula.as_deref(), Some("=SUM([Qty])+C6"));
+        assert_eq!(table.totals.as_ref().unwrap().visible, visible);
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(loaded.sheet(0).unwrap().get_display(10, 3), "30");
+        loaded.structural_edit(0, Axis::Row, 10, 1, false).unwrap();
+        assert_eq!(loaded.table(id).unwrap().1.totals_row(), Some(11));
+        assert_eq!(loaded.sheet(0).unwrap().get_display(11, 3), "30");
+        assert!(loaded.sheet(0).unwrap().get_raw(10, 3).starts_with('='));
     }
 }

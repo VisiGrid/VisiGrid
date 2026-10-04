@@ -119,13 +119,13 @@ impl Sheet {
 }
 
 impl Workbook {
-    pub(crate) fn column_totals_changes(
-        &self, index: usize, at: usize, count: usize, delete: bool,
+    pub(crate) fn structural_totals_changes(
+        &self, index: usize, axis: Axis, at: usize, count: usize, delete: bool,
         before: &[DataTable], after: &[DataTable],
     ) -> Result<Vec<TotalsReferenceChange>, String> {
         let owner = &self.sheets[index];
         let edit = crate::structural::StructuralEdit {
-            sheet_name: owner.name.clone(), axis: Axis::Col, at, count, delete,
+            sheet_name: owner.name.clone(), axis, at, count, delete,
         };
         // Dormant totals need the same local structured-reference context as a
         // visible footer, including when a deleted field becomes #REF!.
@@ -145,8 +145,10 @@ impl Workbook {
             for (i, column) in target.columns.iter().enumerate() {
                 let Some(source) = &mut new.columns[i].formula else { continue; };
                 let old_col = table.columns.iter().position(|c| c.id == column.id).unwrap();
-                let rewritten = self.rewrite_column_schema_source(owner.id, &contexts, &targets,
-                    sheet, table.range.end_row + 1, table.range.start_col + old_col, source)?;
+                let rewritten = if axis == Axis::Col {
+                    self.rewrite_column_schema_source(owner.id, &contexts, &targets,
+                        sheet, table.range.end_row + 1, table.range.start_col + old_col, source)?
+                } else { source.clone() };
                 *source = crate::structural::adjust_formula_text(&rewritten, &edit,
                     &self.sheet_by_id(sheet).unwrap().name).unwrap_or(rewritten);
             }

@@ -11,6 +11,7 @@ use crate::{
 pub(super) struct HeaderInsertion {
     pub at: usize,
     rows: Option<TableRowHistory>,
+    guarded: Option<Box<crate::workbook::GuardedStructureCommit>>,
     print_before: PrintSetup,
     inserted_cells: Vec<(usize, usize, String, CellFormat)>,
     formulas: Vec<(CellId, String, String)>,
@@ -77,9 +78,16 @@ impl Workbook {
             .map(|(s, r, c, b, a)| (CellId::new(staged.sheets[s].id, r, c), b, a))
             .collect();
         let mut commit = staged.create_table(sheet, result, name)?;
+        // Totals use complete sparse structural history. Capture creation and
+        // insertion together so the intermediate header cells are not mistaken
+        // for a stale row-history replay when creation is undone.
+        let guarded = if self.tables().any(|(_, t)| t.totals.is_some()) {
+            Some(Box::new(self.capture_guarded_batch(&staged)?))
+        } else { None };
         commit.header_insertion = Some(Box::new(HeaderInsertion {
             at: range.start_row,
-            rows,
+            rows: if guarded.is_none() { rows } else { None },
+            guarded,
             print_before,
             formulas,
             inserted_cells: staged.sheets[index].occupied_cells_in_rows(range.start_row, 1),
@@ -95,6 +103,12 @@ impl Workbook {
         undo: bool,
     ) -> Result<(), String> {
         let header = commit.header_insertion.as_ref().unwrap();
+        if let Some(guarded) = &header.guarded {
+            let mut candidate = guarded.candidate(self, undo)?;
+            candidate.refresh_table_name_reservations();
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(());
+        }
         let index = self
             .sheet_index_by_id(commit.sheet_id)
             .ok_or("Table sheet no longer exists.")?;
