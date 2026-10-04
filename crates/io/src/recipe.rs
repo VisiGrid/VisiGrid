@@ -2648,6 +2648,11 @@ fn split(column: &str, by: &str, into: &[String], frame: &mut Frame, report: &mu
     if into.len() < 2 {
         return fail(report, "Split needs at least two new column names (into)".into());
     }
+    // Checked before building: every row would grow by this many cells
+    let width = frame.columns.len() - 1 + into.len();
+    if width > NUM_COLS {
+        return fail(report, format!("splitting would make {width} columns; a sheet holds {NUM_COLS}"));
+    }
     for (n, name) in into.iter().enumerate() {
         if name.trim().is_empty() {
             return fail(report, "Split's new columns need names".into());
@@ -3809,6 +3814,9 @@ values_to = "Sales"
         assert!(run(&clash, &snap("Name,Rep\na b,K\n")).report.failures[0].contains("already named Rep"));
         let reuse = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"Name\", \"Rest\"]\n");
         assert_eq!(run(&reuse, &snap("Name\na b c\n")).output.rows, vec![vec!["a", "b c"]]);
+        let wide: Vec<String> = (0..=NUM_COLS).map(|i| format!("\"c{i}\"")).collect();
+        let wide = with_steps(&format!("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [{}]\n", wide.join(",")));
+        assert!(run(&wide, &snap("Name\na b\n")).report.failures[0].contains("a sheet holds 16384"));
         let one = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"A\"]\n");
         assert!(!run(&one, &snap("Name\na b\n")).report.ok);
         // Renaming the source column follows into the step
