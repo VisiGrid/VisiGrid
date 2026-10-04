@@ -18,7 +18,9 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::workbook::Workbook;
 use wasm_bindgen::prelude::*;
 
+mod collab;
 mod session;
+pub use collab::CollabClient;
 pub use session::Session;
 
 #[derive(Deserialize, Clone)]

@@ -8074,7 +8074,10 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "uuid",
+ "visigrid-collab",
  "visigrid-engine",
+ "visigrid-io",
  "wasm-bindgen",
 ]
 

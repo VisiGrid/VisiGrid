@@ -28,3 +28,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
+# The collaboration replica (CollabClient). No simulator (no RNG backend in
+# the browser), and visigrid-json only from io (no DuckDB, SQLite or XLSX).
+visigrid-collab = { path = "../collab", default-features = false }
+visigrid-io = { path = "../io", default-features = false }
+uuid = "1"
