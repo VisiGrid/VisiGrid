@@ -682,9 +682,10 @@ fn totals_ownership_and_conversion_preserve_formulas_and_history() {
     wb.apply_table_commit(&rename, true).unwrap();
     let append = wb.append_table_rows(id, 1, &[]).unwrap();
     wb.apply_table_commit(&append, true).unwrap();
-    assert!(wb
-        .prepare_sheet_copy(&wb, wb.active_sheet_id(), "Copy")
-        .is_err());
+    let (copied, index) = wb.prepare_sheet_copy(&wb, wb.active_sheet_id(), "Copy").unwrap();
+    assert_ne!(copied.sheet(index).unwrap().tables()[0].id, id);
+    assert_eq!(copied.sheet(index).unwrap().get_display(4, 1), "60");
+    assert_eq!(wb.sheet_count(), 1);
     wb.set_cell_value_tracked(0, 4, 1, "999");
     wb.sheet_mut(0).unwrap().set_value(4, 1, "999");
     wb.sheet_mut(0).unwrap().clear_cell(4, 1);

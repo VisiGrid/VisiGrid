@@ -285,18 +285,14 @@ impl Workbook {
             .filter(|s| s.id != sheet_id)
             .any(|sheet| {
                 sheet.tables().iter().any(|t| {
-                    t.columns.iter().any(|c| {
-                        c.formula.as_ref().is_some_and(|source| {
-                            structured::source_references(source)
-                                .iter()
-                                .any(|(_, _, r)| {
-                                    r.table.as_ref().is_some_and(|name| {
-                                        owner
-                                            .tables()
-                                            .iter()
-                                            .any(|owned| owned.name.eq_ignore_ascii_case(name))
-                                    })
-                                })
+                    let rules = t.columns.iter().filter_map(|c| c.formula.as_deref());
+                    let totals = t.totals.iter().flat_map(|totals|
+                        totals.columns.iter().filter_map(|c| c.formula.as_deref()));
+                    rules.chain(totals).any(|source| {
+                        structured::source_references(source).iter().any(|(_, _, r)| {
+                            r.table.as_ref().is_some_and(|name| {
+                                owner.tables().iter().any(|owned| owned.name.eq_ignore_ascii_case(name))
+                            })
                         })
                     })
                 }) || sheet.cells_iter().any(|((row, col), cell)| {

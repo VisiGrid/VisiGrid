@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Copy reviewed sheets containing Tables with visible or hidden totals. Copied footer formulas, custom settings and calculated rules bind to the new Tables; filters, overrides, formatting and comments survive. Undo/redo, history rewind and native/XLSX round trips preserve the independent copies. Dormant totals also reserve referenced Table names and prevent removal of a referenced sheet.
+
 - Resize Tables horizontally with visible or hidden totals. Surviving columns retain their rules and totals; released cells stay in place, and newly added footer cells must be empty. Combined width/height changes apply atomically, with undo/redo and history rewind. Undoing a total or calculated rule now restores originally absent cells so an earlier resize can also be undone.
 
 - Save checkbox-filter values in a stable order in native and JSON files. Existing files with unordered values still load without a format-version change.

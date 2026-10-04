@@ -2535,3 +2535,41 @@ fn horizontally_resized_totals_survive_native_and_xlsx_roundtrips() {
         assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 4), "");
     }
 }
+
+#[test]
+fn copied_totals_keep_independent_bindings_through_native_and_excel() {
+    use visigrid_engine::table::TableTotal;
+    let dir = tempfile::tempdir().unwrap();
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 3, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM(Sales[Amount])+SUM([Price])".into()), label: None,
+        }).unwrap();
+        let original = wb.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        let (wb, index) = wb.prepare_sheet_copy(&wb, SheetId(1), "Copied data").unwrap();
+        let path = dir.path().join("copied-totals.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("copied-totals.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let table = loaded.sheet(index).unwrap().tables()[0].clone();
+        assert_eq!(table.name, "Sales_Copy");
+        assert_ne!(table.id, loaded.sheet(0).unwrap().tables()[0].id);
+        assert_eq!(table.totals.as_ref().unwrap().visible, visible);
+        assert_eq!(table.totals.as_ref().unwrap().columns[2].formula.as_deref(), Some("=SUM(Sales_Copy[Amount])+SUM([Price])"));
+        assert_eq!(loaded.sheet(index).unwrap().comment(4, 3).unwrap().text, "Manual override");
+        if !visible {
+            loaded.set_table_totals_visible(table.id, true, Default::default()).unwrap();
+            let original_id = loaded.sheet(0).unwrap().tables()[0].id;
+            loaded.set_table_totals_visible(original_id, true, Default::default()).unwrap();
+        }
+        assert_eq!(loaded.sheet(index).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
+        loaded.set_cell_value_tracked(index, 4, 3, "999");
+        assert_eq!(loaded.sheet(index).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original + 222.0);
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
+    }
+}
