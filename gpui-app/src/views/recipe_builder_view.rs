@@ -335,7 +335,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
                     .text_size(px(12.0))
                     .cursor_pointer()
                     .when(on, |d| d.bg(accent.opacity(0.18)))
-                    .child(div().text_color(text).child(format!("{}  {}", k + 1, label)))
+                    .child(div().text_color(text).child(format!("{}  {}", add_kind_key(k), label)))
                     .child(div().text_color(muted).child(help.to_string()))
                     .on_mouse_down(MouseButton::Left, cx.listener(with_builder(move |b| b.add_step(k)))),
             );
@@ -481,6 +481,10 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
         Step::Filter { .. } => "Rows where the condition holds are kept.",
         Step::Group { .. } => "One row per group of the checked columns, with the totals below.",
         Step::Unpivot { .. } => "Checked columns stay; every other column becomes rows, including ones added later.",
+        Step::Sort { .. } => "Click a column to sort by it, again for descending. Earlier columns decide first; empty values go last.",
+        Step::FillDown { .. } => "Empty cells in the checked columns take the value above.",
+        Step::Replace { .. } => "None checked: every column. An empty Find in whole cells replaces empty cells.",
+        Step::Split { .. } => "The new columns replace it. The last one keeps the rest, so nothing is lost.",
     };
     let mut rows = div().flex().flex_col();
     for (r, row) in b.editor_rows().iter().enumerate() {
@@ -525,6 +529,32 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
             (EditorRow::AddTotal, _) => ("+ Add a total".into(), "Add".into(), false),
             (EditorRow::NamesTo, Step::Unpivot { names_to, .. }) => ("Column names go in".into(), names_to.clone(), true),
             (EditorRow::ValuesTo, Step::Unpivot { values_to, .. }) => ("Their values go in".into(), values_to.clone(), true),
+            (EditorRow::SortBy { name, present }, Step::Sort { by, .. }) => {
+                let place = by.iter().position(|k| k.column.eq_ignore_ascii_case(name));
+                let value = match place {
+                    None => "—".to_string(),
+                    Some(i) => format!("{} · {}", i + 1, if by[i].descending { "Descending" } else { "Ascending" }),
+                };
+                (column_label(name, *present), value, false)
+            }
+            (EditorRow::ReplaceFind, Step::Replace { find, .. }) => ("Find".into(), find.clone(), true),
+            (EditorRow::ReplaceWith, Step::Replace { with, .. }) => ("Replace with".into(), with.clone(), true),
+            (EditorRow::ReplacePart, Step::Replace { part, .. }) => (
+                "Match".into(),
+                if *part { "Text inside cells".into() } else { "Whole cell".into() },
+                false,
+            ),
+            (EditorRow::ReplaceCase, Step::Replace { match_case, .. }) => (
+                "Case".into(),
+                if *match_case { "Must match".into() } else { "Ignored".into() },
+                false,
+            ),
+            (EditorRow::SplitColumn, Step::Split { column, .. }) => ("Column".into(), column.clone(), false),
+            (EditorRow::SplitBy, Step::Split { by, .. }) => ("At each".into(), by.clone(), true),
+            (EditorRow::SplitInto { index }, Step::Split { into, .. }) => {
+                (format!("New column {}", index + 1), into.get(*index).cloned().unwrap_or_default(), true)
+            }
+            (EditorRow::AddSplitPiece, _) => ("+ Add a column".into(), "Add".into(), false),
             (EditorRow::DropEmpty, Step::Unpivot { drop_empty, .. }) => (
                 "Empty values".into(),
                 if *drop_empty { "Leave out".into() } else { "Keep as empty rows".into() },
@@ -850,4 +880,9 @@ fn render_footer(app: &Spreadsheet, b: &RecipeBuilder, c: &Colors, cx: &mut Cont
                         })),
                 ),
         )
+}
+
+/// The key that picks add-menu entry `k`: 1-9, then a, b, c, d.
+fn add_kind_key(k: usize) -> char {
+    if k < 9 { (b'1' + k as u8) as char } else { (b'a' + (k - 9) as u8) as char }
 }

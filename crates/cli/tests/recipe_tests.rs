@@ -172,3 +172,49 @@ fn recipe_run_appends_a_folder_and_groups_it() {
     let csv = String::from_utf8(out.stdout).unwrap();
     assert_eq!(csv.lines().collect::<Vec<_>>(), ["Region,Total,Files", "West,4,2", "East,2,1"]);
 }
+
+#[test]
+fn recipe_run_fills_replaces_splits_and_sorts() {
+    let d = dir("shape");
+    // A report-style export: the region printed once per group, n/a for no
+    // amount, "Last, First" names
+    std::fs::write(d.join("report.csv"), "Region,Rep,Amount\nWest,\"Doe, Jane\",9\n,\"Roe, Rick\",n/a\nEast,\"Poe, Ed\",10\n").unwrap();
+    std::fs::write(
+        d.join("report.recipe.toml"),
+        r#"version = 1
+[source]
+kind = "csv"
+path = "report.csv"
+
+[[step]]
+op = "fill_down"
+columns = ["Region"]
+
+[[step]]
+op = "replace"
+columns = ["Amount"]
+find = "n/a"
+with = "0"
+
+[[step]]
+op = "split"
+column = "Rep"
+by = ", "
+into = ["Last", "First"]
+
+[[step]]
+op = "sort"
+by = [{ column = "Amount", descending = true }]
+"#,
+    )
+    .unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("report.recipe.toml"))]);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(),
+        ["Region,Last,First,Amount", "East,Poe,Ed,10", "West,Doe,Jane,9", "West,Roe,Rick,0"]
+    );
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.contains("Fill down Region") && stderr.contains("filled 1 empty cell"), "{stderr}");
+    assert!(stderr.contains("Sort by Amount (descending)"), "{stderr}");
+}

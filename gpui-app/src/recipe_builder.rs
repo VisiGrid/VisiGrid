@@ -13,8 +13,8 @@ use visigrid_engine::table::TableId;
 use visigrid_io::csv::{CsvOptions, Encoding};
 use visigrid_io::csv_import::{ColumnRule, DateOrder};
 use visigrid_io::recipe::{
-    self, CsvSource, FilterOp, Missing, OnError, OutColumn, Recipe, RunReport, Snapshot, Source, SourceInfo, Step, Total,
-    TotalFn, RECIPE_VERSION,
+    self, CsvSource, FilterOp, Missing, OnError, OutColumn, Recipe, RunReport, Snapshot, SortKey, Source, SourceInfo, Step,
+    Total, TotalFn, RECIPE_VERSION,
 };
 
 use crate::app::Spreadsheet;
@@ -37,7 +37,7 @@ const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
 const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
 
 /// The kinds of step "Add step" offers, in menu order.
-pub const ADD_KINDS: [(&str, &str); 9] = [
+pub const ADD_KINDS: [(&str, &str); 13] = [
     ("Keep columns", "choose which, in order"),
     ("Remove columns", ""),
     ("Rename columns", ""),
@@ -47,6 +47,10 @@ pub const ADD_KINDS: [(&str, &str); 9] = [
     ("Remove duplicates", "whole row or by key"),
     ("Group by", "one row per group, with totals"),
     ("Unpivot", "other columns into rows"),
+    ("Sort rows", "by one or more columns"),
+    ("Fill down", "empty cells take the value above"),
+    ("Replace values", "a whole cell or text inside it"),
+    ("Split column", "at a delimiter, into new columns"),
 ];
 
 /// One row of the selected step's settings.
@@ -70,6 +74,18 @@ pub enum EditorRow {
     NamesTo,
     ValuesTo,
     DropEmpty,
+    /// Sort: a column's place in the order (not sorted, ascending,
+    /// descending).
+    SortBy { name: String, present: bool },
+    ReplaceFind,
+    ReplaceWith,
+    ReplacePart,
+    ReplaceCase,
+    SplitColumn,
+    SplitBy,
+    /// Split: the name of new column `index`.
+    SplitInto { index: usize },
+    AddSplitPiece,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,7 +237,11 @@ pub fn step_missing(step: &Step) -> Missing {
         | Step::Filter { missing, .. }
         | Step::Dedupe { missing, .. }
         | Step::Group { missing, .. }
-        | Step::Unpivot { missing, .. } => *missing,
+        | Step::Unpivot { missing, .. }
+        | Step::Sort { missing, .. }
+        | Step::FillDown { missing, .. }
+        | Step::Replace { missing, .. }
+        | Step::Split { missing, .. } => *missing,
     }
 }
 
@@ -235,7 +255,11 @@ fn step_missing_mut(step: &mut Step) -> &mut Missing {
         | Step::Filter { missing, .. }
         | Step::Dedupe { missing, .. }
         | Step::Group { missing, .. }
-        | Step::Unpivot { missing, .. } => missing,
+        | Step::Unpivot { missing, .. }
+        | Step::Sort { missing, .. }
+        | Step::FillDown { missing, .. }
+        | Step::Replace { missing, .. }
+        | Step::Split { missing, .. } => missing,
     }
 }
 
@@ -251,6 +275,10 @@ pub fn step_kind(step: &Step) -> &'static str {
         Step::Dedupe { .. } => ADD_KINDS[6].0,
         Step::Group { .. } => ADD_KINDS[7].0,
         Step::Unpivot { .. } => ADD_KINDS[8].0,
+        Step::Sort { .. } => ADD_KINDS[9].0,
+        Step::FillDown { .. } => ADD_KINDS[10].0,
+        Step::Replace { .. } => ADD_KINDS[11].0,
+        Step::Split { .. } => ADD_KINDS[12].0,
     }
 }
 
@@ -445,7 +473,30 @@ impl RecipeBuilder {
             Step::Select { columns: c, .. }
             | Step::Remove { columns: c, .. }
             | Step::Trim { columns: c, .. }
-            | Step::Dedupe { columns: c, .. } => rows.extend(columns(c)),
+            | Step::Dedupe { columns: c, .. }
+            | Step::FillDown { columns: c, .. } => rows.extend(columns(c)),
+            Step::Sort { by, .. } => {
+                let named: Vec<String> = by.iter().map(|k| k.column.clone()).collect();
+                rows.extend(columns(&named).into_iter().map(|r| match r {
+                    EditorRow::Column { name, present } => EditorRow::SortBy { name, present },
+                    other => other,
+                }));
+            }
+            Step::Replace { columns: c, find, part, .. } => {
+                rows.push(EditorRow::ReplaceFind);
+                rows.push(EditorRow::ReplaceWith);
+                rows.push(EditorRow::ReplacePart);
+                if !(find.is_empty() && !part) {
+                    rows.push(EditorRow::ReplaceCase);
+                }
+                rows.extend(columns(c));
+            }
+            Step::Split { into, .. } => {
+                rows.push(EditorRow::SplitColumn);
+                rows.push(EditorRow::SplitBy);
+                rows.extend((0..into.len()).map(|index| EditorRow::SplitInto { index }));
+                rows.push(EditorRow::AddSplitPiece);
+            }
             Step::Rename { columns: m, .. } => rows.extend(columns(&m.keys().cloned().collect::<Vec<_>>())),
             Step::Types { columns: m, .. } => {
                 rows.extend(columns(&m.keys().cloned().collect::<Vec<_>>()));
@@ -493,7 +544,9 @@ impl RecipeBuilder {
             Some(Step::Select { columns, .. })
             | Some(Step::Remove { columns, .. })
             | Some(Step::Trim { columns, .. })
-            | Some(Step::Dedupe { columns, .. }) => columns.iter().any(|c| c.eq_ignore_ascii_case(name)),
+            | Some(Step::Dedupe { columns, .. })
+            | Some(Step::FillDown { columns, .. })
+            | Some(Step::Replace { columns, .. }) => columns.iter().any(|c| c.eq_ignore_ascii_case(name)),
             _ => false,
         }
     }
@@ -593,12 +646,50 @@ impl RecipeBuilder {
                 totals.push(Total { func: TotalFn::Sum, name: TotalFn::Sum.default_name(&column), column });
             }
             (EditorRow::DropEmpty, Step::Unpivot { drop_empty, .. }) => *drop_empty = !*drop_empty,
+            // Not sorted → ascending → descending → not sorted; the order the
+            // columns were added decides which comes first
+            (EditorRow::SortBy { name, present }, Step::Sort { by, .. }) => {
+                match by.iter().position(|k| k.column.eq_ignore_ascii_case(&name)) {
+                    None if present => by.push(SortKey { column: name, descending: back }),
+                    None => return,
+                    Some(i) => match (by[i].descending, back) {
+                        (false, false) => by[i].descending = true,
+                        (true, true) => by[i].descending = false,
+                        _ => {
+                            by.remove(i);
+                        }
+                    },
+                }
+            }
+            (EditorRow::ReplacePart, Step::Replace { part, .. }) => *part = !*part,
+            (EditorRow::ReplaceCase, Step::Replace { match_case, .. }) => *match_case = !*match_case,
+            (EditorRow::SplitColumn, Step::Split { column, .. }) => {
+                if !step_columns.is_empty() {
+                    let i = step_columns.iter().position(|c| c.eq_ignore_ascii_case(column));
+                    let n = step_columns.len();
+                    let next = match (i, back) {
+                        (None, _) => 0,
+                        (Some(i), false) => (i + 1) % n,
+                        (Some(i), true) => (i + n - 1) % n,
+                    };
+                    *column = step_columns[next].clone();
+                }
+            }
+            (EditorRow::ReplaceFind | EditorRow::ReplaceWith | EditorRow::SplitBy | EditorRow::SplitInto { .. }, _) => {
+                self.text_selected = true;
+                return;
+            }
+            (EditorRow::AddSplitPiece, Step::Split { column, into, .. }) => {
+                into.push(format!("{column} {}", into.len() + 1));
+            }
             (EditorRow::Column { name, present }, step) => {
                 let list = match step {
                     Step::Select { columns, .. }
                     | Step::Remove { columns, .. }
                     | Step::Trim { columns, .. }
-                    | Step::Dedupe { columns, .. } => columns,
+                    | Step::Dedupe { columns, .. }
+                    | Step::FillDown { columns, .. }
+                    | Step::Replace { columns, .. } => columns,
                     _ => return,
                 };
                 if let Some(i) = list.iter().position(|c| c.eq_ignore_ascii_case(&name)) {
@@ -622,6 +713,10 @@ impl RecipeBuilder {
             (EditorRow::Total { index, part: TotalPart::Name }, Step::Group { totals, .. }) => totals.get(*index).map(|t| t.name.clone()),
             (EditorRow::NamesTo, Step::Unpivot { names_to, .. }) => Some(names_to.clone()),
             (EditorRow::ValuesTo, Step::Unpivot { values_to, .. }) => Some(values_to.clone()),
+            (EditorRow::ReplaceFind, Step::Replace { find, .. }) => Some(find.clone()),
+            (EditorRow::ReplaceWith, Step::Replace { with, .. }) => Some(with.clone()),
+            (EditorRow::SplitBy, Step::Split { by, .. }) => Some(by.clone()),
+            (EditorRow::SplitInto { index }, Step::Split { into, .. }) => into.get(*index).cloned(),
             _ => None,
         }
     }
@@ -643,6 +738,20 @@ impl RecipeBuilder {
             },
             (EditorRow::NamesTo, Some(Step::Unpivot { names_to, .. })) => *names_to = text,
             (EditorRow::ValuesTo, Some(Step::Unpivot { values_to, .. })) => *values_to = text,
+            (EditorRow::ReplaceFind, Some(Step::Replace { find, .. })) => *find = text,
+            (EditorRow::ReplaceWith, Some(Step::Replace { with, .. })) => *with = text,
+            (EditorRow::SplitBy, Some(Step::Split { by, .. })) => *by = text,
+            // Clearing a third or later name removes that column
+            (EditorRow::SplitInto { index }, Some(Step::Split { into, .. })) => {
+                if text.is_empty() && into.len() > 2 && *index < into.len() {
+                    into.remove(*index);
+                    self.text_selected = false;
+                } else if let Some(name) = into.get_mut(*index) {
+                    *name = text;
+                } else {
+                    return;
+                }
+            }
             _ => return,
         }
         self.changed();
@@ -672,13 +781,36 @@ impl RecipeBuilder {
                 totals: vec![Total { func: TotalFn::CountRows, column: String::new(), name: "Rows".into() }],
                 missing: Missing::Fail,
             },
-            _ => Step::Unpivot {
+            8 => Step::Unpivot {
                 keep: cols.first().cloned().into_iter().collect(),
                 names_to: "Attribute".into(),
                 values_to: "Value".into(),
                 drop_empty: true,
                 missing: Missing::Fail,
             },
+            9 => Step::Sort {
+                by: cols.first().map(|c| SortKey { column: c.clone(), descending: false }).into_iter().collect(),
+                missing: Missing::Fail,
+            },
+            10 => Step::FillDown { columns: Vec::new(), missing: Missing::Fail },
+            // Replaces empty cells with nothing until a value is typed
+            11 => Step::Replace {
+                columns: Vec::new(),
+                find: String::new(),
+                with: String::new(),
+                part: false,
+                match_case: false,
+                missing: Missing::Fail,
+            },
+            _ => {
+                let column = cols.first().cloned().unwrap_or_default();
+                Step::Split {
+                    by: ",".into(),
+                    into: vec![format!("{column} 1"), format!("{column} 2")],
+                    column,
+                    missing: Missing::Fail,
+                }
+            }
         };
         let at = self.selected.map_or(0, |i| i + 1);
         self.recipe.steps.insert(at, step);
@@ -1241,6 +1373,10 @@ impl Spreadsheet {
                 "up" => b.add_menu = Some(i.saturating_sub(1)),
                 "down" => b.add_menu = Some((i + 1).min(ADD_KINDS.len() - 1)),
                 "enter" | "space" => b.add_step(i),
+                // 1-9, then a b c d for the rest
+                k if k.len() == 1 && ('a'..='d').contains(&k.chars().next().unwrap()) => {
+                    b.add_step(9 + (k.as_bytes()[0] - b'a') as usize)
+                }
                 k if k.len() == 1 && ('1'..='9').contains(&k.chars().next().unwrap()) => {
                     b.add_step(k.parse::<usize>().unwrap() - 1)
                 }
@@ -1543,5 +1679,56 @@ mod tests {
         let remove = b.editor_rows().iter().position(|r| *r == EditorRow::Total { index: 1, part: TotalPart::Remove }).unwrap();
         b.activate_row(remove, false);
         assert_eq!(b.preview.as_ref().unwrap().columns.len(), 2);
+    }
+
+    fn type_into(b: &mut RecipeBuilder, row: EditorRow, text: &str) {
+        b.editor_focus = b.editor_rows().iter().position(|r| *r == row).unwrap();
+        b.text_selected = true;
+        for ch in text.chars() {
+            let ch = ch.to_string();
+            b.type_text(&Keystroke { key: ch.clone(), key_char: Some(ch), modifiers: Modifiers::default(), ..Default::default() }, None);
+        }
+    }
+
+    #[test]
+    fn sort_fill_replace_and_split_editors() {
+        let mut b = builder("Name,Region,Amount\n\"Doe, Jane\",West,9\n\"Roe, Rick\",,10\n\"Poe, Ed\",East,n/a\n", vec![]);
+        b.add_step(9); // Sort: by the first column, ascending
+        assert_eq!(b.preview.as_ref().unwrap().rows[0][0], "Doe, Jane");
+        let amount = EditorRow::SortBy { name: "Amount".into(), present: true };
+        let at = b.editor_rows().iter().position(|r| *r == amount).unwrap();
+        b.activate_row(at, false); // Amount ascending, after Name
+        b.activate_row(at, false); // descending
+        assert!(matches!(b.step(), Some(Step::Sort { by, .. }) if by.len() == 2 && by[1].descending));
+        b.activate_row(at, false); // off again
+        assert!(matches!(b.step(), Some(Step::Sort { by, .. }) if by.len() == 1));
+
+        b.add_step(10); // Fill down: nothing checked, nothing changes
+        let region = b.editor_rows().iter().position(|r| *r == EditorRow::Column { name: "Region".into(), present: true }).unwrap();
+        b.activate_row(region, false);
+        assert_eq!(b.preview.as_ref().unwrap().rows.iter().map(|r| r[1].as_str()).collect::<Vec<_>>(), ["West", "East", "East"]);
+
+        b.add_step(11); // Replace: empty cells with nothing, a no-op
+        type_into(&mut b, EditorRow::ReplaceFind, "n/a");
+        type_into(&mut b, EditorRow::ReplaceWith, "0");
+        assert_eq!(b.preview.as_ref().unwrap().rows[1][2], "0");
+        assert!(b.editor_rows().contains(&EditorRow::ReplaceCase));
+
+        b.add_step(12); // Split the first column at ","
+        type_into(&mut b, EditorRow::SplitBy, ", ");
+        type_into(&mut b, EditorRow::SplitInto { index: 0 }, "Last");
+        type_into(&mut b, EditorRow::SplitInto { index: 1 }, "First");
+        let p = b.preview.as_ref().unwrap();
+        assert_eq!(p.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Last", "First", "Region", "Amount"]);
+        assert_eq!(p.rows[0], vec!["Doe", "Jane", "West", "9"]);
+        // A third column, then clearing its name removes it again
+        let add = b.editor_rows().iter().position(|r| *r == EditorRow::AddSplitPiece).unwrap();
+        b.activate_row(add, false);
+        assert_eq!(b.preview.as_ref().unwrap().columns.len(), 5);
+        b.editor_focus = b.editor_rows().iter().position(|r| *r == EditorRow::SplitInto { index: 2 }).unwrap();
+        b.text_selected = true;
+        b.type_text(&Keystroke { key: "backspace".into(), key_char: None, modifiers: Modifiers::default(), ..Default::default() }, None);
+        assert_eq!(b.preview.as_ref().unwrap().columns.len(), 4);
+        assert_eq!(super::step_kind(b.step().unwrap()), "Split column");
     }
 }
