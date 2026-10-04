@@ -885,7 +885,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             let mut sheet_circular = 0usize;
             for ((_row, _col), cell) in sheet.cells_iter() {
                 // Circulars: structural graph property (set during dep graph cycle detection)
-                if cell.value().is_cycle_error() {
+                if sheet.is_cycle_error(_row, _col) {
                     sheet_circular += 1;
                     if result.recalc_error_examples.len() < MAX_ERROR_EXAMPLES {
                         result.recalc_error_examples.push(RecalcErrorExample {
@@ -893,7 +893,10 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                             address: cell_address(_row, _col),
                             kind: "circular",
                             error: "#CYCLE!".to_string(),
-                            formula: None, // Source is lost when cycle is detected
+                            formula: match cell.value() {
+                                ValueRef::Formula { source, .. } => Some(source.to_string()),
+                                _ => None,
+                            },
                         });
                     }
                     continue;

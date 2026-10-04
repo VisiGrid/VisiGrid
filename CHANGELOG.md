@@ -5,6 +5,7 @@
 ### Excel interchange
 
 - **Exported formulas keep their results.** Excel files saved by VisiGrid stored 0 as every formula's result; Excel recalculated on open, but pandas, file previews and other tools that read saved results saw zeros. Each formula now carries its computed value. ([#100](https://github.com/VisiGrid/VisiGrid/pull/100))
+- Fixed Excel files with a large sheet (over 32 MB of sheet data) dropping every Table in the workbook with an "XLSX part … is too large" warning, even when the large sheet had no Tables. A problem reading one sheet's Tables now affects only that sheet. ([#96](https://github.com/VisiGrid/VisiGrid/pull/96))
 
 ## 0.46.0
 
