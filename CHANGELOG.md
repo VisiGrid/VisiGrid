@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Find follows displayed row order and skips filtered-out and manually hidden rows. Replace and Replace All work through Table criteria with atomic validation, sparse undo/redo and History rewind, including edits on other sheets that affect a Table. Stale results and protected targets refuse the whole replacement.
+- Find/Replace retains original UTF-8 offsets and matches formula references at token boundaries. Text replacements preserve leading zeros, whitespace and literal formula-looking text; the shared literal paste/fill path now also preserves whitespace. Search refuses more than 100,000 matches rather than applying a truncated Replace All.
+
 - Save named Table sort/filter setups and switch between them from **Views…**. Rename, update and delete setups with undo/redo and history rewind; column renames keep stable bindings, and manual row hides remain separate. Native/full JSON files containing named views use Table metadata version 6 so older readers enter read-only recovery; XLSX export warns that named setups are omitted.
 
 - Fix worksheet Hide/Unhide targeting the wrong records after sorting. Hide skips filtered-out rows; Unhide removes manual flags without clearing filters. The operation also works alongside other-sheet Table criteria, and visibility-only rewind retains worksheet sort history.

@@ -263,7 +263,7 @@ pub(crate) fn prepare_table_writes_with_new_rows(
         for write in writes {
             if let Some(value) = &write.value {
                 if write.literal_text {
-                    batch.set_cell_text_tracked(sheet_index, write.row, write.col, value);
+                    batch.set_cell_text_exact_tracked(sheet_index, write.row, write.col, value);
                 } else {
                     batch.set_cell_value_tracked(sheet_index, write.row, write.col, value);
                 }

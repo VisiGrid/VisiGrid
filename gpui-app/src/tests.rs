@@ -3042,8 +3042,8 @@ fn review_mode_workbook_mutators_are_guarded() {
     assert_guarded(include_str!("editing.rs"), "recalculate");
     assert_guarded(include_str!("app.rs"), "commit_validation_value");
     let find_replace = include_str!("find_replace.rs");
-    assert_guarded(find_replace, "replace_next");
-    assert_guarded(find_replace, "replace_all");
+    assert_contains_near(find_replace, "replace_next", "block_if_previewing_only(cx)");
+    assert_contains_near(find_replace, "replace_all", "block_if_previewing_only(cx)");
     assert_guarded(include_str!("dialogs.rs"), "ask_ai_insert_formula");
     assert_guarded(include_str!("named_ranges/create.rs"), "confirm_create_named_range");
     assert_guarded(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range");

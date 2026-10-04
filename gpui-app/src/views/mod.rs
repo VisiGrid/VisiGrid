@@ -831,7 +831,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             div.child(goto_dialog::render_goto_dialog(app, cx))
         })
         .when(show_find, |div| {
-            div.child(find_dialog::render_find_dialog(app))
+            div.child(find_dialog::render_find_dialog(app, cx))
         })
         .when(show_command, |div| {
             div.child(command_palette::render_command_palette(app, cx))

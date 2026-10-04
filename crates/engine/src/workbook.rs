@@ -2158,10 +2158,16 @@ impl Workbook {
     /// Write literal text with dependency tracking, without interpreting formulas
     /// or numeric-looking identifiers. Used by typed clipboard imports.
     pub fn set_cell_text_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
+        self.set_cell_text_exact_tracked(sheet_index, row, col, text.trim())
+    }
+
+    /// Preserve authored whitespace and text type for clipboard and replacement
+    /// operations, while retaining dependency tracking and Table write guards.
+    pub fn set_cell_text_exact_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
         let Some(sheet) = self.sheets.get_mut(sheet_index) else { return Recalculated::Cells(Vec::new()); };
         if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
         let sheet_id = sheet.id;
-        sheet.set_text(row, col, text);
+        sheet.set_text_exact(row, col, text);
         self.update_cell_deps(sheet_id, row, col);
         self.note_cell_changed(CellId::new(sheet_id, row, col))
     }
