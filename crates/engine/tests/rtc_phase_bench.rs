@@ -301,7 +301,9 @@ fn build_versus_recompute() {
 // the workbook — on every edit, however small the change, which cost 78 ms for
 // a ONE-dependent edit on 200k formulas. It now orders only the dirty subgraph
 // (`dep_graph::topo_order_subset`), and the same edit is ~0.002 ms and flat
-// across sizes. A one-dependent edit is the measurement that keeps it honest:
+// across sizes. (It regressed to 42 ms at 200k when spill settlement began
+// scanning every formula for INDIRECT/OFFSET readers on every call; that scan
+// is now lazy, done only when a round actually places an array.) A one-dependent edit is the measurement that keeps it honest:
 // the dirty set is 1, so anything the edit costs beyond trivial is ordering
 // work that should not be happening.
 //
