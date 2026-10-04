@@ -678,7 +678,8 @@ fn totals_ownership_and_conversion_preserve_formulas_and_history() {
     let mut wb = book();
     let id = wb.tables().next().unwrap().1.id;
     let before = wb.saved_tables();
-    assert!(wb.rename_table(id, "Renamed").is_err());
+    let rename = wb.rename_table(id, "Renamed").unwrap();
+    wb.apply_table_commit(&rename, true).unwrap();
     let append = wb.append_table_rows(id, 1, &[]).unwrap();
     wb.apply_table_commit(&append, true).unwrap();
     assert!(wb
@@ -754,4 +755,150 @@ fn cross_sheet_structural_rewrite_of_a_footer_refuses_before_any_mutation() {
     assert_eq!(wb.sheet(other).unwrap().get_raw(1, 0), "25");
     assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "=Control!A2");
     assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "25");
+}
+
+#[test]
+fn totals_renames_rewrite_cells_rules_and_custom_settings_without_moving_records() {
+    let (mut wb, id) = native_book();
+    wb.set_calculated_column(id, 1, 1, "=IF([@Region]=\"West\",10,20)", true).unwrap();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 1, TableTotal {
+        function: Some("custom".into()),
+        formula: Some("=SUM([Amount])+SUM(Sales[Amount])+IF(\"Sales[Amount]\"=\"x\",1,0)".into()),
+        label: None,
+    }).unwrap();
+    let other = wb.add_sheet_named("Summary").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "=SUM(Sales[[#Totals],[Amount]])");
+    let before = wb.saved_tables();
+    let ids: Vec<_> = wb.table(id).unwrap().1.columns.iter().map(|c| c.id).collect();
+    let rename = wb.rename_table(id, "Orders").unwrap();
+    assert!(rename.is_name_change());
+    let headers = wb.rename_table_columns(id, &["Area".into(), "Net [USD]".into()]).unwrap();
+    assert!(headers.is_name_change());
+    let expected = "=SUM([Net '[USD']])+SUM(Orders[Net '[USD']])+IF(\"Sales[Amount]\"=\"x\",1,0)";
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), expected);
+    assert_eq!(wb.table(id).unwrap().1.totals.as_ref().unwrap().columns[1].formula.as_deref(), Some(expected));
+    assert_eq!(wb.sheet(other).unwrap().get_display(0, 0), "80");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(1, 1), "=IF([@[Area]]=\"West\",10,20)");
+    assert_eq!(ids, wb.table(id).unwrap().1.columns.iter().map(|c| c.id).collect::<Vec<_>>());
+    wb.apply_table_commit(&headers, true).unwrap();
+    wb.apply_table_commit(&rename, true).unwrap();
+    assert_eq!(serde_json::to_value(wb.saved_tables()).unwrap(), serde_json::to_value(before).unwrap());
+    wb.apply_table_commit(&rename, false).unwrap();
+    wb.apply_table_commit(&headers, false).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), expected);
+    assert_eq!(wb.sheet(other).unwrap().get_display(0, 0), "80");
+}
+
+#[test]
+fn dormant_totals_rename_local_references_and_restore_them_when_shown() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 1, TableTotal { function: Some("custom".into()),
+        formula: Some("=SUM([Amount])*2".into()), label: None }).unwrap();
+    wb.set_table_totals_visible(id, false, Default::default()).unwrap();
+    let rename = wb.rename_table_columns(id, &["Area".into(), "Revenue".into()]).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "");
+    assert_eq!(wb.table(id).unwrap().1.totals.as_ref().unwrap().columns[1].formula.as_deref(), Some("=SUM([Revenue])*2"));
+    wb.apply_table_commit(&rename, true).unwrap();
+    assert_eq!(wb.table(id).unwrap().1.totals.as_ref().unwrap().columns[1].formula.as_deref(), Some("=SUM([Amount])*2"));
+    wb.apply_table_commit(&rename, false).unwrap();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "=SUM([Revenue])*2");
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "120");
+}
+
+#[test]
+fn rename_updates_other_tables_visible_and_dormant_totals_and_rejects_stale_replay() {
+    for visible in [true, false] {
+        let (mut wb, id) = native_book();
+        let other = wb.add_sheet_named("Other").unwrap();
+        wb.set_cell_value_tracked(other, 0, 0, "Value");
+        wb.set_cell_value_tracked(other, 1, 0, "1");
+        let other_id = wb.create_table(wb.sheet(other).unwrap().id, TableRange {
+            start_row: 0, end_row: 1, start_col: 0, end_col: 0,
+        }, "Summary").unwrap().table_id();
+        wb.set_table_totals_visible(other_id, true, Default::default()).unwrap();
+        wb.set_table_total(other_id, 0, TableTotal { function: Some("custom".into()),
+            formula: Some("=SUM(Sales[Amount])".into()), label: None }).unwrap();
+        if !visible { wb.set_table_totals_visible(other_id, false, Default::default()).unwrap(); }
+        let rename = wb.rename_table(id, "Orders").unwrap();
+        assert_eq!(wb.table(other_id).unwrap().1.totals.as_ref().unwrap().columns[0].formula.as_deref(), Some("=SUM(Orders[Amount])"));
+        if visible {
+            assert_eq!(wb.sheet(other).unwrap().get_raw(2, 0), "=SUM(Orders[Amount])");
+            assert_eq!(wb.sheet(other).unwrap().get_display(2, 0), "60");
+        }
+        wb.apply_table_commit(&rename, true).unwrap();
+        wb.apply_table_commit(&rename, false).unwrap();
+        if !visible { wb.set_table_totals_visible(other_id, true, Default::default()).unwrap(); }
+        wb.set_table_total(other_id, 0, TableTotal { function: Some("custom".into()),
+            formula: Some("=SUM(Orders[Amount])*2".into()), label: None }).unwrap();
+        let revision = wb.revision();
+        assert!(wb.apply_table_commit(&rename, true).is_err());
+        assert_eq!(wb.revision(), revision);
+        assert_eq!(wb.table(id).unwrap().1.name, "Orders");
+        assert_eq!(wb.sheet(other).unwrap().get_display(2, 0), "120");
+    }
+}
+
+#[test]
+fn totals_header_swap_keeps_filters_and_labels_bound_to_ids_and_refuses_duplicate_names() {
+    let mut wb = book();
+    let id = wb.tables().next().unwrap().1.id;
+    let table = wb.table(id).unwrap().1;
+    let mut spec = TableViewSpec::new(id);
+    spec.filters.push(TableFilter { column: table.columns[0].id, criteria: ColumnFilter {
+        selected: Some([NormalizedFilterKey::Text("west".into())].into()), text_filter: None,
+    }});
+    wb.set_table_view_spec(wb.active_sheet_id(), Some(spec.clone())).unwrap();
+    let rename = wb.rename_table_columns(id, &["Amount".into(), "Region".into()]).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "=SUBTOTAL(109,[Region])");
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "40");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 0), "Total");
+    assert_eq!(wb.active_sheet().table_view_spec(), Some(&spec));
+    let revision = wb.revision();
+    assert!(wb.rename_table_columns(id, &["Same".into(), "same".into()]).is_err());
+    assert_eq!(wb.revision(), revision);
+    wb.apply_table_commit(&rename, true).unwrap();
+    assert_eq!(wb.active_sheet().table_view_spec(), Some(&spec));
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "40");
+}
+
+#[test]
+fn new_dormant_totals_reference_makes_rename_undo_stale_without_partial_writes() {
+    let (mut wb, id) = native_book();
+    let rename = wb.rename_table(id, "Orders").unwrap();
+    let other = wb.add_sheet_named("Other").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "Value");
+    let other_id = wb.create_table(wb.sheet(other).unwrap().id, TableRange {
+        start_row: 0, end_row: 0, start_col: 0, end_col: 0,
+    }, "Summary").unwrap().table_id();
+    wb.set_table_totals_visible(other_id, true, Default::default()).unwrap();
+    wb.set_table_total(other_id, 0, TableTotal { function: Some("custom".into()),
+        formula: Some("=SUM(Orders[Amount])".into()), label: None }).unwrap();
+    wb.set_table_totals_visible(other_id, false, Default::default()).unwrap();
+    let revision = wb.revision();
+    assert!(wb.apply_table_commit(&rename, true).unwrap_err().contains("New totals references"));
+    assert_eq!(wb.revision(), revision);
+    assert_eq!(wb.table(id).unwrap().1.name, "Orders");
+}
+
+#[test]
+fn renaming_a_header_invalidates_cross_sheet_pivot_sources_when_custom_totals_change() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 1, TableTotal { function: Some("custom".into()),
+        formula: Some("=IF(COUNTIF(Sales[#Headers],\"Amount\"),1,2)".into()), label: None }).unwrap();
+    let summary = wb.add_sheet_named("Summary").unwrap();
+    // A fixed reference is not itself rewritten by the rename.
+    wb.set_cell_value_tracked(summary, 0, 0, "=Sheet1!B5");
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "1");
+    let generation = wb.sheet(summary).unwrap().edit_generation();
+    let rename = wb.rename_table_columns(id, &["Region".into(), "Revenue".into()]).unwrap();
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "2");
+    assert!(wb.sheet(summary).unwrap().edit_generation() > generation);
+    let generation = wb.sheet(summary).unwrap().edit_generation();
+    wb.apply_table_commit(&rename, true).unwrap();
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "1");
+    assert!(wb.sheet(summary).unwrap().edit_generation() > generation);
 }

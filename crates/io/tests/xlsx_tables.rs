@@ -2369,3 +2369,37 @@ fn totals_sort_export_uses_explicit_stored_order_or_headless_fallback() {
         wb.sheet(0).unwrap().table_view_spec().unwrap().sort
     );
 }
+
+#[test]
+fn renamed_totals_keep_custom_settings_and_calculated_rules_through_native_and_xlsx() {
+    use visigrid_engine::table::TableTotal;
+    for visible in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 2, TableTotal { function: Some("custom".into()),
+            formula: Some("=SUM([Price])+SUM(Sales[Price])".into()), label: None }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.rename_table(id, "Orders").unwrap();
+        wb.rename_table_columns(id, &["Units".into(), "Cost".into(), "Revenue".into()]).unwrap();
+        let path = dir.path().join("rename.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("rename.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let xml = xml(&path, "xl/tables/table1.xml");
+        assert!(xml.contains("name=\"Orders\""), "{xml}");
+        assert!(xml.contains("SUM([Cost])+SUM(Orders[Cost])"), "{xml}");
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 2), "100");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 2), "=SUM([Cost])+SUM(Orders[Cost])");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+        assert!(loaded.table(id).unwrap().1.columns[2].formula.as_ref().unwrap().contains("Units"));
+        loaded.set_table_totals_visible(id, false, Default::default()).unwrap();
+        loaded.set_table_totals_visible(id, true, Default::default()).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 2), "100");
+    }
+}

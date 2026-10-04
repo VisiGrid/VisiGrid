@@ -1,3 +1,4 @@
+//! Table/header renames and their candidate validation through saved views.
 //! Header paste is a schema rename, never a batch of ordinary cell writes.
 use crate::{
     app::Spreadsheet,
@@ -62,26 +63,18 @@ fn validate_views(wb: &Workbook) -> Result<(), String> {
     Ok(())
 }
 
-/// A name-only schema change may pass the saved-view history gate. Formula
-/// rules can also change because references to renamed columns are rewritten.
-pub(crate) fn is_header_rename(commit: &TableCommit) -> bool {
-    let (Some(before), Some(after)) = (commit.before_table(), commit.after_table()) else {
-        return false;
-    };
-    if before.columns.len() != after.columns.len() || commit.inserted_header_row().is_some() {
-        return false;
+pub(crate) fn prepare_table_rename(
+    wb: &Workbook,
+    id: visigrid_engine::table::TableId,
+    name: &str,
+) -> Result<(Workbook, TableCommit), String> {
+    let mut candidate = wb.clone();
+    let commit = candidate.rename_table(id, name)?;
+    if let Some(error) = candidate.take_incremental_errors().first() {
+        return Err(format!("The Table rename could not be recalculated: {error:?}"));
     }
-    let changed = before
-        .columns
-        .iter()
-        .zip(&after.columns)
-        .any(|(a, b)| a.name != b.name);
-    let mut normalized = after.clone();
-    for (a, b) in before.columns.iter().zip(&mut normalized.columns) {
-        b.name = a.name.clone();
-        b.formula = a.formula.clone();
-    }
-    changed && *before == normalized
+    validate_views(&candidate)?;
+    Ok((candidate, commit))
 }
 
 /// Validate the whole destination and schema before publishing any changes.
@@ -128,15 +121,21 @@ fn prepare_header_paste(
     {
         return Ok(None);
     }
+    prepare_column_rename(wb, table.id, &names).map(Some)
+}
+
+pub(crate) fn prepare_column_rename(
+    wb: &Workbook,
+    id: visigrid_engine::table::TableId,
+    names: &[String],
+) -> Result<(Workbook, TableCommit), String> {
     let mut candidate = wb.clone();
-    let commit = candidate.rename_table_columns(table.id, &names)?;
+    let commit = candidate.rename_table_columns(id, names)?;
     if let Some(error) = candidate.take_incremental_errors().first() {
-        return Err(format!(
-            "The header rename could not be recalculated: {error:?}"
-        ));
+        return Err(format!("The header rename could not be recalculated: {error:?}"));
     }
     validate_views(&candidate)?;
-    Ok(Some((candidate, commit)))
+    Ok((candidate, commit))
 }
 
 pub(crate) fn prepare_header_replay(
@@ -144,8 +143,8 @@ pub(crate) fn prepare_header_replay(
     commit: &TableCommit,
     undo: bool,
 ) -> Result<Workbook, String> {
-    if !is_header_rename(commit) {
-        return Err("This history entry is not a header rename.".into());
+    if !commit.is_name_change() {
+        return Err("This history entry is not a Table or column rename.".into());
     }
     let mut candidate = wb.clone();
     candidate.apply_table_commit(commit, undo)?;
@@ -159,6 +158,26 @@ pub(crate) fn prepare_header_replay(
 }
 
 impl Spreadsheet {
+    pub(crate) fn submit_table_rename(
+        &mut self, id: visigrid_engine::table::TableId, name: &str, cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.sync_table_view(cx);
+        if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
+            return Err("Clear worksheet sorting and filters before renaming a Table.".into());
+        }
+        if self.wb(cx).table(id).is_some_and(|(_, table)| table.name == name) {
+            return Ok(());
+        }
+        self.validate_saved_view_layout(self.wb(cx))?;
+        let (candidate, commit) = prepare_table_rename(self.wb(cx), id, name)?;
+        self.validate_saved_view_layout(&candidate)?;
+        self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+        self.table_filter_dropdown = None;
+        self.sync_table_view(cx);
+        self.record_table_commit(commit, format!("Rename Table: {name}"), cx);
+        Ok(())
+    }
+
     /// Return true when the destination is a header, including a refused paste.
     pub(crate) fn paste_table_headers(
         &mut self,
@@ -321,7 +340,7 @@ mod tests {
         let (after, commit) = prepare_header_paste(&before, 0, 2, 1, &grid(&["Amount", "Group"]))
             .unwrap()
             .unwrap();
-        assert!(is_header_rename(&commit));
+        assert!(commit.is_name_change());
         assert_eq!(
             after.sheet(other).unwrap().get_raw(0, 0),
             "=SUM(Sales[Group])"
@@ -606,21 +625,84 @@ mod tests {
     }
 
     #[test]
-    fn history_gate_only_admits_column_renames_and_header_only_tables_work() {
+    fn history_gate_admits_names_but_not_resize_and_header_only_tables_work() {
         let mut before = fixture(false);
         let id = before.active_sheet().tables()[0].id;
         let rename = before.rename_table(id, "Orders").unwrap();
-        assert!(!is_header_rename(&rename));
+        assert!(rename.is_name_change());
         before.set_table_view_spec(SheetId(7), None).unwrap();
         let mut range = before.table(id).unwrap().1.range;
         range.end_row = range.start_row;
         let resize = before.resize_table(id, range).unwrap();
-        assert!(!is_header_rename(&resize));
+        assert!(!resize.is_name_change());
         let (after, commit) = prepare_header_paste(&before, 0, 2, 1, &grid(&["Area", "Revenue"]))
             .unwrap()
             .unwrap();
-        assert!(is_header_rename(&commit));
+        assert!(commit.is_name_change());
         assert_eq!(after.table(id).unwrap().1.range, range);
         assert_eq!(after.active_sheet().get_raw(3, 1), "West");
     }
+    #[test]
+    fn totals_table_and_header_rename_preserve_views_and_rewind() {
+        use visigrid_engine::table::TableTotal;
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_calculated_column(id, 3, 3, "=[@Amount]*2", true).unwrap();
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_table_total(id, 3, TableTotal { function: Some("custom".into()),
+            formula: Some("=SUBTOTAL(109,[Result])".into()), label: None }).unwrap();
+        let (renamed, rename) = prepare_table_rename(&base, id, "Orders").unwrap();
+        let (after, headers) = prepare_header_paste(&renamed, 0, 2, 1,
+            &grid(&["Area", "Revenue", "Double"])).unwrap().unwrap();
+        assert!(rename.is_name_change());
+        assert!(headers.is_name_change());
+        assert_eq!(after.active_sheet().get_raw(7, 3), "=SUBTOTAL(109,[Double])");
+        assert_eq!(after.active_sheet().get_display(7, 3), "180");
+        assert_eq!(after.active_sheet().get_raw(4, 1), "East");
+        assert_eq!(after.active_sheet().table_view_spec(), base.active_sheet().table_view_spec());
+        assert_eq!(projection(&after), projection(&base));
+        let undone = prepare_header_replay(&after, &headers, true).unwrap();
+        let undone = prepare_header_replay(&undone, &rename, true).unwrap();
+        assert_eq!(undone.active_sheet().tables(), base.active_sheet().tables());
+        let redone = prepare_header_replay(&undone, &rename, false).unwrap();
+        let redone = prepare_header_replay(&redone, &headers, false).unwrap();
+        assert_eq!(redone.active_sheet().tables(), after.active_sheet().tables());
+        let mut history = History::new();
+        for commit in [rename, headers] {
+            history.record_action_with_provenance(UndoAction::TableCommit {
+                header_layout: None, sheet_index: 0, commit: Box::new(commit), description: "Rename".into(),
+            }, None);
+        }
+        let preview = history.build_workbook_before(2, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().tables(), after.active_sheet().tables());
+        assert_eq!(preview.workbook.active_sheet().get_display(7, 3), "180");
+        assert_eq!(projection(&preview.workbook), projection(&base));
+        let earlier = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(earlier.workbook.active_sheet().tables(), renamed.active_sheet().tables());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("renamed-totals.sheet");
+        visigrid_io::native::save_workbook(&after, &path).unwrap();
+        let loaded = visigrid_io::native::load_workbook(&path).unwrap();
+        assert_eq!(loaded.active_sheet().tables(), after.active_sheet().tables());
+        assert_eq!(projection(&loaded), projection(&after));
+        assert_eq!(loaded.active_sheet().get_display(7, 3), "180");
+    }
+
+    #[test]
+    fn totals_rename_candidate_refuses_conflicts_and_stale_replay() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let revision = base.revision();
+        assert!(prepare_table_rename(&base, id, "A1").is_err());
+        assert!(prepare_header_paste(&base, 0, 2, 1, &grid(&["Same", "same"])).is_err());
+        assert_eq!(base.revision(), revision);
+        let (mut after, commit) = prepare_table_rename(&base, id, "Orders").unwrap();
+        after.set_cell_value_tracked(0, 0, 5, "=SUM(Orders[[#Totals],[Result]])");
+        let revision = after.revision();
+        assert!(prepare_header_replay(&after, &commit, true).is_err());
+        assert_eq!(after.revision(), revision);
+        assert_eq!(after.table(id).unwrap().1.name, "Orders");
+    }
+
 }

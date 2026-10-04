@@ -14,7 +14,7 @@ mod totals;
 #[path = "workbook_table_footer.rs"]
 mod footer;
 
-use super::table_refs::TableFormulaChange;
+use super::table_refs::{names_only, TableFormulaChange, TotalsReferenceChange};
 use super::Workbook;
 use crate::cell::{CellValue, ValueRef};
 use crate::sheet::SheetId;
@@ -51,10 +51,17 @@ pub struct TableCommit {
     header_insertion: Option<Box<create::HeaderInsertion>>,
     rules: Vec<calculated::RuleChange>,
     totals_edit: bool,
+    name_edit: bool,
+    totals_references: Vec<TotalsReferenceChange>,
     footer_move: Option<footer::FooterMove>,
 }
 
 impl TableCommit {
+    /// A validated Table/column rename, including derived formula changes.
+    pub fn is_name_change(&self) -> bool {
+        self.name_edit
+    }
+
     pub fn is_totals_change(&self) -> bool {
         self.totals_edit
     }
@@ -715,9 +722,11 @@ impl Workbook {
         before: Option<DataTable>,
         mut after: Option<DataTable>,
     ) -> Result<TableCommit, String> {
-        if before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
+        let name_edit = before.as_ref().zip(after.as_ref())
+            .is_some_and(|(a, b)| a != b && names_only(a, b));
+        if !name_edit && before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
             && (a.range.start_row != b.range.start_row || a.range.start_col != b.range.start_col || a.range.end_col != b.range.end_col || a.name != b.name || a.columns != b.columns)) {
-            return Err("Changing columns or names of a totals-row Table is not supported yet. Convert it to a range first.".into());
+            return Err("Changing column structure or calculated rules of a totals-row Table is not supported yet. Convert it to a range first.".into());
         }
         let sheet = self
             .sheet_by_id(sheet_id)
@@ -771,7 +780,10 @@ impl Workbook {
         } else {
             None
         };
-        let mut formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
+        let mut totals_references = if name_edit {
+            self.totals_reference_changes(sheet_id, before.as_ref().unwrap(), after.as_ref().unwrap())?
+        } else { Vec::new() };
+        let mut formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref(), name_edit)?;
         let rules = self.schema_rule_changes(sheet_id, before.as_ref(), after.as_ref())?;
         // The operation's own rule changes are part of its primary schema state.
         if let Some(table) = &mut after {
@@ -783,6 +795,10 @@ impl Workbook {
             }
         }
         let rules = rules.into_iter().filter(|r| r.table != id).collect();
+        if let Some(change) = totals_references.iter().find(|c| c.table == id) {
+            after.as_mut().unwrap().totals = Some(change.after.clone());
+        }
+        totals_references.retain(|c| c.table != id);
         let footer_move = match before.as_ref().zip(after.as_ref()) {
             Some((old, new)) => self.prepare_footer_move(sheet_id, old, new)?,
             None => None,
@@ -792,6 +808,8 @@ impl Workbook {
             formulas.retain(|change| change.cell.sheet != sheet_id || !movement.owns(change.cell.row, change.cell.col));
         }
         Ok(TableCommit {
+            name_edit,
+            totals_references,
             footer_move,
             totals_edit: false,
             rules,
@@ -949,6 +967,15 @@ impl Workbook {
                 );
             }
         }
+        if commit.name_edit {
+            for change in &commit.formulas {
+                let sheet = self.sheet_by_id(change.cell.sheet).unwrap();
+                if let Some(table) = sheet.table_at(change.cell.row, change.cell.col)
+                    .filter(|t| t.totals_row() == Some(change.cell.row)) {
+                    self.validate_table_region(sheet.id, table.full_range(), Some(table.id))?;
+                }
+            }
+        }
         // Refuse replay if newer formulas would also require a rewrite. Existing
         // destructive rewrites (#REF!/A1 conversion) are restored from the commit.
         if let Some(sources) = &commit.creation_references {
@@ -963,6 +990,7 @@ impl Workbook {
                 commit.sheet_id,
                 expected.table.as_ref(),
                 target.table.as_ref(),
+                commit.name_edit,
             )? {
                 if !commit
                     .formulas
@@ -975,6 +1003,21 @@ impl Workbook {
                     })
                 {
                     return Err("New dependent formulas require a fresh table operation.".into());
+                }
+            }
+        }
+        for change in &commit.totals_references {
+            let expected = if undo { &change.after } else { &change.before };
+            if self.table(change.table).filter(|(s, _)| *s == change.sheet)
+                .and_then(|(_, t)| t.totals.as_ref()) != Some(expected) {
+                return Err("Totals settings changed since this rename was prepared.".into());
+            }
+        }
+        if commit.name_edit {
+            for change in self.totals_reference_changes(commit.sheet_id,
+                expected.table.as_ref().unwrap(), target.table.as_ref().unwrap())? {
+                if change.table != commit.id && !commit.totals_references.iter().any(|c| c.table == change.table) {
+                    return Err("New totals references require a fresh Table rename.".into());
                 }
             }
         }
@@ -995,7 +1038,7 @@ impl Workbook {
         }
         // A pivot can source a formula on another sheet that depends on this
         // footer. Recalculation alone doesn't advance that sheet's generation.
-        let totals_dependents: Vec<_> = if commit.is_totals_change() || commit.footer_move.is_some() {
+        let totals_dependents: Vec<_> = if commit.is_totals_change() || commit.footer_move.is_some() || commit.name_edit {
             self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
                 sheet.cells_iter().filter_map(move |((row, col), cell)| {
                     matches!(cell.value(), ValueRef::Formula { .. })
@@ -1031,10 +1074,11 @@ impl Workbook {
             let source = if undo { &change.before } else { &change.after };
             let sheet = self.sheet_by_id_mut(change.cell.sheet).unwrap();
             if sheet.table_at(change.cell.row, change.cell.col)
-                .is_some_and(|t| t.id == commit.id && t.totals_row() == Some(change.cell.row)) {
-                // Restoring Convert to Range reinstalls the footer owner before
-                // its symbolic formula. This validated replay owns that write.
+                .is_some_and(|t| (t.id == commit.id || commit.name_edit) && t.totals_row() == Some(change.cell.row)) {
+                // Conversion replay and renames own these validated footer
+                // formula writes, including dependent totals in other Tables.
                 sheet.write_table_header(change.cell.row, change.cell.col, CellValue::from_input(source));
+                sheet.mark_table_changed();
             } else {
                 sheet.set_value(change.cell.row, change.cell.col, source);
             }
@@ -1059,6 +1103,12 @@ impl Workbook {
                     sheet.restore_history_cell(patch.row, patch.col, Some(cell));
                 }
             }
+        }
+        for change in &commit.totals_references {
+            let sheet = self.sheet_by_id_mut(change.sheet).unwrap();
+            let table = sheet.data_tables.iter_mut().find(|t| t.id == change.table).unwrap();
+            table.totals = Some(if undo { change.before.clone() } else { change.after.clone() });
+            sheet.mark_table_changed();
         }
         self.apply_rule_changes(&commit.rules, undo);
         // Membership changes affect symbolic shape dependencies even when no

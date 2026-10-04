@@ -49,7 +49,7 @@ impl Spreadsheet {
                     &entry.action,
                     UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. } | UndoAction::ReviewCopy { .. }
                 )
-                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if commit.is_totals_change() || crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if commit.is_totals_change() || commit.is_name_change() || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
@@ -1335,7 +1335,7 @@ impl Spreadsheet {
                     &entry.action,
                     UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. } | UndoAction::ReviewCopy { .. }
                 )
-                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if commit.is_totals_change() || crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if commit.is_totals_change() || commit.is_name_change() || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {

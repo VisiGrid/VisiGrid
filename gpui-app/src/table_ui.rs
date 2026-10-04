@@ -483,7 +483,7 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if !matches!(kind, TableDialogKind::Resize(_) | TableDialogKind::Total(..)) && self.block_table_view_edit(cx) { return; }
+        if !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Total(..)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
             TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
@@ -556,6 +556,14 @@ impl Spreadsheet {
             let result = crate::table_totals::total_setting(&draft.range, &draft.name)
                 .and_then(|total| self.change_table_totals(id, Some((col, total)), cx));
             match result {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::Rename(id) = draft.kind {
+            match self.submit_table_rename(id, draft.name.trim(), cx) {
                 Ok(()) => self.table_dialog = None,
                 Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
             }
@@ -671,7 +679,7 @@ impl Spreadsheet {
         if crate::table_resize::is_resize(commit) {
             return self.replay_table_resize(commit, undo, cx);
         }
-        if crate::table_header_paste::is_header_rename(commit) {
+        if commit.is_name_change() {
             return self.replay_table_headers(commit, undo, cx);
         }
         match self
@@ -734,11 +742,20 @@ impl Spreadsheet {
         let table = self.sheet(cx).table_header_at(row, col)?.clone();
         let mut names: Vec<_> = table.columns.iter().map(|c| c.name.clone()).collect();
         names[col - table.range.start_col] = value.to_string();
-        let result = self
-            .workbook
-            .update(cx, |wb, _| wb.rename_table_columns(table.id, &names));
+        if table.columns[col - table.range.start_col].name == value {
+            return Some(true);
+        }
+        let result = (|| {
+            self.validate_saved_view_layout(self.wb(cx))?;
+            let (candidate, commit) = crate::table_header_paste::prepare_column_rename(self.wb(cx), table.id, &names)?;
+            self.validate_saved_view_layout(&candidate)?;
+            Ok::<_, String>((candidate, commit))
+        })();
         Some(match result {
-            Ok(commit) => {
+            Ok((candidate, commit)) => {
+                self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                self.table_filter_dropdown = None;
+                self.sync_table_view(cx);
                 self.record_table_commit(commit, format!("Rename {} column", table.name), cx);
                 true
             }

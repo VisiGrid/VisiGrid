@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Rename Tables and column headers with totals enabled or hidden. Structured cell formulas, calculated rules and custom totals settings follow the new names, including references from other Tables. Saved filters/sorting stay active, with undo/redo and history rewind.
+
 - Table sorting and filtering now display correctly on smaller imported sheets, including CSV files. The desktop projection respects the sheet's row extent, keeping visible records and totals consistent.
 
 - Adding Table records and vertical resizing now move the totals footer safely, including its formulas, formatting and comments. Filtered bulk paste, calculated-column fill and undo/redo/rewind preserve hidden records and neighboring notes. Occupied footer destinations and unsafe fixed references refuse before any write; structured `#Totals` references follow the footer.

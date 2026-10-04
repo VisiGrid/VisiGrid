@@ -178,14 +178,14 @@ pub(crate) fn render_table_controls(
             move |s, cx| s.open_table_dialog(TableDialogKind::Resize(id), cx),
             cx,
         ))
-        .when(!view_only, |d| d.child(button(
+        .child(button(
             "table-rename",
             "Rename",
             app,
             move |s, cx| s.open_table_dialog(TableDialogKind::Rename(id), cx),
             cx,
         ))
-        .child(button(
+        .when(!view_only, |d| d.child(button(
             "table-banding",
             if table.style.banded_rows {
                 "✓ Banded rows"

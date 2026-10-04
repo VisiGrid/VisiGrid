@@ -7,13 +7,34 @@ use crate::cell_id::CellId;
 use crate::formula::parser::{format_expr, BoundExpr, Expr};
 use crate::formula::structured::{self, StructuredReference};
 use crate::sheet::SheetId;
-use crate::table::DataTable;
+use crate::table::{DataTable, TableId, TableTotals};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TableFormulaChange {
     pub cell: CellId,
     pub before: String,
     pub after: String,
+}
+
+/// Compare the input schemas before derived formula rewrites are applied.
+pub(crate) fn names_only(before: &DataTable, after: &DataTable) -> bool {
+    if before.columns.len() != after.columns.len() {
+        return false;
+    }
+    let mut normalized = after.clone();
+    normalized.name = before.name.clone();
+    for (old, new) in before.columns.iter().zip(&mut normalized.columns) {
+        new.name = old.name.clone();
+    }
+    normalized == *before
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TotalsReferenceChange {
+    pub sheet: SheetId,
+    pub table: TableId,
+    pub before: TableTotals,
+    pub after: TableTotals,
 }
 
 impl Workbook {
@@ -73,6 +94,7 @@ impl Workbook {
         owner_sheet: SheetId,
         before: Option<&DataTable>,
         after: Option<&DataTable>,
+        renaming: bool,
     ) -> Result<Vec<TableFormulaChange>, String> {
         let Some(before) = before else {
             return Ok(Vec::new());
@@ -80,7 +102,7 @@ impl Workbook {
         let mut changes = Vec::new();
         for sheet in self.sheets() {
             for table in sheet.tables().iter().filter(|t| t.id != before.id) {
-                if let Some(totals) = &table.totals {
+                if let Some(totals) = table.totals.as_ref().filter(|_| !renaming) {
                     for (offset, total) in totals.columns.iter().enumerate() {
                         if let Some(source) = &total.formula {
                             if self.rewrite_table_formula_source(owner_sheet, before, after, sheet.id,
@@ -110,7 +132,7 @@ impl Workbook {
                     source,
                 )?;
                 if rewritten != source {
-                    if sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
+                    if !renaming && sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
                         return Err("This schema change would rewrite a totals formula. Totals reference rewriting is not supported yet.".into());
                     }
                     changes.push(TableFormulaChange {
@@ -122,6 +144,40 @@ impl Workbook {
             }
         }
         changes.sort_by_key(|c| (c.cell.sheet.0, c.cell.row, c.cell.col));
+        Ok(changes)
+    }
+
+    pub(crate) fn totals_reference_changes(
+        &self,
+        owner: SheetId,
+        before: &DataTable,
+        after: &DataTable,
+    ) -> Result<Vec<TotalsReferenceChange>, String> {
+        let mut changes = Vec::new();
+        for (sheet, table) in self.tables() {
+            let Some(totals) = &table.totals else { continue; };
+            let mut rewritten = totals.clone();
+            // Dormant footers still bind local references to their owning Table.
+            let mut context = before.clone();
+            let mut target = after.clone();
+            if table.id == before.id {
+                context.totals.as_mut().unwrap().visible = true;
+                target.totals.as_mut().unwrap().visible = true;
+            }
+            for (offset, total) in rewritten.columns.iter_mut().enumerate() {
+                if let Some(source) = &mut total.formula {
+                    *source = self.rewrite_table_formula_source(
+                        owner, &context, Some(&target), sheet,
+                        table.range.end_row + 1, table.range.start_col + offset, source,
+                    )?;
+                }
+            }
+            if rewritten != *totals {
+                changes.push(TotalsReferenceChange {
+                    sheet, table: table.id, before: totals.clone(), after: rewritten,
+                });
+            }
+        }
         Ok(changes)
     }
 

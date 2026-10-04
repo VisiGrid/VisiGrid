@@ -1828,7 +1828,7 @@ impl History {
                     let candidate = crate::table_resize::prepare_resize_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
                     workbook.restore_snapshot_monotonic(&candidate);
-                } else if crate::table_header_paste::is_header_rename(commit) {
+                } else if commit.is_name_change() {
                     let candidate = crate::table_header_paste::prepare_header_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
                     workbook.restore_snapshot_monotonic(&candidate);
