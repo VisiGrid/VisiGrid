@@ -45,6 +45,9 @@ impl Spreadsheet {
             if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, false) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
+            if let Err(error) = crate::cond_format_ui::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
                 if let Err(error) = self.preflight_pivot_history(&entry.action, true, cx) {
                     self.history.redo(); self.status_message = Some(error); cx.notify(); return;
@@ -80,22 +83,11 @@ impl Spreadsheet {
             }
 
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.cond_formats.remove(rule.id);
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), false));
                 self.bump_cf_rules_rev();
                 }
                 UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for mut r in rules {
-                                r.reparse();
-                                sheet.cond_formats.insert_at(usize::MAX, r);
-                            }
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, true));
                 self.bump_cf_rules_rev();
                 }
                 UndoAction::Values { sheet_index, changes } => {
@@ -584,22 +576,11 @@ impl Spreadsheet {
             }
 
             UndoAction::CondFormatAdded { sheet_index, rule } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        sheet.cond_formats.remove(rule.id);
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), false));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        for mut r in rules {
-                            r.reparse();
-                            sheet.cond_formats.insert_at(usize::MAX, r);
-                        }
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, true));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::Values { sheet_index, changes } => {
@@ -993,23 +974,11 @@ impl Spreadsheet {
             }
 
             UndoAction::CondFormatAdded { sheet_index, rule } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        let mut r = rule;
-                        r.reparse();
-                        sheet.cond_formats.insert_at(usize::MAX, r);
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), true));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        for r in rules {
-                            sheet.cond_formats.remove(r.id);
-                        }
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, false));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::Values { sheet_index, changes } => {
@@ -1324,6 +1293,9 @@ impl Spreadsheet {
             if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, true) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
+            if let Err(error) = crate::cond_format_ui::plan::validate_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
                 if let Err(error) = self.preflight_pivot_history(&entry.action, false, cx) {
                     self.history.undo(); self.status_message = Some(error); cx.notify(); return;
@@ -1359,23 +1331,11 @@ impl Spreadsheet {
             }
 
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            let mut r = rule;
-                            r.reparse();
-                            sheet.cond_formats.insert_at(usize::MAX, r);
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), true));
                     self.bump_cf_rules_rev();
                 }
                 UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for r in rules {
-                                sheet.cond_formats.remove(r.id);
-                            }
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, false));
                 self.bump_cf_rules_rev();
                 }
                 UndoAction::Values { sheet_index, changes } => {

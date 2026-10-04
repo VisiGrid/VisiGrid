@@ -201,50 +201,81 @@ fn override_from_explicit(format: &CellFormat) -> CellFormatOverride {
 // Dialog state + commit (Spreadsheet impl)
 // ============================================================================
 
+#[path = "cond_format_plan.rs"]
+pub(crate) mod plan;
+
 impl Spreadsheet {
-    /// Open the Add Conditional Format dialog for the current selection.
+    fn cf_selection_targets(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(Vec<CellRange>, (usize, usize)), String> {
+        self.sync_table_view(cx);
+        if self.wb(cx).has_table_criteria()
+            || self.row_view.is_sorted()
+            || self.row_view.is_filtered()
+            || self.display_hidden_rows().is_some_and(|h| !h.is_empty())
+            || self
+                .hidden_cols
+                .get(&self.cached_sheet_id())
+                .is_some_and(|h| !h.is_empty())
+        {
+            self.validate_saved_view_layout(self.wb(cx))?;
+            plan::targets(
+                self.sheet(cx),
+                &self.row_view,
+                self.display_hidden_rows(),
+                self.hidden_cols.get(&self.cached_sheet_id()),
+                &self.all_selection_ranges(),
+            )
+        } else {
+            let ((start_row, start_col), (end_row, end_col)) = self.selection_range();
+            Ok((
+                vec![CellRange {
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                }],
+                (start_row, start_col),
+            ))
+        }
+    }
+
     pub fn show_add_cond_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
         if self.mode.is_editing() {
             return;
         }
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-        self.cf_target = vec![CellRange {
-            start_row: min_row,
-            start_col: min_col,
-            end_row: max_row,
-            end_col: max_col,
-        }];
+        let (ranges, anchor) = match self.cf_selection_targets(cx) {
+            Ok(targets) => targets,
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.cf_target = ranges.clone();
+        self.cf_draft = Some(plan::Draft::new(
+            self.wb(cx),
+            self.sheet_index(cx),
+            ranges,
+            anchor,
+            None,
+        ));
         self.cf_input.clear();
         self.cf_input_error = None;
+        self.cf_preview_matches = None;
         self.mode = Mode::AddCondFormat;
+        self.bump_cf_rules_rev();
         cx.notify();
     }
 
     pub fn hide_add_cond_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        // Cancel: withdraw the live-preview rule, if any
-        if let Some(id) = self.cf_preview_id.take() {
-            let sheet_index = self.sheet_index(cx);
-            self.wb_mut(cx, |wb| {
-                if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                    sheet.cond_formats.remove(id);
-                }
-            });
-            self.bump_cf_rules_rev();
-        }
-        // Cancelled an edit: put the original rule back where it was
-        if let Some((pos, rule)) = self.cf_edit_backup.take() {
-            let sheet_index = self.sheet_index(cx);
-            self.wb_mut(cx, |wb| {
-                if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                    let mut r = rule;
-                    r.reparse();
-                    sheet.cond_formats.insert_at(pos, r);
-                }
-            });
-            self.bump_cf_rules_rev();
-        }
+        // Cancellation only discards private state, even if the workbook changed.
+        self.cf_draft = None;
+        self.bump_cf_rules_rev();
         self.cf_preview_matches = None;
         self.mode = Mode::Navigation;
         self.cf_input.clear();
@@ -253,222 +284,156 @@ impl Spreadsheet {
     }
 
     pub fn cf_input_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.cf_input.push(c);
-        self.cf_input_error = None;
         self.update_cf_preview(cx);
         cx.notify();
     }
 
     pub fn cf_input_backspace(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
         self.cf_input.pop();
-        self.cf_input_error = None;
         self.update_cf_preview(cx);
         cx.notify();
     }
 
-    /// Live preview: keep a (history-bypassing) rule in the store that
-    /// mirrors the currently-typed input, so the grid highlights matches
-    /// while the user types. Promoted to a real rule on Enter, removed on
-    /// cancel or when the input stops parsing.
+    /// Draft rules are visible only to rendering; saves and session readers see
+    /// the committed store until confirm publishes the complete replacement.
     fn update_cf_preview(&mut self, cx: &mut Context<Self>) {
-        let sheet_index = self.sheet_index(cx);
-
-        // Drop the previous preview rule
-        if let Some(id) = self.cf_preview_id.take() {
-            self.wb_mut(cx, |wb| {
-                if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                    sheet.cond_formats.remove(id);
-                }
-            });
-            self.bump_cf_rules_rev();
+        if let Some(draft) = &mut self.cf_draft {
+            draft.preview = None;
         }
         self.cf_preview_matches = None;
-
-        let input = self.cf_input.clone();
-        let parsed = {
-            let sheet = self.sheet(cx);
-            let lookup = |row: usize, col: usize| sheet.get_format(row, col);
-            parse_rule_input(&input, &lookup)
-        };
-        let Ok((predicate, style)) = parsed else { return };
-
-        let ranges = self.cf_target.clone();
-        let mut id = 0u64;
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                id = sheet.cond_formats.add(ranges, predicate, style);
-            }
-        });
+        self.cf_input_error = None;
         self.bump_cf_rules_rev();
-        self.cf_preview_id = Some(id);
-
-        // Bounded match count for the dialog (same 10k convention as the
-        // status bar — never scan unbounded ranges from a keystroke).
-        const MAX_PREVIEW_SCAN: usize = 10_000;
-        let sheet = self.sheet(cx);
-        if let Some(rule) = sheet.cond_formats.get(id) {
-            let mut scanned = 0usize;
-            let mut matching = 0usize;
-            'scan: for range in &rule.ranges {
-                for row in range.start_row..=range.end_row {
-                    for col in range.start_col..=range.end_col {
-                        if scanned >= MAX_PREVIEW_SCAN {
-                            break 'scan;
-                        }
-                        scanned += 1;
-                        if rule.matches(row, col, sheet) {
-                            matching += 1;
+        let result = (|| {
+            let draft = self
+                .cf_draft
+                .as_ref()
+                .ok_or("Reopen the conditional-format editor.")?;
+            let index = draft.validate(self.wb(cx))?;
+            let sheet = self.wb(cx).sheet(index).unwrap();
+            let (predicate, style) =
+                parse_rule_input(&self.cf_input, &|r, c| sheet.get_format(r, c))?;
+            let store = draft.build(&predicate, style)?;
+            for rule in store.iter() {
+                plan::validate_rule(sheet, rule)?;
+            }
+            Ok::<_, String>(store)
+        })();
+        match result {
+            Ok(store) => {
+                let draft = self.cf_draft.as_ref().unwrap();
+                let edited_id = draft.editing.as_ref().map(|(_, r)| r.id);
+                let mut scanned = 0;
+                let mut matching = 0;
+                'scan: for rule in store
+                    .iter()
+                    .filter(|r| edited_id == Some(r.id) || draft.before.get(r.id).is_none())
+                {
+                    for range in &rule.ranges {
+                        for row in range.start_row..=range.end_row {
+                            for col in range.start_col..=range.end_col {
+                                if scanned >= 10_000 {
+                                    break 'scan;
+                                }
+                                scanned += 1;
+                                if rule.matches(row, col, self.sheet(cx)) {
+                                    matching += 1;
+                                }
+                            }
                         }
                     }
                 }
+                self.cf_preview_matches = Some((matching, scanned));
+                self.cf_draft.as_mut().unwrap().preview = Some(store);
             }
-            self.cf_preview_matches = Some((matching, scanned));
+            Err(error) => {
+                if !self.cf_input.trim().is_empty() {
+                    self.cf_input_error = Some(error);
+                }
+            }
         }
     }
 
-    /// Commit the typed rule: promote the live-preview rule (already in
-    /// the store and visible on the grid) into a permanent, undoable rule.
     pub fn confirm_add_cond_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let input = self.cf_input.clone();
-        let sheet_index = self.sheet_index(cx);
-
-        // Validate first so a broken input surfaces an error rather than
-        // silently closing (preview is only present for valid input).
-        let parsed = {
-            let sheet = self.sheet(cx);
-            let lookup = |row: usize, col: usize| sheet.get_format(row, col);
-            parse_rule_input(&input, &lookup)
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        self.update_cf_preview(cx);
+        let Some(draft) = self.cf_draft.as_ref() else {
+            return;
         };
-        let (predicate, style) = match parsed {
-            Ok(p) => p,
-            Err(e) => {
-                self.cf_input_error = Some(e);
+        let Some(store) = draft.preview.clone() else {
+            if self.cf_input_error.is_none() {
+                self.cf_input_error = Some("Enter a formula and style.".into());
+            }
+            cx.notify();
+            return;
+        };
+        let editing = draft.editing.is_some();
+        let before = draft.before.iter().cloned().collect();
+        let index = self.sheet_index(cx);
+        if !store.iter().eq(self.sheet(cx).cond_formats.iter()) {
+            self.publish_cf_store(
+                index,
+                store,
+                before,
+                if editing {
+                    "Edit conditional format"
+                } else {
+                    "Add conditional format"
+                },
+                cx,
+            );
+        }
+        self.hide_add_cond_format(cx);
+    }
+
+    pub fn clear_cond_formats_in_selection(&mut self, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        let result = self
+            .cf_selection_targets(cx)
+            .and_then(|(ranges, _)| plan::clear(&self.sheet(cx).cond_formats, &ranges));
+        let store = match result {
+            Ok(store) => store,
+            Err(error) => {
+                self.status_message = Some(error);
                 cx.notify();
                 return;
             }
         };
-
-        // Promote the preview rule if present; otherwise add fresh.
-        let added_id = match self.cf_preview_id.take() {
-            Some(id) => id,
-            None => {
-                let ranges = self.cf_target.clone();
-                let mut id = 0u64;
-                self.wb_mut(cx, |wb| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        id = sheet.cond_formats.add(ranges, predicate.clone(), style);
-                    }
-                });
-                self.bump_cf_rules_rev();
-                id
-            }
-        };
-
-        let range_label = format_range_label(&self.cf_target);
-        if let Some((pos, old_rule)) = self.cf_edit_backup.take() {
-            // Editing an existing rule: keep its precedence slot, and record
-            // one undoable replacement (before-list has the old rule back in
-            // place; the new rule is excluded so redo reconstructs exactly).
-            self.wb_mut(cx, |wb| {
-                if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                    sheet.cond_formats.reorder(added_id, pos);
-                }
-            });
-            self.bump_cf_rules_rev();
-            let mut before: Vec<CondFormatRule> = self
-                .sheet(cx)
-                .cond_formats
-                .iter()
-                .filter(|r| r.id != added_id)
-                .cloned()
-                .collect();
-            let insert_at = pos.min(before.len());
-            before.insert(insert_at, old_rule);
-            self.record_cf_list_change(sheet_index, before, "Edit conditional format", cx);
-            self.status_message = Some(format!(
-                "Rule updated on {}: {} (Ctrl+Z to undo)",
-                range_label, predicate
-            ));
+        let before = self.cf_rules_snapshot(cx);
+        if store.iter().eq(before.iter()) {
+            self.status_message = Some("No conditional formats in selection".into());
         } else {
-            // Undoable: undo removes the rule, redo re-adds it
-            if let Some(rule) = self
-                .sheet(cx)
-                .cond_formats
-                .get(added_id)
-                .cloned()
-            {
-                self.history.record_action_with_provenance(
-                    crate::history::UndoAction::CondFormatAdded { sheet_index, rule },
-                    None,
-                );
-            }
-            self.status_message = Some(format!(
-                "Conditional format on {}: {} (Ctrl+Z to undo)",
-                range_label, predicate
-            ));
+            self.publish_cf_store(
+                self.sheet_index(cx),
+                store,
+                before,
+                "Clear conditional formatting",
+                cx,
+            );
         }
-        self.is_modified = true;
-        self.mode = Mode::Navigation;
-        self.cf_input.clear();
-        self.cf_input_error = None;
-        self.cf_preview_matches = None;
         cx.notify();
     }
 
-    /// Remove all conditional format rules that touch the current selection
-    /// (or all rules on the sheet when the selection covers everything).
-    pub fn clear_cond_formats_in_selection(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let ((min_row, min_col), (max_row, max_col)) = self.selection_range();
-        let sel = CellRange {
-            start_row: min_row,
-            start_col: min_col,
-            end_row: max_row,
-            end_col: max_col,
-        };
-        let sheet_index = self.sheet_index(cx);
-
-        let doomed: Vec<_> = self
-            .sheet(cx)
-            .cond_formats
-            .iter()
-            .filter(|r| r.ranges.iter().any(|range| range.overlaps(&sel)))
-            .cloned()
-            .collect();
-
-        if doomed.is_empty() {
-            self.status_message = Some("No conditional formats in selection".into());
-            cx.notify();
-            return;
-        }
-
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                for rule in &doomed {
-                    sheet.cond_formats.remove(rule.id);
-                }
-            }
+    fn publish_cf_store(
+        &mut self,
+        index: usize,
+        store: visigrid_engine::cond_format::CondFormatStore,
+        before: Vec<CondFormatRule>,
+        description: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbook.update(cx, |wb, _| {
+            wb.sheet_mut(index).unwrap().cond_formats = store;
+            wb.bump_revision_for_structure();
         });
         self.bump_cf_rules_rev();
-
-        let count = doomed.len();
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::CondFormatsCleared {
-                sheet_index,
-                rules: doomed,
-            },
-            None,
-        );
-        self.is_modified = true;
-        self.status_message = Some(format!(
-            "Removed {} conditional format rule{}",
-            count,
-            if count == 1 { "" } else { "s" }
-        ));
-        cx.notify();
+        self.record_cf_list_change(index, before, description, cx);
+        self.request_title_refresh(cx);
+        self.status_message = Some(format!("{description} (Ctrl+Z to undo)"));
     }
 }
 
@@ -517,8 +482,7 @@ impl Spreadsheet {
         description: &str,
         cx: &Context<Self>,
     ) {
-        let after: Vec<CondFormatRule> =
-            self.sheet(cx).cond_formats.iter().cloned().collect();
+        let after: Vec<CondFormatRule> = self.sheet(cx).cond_formats.iter().cloned().collect();
         let mut actions = vec![crate::history::UndoAction::CondFormatsCleared {
             sheet_index,
             rules: before,
@@ -545,90 +509,88 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    pub fn toggle_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let sheet_index = self.sheet_index(cx);
+    fn change_cf_rules(
+        &mut self,
+        description: &str,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut visigrid_engine::cond_format::CondFormatStore),
+    ) {
         let before = self.cf_rules_snapshot(cx);
-        let mut changed = false;
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                if let Some(rule) = sheet.cond_formats.get_mut(id) {
-                    rule.enabled = !rule.enabled;
-                    changed = true;
-                }
+        let mut store = self.sheet(cx).cond_formats.clone();
+        change(&mut store);
+        if store.iter().eq(before.iter()) {
+            return;
+        }
+        for rule in store.iter() {
+            if let Err(error) = plan::validate_rule(self.sheet(cx), rule) {
+                self.status_message = Some(error);
+                cx.notify();
+                return;
+            }
+        }
+        self.publish_cf_store(self.sheet_index(cx), store, before, description, cx);
+        cx.notify();
+    }
+
+    pub fn toggle_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        self.change_cf_rules("Toggle conditional format", cx, |store| {
+            if let Some(rule) = store.get_mut(id) {
+                rule.enabled = !rule.enabled;
             }
         });
-        self.bump_cf_rules_rev();
-        if changed {
-            self.record_cf_list_change(sheet_index, before, "Toggle conditional format", cx);
-        }
-        cx.notify();
     }
 
     pub fn delete_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let sheet_index = self.sheet_index(cx);
-        let before = self.cf_rules_snapshot(cx);
-        let mut removed = false;
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                removed = sheet.cond_formats.remove(id).is_some();
-            }
-        });
-        self.bump_cf_rules_rev();
-        if removed {
-            self.record_cf_list_change(sheet_index, before, "Delete conditional format", cx);
-            self.status_message = Some("Rule deleted (Ctrl+Z to undo)".into());
-        }
-        cx.notify();
-    }
-
-    /// Move a rule up (-1) or down (+1) in precedence order.
-    pub fn move_cf_rule(&mut self, id: u64, delta: i32, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let sheet_index = self.sheet_index(cx);
-        let before = self.cf_rules_snapshot(cx);
-        let Some(pos) = before.iter().position(|r| r.id == id) else { return };
-        let new_pos = pos as i32 + delta;
-        if new_pos < 0 || new_pos as usize >= before.len() {
+        if self.block_if_previewing_only(cx) {
             return;
         }
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                sheet.cond_formats.reorder(id, new_pos as usize);
-            }
+        self.change_cf_rules("Delete conditional format", cx, |store| {
+            store.remove(id);
         });
-        self.bump_cf_rules_rev();
-        self.record_cf_list_change(sheet_index, before, "Reorder conditional formats", cx);
-        cx.notify();
     }
 
-    /// Open the quick-add dialog pre-filled with an existing rule. The rule
-    /// is pulled from the store while editing (so the live preview replaces
-    /// it cleanly instead of stacking); cancel restores it, confirm records
-    /// a single undoable replacement.
-    pub fn edit_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let sheet_index = self.sheet_index(cx);
-        let rules = self.cf_rules_snapshot(cx);
-        let Some(pos) = rules.iter().position(|r| r.id == id) else { return };
-        let rule = rules[pos].clone();
-
-        self.wb_mut(cx, |wb| {
-            if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                sheet.cond_formats.remove(id);
+    pub fn move_cf_rule(&mut self, id: u64, delta: i32, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        self.change_cf_rules("Reorder conditional formats", cx, |store| {
+            let pos = store.iter().position(|r| r.id == id);
+            if let Some(pos) = pos {
+                if let Some(next) = pos
+                    .checked_add_signed(delta as isize)
+                    .filter(|n| *n < store.len())
+                {
+                    store.reorder(id, next);
+                }
             }
         });
-        self.bump_cf_rules_rev();
+    }
 
+    pub fn edit_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.block_if_previewing_only(cx) {
+            return;
+        }
+        let rules = self.cf_rules_snapshot(cx);
+        let Some(pos) = rules.iter().position(|r| r.id == id) else {
+            return;
+        };
+        let rule = rules[pos].clone();
+        let Some(first) = rule.ranges.first() else {
+            return;
+        };
+        let anchor = (first.start_row, first.start_col);
         self.cf_target = rule.ranges.clone();
-        self.cf_input = format!(
-            "{} -> {}",
-            rule.predicate,
-            style_to_text(&rule.style)
-        );
-        self.cf_input_error = None;
-        self.cf_edit_backup = Some((pos, rule));
+        self.cf_input = format!("{} -> {}", rule.predicate, style_to_text(&rule.style));
+        self.cf_draft = Some(plan::Draft::new(
+            self.wb(cx),
+            self.sheet_index(cx),
+            rule.ranges.clone(),
+            anchor,
+            Some((pos, rule)),
+        ));
         self.mode = Mode::AddCondFormat;
         self.update_cf_preview(cx);
         cx.notify();
@@ -636,8 +598,9 @@ impl Spreadsheet {
 }
 
 pub(crate) fn format_range_label(ranges: &[CellRange]) -> String {
-    ranges
+    let label = ranges
         .iter()
+        .take(6)
         .map(|r| {
             format!(
                 "{}{}:{}{}",
@@ -648,7 +611,12 @@ pub(crate) fn format_range_label(ranges: &[CellRange]) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    if ranges.len() > 6 {
+        format!("{label}, +{} ranges", ranges.len() - 6)
+    } else {
+        label
+    }
 }
 
 fn col_letter(mut col: usize) -> String {

@@ -17,14 +17,21 @@ pub(crate) fn render_add_cond_format_dialog(
     let muted = app.token(TokenKey::TextMuted);
     let error_color = app.token(TokenKey::Error);
     let accent = app.token(TokenKey::Accent);
-    let editing = app.cf_edit_backup.is_some();
+    let editing = app.cf_draft.as_ref().is_some_and(|d| d.editing.is_some());
+    let scope = if editing {
+        "Edits apply to the full stored rule, including hidden cells."
+    } else if app.cf_target.len() > 1 {
+        "Highlight visible selected cells. Separate ranges appear as separate rules."
+    } else {
+        "Highlight selected cells when a rule is true."
+    };
     let empty = app.cf_input.trim().is_empty();
     let error = app.cf_input_error.clone();
     let range_label = format_range_label(&app.cf_target);
     let example_ref = app
-        .cf_target
-        .first()
-        .map(|r| app.cell_ref_at(r.start_row, r.start_col))
+        .cf_draft
+        .as_ref()
+        .map(|d| app.cell_ref_at(d.anchor.0, d.anchor.1))
         .unwrap_or_else(|| "A1".into());
     let total: usize = app
         .cf_target
@@ -84,7 +91,8 @@ pub(crate) fn render_add_cond_format_dialog(
                     div()
                         .text_size(px(13.0))
                         .text_color(muted)
-                        .child("Highlight cells when a rule is true."),
+                        .whitespace_normal()
+                        .child(scope),
                 ),
         )
         .child(
@@ -183,7 +191,12 @@ pub(crate) fn render_add_cond_format_dialog(
                     div()
                         .text_size(px(12.0))
                         .text_color(muted)
-                        .child("Separate the formula and style with ->."),
+                        .whitespace_normal()
+                        .child(if editing {
+                            "Separate the formula and style with ->. Relative references start at each range’s top-left cell.".into()
+                        } else {
+                            format!("Write the formula for {example_ref} (stored address), followed by -> and a style.")
+                        }),
                 ),
         )
         .child(

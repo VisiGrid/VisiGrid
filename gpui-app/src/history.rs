@@ -1701,18 +1701,14 @@ impl History {
                 for patch in patches { sheet.set_comment(patch.row, patch.col, patch.after.clone()); }
             }
             UndoAction::CondFormatAdded { sheet_index, rule } => {
-                if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
-                    let mut r = rule.clone();
-                    r.reparse();
-                    sheet.cond_formats.insert_at(usize::MAX, r);
-                }
+                crate::cond_format_ui::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
+                crate::cond_format_ui::plan::apply(workbook, *sheet_index, std::slice::from_ref(rule), true);
             }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
-                    for r in rules {
-                        sheet.cond_formats.remove(r.id);
-                    }
-                }
+                crate::cond_format_ui::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
+                crate::cond_format_ui::plan::apply(workbook, *sheet_index, rules, false);
             }
             UndoAction::Values { sheet_index, changes } => {
                 let sheet = workbook.sheet_mut(*sheet_index)

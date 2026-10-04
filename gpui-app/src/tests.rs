@@ -2999,9 +2999,6 @@ fn review_mode_workbook_mutators_are_guarded() {
     let conditional_formats = include_str!("cond_format_ui.rs");
     for function in [
         "show_add_cond_format",
-        "hide_add_cond_format",
-        "cf_input_insert_char",
-        "cf_input_backspace",
         "confirm_add_cond_format",
         "clear_cond_formats_in_selection",
         "toggle_cf_rule",
@@ -3009,7 +3006,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "move_cf_rule",
         "edit_cf_rule",
     ] {
-        assert_contains_near(conditional_formats, function, "block_active_sheet_metadata_edit(cx)");
+        assert_contains_near(conditional_formats, function, "block_if_previewing_only(cx)");
     }
 
     let validations = include_str!("dialogs.rs");

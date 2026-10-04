@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Author and manage conditional formatting through sorted/filtered Tables. New rules target visible stored records; partial clearing preserves hidden cells and formula anchors. Undo/redo and rewind retain rule order and validate all targets before replay.
+- Keep conditional-format previews private until Save/Add: saving or exporting while editing no longer captures a draft or temporarily removes the original rule. Stale drafts are refused without discarding text; editing preserves disabled rules and their precedence.
+
 - Format visible records in sorted/filtered Tables without clearing criteria: fonts, colors, alignment, number formats, styles, borders, Clear Formatting and Format Painter use canonical cells and atomic validation. F4 repeat and undo/redo keep the same targeting; hidden records stay unchanged.
 - Resolve Table borders against visible neighbors, preserve empty-cell absence through formatting undo, and keep the copied format available after a refused paste/painter operation. Adjacent body formatting and percentage-text conversion remain explicit refusals.
 

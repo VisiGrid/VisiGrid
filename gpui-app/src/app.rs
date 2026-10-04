@@ -788,19 +788,18 @@ pub struct Spreadsheet {
     pub cf_input: String,                          // Typed rule: "=PRED -> STYLE"
     pub cf_input_error: Option<String>,            // Parse error shown in dialog
     pub cf_target: Vec<visigrid_engine::validation::CellRange>,  // Selection when opened
-    pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
+    pub(crate) cf_draft: Option<crate::cond_format_ui::plan::Draft>, // Private, uncommitted preview
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
     pub(crate) table_dialog: Option<crate::table_ui::TableDialog>,
     pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
     pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
-    /// Per-cell conditional format override cache, keyed by (cells_rev, cf_rules_rev).
+    /// Per-cell conditional format override cache, keyed by cell/rule/workbook revisions and preview state.
     /// Heavy predicates (COUNTIF over large ranges) are evaluated once per
     /// edit/rule-change instead of once per frame per cell.
     pub(crate) cf_cache: std::cell::RefCell<std::collections::HashMap<(usize, usize), Option<visigrid_engine::cell::CellFormatOverride>>>,
-    pub(crate) cf_cache_key: std::cell::Cell<(u64, u64)>,
-    pub cf_edit_backup: Option<(usize, visigrid_engine::cond_format::CondFormatRule)>, // Rule pulled for editing (index, rule) — restored on cancel
+    pub(crate) cf_cache_key: std::cell::Cell<(u64, u64, u64, bool)>,
 
     // Create named range state (Ctrl+Shift+N)
     pub create_name_name: String,           // User-typed name
@@ -1454,16 +1453,15 @@ impl Spreadsheet {
             cf_input: String::new(),
             cf_input_error: None,
             cf_target: Vec::new(),
-            cf_preview_id: None,
+            cf_draft: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
             table_dialog: None,
             pivot_panel: None,
             pivot_errors: std::collections::HashMap::new(),
-            cf_edit_backup: None,
             cf_rules_rev: 1,
             cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-            cf_cache_key: std::cell::Cell::new((0, 0)),
+            cf_cache_key: std::cell::Cell::new((0, 0, 0, false)),
             create_name_name: String::new(),
             create_name_description: String::new(),
             create_name_target: String::new(),
@@ -2290,11 +2288,15 @@ impl Spreadsheet {
     pub(crate) fn effective_format_cached(&self, row: usize, col: usize, cx: &App) -> visigrid_engine::cell::CellFormat {
         let sheet = self.sheet(cx);
         let base = sheet.get_format(row, col);
-        if !sheet.cond_formats.any_rule_covers(row, col) {
+        let preview = self.cf_draft.as_ref()
+            .filter(|d| self.mode == Mode::AddCondFormat && !self.is_previewing() && self.review_mode.is_none() && d.is_current(self.wb(cx)))
+            .and_then(|d| d.preview.as_ref());
+        let store = preview.unwrap_or(&sheet.cond_formats);
+        if !store.any_rule_covers(row, col) {
             return base;
         }
 
-        let key = (self.cells_rev, self.cf_rules_rev);
+        let key = (self.cells_rev, self.cf_rules_rev, self.wb(cx).revision(), preview.is_some());
         if self.cf_cache_key.get() != key {
             self.cf_cache.borrow_mut().clear();
             self.cf_cache_key.set(key);
@@ -2304,7 +2306,7 @@ impl Spreadsheet {
         let override_opt = match cached {
             Some(ov) => ov,
             None => {
-                let ov = sheet.cond_formats.override_for_cell(row, col, sheet);
+                let ov = store.override_for_cell(row, col, sheet);
                 self.cf_cache.borrow_mut().insert((row, col), ov.clone());
                 ov
             }
