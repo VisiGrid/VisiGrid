@@ -121,9 +121,22 @@ impl Spreadsheet {
             return;
         }
 
-        // An import recipe opens as the Table it produces
+        // An import recipe opens as the Table it produces. Other TOML files
+        // (Cargo.toml, a config file) are not recipes: say so, don't run them
         if ext_lower == "toml" {
-            self.open_recipe(path, cx);
+            let named_recipe = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_lowercase().ends_with(".recipe.toml"));
+            match visigrid_io::recipe::Recipe::load(path) {
+                Ok(_) => self.open_recipe(path, cx),
+                Err(e) if named_recipe => {
+                    self.status_message = Some(format!("Couldn't open the recipe: {e}"));
+                    cx.notify();
+                }
+                Err(_) => {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("This file");
+                    self.status_message = Some(format!("{name} is not an import recipe. VisiGrid opens .recipe.toml files saved from the recipe builder."));
+                    cx.notify();
+                }
+            }
             return;
         }
 
