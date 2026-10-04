@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use uuid::Uuid;
 use visigrid_engine::workbook::Workbook;
 
-use crate::apply::{apply_ops, filter_unappliable};
+use crate::apply::{apply_ops, apply_ops_tracked, filter_unappliable, Changes};
 use crate::op::{CollabOp, Envelope, SheetKey};
 use crate::server::Committed;
 use crate::transform::{transform, transform_lists, Order, Transformed};
@@ -98,6 +98,10 @@ pub struct Client {
     /// Measurement only: the pre-10/4 refusal policy, which discarded every
     /// envelope queued after a refused one. Off by default.
     pub legacy_refusal: bool,
+    /// When set, every change to the optimistic state `wb` is recorded here,
+    /// for a UI mirroring it (the browser client). The caller takes it with
+    /// `take_changes`. Recording never changes what is applied.
+    pub changes: Option<Changes>,
 }
 
 impl Client {
@@ -115,6 +119,32 @@ impl Client {
             resend_inflight: false,
             stats: ClientStats::default(),
             legacy_refusal: false,
+            changes: None,
+        }
+    }
+
+    /// Start recording changes to the optimistic state.
+    pub fn record_changes(&mut self) {
+        self.changes.get_or_insert_with(Changes::default);
+    }
+
+    /// The changes recorded since the last call (empty when not recording).
+    pub fn take_changes(&mut self) -> Changes {
+        match self.changes.as_mut() {
+            Some(ch) => std::mem::take(ch),
+            None => Changes::default(),
+        }
+    }
+
+    /// Apply ops to the optimistic state, recording them when asked.
+    fn apply_optimistic(&mut self, ops: &[CollabOp]) {
+        match self.changes.as_mut() {
+            Some(ch) => {
+                apply_ops_tracked(&mut self.wb, ops, ch);
+            }
+            None => {
+                apply_ops(&mut self.wb, ops);
+            }
         }
     }
 
@@ -124,7 +154,7 @@ impl Client {
 
     /// A local edit: applied now, queued for the server.
     pub fn local(&mut self, client_op_id: Uuid, ops: Vec<CollabOp>) {
-        apply_ops(&mut self.wb, &ops);
+        self.apply_optimistic(&ops);
         self.buffer.push_back(Pending { client_op_id, ops });
         self.stats.local_envelopes += 1;
         self.stats.max_pending = self.stats.max_pending.max(self.pending_count());
@@ -282,7 +312,7 @@ impl Client {
         if rebuild {
             self.rebuild();
         } else {
-            apply_ops(&mut self.wb, &remote);
+            self.apply_optimistic(&remote);
         }
     }
 
@@ -386,6 +416,11 @@ impl Client {
             self.stats.discarded_after_refusal += emptied;
         }
         self.wb = wb;
+        if let Some(ch) = self.changes.as_mut() {
+            // The optimistic state was replaced wholesale.
+            ch.full = true;
+            ch.sheets = true;
+        }
     }
 
     /// The server replaced the whole document (an old client's whole-file

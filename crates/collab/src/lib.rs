@@ -10,8 +10,10 @@
 
 pub mod apply;
 pub mod client;
+#[cfg(feature = "sim")]
 pub mod gen;
 pub mod op;
 pub mod server;
+#[cfg(feature = "sim")]
 pub mod sim;
 pub mod transform;

@@ -7,11 +7,15 @@ description = "Collaborative workbook model: operations, transform, sequencer, r
 
 [dependencies]
 visigrid-engine = { workspace = true }
-visigrid-protocol = { path = "../protocol" }
+# Only for `op::from_protocol` (mapping session-protocol v1 ops); it pulls in
+# rand and dirs, which the browser build cannot use.
+visigrid-protocol = { path = "../protocol", optional = true }
 serde = { workspace = true }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
-rand = "0.8"
+# The simulator's generator only (feature `sim`), so the WASM client builds
+# without a random-number backend.
+rand = { version = "0.8", optional = true }
 sha2 = { workspace = true }
 
 # Remote simulator (drives a real server over WebSocket protocol v2). Off by
@@ -26,7 +30,11 @@ path = "src/bin/collab_sim_remote.rs"
 required-features = ["remote"]
 
 [features]
-remote = ["dep:tungstenite", "dep:url", "dep:visigrid-io"]
+default = ["sim", "protocol"]
+protocol = ["dep:visigrid-protocol"]
+# The convergence simulator and its op generator. Off for the browser build.
+sim = ["dep:rand"]
+remote = ["sim", "dep:tungstenite", "dep:url", "dep:visigrid-io"]
 # Long fuzz runs read COLLAB_FUZZ_SEEDS; this feature only exists so CI can
 # opt a job in without an environment variable.
 long-fuzz = []

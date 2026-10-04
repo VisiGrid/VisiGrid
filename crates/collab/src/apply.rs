@@ -29,7 +29,49 @@ fn after_sheet_change(wb: &mut Workbook) {
     wb.recompute_full_ordered();
 }
 
+/// What applying ops changed, for a client mirroring the workbook in a UI.
+///
+/// Recording never affects what is applied: every replica applies the same
+/// ops with the same code whether or not it records.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// Cells written, then the cells their writes re-evaluated (spill
+    /// receivers included), by stable sheet key, in order. May repeat.
+    pub cells: Vec<(SheetKey, usize, usize)>,
+    /// The change is not describable cell by cell (a structural or sheet op,
+    /// a full recompute, a rebuild): the mirror must repaint everything.
+    pub full: bool,
+    /// Sheets were added, renamed or removed.
+    pub sheets: bool,
+    /// Structural ops applied, in order.
+    pub structural: Vec<CollabOp>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty() && !self.full && !self.sheets && self.structural.is_empty()
+    }
+
+    fn recalculated(&mut self, r: visigrid_engine::workbook::Recalculated) {
+        match r {
+            visigrid_engine::workbook::Recalculated::Cells(ids) => {
+                self.cells.extend(ids.into_iter().map(|id| (id.sheet.0, id.row, id.col)));
+            }
+            visigrid_engine::workbook::Recalculated::All => self.full = true,
+        }
+    }
+}
+
+/// A formatting rectangle larger than this is reported as `full` rather than
+/// cell by cell.
+const MAX_TRACKED_CELLS: usize = 10_000;
+
 pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
+    apply_op_tracked(wb, op, None)
+}
+
+/// [`apply_op`], recording what changed into `changes` when given.
+pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&mut Changes>) -> Result<(), Skipped> {
     match op {
         CollabOp::SetCell {
             sheet,
@@ -43,12 +85,28 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
             // goes, the cell's format stays. The engine's clear_cell removes
             // the whole cell including its format, which would not commute
             // with a concurrent format change.
-            wb.set_cell_value_tracked(idx, *row, *col, content.raw());
+            let r = wb.set_cell_value_tracked(idx, *row, *col, content.raw());
+            if let Some(ch) = changes.as_deref_mut() {
+                ch.cells.push((*sheet, *row, *col));
+                ch.recalculated(r);
+            }
             Ok(())
         }
         CollabOp::SetBold { sheet, rect, bold } => {
             let idx = index_of(wb, *sheet)?;
             let id = wb.sheets()[idx].id;
+            if let Some(ch) = changes.as_deref_mut() {
+                let area = (rect.r1.saturating_sub(rect.r0) + 1).saturating_mul(rect.c1.saturating_sub(rect.c0) + 1);
+                if area > MAX_TRACKED_CELLS {
+                    ch.full = true;
+                } else {
+                    for r in rect.r0..=rect.r1 {
+                        for c in rect.c0..=rect.c1 {
+                            ch.cells.push((*sheet, r, c));
+                        }
+                    }
+                }
+            }
             for r in rect.r0..=rect.r1 {
                 for c in rect.c0..=rect.c1 {
                     if let Some(s) = wb.sheet_mut(idx) {
@@ -68,9 +126,17 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
             ..
         } => {
             let idx = index_of(wb, *sheet)?;
-            wb.structural_edit(idx, (*axis).into(), *at, *count, *delete)
+            let done = wb
+                .structural_edit(idx, (*axis).into(), *at, *count, *delete)
                 .map(|_| ())
-                .map_err(Skipped::Refused)
+                .map_err(Skipped::Refused);
+            if let Some(ch) = changes.as_deref_mut() {
+                if done.is_ok() {
+                    ch.full = true;
+                    ch.structural.push(op.clone());
+                }
+            }
+            done
         }
         CollabOp::AddSheet { sheet, name, index } => {
             let s = Sheet::new_with_name(SheetId(*sheet), NUM_ROWS, NUM_COLS, name);
@@ -79,6 +145,7 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
                 return Err(Skipped::Refused(format!("could not add sheet {name}")));
             }
             after_sheet_change(wb);
+            sheet_changed(changes.as_deref_mut());
             Ok(())
         }
         CollabOp::RenameSheet { sheet, name } => {
@@ -87,6 +154,7 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
                 return Err(Skipped::Refused(format!("could not rename to {name}")));
             }
             after_sheet_change(wb);
+            sheet_changed(changes.as_deref_mut());
             Ok(())
         }
         CollabOp::DeleteSheet { sheet, .. } => {
@@ -95,6 +163,7 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
                 return Err(Skipped::Refused("could not delete sheet".into()));
             }
             after_sheet_change(wb);
+            sheet_changed(changes.as_deref_mut());
             Ok(())
         }
         CollabOp::ReplaceRange {
@@ -106,7 +175,11 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
             let idx = index_of(wb, *sheet)?;
             for (dr, line) in values.iter().enumerate() {
                 for (dc, content) in line.iter().enumerate() {
-                    wb.set_cell_value_tracked(idx, row + dr, col + dc, content.raw());
+                    let r = wb.set_cell_value_tracked(idx, row + dr, col + dc, content.raw());
+                    if let Some(ch) = changes.as_deref_mut() {
+                        ch.cells.push((*sheet, row + dr, col + dc));
+                        ch.recalculated(r);
+                    }
                 }
             }
             Ok(())
@@ -187,6 +260,18 @@ pub const NO_SUCH_SHEET: &str = "no_such_sheet";
 
 pub fn apply_ops(wb: &mut Workbook, ops: &[CollabOp]) -> Vec<Skipped> {
     ops.iter().filter_map(|op| apply_op(wb, op).err()).collect()
+}
+
+/// [`apply_ops`], recording what changed.
+pub fn apply_ops_tracked(wb: &mut Workbook, ops: &[CollabOp], changes: &mut Changes) -> Vec<Skipped> {
+    ops.iter().filter_map(|op| apply_op_tracked(wb, op, Some(changes)).err()).collect()
+}
+
+fn sheet_changed(changes: Option<&mut Changes>) {
+    if let Some(ch) = changes {
+        ch.full = true;
+        ch.sheets = true;
+    }
 }
 
 /// Everything convergence compares: tab order, ids and names, then every

@@ -188,6 +188,7 @@ pub struct Envelope {
     pub ops: Vec<CollabOp>,
 }
 
+#[cfg(feature = "protocol")]
 /// Map a v1 protocol op onto the collaboration vocabulary. Protocol v1 names
 /// sheets by index, so the caller resolves the stable key and the name.
 /// Ops outside the V1 collaboration vocabulary (number formats, italic,
