@@ -2573,3 +2573,150 @@ fn copied_totals_keep_independent_bindings_through_native_and_excel() {
         assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
     }
 }
+
+#[test]
+fn large_plain_sheets_do_not_enter_table_parser_or_hide_later_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    for unrelated_links in [false, true] {
+        let path = dir.path().join("large-plain-source.xlsx");
+        let changed = dir.path().join("large-plain.xlsx");
+        let mut file = rust_xlsxwriter::Workbook::new();
+        let plain = file.add_worksheet();
+        plain.set_name("Large plain").unwrap();
+        plain.write_string(0, 0, "Keep ordinary cells").unwrap();
+        if unrelated_links { plain.write_url(2, 0, "https://example.com").unwrap(); }
+        let sheet = file.add_worksheet();
+        sheet.set_name("With Tables").unwrap();
+        sheet.write_number(1, 0, 17).unwrap();
+        sheet.add_table(0, 0, 1, 0, &rust_xlsxwriter::Table::new().set_name("LaterData")).unwrap();
+        file.save(&path).unwrap();
+        rewrite(&path, &changed, |name, data| {
+            (name.into(), if name == "xl/worksheets/sheet1.xml" {
+                data.replace("</worksheet>", &format!("<!--{}--></worksheet>", " ".repeat(33 * 1024 * 1024)))
+            } else { data })
+        });
+        let (loaded, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(report.tables_skipped, 0);
+        assert!(report.warnings.iter().all(|w| !w.contains("Table metadata")), "{:?}", report.warnings);
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(0, 0), "Keep ordinary cells");
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "17");
+        assert!(loaded.table_by_name("LaterData").is_some());
+    }
+}
+
+#[test]
+fn table_import_count_budget_is_global_and_keeps_cells_and_valid_definitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("many-tables.xlsx");
+    let mut file = rust_xlsxwriter::Workbook::new();
+    for (start, count) in [(0, 513), (513, 512)] {
+        let sheet = file.add_worksheet();
+        for i in 0..count {
+            let row = i * 3;
+            sheet.write_number(row + 1, 0, (start + i) as f64).unwrap();
+            sheet.add_table(row, 0, row + 1, 0, &rust_xlsxwriter::Table::new().set_name(format!("ImportedData{}", start + i))).unwrap();
+        }
+    }
+    file.save(&path).unwrap();
+    for values_only in [false, true] {
+        let (loaded, report) = xlsx::import_with_options(&path, &xlsx::ImportOptions { values_only, ..Default::default() }).unwrap();
+        assert_eq!(report.tables_imported, 1024, "{:?}", report.warnings);
+        assert_eq!(report.tables_skipped, 1);
+        assert_eq!(loaded.tables().count(), 1024);
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(511 * 3 + 1, 0), "1024");
+        assert!(loaded.table_by_name("ImportedData1023").is_some());
+        assert!(loaded.table_by_name("ImportedData1024").is_none());
+        assert!(report.warnings.iter().any(|w| w.contains("workbook limit of 1024")));
+        let path = dir.path().join(format!("many-{values_only}.sheet"));
+        native::save_workbook(&loaded, &path).unwrap();
+        assert_eq!(native::load_workbook(&path).unwrap().tables().count(), 1024);
+    }
+    let damaged = dir.path().join("many-damaged.xlsx");
+    rewrite(&path, &damaged, |name, data| {
+        (name.into(), if name == "xl/tables/table1.xml" { data.replace("name=\"Column1\"", "name=\"Wrong header\"") } else { data })
+    });
+    let (loaded, report) = xlsx::import(&damaged).unwrap();
+    assert_eq!(report.tables_imported, 1023);
+    assert_eq!(report.tables_skipped, 2); // A corrupt definition still consumes an attempt.
+    assert!(loaded.table_by_name("ImportedData1023").is_some());
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 0), "0");
+}
+
+#[test]
+fn table_metadata_byte_budget_skips_large_parts_but_keeps_later_small_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata-source.xlsx");
+    let changed = dir.path().join("metadata-budget.xlsx");
+    let mut file = rust_xlsxwriter::Workbook::new();
+    let sheet = file.add_worksheet();
+    for i in 0..4 {
+        sheet.write_number(i * 3 + 1, 0, (i + 1) as f64).unwrap();
+        sheet.add_table(i * 3, 0, i * 3 + 1, 0, &rust_xlsxwriter::Table::new().set_name(format!("BudgetData{i}"))).unwrap();
+    }
+    file.save(&path).unwrap();
+    rewrite(&path, &changed, |name, data| {
+        (name.into(), if ["xl/tables/table1.xml", "xl/tables/table2.xml", "xl/tables/table3.xml"].contains(&name) {
+            data.replace("</table>", &format!("<!--{}--></table>", " ".repeat(24 * 1024 * 1024)))
+        } else { data })
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 3, "{:?}", report.warnings);
+    assert_eq!(report.tables_skipped, 1);
+    assert!(report.warnings.iter().any(|w| w.contains("64 MiB Table metadata budget")));
+    assert!(loaded.table_by_name("BudgetData2").is_none());
+    assert!(loaded.table_by_name("BudgetData3").is_some());
+    assert_eq!(loaded.active_sheet().get_raw(7, 0), "3");
+
+    // Lie about Table uncompressed sizes while retaining the compressed bytes
+    // and CRCs. Limits must charge decompression, not just ZIP declarations.
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let end = bytes.windows(4).rposition(|b| b == b"PK\x05\x06").unwrap();
+    let mut at = u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap()) as usize;
+    while bytes.get(at..at + 4) == Some(b"PK\x01\x02") {
+        let name_len = u16::from_le_bytes(bytes[at + 28..at + 30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(bytes[at + 30..at + 32].try_into().unwrap()) as usize;
+        let comment_len = u16::from_le_bytes(bytes[at + 32..at + 34].try_into().unwrap()) as usize;
+        if bytes[at + 46..at + 46 + name_len].starts_with(b"xl/tables/table") {
+            let local = u32::from_le_bytes(bytes[at + 42..at + 46].try_into().unwrap()) as usize;
+            bytes[at + 24..at + 28].copy_from_slice(&1u32.to_le_bytes());
+            bytes[local + 22..local + 26].copy_from_slice(&1u32.to_le_bytes());
+        }
+        at += 46 + name_len + extra_len + comment_len;
+    }
+    let forged = dir.path().join("forged-metadata-sizes.xlsx");
+    std::fs::write(&forged, bytes).unwrap();
+    let (loaded, report) = xlsx::import(&forged).unwrap();
+    // A ZIP reader may reject a size mismatch itself. Either layer must keep
+    // these declarations from admitting all four Tables past the byte budget.
+    assert!(report.tables_imported <= 2, "{:?}", report.warnings);
+    assert_eq!(report.tables_skipped, 4 - report.tables_imported);
+    assert!(!report.warnings.is_empty());
+    assert_eq!(loaded.active_sheet().get_raw(10, 0), "4");
+}
+
+#[test]
+fn unreadable_table_sheet_does_not_discard_valid_tables_on_later_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two-table-sheets.xlsx");
+    let changed = dir.path().join("oversized-table-sheet.xlsx");
+    let mut file = rust_xlsxwriter::Workbook::new();
+    for name in ["OversizedData", "LaterValidData"] {
+        let sheet = file.add_worksheet();
+        sheet.set_name(name).unwrap();
+        sheet.write_number(1, 0, 42).unwrap();
+        sheet.add_table(0, 0, 1, 0, &rust_xlsxwriter::Table::new().set_name(name)).unwrap();
+    }
+    file.save(&path).unwrap();
+    rewrite(&path, &changed, |name, data| {
+        (name.into(), if name == "xl/worksheets/sheet1.xml" {
+            data.replace("</worksheet>", &format!("<!--{}--></worksheet>", " ".repeat(33 * 1024 * 1024)))
+        } else { data })
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 1);
+    assert_eq!(report.tables_skipped, 1);
+    assert!(loaded.table_by_name("LaterValidData").is_some());
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 0), "42");
+    assert!(report.warnings.iter().any(|w| w.contains("on OversizedData") && w.contains("too large")));
+}

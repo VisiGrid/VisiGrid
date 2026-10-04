@@ -6,7 +6,7 @@ use quick_xml::{
     Reader, Writer,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Cursor, Read, Write},
     path::Path,
@@ -14,10 +14,17 @@ use std::{
 use visigrid_engine::{
     formula::parser::parse,
     table::{DataTable, TableColumn, TableColumnId, TableId, TableRange, TableStyle},
-    workbook::{SavedTableSheet, Workbook},
+    workbook::Workbook,
 };
 
 const MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
+// Bound work independently of cell-import limits, including malformed/duplicate
+// definitions. Large ordinary sheets without Table links do not use this parser.
+const MAX_TABLES: usize = 1024;
+const MAX_TABLE_BYTES: u64 = 64 * 1024 * 1024;
+struct TableBudget { attempts: usize, bytes_left: u64 }
+struct PendingTable { sheet: usize, imported: ImportedTable }
+
 pub(super) fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, String> {
     for a in e.attributes() {
         let a = a.map_err(|e| e.to_string())?;
@@ -46,6 +53,24 @@ fn part(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<String, String> {
         return Err(format!("XLSX part {name} is too large"));
     }
     Ok(xml)
+}
+fn table_part(zip: &mut zip::ZipArchive<File>, name: &str, budget: &mut TableBudget) -> Result<String, String> {
+    let exhausted = "The workbook's 64 MiB Table metadata budget was exceeded";
+    if budget.bytes_left == 0 { return Err(exhausted.into()); }
+    let file = zip.by_name(name).map_err(|e| format!("Missing XLSX part {name}: {e}"))?;
+    if file.size() > MAX_PART_BYTES { return Err(format!("XLSX part {name} is too large")); }
+    if file.size() > budget.bytes_left { return Err(exhausted.into()); }
+    let limit = budget.bytes_left.min(MAX_PART_BYTES);
+    let mut bytes = Vec::new();
+    let read = file.take(limit + 1).read_to_end(&mut bytes);
+    // Count actual decompressed bytes, even on malformed XML/UTF-8 or an I/O
+    // error. A forged ZIP size must not bypass the aggregate budget.
+    budget.bytes_left = budget.bytes_left.saturating_sub(bytes.len() as u64);
+    read.map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err(if limit < MAX_PART_BYTES { exhausted.into() } else { format!("XLSX part {name} is too large") });
+    }
+    String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 fn target(source: &str, path: &str) -> Result<String, String> {
     let joined = if path.starts_with('/') {
@@ -213,6 +238,9 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
                     );
                 }
                 b"tableColumn" => {
+                    if columns.len() >= visigrid_engine::sheet::NUM_COLS {
+                        return Err("Table has more columns than the worksheet supports".into());
+                    }
                     for key in [
                         b"dataDxfId".as_slice(),
                         b"headerRowDxfId",
@@ -391,110 +419,121 @@ pub(crate) fn import(
     result: &mut ImportResult,
     values_only: bool,
 ) -> Vec<super::xlsx_table_filters::PendingView> {
-    let mut views = Vec::new();
-    if let Err(error) = read_tables(path, wb, result, values_only, &mut views) {
+    let mut pending = Vec::new();
+    if let Err(error) = read_tables(path, wb, result, &mut pending) {
         result.warnings.push(format!("Excel Table metadata could not be read: {error}. Cells were kept; formulas referencing skipped Tables may show errors."));
+    }
+    let (definitions, details): (Vec<_>, Vec<_>) = pending.into_iter().map(|pending| {
+        let ImportedTable { mut table, view, warnings } = pending.imported;
+        if values_only {
+            for column in &mut table.columns { column.formula = None; }
+            if let Some(totals) = &mut table.totals {
+                for column in &mut totals.columns { column.function = None; column.formula = None; }
+            }
+        }
+        let name = table.name.clone();
+        ((pending.sheet, table), (pending.sheet, name, view, warnings))
+    }).unzip();
+    let outcomes = if result.truncated {
+        definitions.iter().map(|_| Err("Workbook import was truncated; Table definitions cannot safely be restored".into())).collect()
+    } else { wb.restore_imported_tables(definitions) };
+    let mut views = Vec::new();
+    for (outcome, (sheet, name, view, warnings)) in outcomes.into_iter().zip(details) {
+        match outcome {
+            Ok(table) => {
+                result.tables_imported += 1;
+                for warning in warnings { result.warnings.push(format!("Table {name}: {warning}")); }
+                views.push(super::xlsx_table_filters::PendingView { sheet, table, view });
+            }
+            Err(error) => skip_table(result, &wb.sheet(sheet).unwrap().name, &error),
+        }
     }
     views
 }
+fn skip_table(result: &mut ImportResult, sheet: &str, error: &str) {
+    result.tables_skipped += 1;
+    result.warnings.push(format!("Excel Table on {sheet} was kept as plain cells: {error}. Formulas referencing it may show errors."));
+}
 fn read_tables(
-    path: &Path,
-    wb: &mut Workbook,
-    result: &mut ImportResult,
-    values_only: bool,
-    views: &mut Vec<super::xlsx_table_filters::PendingView>,
+    path: &Path, wb: &Workbook, result: &mut ImportResult, pending: &mut Vec<PendingTable>,
 ) -> Result<(), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else {
-        return Ok(());
-    };
-    if !zip.file_names().any(|p| p == "xl/workbook.xml") {
-        return Ok(());
-    }
-    let rels = relationships(
-        &part(&mut zip, "xl/_rels/workbook.xml.rels")?,
-        "xl/workbook.xml",
-    )?;
+    let Ok(mut zip) = zip::ZipArchive::new(file) else { return Ok(()); };
+    if !zip.file_names().any(|p| p == "xl/workbook.xml") { return Ok(()); }
+    let rels = relationships(&part(&mut zip, "xl/_rels/workbook.xml.rels")?, "xl/workbook.xml")?;
     let xml = part(&mut zip, "xl/workbook.xml")?;
     let mut reader = Reader::from_str(&xml);
     let mut seen = HashSet::new();
+    let mut budget = TableBudget { attempts: 0, bytes_left: MAX_TABLE_BYTES };
     loop {
         match reader.read_event().map_err(|e| e.to_string())? {
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"sheet" => {
                 let name = attr(&e, b"name")?.ok_or("Missing sheet name")?;
-                let Some(si) = wb.sheets().iter().position(|s| s.name == name) else {
-                    continue;
-                };
-                let rel = rels
-                    .get(&attr(&e, b"id")?.ok_or("Missing sheet relationship")?)
-                    .ok_or("Missing sheet relationship")?;
-                if !rel.kind.ends_with("/worksheet") || rel.external {
-                    continue;
-                }
-                let sheet_xml = part(&mut zip, &rel.target)?;
-                let mut sr = Reader::from_str(&sheet_xml);
-                let mut ids = Vec::new();
-                loop {
-                    match sr.read_event().map_err(|e| e.to_string())? {
-                        Event::Start(e) | Event::Empty(e)
-                            if e.local_name().as_ref() == b"tablePart" =>
-                        {
-                            ids.push(attr(&e, b"id")?.ok_or("Missing Table relationship")?)
-                        }
-                        Event::Eof => break,
-                        _ => {}
-                    }
-                }
-                if ids.is_empty() {
-                    continue;
-                }
-                let sheet_rels = part(&mut zip, &rel_path(&rel.target))
-                    .and_then(|xml| relationships(&xml, &rel.target));
-                for id in ids {
-                    let imported = (|| {
-                        let rs = sheet_rels.as_ref().map_err(|e| e.clone())?;
-                        let rel = rs.get(&id).ok_or("Missing Table relationship")?;
-                        if !rel.kind.ends_with("/table") || rel.external {
-                            return Err("Unsupported Table relationship".into());
-                        }
-                        if !seen.insert(rel.target.clone()) {
-                            return Err("Duplicate Table part reference".into());
-                        }
-                        parse_table(&part(&mut zip, &rel.target)?)
-                    })();
-                    let outcome = imported.and_then(|mut imported| {
-                        if result.truncated { return Err("Workbook import was truncated; Table definitions cannot safely be restored".into()); }
-                        let t = &mut imported.table;
-                        let sheet = wb.sheet(si).unwrap();
-                        for (i, column) in t.columns.iter_mut().enumerate() {
-                            if sheet.get_raw(t.range.start_row, t.range.start_col + i) != column.name { return Err(format!("Table {} has missing or inconsistent header cells", t.name)); }
-                            if values_only { column.formula = None; }
-                        }
-                        if values_only {
-                            if let Some(totals) = &mut t.totals {
-                                for column in &mut totals.columns { column.function = None; column.formula = None; }
-                            }
-                        }
-                        let mut catalog = wb.saved_tables();
-                        catalog.version = catalog.version.max(if t.totals.is_some() { 5 } else { 2 });
-                        t.id = TableId(catalog.next_table_id);
-                        catalog.next_table_id += 1;
-                        if let Some(entry) = catalog.sheets.iter_mut().find(|s| s.sheet == si) { entry.tables.push(t.clone()); }
-                        else { catalog.sheets.push(SavedTableSheet { sheet: si, tables: vec![t.clone()], column_allocators: BTreeMap::new(), view: None }); }
-                        wb.restore_tables(catalog)?;
-                        result.tables_imported += 1;
-                        for warning in imported.warnings { result.warnings.push(format!("Table {}: {warning}", t.name)); }
-                        views.push(super::xlsx_table_filters::PendingView { sheet: si, table: t.id, view: imported.view });
-                        Ok(())
-                    });
-                    if let Err(error) = outcome {
-                        result.tables_skipped += 1;
-                        result.warnings.push(format!("Excel Table on {name} was kept as plain cells: {error}. Formulas referencing it may show errors."));
-                    }
+                let Some(si) = wb.sheets().iter().position(|s| s.name == name) else { continue; };
+                let outcome = (|| {
+                    let rel = rels.get(&attr(&e, b"id")?.ok_or("Missing sheet relationship")?)
+                        .ok_or("Missing sheet relationship")?;
+                    if !rel.kind.ends_with("/worksheet") || rel.external { return Ok(()); }
+                    read_sheet_tables(&mut zip, &rel.target, si, &name, result, pending, &mut seen, &mut budget)
+                })();
+                if let Err(error) = outcome {
+                    result.warnings.push(format!("Excel Table metadata on {name} could not be read: {error}. Cells were kept; formulas referencing skipped Tables may show errors."));
                 }
             }
             Event::Eof => break,
             _ => {}
+        }
+    }
+    Ok(())
+}
+fn read_sheet_tables(
+    zip: &mut zip::ZipArchive<File>, path: &str, sheet: usize, name: &str,
+    result: &mut ImportResult, pending: &mut Vec<PendingTable>,
+    seen: &mut HashSet<String>, budget: &mut TableBudget,
+) -> Result<(), String> {
+    let links = rel_path(path);
+    match zip.by_name(&links) {
+        Ok(_) => {},
+        Err(zip::result::ZipError::FileNotFound) => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    }
+    let rels = relationships(&part(zip, &links)?, path)?;
+    if !rels.values().any(|rel| rel.kind.ends_with("/table")) { return Ok(()); }
+    let xml = part(zip, path).map_err(|error| {
+        result.tables_skipped += rels.values().filter(|rel| rel.kind.ends_with("/table")).count();
+        error
+    })?;
+    let mut reader = Reader::from_str(&xml);
+    let mut ids = Vec::new();
+    let mut skipped = 0usize;
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"tablePart" => {
+                if budget.attempts == MAX_TABLES { skipped += 1; }
+                else {
+                    budget.attempts += 1;
+                    ids.push(attr(&e, b"id")?.ok_or("Missing Table relationship")?);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if skipped > 0 {
+        result.tables_skipped += skipped;
+        result.warnings.push(format!("{skipped} Excel Table definitions on {name} exceeded the workbook limit of {MAX_TABLES}. Cells were kept; formulas referencing skipped Tables may show errors."));
+    }
+    for id in ids {
+        let outcome = (|| {
+            let rel = rels.get(&id).ok_or("Missing Table relationship")?;
+            if !rel.kind.ends_with("/table") || rel.external { return Err("Unsupported Table relationship".into()); }
+            if !seen.insert(rel.target.clone()) { return Err("Duplicate Table part reference".into()); }
+            let xml = table_part(zip, &rel.target, budget)?;
+            parse_table(&xml)
+        })();
+        match outcome {
+            Ok(imported) => pending.push(PendingTable { sheet, imported }),
+            Err(error) => skip_table(result, name, &error),
         }
     }
     Ok(())

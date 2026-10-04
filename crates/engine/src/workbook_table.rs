@@ -338,7 +338,7 @@ impl Workbook {
         Ok(())
     }
 
-    fn validate_table_region(
+    fn validate_table_region_geometry(
         &self,
         sheet_id: SheetId,
         range: TableRange,
@@ -373,6 +373,14 @@ impl Workbook {
         ) {
             return Err(format!("Table range overlaps {}'s pivot output.", p.name));
         }
+        Ok(())
+    }
+
+    fn validate_table_region(
+        &self, sheet_id: SheetId, range: TableRange, except: Option<TableId>,
+    ) -> Result<(), String> {
+        self.validate_table_region_geometry(sheet_id, range, except)?;
+        let sheet = self.sheet_by_id(sheet_id).unwrap();
         // Sparse iteration: even a header-only table on a large empty range
         // never allocates one entry per body cell.
         for ((row, col), cell) in sheet.cells_iter() {
@@ -1267,6 +1275,55 @@ impl Workbook {
                 })
                 .collect(),
         }
+    }
+
+    /// Install interchange definitions after cells are loaded and before binding
+    /// formulas. Each result corresponds to one input; invalid definitions leave
+    /// cells and previously accepted Tables intact. IDs are always allocated here.
+    /// Unlike repeated catalog restores, existing definitions are not revalidated.
+    pub fn restore_imported_tables(
+        &mut self, imported: Vec<(usize, DataTable)>,
+    ) -> Vec<Result<TableId, String>> {
+        if imported.is_empty() { return Vec::new(); }
+        if let Err(error) = self.ensure_writable() {
+            return imported.iter().map(|_| Err(error.clone())).collect();
+        }
+        let mut results = Vec::with_capacity(imported.len());
+        let mut spills = std::collections::HashMap::<usize, Vec<(usize, usize)>>::new();
+        for (index, mut table) in imported {
+            let outcome = (|| {
+                let sheet = self.sheet(index).ok_or("Table references a missing sheet.")?;
+                table.id = TableId(self.next_table_id);
+                let next = self.next_table_id.checked_add(1).ok_or("Table identities exhausted.")?;
+                table.validate(sheet.rows, sheet.cols)?;
+                self.validate_table_name_available(&table.name, None)?;
+                self.validate_table_region_geometry(sheet.id, table.full_range(), None)?;
+                // Cell state does not change during metadata loading. Scan each
+                // sheet once, rather than every populated cell for every Table.
+                let positions = spills.entry(index).or_insert_with(|| sheet.cells_iter()
+                    .filter(|(_, cell)| cell.spill_info().is_some() || cell.spill_parent().is_some())
+                    .map(|(position, _)| position).collect());
+                if positions.iter().any(|&(row, col)| table.full_range().contains(row, col)) {
+                    return Err("Saved table overlaps an array spill.".into());
+                }
+                for (offset, col) in table.columns.iter().enumerate() {
+                    if !matches!(sheet.get_cell_opt(table.range.start_row, table.range.start_col + offset).map(|c| c.value()), Some(ValueRef::Text(t)) if t == col.name) {
+                        return Err(format!("Saved table '{}' does not match its header cells.", table.name));
+                    }
+                }
+                let id = table.id;
+                let sheet = &mut self.sheets[index];
+                sheet.table_column_allocators.insert(id.0, table.next_column_id);
+                sheet.data_tables.push(table);
+                self.next_table_id = next;
+                Ok(id)
+            })();
+            results.push(outcome);
+        }
+        for sheet in &mut self.sheets { sheet.table_id_high_water = self.next_table_id - 1; }
+        self.refresh_table_name_reservations();
+        self.update_pivot_staleness();
+        results
     }
 
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and

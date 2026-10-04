@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Large XLSX sheets without Table links no longer trigger the Table-parser size warning or prevent Tables on later sheets from loading. Table import now validates definitions in a batch, with a workbook limit of 1,024 definition attempts and 64 MiB of Table metadata. Skipped definitions keep their cells and produce an explicit warning.
+
 - Copy reviewed sheets containing Tables with visible or hidden totals. Copied footer formulas, custom settings and calculated rules bind to the new Tables; filters, overrides, formatting and comments survive. Undo/redo, history rewind and native/XLSX round trips preserve the independent copies. Dormant totals also reserve referenced Table names and prevent removal of a referenced sheet.
 
 - Resize Tables horizontally with visible or hidden totals. Surviving columns retain their rules and totals; released cells stay in place, and newly added footer cells must be empty. Combined width/height changes apply atomically, with undo/redo and history rewind. Undoing a total or calculated rule now restores originally absent cells so an earlier resize can also be undone.

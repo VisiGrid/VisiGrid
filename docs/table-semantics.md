@@ -526,6 +526,16 @@ Generated Table names also avoid unresolved references in dormant totals, so add
 
 Validation, 2026-10-04: 850 engine unit tests, 137 engine Table integration tests, 338 I/O unit tests, 84 Table I/O tests and 847 desktop tests passed (2,256 total; 19 existing ignores). New regressions cover visible/dormant custom totals, multiple copied Tables, explicit worksheet references, manual hidden rows, independent source/copy recalculation, footer comments and safe reshow refusal, unresolved-name reservation, dormant external-reference deletion guards, reviewed edits/deletions, append, undo/redo/rewind and native/XLSX round trips. The fresh native desktop build and `git diff --check` passed. Live UI and real Microsoft Excel QA remain outstanding.
 
+## Phase 4: Bounded XLSX Table import
+
+The Table pass checks each worksheet's relationships first. A worksheet with no Table relationships is not read by the Table XML parser, so its 32 MiB part limit does not reject unrelated large sheets or emit a false Table-loss warning. Other relationships, such as hyperlinks, do not trigger Table parsing. A failure reading one Table-bearing sheet reports that sheet and continues with later sheets; previously parsed valid definitions remain available.
+
+A workbook can attempt at most 1,024 Table definitions, including malformed, duplicate and unsupported references. Excess definitions remain plain cells with an explicit warning and skipped count. Table parts also share a 64 MiB uncompressed metadata budget, with the existing 32 MiB per-part limit. The budget counts actual decompressed bytes, including failed reads, so forged ZIP size declarations cannot bypass it. A part exceeding the remaining budget is skipped without preventing a later smaller part from using that budget. Column parsing is bounded by the worksheet column limit.
+
+Definitions are loaded as a batch before dependency binding and recalculation. Each new Table receives a fresh workbook identity and is checked against names, existing/earlier accepted Table bounds, headers, merges, pivots and spills. The loader scans each sheet's spill state once, validates each incoming definition once, and refreshes shared name reservations and pivot baselines once after the batch. It no longer clones and revalidates the entire growing catalog for each definition. Invalid definitions do not alter cells or remove valid Tables. Values-only imports use the same limits and validation while stripping calculated and totals formulas from metadata. Strict native catalog restoration is unchanged.
+
+Validation, 2026-10-04: 138 engine Table tests, 88 Table I/O tests and 847 desktop tests passed (1,073 total; 3 existing desktop ignores). New regressions cover 33 MiB plain sheets with no relationships or only hyperlinks, later valid Tables after an oversized Table-bearing sheet, 1,025 definitions across two sheets, malformed definitions consuming the count budget, values-only import, native round trips, aggregate metadata byte limits, forged ZIP sizes, and header/name/overlap/merge/spill/recovery validation in the batch loader. The fresh native desktop build and `git diff --check` passed. Live UI and real Microsoft Excel QA remain outstanding.
+
 ## Phase 4 backlog
 
 1. Remaining XLSX fidelity: broaden the formula/metadata subset for materialized sorting, multi-column/custom sorts, advanced predicates and custom styles/themes. Real Excel verification of the shipped subset stays a Phase 3 release check. Guarded materialized export, single-column saved sorting, built-in style metadata and checkbox filters are implemented locally.
@@ -538,8 +548,6 @@ Web/cloud preservation and authoring remain deferred to the separate frontend re
 
 ### Inherited PR #83 follow-ups for Phase 4
 
-- Inspect worksheet relationships before reading worksheet XML for Tables, so the 32 MB Table-parser limit does not reject unrelated large sheets or produce a misleading warning.
-- Bound Table counts and reduce repeated import validation to prevent pathological import times from many tiny Tables.
 - Confirm the recovery export policy: XLSX salvage is currently blocked along with other exports; any future salvage path must explicitly describe lost definitions and potentially stale values.
 - Verify exported this-row references (`[@Col]`) in Microsoft Excel. Older-reader pivot-definition loss is documented in the docs change below.
 
