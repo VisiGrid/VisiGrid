@@ -2484,10 +2484,24 @@ path = "export-*-*.csv"
                 entry.read_to_end(&mut bytes).unwrap();
                 let name = entry.name().to_string();
                 if name == "xl/worksheets/sheet1.xml" {
+                    // Whatever result the exporter saved (0 before #100, the
+                    // computed value after), replace it with one no
+                    // recalculation would produce
                     let xml = String::from_utf8(bytes).unwrap();
-                    let n = xml.matches("</f><v>0</v>").count();
+                    let mut out = String::new();
+                    let mut rest = xml.as_str();
+                    let mut n = 0;
+                    while let Some(at) = rest.find("</f><v>") {
+                        let start = at + "</f><v>".len();
+                        let end = start + rest[start..].find("</v>").unwrap();
+                        out.push_str(&rest[..start]);
+                        out.push_str("99");
+                        rest = &rest[end..];
+                        n += 1;
+                    }
+                    out.push_str(rest);
                     assert_eq!(n, 3, "{xml}");
-                    bytes = xml.replace("</f><v>0</v>", "</f><v>99</v>").into_bytes();
+                    bytes = out.into_bytes();
                 }
                 output.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
                 output.write_all(&bytes).unwrap();
