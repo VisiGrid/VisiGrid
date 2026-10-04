@@ -1787,8 +1787,12 @@ impl History {
                     .replay(workbook, false)
                     .map_err(PreviewBuildError::InvariantViolation)?;
                 if let Some(view) = view_state.per_sheet.get_mut(*sheet_index) {
-                    view.row_order = None;
-                    view.sort = None;
+                    // A visibility-only commit keeps worksheet sort history.
+                    // Structural row/column edits still invalidate that mapping.
+                    if !history.commit.steps.is_empty() {
+                        view.row_order = None;
+                        view.sort = None;
+                    }
                     view.structure_layout = Some(history.after.clone());
                 }
             }

@@ -496,9 +496,14 @@ impl Spreadsheet {
         }
 
         let ((min_row, _), (max_row, _)) = self.selection_range();
-        let rows: Vec<usize> = (min_row..=max_row)
-            .filter(|r| !self.is_row_hidden(*r))
-            .collect();
+        let empty = Default::default();
+        let manual = self.display_hidden_rows().unwrap_or(&empty);
+        let rows = match crate::table_visibility::selected_row_visibility(
+            &self.row_view, manual, min_row, max_row, true,
+        ) {
+            Ok(rows) => rows,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
 
         if rows.is_empty() { return; }
 
@@ -537,9 +542,14 @@ impl Spreadsheet {
 
         let ((min_row, _), (max_row, _)) = self.selection_range();
         let sheet_id = self.cached_sheet_id();
-        let rows: Vec<usize> = (min_row..=max_row)
-            .filter(|r| self.is_row_hidden(*r))
-            .collect();
+        let empty = Default::default();
+        let manual = self.display_hidden_rows().unwrap_or(&empty);
+        let rows = match crate::table_visibility::selected_row_visibility(
+            &self.row_view, manual, min_row, max_row, false,
+        ) {
+            Ok(rows) => rows,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
 
         if rows.is_empty() {
             self.status_message = Some("No hidden rows in selection".to_string());

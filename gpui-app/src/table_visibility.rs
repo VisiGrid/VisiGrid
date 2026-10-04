@@ -1,10 +1,44 @@
 //! Manual visibility and totals metadata are one guarded history operation.
 use crate::{app::Spreadsheet, history::UndoAction, table_structure::{StructureLayout, TableStructureHistory}};
 use gpui::Context;
-use visigrid_engine::{sheet::SheetId, workbook::Workbook};
+use visigrid_engine::{filter::RowView, sheet::SheetId, workbook::Workbook};
+use std::collections::BTreeSet;
 
+/// Resolve the current displayed selection once, before visibility changes.
+/// Unhide spans invisible slots too, but only removes manual flags.
+pub(crate) fn selected_row_visibility(
+    rows: &RowView, manual: &BTreeSet<usize>, start: usize, end: usize, hidden: bool,
+) -> Result<Vec<usize>, String> {
+    if start > end || end >= rows.row_count() {
+        return Err("The row selection is outside the worksheet.".into());
+    }
+    Ok((start..=end).filter_map(|slot| {
+        let row = rows.view_to_data(slot);
+        if hidden {
+            (rows.is_view_row_visible(slot) && !manual.contains(&row)).then_some(row)
+        } else {
+            manual.contains(&row).then_some(row)
+        }
+    }).collect())
+}
+
+#[cfg(test)]
 fn prepare(
     wb: &Workbook, id: SheetId, before: &StructureLayout, start: usize, end: usize, hidden: bool,
+) -> Result<Option<(Workbook, TableStructureHistory, usize)>, String> {
+    let sheet = wb.sheet_by_id(id).ok_or("Visibility sheet no longer exists.")?;
+    let view = sheet.build_saved_table_view(sheet.rows)?;
+    let identity;
+    let rows = if let Some(view) = &view { view.rows() } else {
+        identity = RowView::new(sheet.rows);
+        &identity
+    };
+    prepare_in_view(wb, id, before, rows, start, end, hidden)
+}
+
+fn prepare_in_view(
+    wb: &Workbook, id: SheetId, before: &StructureLayout, rows: &RowView,
+    start: usize, end: usize, hidden: bool,
 ) -> Result<Option<(Workbook, TableStructureHistory, usize)>, String> {
     let sheet = wb.sheet_by_id(id).ok_or("Visibility sheet no longer exists.")?;
     if start > end || end >= sheet.rows.min(crate::app::NUM_ROWS) {
@@ -18,15 +52,14 @@ fn prepare(
             return Err("Reset body row heights or unfreeze the Table body before changing row visibility.".into());
         }
     }
-    let view = sheet.build_saved_table_view(sheet.rows)?;
+    let targets = selected_row_visibility(rows, &before.hidden_rows, start, end, hidden)?;
+    if targets.iter().any(|row| *row >= sheet.rows) {
+        return Err("The row selection is outside the worksheet.".into());
+    }
     let mut after = before.clone();
-    let mut count = 0;
-    for slot in start..=end {
-        let row = view.as_ref().map_or(slot, |view| view.rows().view_to_data(slot));
-        // Hiding skips filtered-out records. Unhide removes only manual flags;
-        // it never changes the saved filter criteria or reveals filtered rows.
-        if hidden && view.as_ref().is_some_and(|view| !view.rows().is_data_row_visible(row)) { continue; }
-        if if hidden { after.hidden_rows.insert(row) } else { after.hidden_rows.remove(&row) } { count += 1; }
+    let count = targets.len();
+    for row in targets {
+        if hidden { after.hidden_rows.insert(row); } else { after.hidden_rows.remove(&row); }
     }
     if count == 0 { return Ok(None); }
     if let Some(table) = sheet.table_view_spec().filter(|spec| spec.has_criteria())
@@ -64,15 +97,10 @@ impl Spreadsheet {
 
     pub(crate) fn change_table_row_visibility(&mut self, hidden: bool, cx: &mut Context<Self>) {
         self.sync_table_view(cx);
-        if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered()) {
-            self.status_message = Some("Clear worksheet sorting and filters before changing manual row visibility with Tables.".into());
-            cx.notify();
-            return;
-        }
         let ((start, _), (end, _)) = self.selection_range();
         let id = self.cached_sheet_id();
         let before = self.structure_layout(id);
-        let result = prepare(self.wb(cx), id, &before, start, end, hidden).and_then(|result| {
+        let result = prepare_in_view(self.wb(cx), id, &before, &self.row_view, start, end, hidden).and_then(|result| {
             if let Some((candidate, history, _)) = &result {
                 self.validate_structure_layout(candidate, id, &history.after)?;
             }
@@ -276,6 +304,78 @@ mod tests {
         let preview = stack.build_workbook_before(0, Some(&wb), 100, 10_000).unwrap();
         assert!(preview.view_state.per_sheet[0].table_rows.as_ref().unwrap().is_data_row_visible(3));
         assert!(!preview.view_state.per_sheet[0].table_rows.as_ref().unwrap().is_data_row_visible(4));
+    }
+
+    #[test]
+    fn worksheet_hide_targets_canonical_visible_rows_and_unhide_keeps_filter_mask() {
+        let mut rows = RowView::new(8);
+        rows.apply_sort(vec![0, 4, 2, 1, 3, 5, 6, 7]);
+        rows.apply_filter(vec![true, true, false, true, true, true, true, true]);
+        let manual = [4].into();
+        assert_eq!(selected_row_visibility(&rows, &manual, 1, 4, true).unwrap(), [1, 3]);
+        assert_eq!(selected_row_visibility(&rows, &manual, 1, 1, false).unwrap(), [4]);
+        assert!(selected_row_visibility(&rows, &manual, 2, 2, true).unwrap().is_empty());
+        let manual = [1, 2, 3, 4].into();
+        assert_eq!(selected_row_visibility(&rows, &manual, 1, 4, false).unwrap(), [4, 2, 1, 3]);
+        assert!(!rows.is_data_row_visible(2), "unhide must not replace the worksheet filter mask");
+        assert!(selected_row_visibility(&rows, &manual, 7, 8, true).is_err());
+        assert!(selected_row_visibility(&rows, &manual, 5, 2, false).is_err());
+    }
+
+    #[test]
+    fn worksheet_visibility_keeps_sort_history_and_other_sheet_table_criteria() {
+        let mut wb = fixture(true);
+        let table_spec = wb.active_sheet().table_view_spec().cloned();
+        let other = wb.add_sheet_named("Plain").unwrap();
+        wb.sheet_mut(other).unwrap().rows = 12;
+        for (row, value) in ["Amount", "40", "10", "30", "20"].iter().enumerate() {
+            wb.set_cell_value_tracked(other, row, 0, value);
+        }
+        wb.set_cell_value_tracked(other, 0, 2, "=SUBTOTAL(109,A2:A5)");
+        let id = wb.sheet(other).unwrap().id;
+        let (wb, _) = wb.prepare_table_row_visibility(id, [4].into()).unwrap();
+        let mut layout = StructureLayout::default();
+        layout.hidden_rows.insert(4);
+        let mut rows = RowView::new(12);
+        rows.apply_sort(vec![0, 2, 4, 3, 1, 5, 6, 7, 8, 9, 10, 11]);
+        rows.apply_filter((0..12).map(|row| row != 3).collect());
+        let (hidden, history, count) = prepare_in_view(&wb, id, &layout, &rows, 1, 4, true).unwrap().unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(history.after.hidden_rows, [1, 2, 4].into());
+        assert_eq!(hidden.sheet(other).unwrap().get_display(0, 2), "30");
+        assert_eq!(hidden.sheet(0).unwrap().table_view_spec(), table_spec.as_ref());
+        assert_eq!(history.commit.changed_cell_count(), 0);
+        let undone = history.commit.candidate(&hidden, true).unwrap();
+        assert_eq!(undone.sheet(other).unwrap().manual_hidden_rows(), [4].into());
+        assert_eq!(undone.sheet(other).unwrap().get_display(0, 2), "80");
+        let redone = history.commit.candidate(&undone, false).unwrap();
+        assert_eq!(redone.sheet(other).unwrap().manual_hidden_rows(), [1, 2, 4].into());
+        let (shown, unhide, count) = prepare_in_view(&hidden, id, &history.after, &rows, 1, 4, false).unwrap().unwrap();
+        assert_eq!(count, 3);
+        assert!(shown.sheet(other).unwrap().manual_hidden_rows().is_empty());
+        assert!(!rows.is_data_row_visible(3));
+        assert_eq!(shown.sheet(0).unwrap().table_view_spec(), table_spec.as_ref());
+        let mut stack = History::new();
+        stack.record_action_with_provenance(UndoAction::SortApplied {
+            sheet_index: other,
+            previous_row_order: (0..12).collect(),
+            new_row_order: rows.row_order().to_vec(),
+            previous_sort_state: None,
+            new_sort_state: (0, true),
+        }, None);
+        for h in [history, unhide] {
+            stack.record_action_with_provenance(UndoAction::TableStructureChanged {
+                sheet_index: other, history: Box::new(h), description: "Worksheet visibility".into(),
+            }, None);
+        }
+        for (end, hidden) in [(1, vec![4]), (2, vec![1, 2, 4]), (3, vec![])] {
+            let preview = stack.build_workbook_before(end, Some(&wb), 100, 10_000).unwrap();
+            let view = &preview.view_state.per_sheet[other];
+            assert_eq!(view.row_order.as_deref(), Some(rows.row_order()));
+            assert_eq!(view.sort, Some((0, true)));
+            assert_eq!(view.structure_layout.as_ref().unwrap().hidden_rows, hidden.into_iter().collect());
+            assert_eq!(preview.workbook.sheet(0).unwrap().table_view_spec(), table_spec.as_ref());
+        }
     }
 
 }
