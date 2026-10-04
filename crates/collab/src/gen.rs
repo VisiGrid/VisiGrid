@@ -188,6 +188,11 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
             return Vec::new();
         }
         CollabOp::DeleteSheet { sheet, index: idx }
+    } else if roll < 95 {
+        if sheets.len() < 2 {
+            return Vec::new();
+        }
+        CollabOp::MoveSheet { sheet, index: rng.gen_range(0..sheets.len()) }
     } else {
         let (h, w) = (rng.gen_range(1..=3), rng.gen_range(1..=2));
         let values = (0..h)

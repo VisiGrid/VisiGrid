@@ -355,6 +355,13 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
         }
         (DeleteSheet { .. }, _) => one(a),
 
+        // A move is serialized against every tab-order op (see `conflict`),
+        // and nothing else depends on tab positions.
+        (MoveSheet { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
+            Transformed::Dropped("its sheet was deleted")
+        }
+        (MoveSheet { .. }, _) => one(a),
+
         // ---- atomic range ----
         (
             ReplaceRange {
@@ -547,6 +554,13 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
                 return Some("rows or columns were inserted where others were deleted".into());
             }
         }
+    }
+    // Moving a tab concurrent with any other change to the tab order (an
+    // add, a delete, another move) is serialized: index arithmetic across
+    // two concurrent reorders does not commute.
+    let reorders = |x: &CollabOp| matches!(x, AddSheet { .. } | DeleteSheet { .. } | MoveSheet { .. });
+    if (matches!(a, MoveSheet { .. }) && reorders(b)) || (matches!(b, MoveSheet { .. }) && reorders(a)) {
+        return Some("the sheet tabs were reordered at the same time".into());
     }
     // Concurrent deletes of different sheets are serialized, so two clients
     // can never together delete the last sheet.

@@ -295,6 +295,12 @@ pub enum CollabOp {
         sheet: SheetKey,
         index: usize,
     },
+    /// Move a sheet's tab to `index` (its position after the move). V1
+    /// serializes it against any concurrent add, delete or move.
+    MoveSheet {
+        sheet: SheetKey,
+        index: usize,
+    },
     /// V1 atomic range op standing in for sort / move / large paste: it
     /// replaces a block of values. Concurrent overlapping ops are refused.
     ReplaceRange {
@@ -315,6 +321,7 @@ impl CollabOp {
             | CollabOp::AddSheet { sheet, .. }
             | CollabOp::RenameSheet { sheet, .. }
             | CollabOp::DeleteSheet { sheet, .. }
+            | CollabOp::MoveSheet { sheet, .. }
             | CollabOp::ReplaceRange { sheet, .. } => *sheet,
         }
     }

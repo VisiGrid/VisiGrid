@@ -166,6 +166,19 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             sheet_changed(changes.as_deref_mut());
             Ok(())
         }
+        CollabOp::MoveSheet { sheet, index } => {
+            let idx = index_of(wb, *sheet)?;
+            let to = (*index).min(wb.sheets().len() - 1);
+            if to != idx {
+                let s = wb.take_sheet(idx).ok_or_else(|| Skipped::Refused("could not move sheet".into()))?;
+                if !wb.restore_sheet(to, s) {
+                    return Err(Skipped::Refused("could not move sheet".into()));
+                }
+                after_sheet_change(wb);
+                sheet_changed(changes.as_deref_mut());
+            }
+            Ok(())
+        }
         CollabOp::DeleteSheet { sheet, .. } => {
             let idx = index_of(wb, *sheet)?;
             if wb.take_sheet(idx).is_none() {

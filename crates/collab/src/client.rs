@@ -520,6 +520,7 @@ impl Client {
                         }
                     }
                     CollabOp::AddSheet { index, .. } => *index = (*index).min(wb.sheets().len()),
+                    CollabOp::MoveSheet { index, .. } => *index = (*index).min(wb.sheets().len().saturating_sub(1)),
                     _ => {}
                 }
                 apply_ops(&mut wb, std::slice::from_ref(op));
@@ -631,6 +632,11 @@ pub fn positional_inverse(ops: &[CollabOp], before: &Workbook) -> Vec<CollabOp> 
                     index: *index,
                 });
             }
+            CollabOp::MoveSheet { sheet, .. } => {
+                if let Some(at) = scratch.sheets().iter().position(|s| s.id.0 == *sheet) {
+                    inverse.push(CollabOp::MoveSheet { sheet: *sheet, index: at });
+                }
+            }
         }
         apply_ops(&mut scratch, std::slice::from_ref(op));
     }
@@ -699,6 +705,13 @@ fn with_current_tab_positions(wb: &Workbook, mut ops: Vec<CollabOp>) -> Vec<Coll
             CollabOp::AddSheet { sheet, index, .. } => {
                 *index = (*index).min(tabs.len());
                 tabs.insert(*index, *sheet);
+            }
+            CollabOp::MoveSheet { sheet, index } => {
+                if let Some(at) = tabs.iter().position(|s| s == sheet) {
+                    tabs.remove(at);
+                    *index = (*index).min(tabs.len());
+                    tabs.insert(*index, *sheet);
+                }
             }
             _ => {}
         }

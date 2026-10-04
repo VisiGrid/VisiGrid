@@ -241,3 +241,25 @@ fn writing_the_same_value_again_is_not_an_undo_step() {
     room.sync();
     assert_eq!(room.raw(0, 0), "", "one undo reverts the edit, not the duplicate write");
 }
+
+#[test]
+fn moving_a_sheet_tab_converges_undoes_and_serializes_against_concurrent_reorders() {
+    let mut room = Room::new(2);
+    let key = room.key();
+    let add = |k: u64, name: &str, index: usize| CollabOp::AddSheet { sheet: k, name: name.into(), index };
+    room.edit(0, vec![add(41, "Two", 1), add(42, "Three", 2)]);
+    room.sync();
+    let order = |room: &Room| room.server.wb.sheets().iter().map(|s| s.id.0).collect::<Vec<_>>();
+    assert_eq!(order(&room), vec![key, 41, 42]);
+    room.edit(0, vec![CollabOp::MoveSheet { sheet: 42, index: 0 }]);
+    room.sync();
+    assert_eq!(order(&room), vec![42, key, 41]);
+    assert!(room.undo(0).applied);
+    room.sync();
+    assert_eq!(order(&room), vec![key, 41, 42], "undo puts the tab back");
+    // Concurrent: one moves a tab while the other adds one. The later is refused.
+    room.edit(0, vec![CollabOp::MoveSheet { sheet: 41, index: 2 }]);
+    room.edit(1, vec![add(43, "Four", 0)]);
+    room.sync();
+    assert_eq!(order(&room), vec![key, 42, 41], "the move landed, the concurrent add was refused");
+}

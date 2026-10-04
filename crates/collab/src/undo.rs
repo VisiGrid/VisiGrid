@@ -391,6 +391,11 @@ pub fn apply_recording(
             CollabOp::AddSheet { sheet, index, .. } => {
                 inv.push(CollabOp::DeleteSheet { sheet: *sheet, index: *index });
             }
+            CollabOp::MoveSheet { sheet, .. } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    inv.push(CollabOp::MoveSheet { sheet: *sheet, index: idx });
+                }
+            }
             CollabOp::RenameSheet { sheet, .. } => {
                 if let Some(name) = name_of(scratch, *sheet) {
                     inv.push(CollabOp::RenameSheet { sheet: *sheet, name });
