@@ -546,12 +546,20 @@ Safe rows above/below an active Table view and rows on other sheets can change v
 
 Validation, 2026-10-04: 142 engine Table tests, 89 Table I/O tests and 851 desktop tests passed (1,082 total; 3 existing desktop ignores). New regressions cover 1-series versus 101-series aggregates, multiple totals on one sheet, dormant settings, footer hide/unhide and subsequent append, cross-sheet dependent invalidation, stale/bounds/recovery refusal, unsafe spills affecting another saved view, safe visibility changes alongside other-sheet criteria, rewind of workbook and layout together, and native/XLSX round trips. The fresh native desktop build and `git diff --check` passed. Live UI and real Microsoft Excel QA remain outstanding.
 
+## Phase 4: Large-workbook history measurement
+
+The reproducible `table_edit_bench` example measures candidate cloning, incremental recalculation, saved-view validation, guarded batch capture/replay and snapshot publication with 10,000- and 100,000-row Tables. Cases include values, per-row formulas, sorting, filtering, totals and cross-sheet aggregates. Correctness assertions accompany the measurements. These are engine component timings; ordinary typing uses a lighter target-only history path, and desktop rendering is not included. See [Table performance](table-performance.md) for the command, fixture, results and measurement limits.
+
+The initial run identified retained per-cell JSON trees in guarded-history fingerprinting as a large temporary-memory cost. Fingerprinting now retains sorted coordinates and serializes one cell at a time. Hash encoding, authored-state coverage, candidate validation, stale-history refusal and sparse history contents are unchanged. General command restrictions, full scans and repeated view construction remain separate work.
+
+Validation, 2026-10-04: all 1,883 engine and desktop tests passed (18 existing ignores), including exact fingerprint compatibility, authored-state sensitivity, structural and automation replay, totals and history rewind. Every correctness assertion in the release-profile benchmark passed. The benchmark process peak fell from 1877.5 MiB to 209.6 MiB; timing variability does not support a general speed guarantee. The fresh native desktop build and `git diff --check` passed. Live UI, real Microsoft Excel and cross-platform checks remain outstanding.
+
 ## Phase 4 backlog
 
 1. Remaining XLSX fidelity: broaden the formula/metadata subset for materialized sorting, multi-column/custom sorts, advanced predicates and custom styles/themes. Real Excel verification of the shipped subset stays a Phase 3 release check. Guarded materialized export, single-column saved sorting, built-in style metadata and checkbox filters are implemented locally.
 2. Remaining totals structure: fixed-reference relocation during Table-only footer movement, and manual visibility inside projected Table bodies. Native show/hide, column functions, labels and custom formulas are implemented.
 3. Named saved views and richer mixed-layout support beyond the current saved criteria.
-4. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above, and measure candidate validation/recalculation on large workbooks before optimizing.
+4. Continue narrowing workbook-wide command/history restrictions beyond the metadata commands implemented above. Large-workbook component measurement is now available; continue measuring full desktop edit latency and optimizing demonstrated history/repeated-view costs without weakening validation.
 5. Additional structural capabilities and editor integrations currently refused or unsupported, including sheet lifecycle operations and cross-workbook structured-reference binding. Keep existing refusals explicit until these are implemented.
 
 Web/cloud preservation and authoring remain deferred to the separate frontend rebuild. Refreshable external sources and broader Excel parity remain later work. Cross-platform QA and confirmed release-blocking bugs are not deferred features.

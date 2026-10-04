@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reduce temporary memory used by guarded Table history. Workbook fingerprints now process one cell at a time while preserving the same stale-edit protection for undo/redo, structural changes and automation batches.
+
 - Manually hide/unhide rows on sheets with Table totals. Totals and dependents recalculate, and undo/redo and history rewind restore visibility and totals together. Safe rows outside an active Table view and rows on other sheets no longer require clearing workbook-wide criteria. Hiding records inside a sorted/filtered Table still requires clearing that Table's criteria first.
 
 - Large XLSX sheets without Table links no longer trigger the Table-parser size warning or prevent Tables on later sheets from loading. Table import now validates definitions in a batch, with a workbook limit of 1,024 definition attempts and 64 MiB of Table metadata. Skipped definitions keep their cells and produce an explicit warning.

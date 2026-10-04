@@ -15,7 +15,7 @@ use crate::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Copy, Debug)]
 pub struct StructureStep {
@@ -143,19 +143,101 @@ fn signature(cell: &Option<Cell>) -> serde_json::Value {
     ])
 }
 fn fingerprint(s: &Sheet) -> [u8; 32] {
-    let cells: BTreeMap<_, _> = s
-        .cells_iter()
-        .map(|(p, _)| (p, signature(&image(s, p.0, p.1))))
-        .collect();
+    // Retain only coordinates while imposing canonical row/column order.
+    // Materializing every cell's JSON tree here used over a gigabyte for a
+    // 300k-cell sheet. Serialize one signature at a time, preserving the exact
+    // fingerprint encoding and all stale-history checks.
+    let mut positions: Vec<_> = s.cells_iter().map(|(p, _)| p).collect();
+    positions.sort_unstable();
     let mut h = Sha256::new();
-    for ((r, c), value) in cells {
+    for (r, c) in positions {
         h.update((r as u64).to_le_bytes());
         h.update((c as u64).to_le_bytes());
-        let bytes = serde_json::to_vec(&value).unwrap();
+        let bytes = serde_json::to_vec(&signature(&image(s, r, c))).unwrap();
         h.update((bytes.len() as u64).to_le_bytes());
         h.update(bytes);
     }
     h.finalize().into()
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use crate::cell::{CellComment, CellValue};
+
+    // The previous materialized encoder is an independent compatibility
+    // oracle: optimizing the scan must not weaken what history detects.
+    fn materialized(s: &Sheet) -> [u8; 32] {
+        let cells: std::collections::BTreeMap<_, _> = s.cells_iter()
+            .map(|(p, _)| (p, signature(&image(s, p.0, p.1)))).collect();
+        let mut h = Sha256::new();
+        for ((r, c), value) in cells {
+            h.update((r as u64).to_le_bytes());
+            h.update((c as u64).to_le_bytes());
+            let bytes = serde_json::to_vec(&value).unwrap();
+            h.update((bytes.len() as u64).to_le_bytes());
+            h.update(bytes);
+        }
+        h.finalize().into()
+    }
+
+    #[test]
+    fn streamed_fingerprint_preserves_authored_cells_and_order_independence() {
+        let mut a = Sheet::new(SheetId(1), 200, 20);
+        let mut b = a.clone();
+        let cells: Vec<_> = (0..1000).map(|i| {
+            let (row, col) = (i % 200, i / 200);
+            let mut cell = Cell::new();
+            cell.value = match i % 6 {
+                0 => CellValue::Empty,
+                1 => CellValue::Number(-0.0),
+                2 => CellValue::Number(i as f64 / 7.0),
+                3 => CellValue::Text(format!("Unicode é / \"quotes\" / {i}\n")),
+                4 => CellValue::from_input("=(A1+1)*2"),
+                _ => CellValue::Number(f64::NAN),
+            };
+            if i % 3 == 0 {
+                std::sync::Arc::make_mut(&mut cell.format).bold = true;
+                cell.set_comment(Some(CellComment { text: "note".into(), author: "tester".into() }));
+                cell.set_style_id(Some(3));
+                cell.set_frozen_formula(Some("=A1".into()));
+            }
+            (row, col, cell)
+        }).collect();
+        for (r, c, cell) in &cells {
+            a.restore_history_cell(*r, *c, Some(cell.clone()));
+        }
+        for (r, c, cell) in cells.iter().rev() {
+            let mut cell = cell.clone();
+            cell.clear_spill_state();
+            b.restore_history_cell(*r, *c, Some(cell));
+        }
+        assert_eq!(fingerprint(&a), materialized(&a));
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+        let mut derived = cells[1].2.clone();
+        let authored = signature(&Some(derived.clone()));
+        derived.set_spill_parent(Some((0, 0)));
+        assert_eq!(signature(&Some(derived)), authored);
+        let baseline = fingerprint(&b);
+        for change in 0..8 {
+            let mut altered = b.clone();
+            let row = match change { 6 => 0, 7 => 4, _ => 1 };
+            let mut cell = altered.get_cell(row, 0);
+            match change {
+                0 => cell.value = CellValue::Number(0.0), // distinguish signed zero
+                1 => std::sync::Arc::make_mut(&mut cell.format).italic = true,
+                2 => cell.set_comment(Some(CellComment { text: "new".into(), author: String::new() })),
+                3 => cell.set_style_id(Some(4)),
+                4 => cell.set_frozen_formula(Some("=B1".into())),
+                7 => cell.value = CellValue::from_input("=A1+1*2"),
+                _ => {},
+            }
+            // Case 6 specifically distinguishes stored empty from absence.
+            altered.restore_history_cell(row, 0, if change == 5 || change == 6 { None } else { Some(cell) });
+            assert_ne!(fingerprint(&altered), baseline, "missed authored change {change}");
+            assert_eq!(fingerprint(&altered), materialized(&altered));
+        }
+    }
 }
 fn workbook_fingerprint(wb: &Workbook) -> [u8; 32] {
     let mut h = Sha256::new();
