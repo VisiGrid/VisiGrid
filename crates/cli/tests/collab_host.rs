@@ -229,6 +229,34 @@ fn every_command_over_stdio() {
     assert_eq!(wrong["ok"], json!(false));
     assert_eq!(h.call(json!({"cmd": "load", "document": "nope", "seq": 0}))["ok"], json!(false));
 
+    // An op naming a sheet that does not exist is dropped, not sequenced.
+    let ghost = |sheet: u64| CollabOp::SetCell { sheet, sheet_name: "Nope".into(), row: 0, col: 0, content: val("x") };
+    let before = h.ok(json!({"cmd": "snapshot"}));
+    for op in [
+        ghost(0),
+        CollabOp::SetBold { sheet: 0, rect: visigrid_collab::op::Rect::new(0, 0, 1, 1), bold: true },
+        CollabOp::Structural { sheet: 0, sheet_name: "Nope".into(), axis: Axis::Row, at: 0, count: 1, delete: false },
+        CollabOp::RenameSheet { sheet: 0, name: "X".into() },
+        CollabOp::DeleteSheet { sheet: 0, index: 0 },
+        CollabOp::ReplaceRange { sheet: 0, row: 0, col: 0, values: vec![vec![val("1")]] },
+    ] {
+        let r = submit(&mut h, 8, &[op.clone()], &[]);
+        assert_eq!(r["result"], json!("dropped"), "{op:?} -> {r}");
+        assert_eq!(r["reason"], json!("no_such_sheet"));
+    }
+    let after = h.ok(json!({"cmd": "snapshot"}));
+    assert_eq!(after["seq"], before["seq"], "a dropped envelope takes no seq");
+    assert_eq!(after["checksum"], before["checksum"]);
+    // Mixed: the real op applies, the ghost is removed from the broadcast.
+    let mixed = submit(&mut h, 8, &[ghost(0), set(2, 2, val("kept"))], &[]);
+    assert_eq!(mixed["result"], json!("op"));
+    assert_eq!(mixed["op"].as_array().unwrap().len(), 1, "{mixed}");
+    // A sheet added earlier in the same envelope counts as present.
+    let added = CollabOp::AddSheet { sheet: 77, name: "Fresh".into(), index: 1 };
+    let on_new = CollabOp::SetCell { sheet: 77, sheet_name: "Fresh".into(), row: 0, col: 0, content: val("1") };
+    let both = submit(&mut h, 9, &[added, on_new], &[]);
+    assert_eq!(both["op"].as_array().unwrap().len(), 2, "{both}");
+
     // End of input ends the process cleanly.
     h.stdin.take();
     let status = h.child.wait().unwrap();

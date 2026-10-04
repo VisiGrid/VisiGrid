@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 use visigrid_engine::workbook::Workbook;
 
-use crate::apply::apply_ops;
+use crate::apply::{apply_ops, filter_missing_sheets};
 use crate::op::{CollabOp, Envelope};
 use crate::transform::{transform_lists, Order};
 
@@ -92,6 +92,10 @@ impl Server {
                 }
             }
         }
+        // Ops naming a sheet this replica does not have are dropped here, so
+        // they are never broadcast. (Empty envelopes still take a sequence
+        // number in the in-memory model; the engine host answers "dropped".)
+        let (ops, _) = filter_missing_sheets(&self.wb, &ops);
         let committed = Committed {
             seq: self.head() + 1,
             client_op_id: env.client_op_id,

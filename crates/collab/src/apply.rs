@@ -115,6 +115,37 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
 }
 
 /// Apply a list in order. Skips are collected, never fatal.
+/// Keep only the ops whose target sheet exists on `wb` when they apply.
+/// Ops in an envelope are sequential, so an `AddSheet` earlier in the list
+/// makes its sheet available to later ops, and a `DeleteSheet` removes it.
+/// The sequencer runs this on its own replica before sequencing, so an op
+/// naming a sheet that does not exist is dropped there and never reaches
+/// any client: no replica ever applies (or broadcasts) a no-op.
+/// Returns the kept ops and how many were dropped.
+pub fn filter_missing_sheets(wb: &Workbook, ops: &[CollabOp]) -> (Vec<CollabOp>, usize) {
+    let mut present: std::collections::HashSet<SheetKey> = wb.sheets().iter().map(|s| s.id.0).collect();
+    let mut kept = Vec::with_capacity(ops.len());
+    let mut dropped = 0;
+    for op in ops {
+        match op {
+            CollabOp::AddSheet { sheet, .. } => {
+                present.insert(*sheet);
+                kept.push(op.clone());
+            }
+            _ if !present.contains(&op.sheet()) => dropped += 1,
+            CollabOp::DeleteSheet { sheet, .. } => {
+                present.remove(sheet);
+                kept.push(op.clone());
+            }
+            _ => kept.push(op.clone()),
+        }
+    }
+    (kept, dropped)
+}
+
+/// The drop reason for ops whose sheet does not exist.
+pub const NO_SUCH_SHEET: &str = "no_such_sheet";
+
 pub fn apply_ops(wb: &mut Workbook, ops: &[CollabOp]) -> Vec<Skipped> {
     ops.iter().filter_map(|op| apply_op(wb, op).err()).collect()
 }
