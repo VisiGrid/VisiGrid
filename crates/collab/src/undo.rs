@@ -47,6 +47,21 @@ pub struct UndoEntry {
     pub expect: Vec<CollabOp>,
 }
 
+impl UndoEntry {
+    /// The change left every cell it wrote as it was (an editor writing the
+    /// same value twice): there is nothing to undo.
+    pub fn is_noop(&self) -> bool {
+        !self.inverse.is_empty()
+            && self.inverse.iter().all(|op| match op {
+                CollabOp::SetCell { sheet, row, col, content, .. } => self.expect.iter().any(|e| {
+                    matches!(e, CollabOp::SetCell { sheet: s, row: r, col: c, content: x, .. }
+                        if s == sheet && r == row && c == col && x == content)
+                }),
+                _ => false,
+            })
+    }
+}
+
 /// The result of an undo or redo request.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct UndoOutcome {

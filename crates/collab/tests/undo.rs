@@ -229,3 +229,15 @@ fn format_undo_keeps_a_collaborators_property() {
     assert!(!f.bold, "my bold is undone");
     assert_eq!(f.font_color, Some([0, 0, 255, 255]), "their colour stays");
 }
+
+#[test]
+fn writing_the_same_value_again_is_not_an_undo_step() {
+    let mut room = Room::new(1);
+    let (x, again) = (room.set(0, 0, "x"), room.set(0, 0, "x"));
+    room.edit(0, vec![x]);
+    room.edit(0, vec![again]);
+    room.sync();
+    assert!(room.undo(0).applied);
+    room.sync();
+    assert_eq!(room.raw(0, 0), "", "one undo reverts the edit, not the duplicate write");
+}

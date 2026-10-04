@@ -217,17 +217,21 @@ impl Client {
             let changes = &mut self.changes;
             let entry = apply_recording(&mut self.wb, client_op_id, &ops, |wb, op| apply_to(wb, changes, op));
             self.shift_history(&ops);
-            let stack = match kind {
-                Kind::Edit => {
-                    self.redo_stack.clear();
-                    &mut self.undo_stack
+            // An edit that changed nothing (an editor writing the same value
+            // twice) is no undo step, and keeps the redo stack.
+            if !(kind == Kind::Edit && entry.is_noop()) {
+                let stack = match kind {
+                    Kind::Edit => {
+                        self.redo_stack.clear();
+                        &mut self.undo_stack
+                    }
+                    Kind::Undo => &mut self.redo_stack,
+                    Kind::Redo => &mut self.undo_stack,
+                };
+                stack.push(entry);
+                if stack.len() > MAX_UNDO {
+                    stack.remove(0);
                 }
-                Kind::Undo => &mut self.redo_stack,
-                Kind::Redo => &mut self.undo_stack,
-            };
-            stack.push(entry);
-            if stack.len() > MAX_UNDO {
-                stack.remove(0);
             }
         } else {
             self.apply_optimistic(&ops);
