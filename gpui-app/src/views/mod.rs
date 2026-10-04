@@ -61,6 +61,7 @@ mod f1_help;
 mod cf_rules_panel;
 mod pivot_panel;
 mod table_controls;
+mod table_saved_views;
 mod table_recovery;
 mod problems_panel;
 mod cond_format_dialog;

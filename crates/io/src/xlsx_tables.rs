@@ -395,6 +395,7 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
         next_column_id,
         style,
         source: None,
+        saved_views: Vec::new(),
         totals,
     };
     table.validate(
@@ -546,6 +547,9 @@ pub(crate) fn export_warnings(
     wb.validate_table_view_specs()?;
     let mut warnings = Vec::new();
     for (sheet_id, table) in wb.tables() {
+        if !table.saved_views.is_empty() {
+            warnings.push(format!("Table {}: named saved views are not exported to Excel. Keep a VisiGrid or full JSON copy to preserve them. The active view is exported using the supported sort/filter settings.", table.name));
+        }
         if table.name.chars().count() > 255 {
             return Err(format!(
                 "Table {} has a name longer than Excel's 255-character limit; no file was written.",

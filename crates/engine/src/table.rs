@@ -140,6 +140,8 @@ pub struct DataTable {
     /// Excel totals metadata; range continues to describe header and data only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totals: Option<TableTotals>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_views: Vec<crate::table_view::NamedTableView>,
 }
 
 /// Retained totals-row settings. A visible totals row is immediately below the body.
@@ -282,6 +284,20 @@ impl DataTable {
                     "Table columns must have unique names and stable, allocated IDs.".into(),
                 );
             }
+        }
+        if self.saved_views.len() > crate::table_view::MAX_NAMED_TABLE_VIEWS {
+            return Err("A Table can have at most 64 named views.".into());
+        }
+        let mut view_names = HashSet::new();
+        for saved in &self.saved_views {
+            crate::table_view::validate_view_name(&saved.name)?;
+            if !view_names.insert(saved.name.to_lowercase()) || saved.view.table != self.id {
+                return Err("Saved views must have unique names and belong to their Table.".into());
+            }
+            // Do not call validate_schema here: it validates this DataTable.
+            saved.view.resolve(self).map_err(|e| format!(
+                "Saved view '{}': {e} Update or delete this saved view first.", saved.name
+            ))?;
         }
         Ok(())
     }

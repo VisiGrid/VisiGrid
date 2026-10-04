@@ -165,6 +165,9 @@ impl Workbook {
                 .checked_add(1)
                 .ok_or("Table identities exhausted.")?;
             ids.insert(old, table.id);
+            for saved in &mut table.saved_views {
+                saved.view.table = table.id;
+            }
             table.name = names[&table.name.to_ascii_lowercase()].clone();
             for col in &mut table.columns {
                 if let Some(formula) = &mut col.formula {

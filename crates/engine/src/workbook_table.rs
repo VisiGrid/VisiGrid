@@ -15,6 +15,8 @@ mod totals;
 mod footer;
 #[path = "workbook_table_footer_refs.rs"]
 mod footer_refs;
+#[path = "workbook_named_table_views.rs"]
+mod named_views;
 
 use super::table_refs::{names_only, TableFormulaChange, TotalsReferenceChange};
 use super::Workbook;
@@ -56,6 +58,7 @@ pub struct TableCommit {
     totals_edit: bool,
     name_edit: bool,
     calculated_edit: bool,
+    saved_view_edit: bool,
     totals_schema_edit: bool,
     guarded: Option<Box<super::GuardedStructureCommit>>,
     totals_references: Vec<TotalsReferenceChange>,
@@ -63,6 +66,10 @@ pub struct TableCommit {
 }
 
 impl TableCommit {
+    pub fn is_saved_view_change(&self) -> bool {
+        self.saved_view_edit
+    }
+
     pub fn is_calculated_change(&self) -> bool {
         self.calculated_edit
     }
@@ -445,6 +452,7 @@ impl Workbook {
             style: TableStyle::default(),
             source: None,
             totals: None,
+            saved_views: Vec::new(),
         };
         let commit = self.table_commit(sheet_id, id, None, Some(table))?;
         self.apply_table_commit(&commit, false)?;
@@ -830,6 +838,11 @@ impl Workbook {
         before: Option<DataTable>,
         mut after: Option<DataTable>,
     ) -> Result<TableCommit, String> {
+        let saved_view_edit = before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)| {
+            let mut normalized = b.clone();
+            normalized.saved_views = a.saved_views.clone();
+            a != b && normalized == *a
+        });
         let name_edit = before.as_ref().zip(after.as_ref())
             .is_some_and(|(a, b)| a != b && names_only(a, b));
         let calculated_edit = before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)| {
@@ -933,6 +946,7 @@ impl Workbook {
             guarded: None,
             totals_schema_edit,
             calculated_edit,
+            saved_view_edit,
             name_edit,
             totals_references,
             footer_move,
@@ -1279,8 +1293,10 @@ impl Workbook {
 
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
-            // Older readers must refuse a recipe link rather than drop it
-            version: if self.tables().any(|(_, t)| t.totals.is_some()) {
+            // Older readers must recover read-only rather than drop unsupported metadata.
+            version: if self.tables().any(|(_, t)| !t.saved_views.is_empty()) {
+                6
+            } else if self.tables().any(|(_, t)| t.totals.is_some()) {
                 5
             } else if self.tables().any(|(_, t)| t.source.is_some()) {
                 4
@@ -1364,7 +1380,7 @@ impl Workbook {
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
     /// before recalculation. Reject corrupt metadata, never discard silently.
     pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
-        if ![1, 2, 3, 4, 5].contains(&saved.version) || saved.next_table_id == 0 {
+        if ![1, 2, 3, 4, 5, 6].contains(&saved.version) || saved.next_table_id == 0 {
             return Err("Unsupported or invalid Tables metadata version/allocator.".into());
         }
         let mut names = HashSet::new();
@@ -1396,6 +1412,9 @@ impl Workbook {
                 table.validate(sheet.rows, sheet.cols)?;
                 if saved.version == 1 && table.columns.iter().any(|c| c.formula.is_some()) {
                     return Err("Calculated columns require Tables metadata version 2.".into());
+                }
+                if saved.version < 6 && !table.saved_views.is_empty() {
+                    return Err("Named Table views require Tables metadata version 6.".into());
                 }
                 if saved.version < 5 && table.totals.is_some() {
                     return Err("Totals rows require Tables metadata version 5.".into());

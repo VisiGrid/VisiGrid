@@ -87,6 +87,7 @@ impl Sheet {
                 .ok_or("Cannot remove a Table's last column.")?;
             table.range.start_col = start;
             table.range.end_col = end;
+            table.validate(self.rows, self.cols)?;
         }
         self.validate_table_view_schema(&tables)?;
         Ok(tables)

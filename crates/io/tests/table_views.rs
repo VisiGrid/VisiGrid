@@ -231,7 +231,7 @@ fn damaged_current_view_and_future_catalog_use_distinct_read_only_recovery() {
             "corrupt"
         };
         match case {
-            0 => doc["table_catalog"]["version"] = 6.into(),
+            0 => doc["table_catalog"]["version"] = 7.into(),
             1 => doc["table_catalog"]["sheets"][0]["view"]["sort"]["column"] = 999.into(),
             2 => doc["table_catalog"]["version"] = 2.into(),
             _ => doc["table_catalog"]["sheets"][0]["view"]["unknown_criterion"] = true.into(),
@@ -406,5 +406,90 @@ fn filter_value_serialization_is_stable_across_insertion_order_and_native_json_p
         let raw = serde_json::to_string(&filter).unwrap();
         assert_eq!(serde_json::from_str::<ColumnFilter>(&raw).unwrap(), filter);
         assert!(raw.contains(if filter.selected.is_none() { "null" } else { "[]" }));
+    }
+}
+
+#[test]
+fn named_presets_roundtrip_without_activating_or_changing_semantic_verification() {
+    let (mut wb, spec) = fixture();
+    let original_fingerprint = native::compute_semantic_fingerprint(&wb);
+    wb.save_named_table_view(spec.table, "Small orders", spec.clone()).unwrap();
+    wb.save_named_table_view(spec.table, "All records", TableViewSpec::new(spec.table)).unwrap();
+    let expected = wb.table(spec.table).unwrap().1.saved_views.clone();
+    let dir = tempfile::tempdir().unwrap();
+    for mode in 0..6 {
+        let mut loaded = if mode < 4 {
+            let path = dir.path().join(format!("presets-{mode}.sheet"));
+            match mode {
+                0 => native::save_workbook(&wb, &path).unwrap(),
+                1 => native::save_workbook_with_metadata(&wb, &Default::default(), &path).unwrap(),
+                2 => native::save_workbook_full(&wb, &Default::default(), &[], &[], &path).unwrap(),
+                _ => native::save(wb.active_sheet(), &path).unwrap(),
+            }
+            native::load_workbook(&path).unwrap()
+        } else {
+            let raw = if mode == 4 { json::export_full(wb.active_sheet()).unwrap() }
+                else { json::export_workbook(&wb, &[], 0).unwrap() };
+            json::import_any(&raw).unwrap().0
+        };
+        assert_eq!(loaded.saved_tables().version, 6);
+        assert_eq!(loaded.table(spec.table).unwrap().1.saved_views, expected);
+        assert!(loaded.active_sheet().table_view_spec().is_none());
+        assert_eq!(native::compute_semantic_fingerprint(&loaded), original_fingerprint);
+        loaded.set_table_view_spec(loaded.active_sheet_id(), Some(spec.clone())).unwrap();
+        check(&loaded, &spec);
+    }
+    let warnings = visigrid_io::xlsx::table_export_warnings(&wb).unwrap();
+    assert!(warnings.iter().any(|w| w.contains("named saved views are not exported")));
+    wb.set_table_view_spec(wb.active_sheet_id(), Some(spec.clone())).unwrap();
+    let path = dir.path().join("presets.xlsx");
+    let report = visigrid_io::xlsx::export_with_order(&wb, &path, None, visigrid_io::xlsx::ExportOrder::Stored).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("named saved views are not exported")));
+    let (loaded, _) = visigrid_io::xlsx::import(&path).unwrap();
+    assert!(loaded.tables().all(|(_, t)| t.saved_views.is_empty()));
+    let imported = loaded.active_sheet().table_view_spec().unwrap();
+    assert_eq!(imported.sort.as_ref().unwrap().direction, spec.sort.as_ref().unwrap().direction);
+    assert_eq!(imported.filters[0].criteria, spec.filters[0].criteria);
+    assert_eq!(wb.table(spec.table).unwrap().1.saved_views, expected);
+}
+
+#[test]
+fn damaged_named_presets_and_future_versions_keep_cells_in_read_only_recovery() {
+    let (mut wb, spec) = fixture();
+    wb.save_named_table_view(spec.table, "Small orders", spec).unwrap();
+    let original: serde_json::Value = serde_json::from_str(&json::export_workbook(&wb, &[], 0).unwrap()).unwrap();
+    for case in 0..6 {
+        let mut doc = original.clone();
+        let expected = if case == 0 { "Upgrade VisiGrid" } else { "corrupt" };
+        let catalog = &mut doc["table_catalog"];
+        match case {
+            0 => catalog["version"] = 7.into(),
+            1 => catalog["version"] = 5.into(),
+            2 => catalog["sheets"][0]["tables"][0]["saved_views"][0]["view"]["sort"]["column"] = 999.into(),
+            3 => catalog["sheets"][0]["tables"][0]["saved_views"][0]["view"]["table"] = 999.into(),
+            4 => {
+                let duplicate = catalog["sheets"][0]["tables"][0]["saved_views"][0].clone();
+                catalog["sheets"][0]["tables"][0]["saved_views"].as_array_mut().unwrap().push(duplicate);
+            }
+            _ => catalog["sheets"][0]["tables"][0]["saved_views"][0]["view"]["unknown"] = true.into(),
+        }
+        let raw = doc.to_string();
+        assert!(json::import_any(&raw).unwrap_err().contains(expected));
+        let recovered = json::import_any_for_recovery(&raw).unwrap().0;
+        assert!(recovered.read_only_reason().unwrap().contains(expected));
+        assert_eq!(recovered.active_sheet().get_display(0, 0), "35");
+        assert!(json::export_workbook(&recovered, &[], 0).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preset.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute("UPDATE meta SET value=?1 WHERE key='tables'", [doc["table_catalog"].to_string()]).unwrap();
+        }
+        assert!(native::load_workbook(&path).unwrap_err().contains(expected));
+        let (recovered, issue) = native::load_workbook_for_recovery(&path).unwrap();
+        assert!(issue.unwrap().to_string().contains(expected));
+        assert_eq!(recovered.active_sheet().get_display(0, 0), "35");
+        assert!(native::save_workbook(&recovered, &dir.path().join("copy.sheet")).is_err());
     }
 }

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Save named Table sort/filter setups and switch between them from **Views…**. Rename, update and delete setups with undo/redo and history rewind; column renames keep stable bindings, and manual row hides remain separate. Native/full JSON files containing named views use Table metadata version 6 so older readers enter read-only recovery; XLSX export warns that named setups are omitted.
+
 - Fix worksheet Hide/Unhide targeting the wrong records after sorting. Hide skips filtered-out rows; Unhide removes manual flags without clearing filters. The operation also works alongside other-sheet Table criteria, and visibility-only rewind retains worksheet sort history.
 
 - Vertical navigation and formula reference picking skip manually hidden rows after clearing Table criteria. Ctrl+Arrow ignores hidden gaps and hidden values, and moving from a hidden row no longer skips the nearest visible row twice. Picked references under worksheet sorting use canonical cell addresses.

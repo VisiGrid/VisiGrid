@@ -13,11 +13,22 @@ pub(crate) const TABLE_CONTROLS_HEIGHT: f32 = 32.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TableDialogKind {
     Create,
+    Views(TableId),
+    SaveView(TableId),
+    RenameView(TableId, usize),
+    UpdateView(TableId, usize),
+    DeleteView(TableId, usize),
     Rename(TableId),
     Resize(TableId),
     Convert(TableId),
     Total(TableId, usize),
     ColumnFormula(TableId, usize, bool),
+}
+
+impl TableDialogKind {
+    pub(crate) fn is_named_view(self) -> bool {
+        matches!(self, Self::Views(_) | Self::SaveView(_) | Self::RenameView(..) | Self::UpdateView(..) | Self::DeleteView(..))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -468,9 +479,14 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Total(..) | TableDialogKind::ColumnFormula(..)) && self.block_table_view_edit(cx) { return; }
+        if !kind.is_named_view() && !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Total(..) | TableDialogKind::ColumnFormula(..)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
-            TableDialogKind::Rename(id)
+            TableDialogKind::Views(id)
+            | TableDialogKind::SaveView(id)
+            | TableDialogKind::RenameView(id, _)
+            | TableDialogKind::UpdateView(id, _)
+            | TableDialogKind::DeleteView(id, _)
+            | TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
             | TableDialogKind::Convert(id)
             | TableDialogKind::Total(id, _)
@@ -483,7 +499,15 @@ impl Spreadsheet {
         self.table_dialog = Some(TableDialog {
             kind,
             sheet,
-            name: if let TableDialogKind::Total(_, col) = kind {
+            name: if kind.is_named_view() {
+                match kind {
+                    TableDialogKind::RenameView(_, i) | TableDialogKind::UpdateView(_, i) | TableDialogKind::DeleteView(_, i) => {
+                        let Some(saved) = table.saved_views.get(i) else { return; };
+                        saved.name.clone()
+                    }
+                    _ => String::new(),
+                }
+            } else if let TableDialogKind::Total(_, col) = kind {
                 self.sheet(cx).get_raw(table.range.end_row + 1, col)
             } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
                 let row = self.row_view.view_to_data(self.view_state.selected.0);
@@ -498,7 +522,12 @@ impl Spreadsheet {
             } else {
                 table.name.clone()
             },
-            range: if let TableDialogKind::Total(_, col) = kind {
+            range: if kind.is_named_view() {
+                match kind {
+                    TableDialogKind::RenameView(_, i) | TableDialogKind::UpdateView(_, i) | TableDialogKind::DeleteView(_, i) => table.saved_views[i].name.clone(),
+                    _ => String::new(),
+                }
+            } else if let TableDialogKind::Total(_, col) = kind {
                 let total = table.totals.as_ref().and_then(|t| t.columns.get(col - table.range.start_col));
                 total.map(|t| if t.formula.is_some() { "custom" } else if let Some(f) = t.function.as_deref().filter(|f| *f != "none") { f } else if t.label.is_some() { "label" } else { "none" }).unwrap_or("none").into()
             } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
@@ -529,6 +558,10 @@ impl Spreadsheet {
         let Some(draft) = self.table_dialog.clone() else {
             return;
         };
+        if draft.kind.is_named_view() {
+            self.submit_named_table_view(cx);
+            return;
+        }
         if let TableDialogKind::Resize(id) = draft.kind {
             match parse_range(&draft.range).and_then(|range| self.submit_table_resize(id, range, cx)) {
                 Ok(()) => self.table_dialog = None,
@@ -583,7 +616,8 @@ impl Spreadsheet {
                 parse_range(&draft.range).and_then(|r| wb.resize_table(id, r))
             }
             TableDialogKind::Convert(id) => wb.remove_table(id),
-            TableDialogKind::Total(..) => unreachable!(),
+            TableDialogKind::Total(..) | TableDialogKind::Views(_) | TableDialogKind::SaveView(_)
+            | TableDialogKind::RenameView(..) | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..) => unreachable!(),
             TableDialogKind::ColumnFormula(id, col, replace) => {
                 let row = draft
                     .range
@@ -595,6 +629,8 @@ impl Spreadsheet {
         match result {
             Ok(commit) => {
                 let verb = match draft.kind {
+                    TableDialogKind::Views(_) | TableDialogKind::SaveView(_) | TableDialogKind::RenameView(..)
+                    | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..) => unreachable!(),
                     TableDialogKind::Create => "Create Table",
                     TableDialogKind::Rename(_) => "Rename Table",
                     TableDialogKind::Resize(_) => "Resize Table",
@@ -842,6 +878,7 @@ impl Spreadsheet {
     /// A modal interceptor runs before grid bindings so typing, Enter, Delete,
     /// paste and Ctrl+T cannot mutate cells behind the dialog.
     pub(crate) fn table_dialog_key(&mut self, key: &Keystroke, cx: &mut Context<Self>) -> bool {
+        if self.named_table_views_key(key, cx) { return true; }
         use crate::ui::text_input::{handle_input_key, handle_input_paste, InputAction};
         let Some(d) = self.table_dialog.as_mut() else {
             return false;
@@ -875,7 +912,7 @@ impl Spreadsheet {
                 return true;
             }
         }
-        if matches!(d.kind, TableDialogKind::Convert(_)) {
+        if matches!(d.kind, TableDialogKind::Convert(_) | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..)) {
             return true;
         }
         if key.key == "tab" && d.kind == TableDialogKind::Create {

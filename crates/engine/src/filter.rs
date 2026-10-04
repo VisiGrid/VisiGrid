@@ -578,7 +578,7 @@ pub struct UniqueValueEntry {
 }
 
 /// Text filter mode
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextFilterMode {
     Contains,
     NotContains,
@@ -589,7 +589,7 @@ pub enum TextFilterMode {
 }
 
 /// Text filter predicate
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextFilter {
     pub mode: TextFilterMode,
     pub value: String,
@@ -616,7 +616,7 @@ impl TextFilter {
 }
 
 /// Per-column filter criteria
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnFilter {
     /// Selected normalized filter keys to INCLUDE (None = all pass)
     /// Uses NormalizedFilterKey for consistent comparison

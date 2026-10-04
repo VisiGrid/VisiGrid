@@ -6,6 +6,7 @@ mod toolbar;
 mod desktop_keytips;
 mod pivot_ui;
 mod table_ui;
+mod table_saved_views;
 mod table_append;
 mod table_resize;
 mod table_totals;

@@ -80,6 +80,8 @@ pub(crate) fn render_table_controls(
             let row = app.row_view.view_to_data(row);
             let column = &table.columns[col - table.range.start_col];
             let mut controls: Vec<AnyElement> = Vec::new();
+            controls.push(button("table-saved-views", "Views…", app,
+                move |s, cx| s.open_table_dialog(TableDialogKind::Views(id), cx), cx).into_any_element());
             if app.sheet(cx).table_view_spec().is_some() {
                 controls.push(button("table-clear-view", "Clear view", app, |s,cx| { s.change_table_view(None,"Clear Table view — editing enabled",cx); },cx).into_any_element());
                 if app.sheet(cx).table_view_spec().is_some_and(|s| !s.show_filter_buttons) {
@@ -211,7 +213,15 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let Some(d) = &app.table_dialog else {
         return div().into_any_element();
     };
+    if let TableDialogKind::Views(id) = d.kind {
+        return super::table_saved_views::render(app, id, cx);
+    }
     let title = match d.kind {
+        TableDialogKind::Views(_) => unreachable!(),
+        TableDialogKind::SaveView(_) => "Save current view",
+        TableDialogKind::RenameView(..) => "Rename saved view",
+        TableDialogKind::UpdateView(..) => "Update saved view",
+        TableDialogKind::DeleteView(..) => "Delete saved view",
         TableDialogKind::Create => "Create Table",
         TableDialogKind::Rename(_) => "Rename Table",
         TableDialogKind::Resize(_) => "Resize Table",
@@ -227,7 +237,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     let creating = d.kind == TableDialogKind::Create;
     let mut fields = div().flex().gap_3().when(!creating, |s| s.flex_col());
     for (index, label, value) in [(0, "Table name", &d.name), (1, "Range", &d.range)] {
-        let label = if matches!(d.kind, TableDialogKind::ColumnFormula(..)) {
+        let label = if d.kind.is_named_view() { "View name" }
+        else if matches!(d.kind, TableDialogKind::ColumnFormula(..)) {
             "Column formula"
         } else if matches!(d.kind, TableDialogKind::Total(..)) {
             if d.range == "custom" { "Custom formula" } else { "Label text" }
@@ -235,6 +246,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             label
         };
         let show = match d.kind {
+            TableDialogKind::SaveView(_) | TableDialogKind::RenameView(..) => index == 0,
+            TableDialogKind::Views(_) | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..) => false,
             TableDialogKind::Create => true,
             TableDialogKind::Rename(_) | TableDialogKind::ColumnFormula(..) => index == 0,
             TableDialogKind::Resize(_) => index == 1,
@@ -341,6 +354,15 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .text_size(px(12.0))
         .text_color(muted);
     match d.kind {
+        TableDialogKind::Views(_) => unreachable!(),
+        TableDialogKind::SaveView(id) => {
+            if let Some((_, table)) = app.wb(cx).table(id) {
+                preview = preview.child(format!("Save the current sorting, filters and filter-button setting for {}. Manually hidden rows are separate.", table.name));
+            }
+        }
+        TableDialogKind::RenameView(..) => preview = preview.child("Change the name. The saved sorting and filters stay the same."),
+        TableDialogKind::UpdateView(..) => preview = preview.child(format!("Replace '{}' with this Table's current sorting, filters and filter-button setting? You can undo this change.", d.range)),
+        TableDialogKind::DeleteView(..) => preview = preview.child(format!("Delete '{}'? The current sorting and filters stay active. You can undo this change.", d.range)),
         TableDialogKind::Create => {
             if crate::table_filter_ui::has_table_criteria(app.wb(cx)) {
                 preview = preview.child("Ranges use worksheet addresses. Existing Table sorting and filters stay active.");
@@ -427,7 +449,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 preview = preview.child(format!("Formula shown at row {}. New rows use this rule; cell edits remain overrides.", d.range.parse::<usize>().unwrap_or(0)+1));
             }
         }
-        TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding disappears; explicit formatting is kept. You can undo this change.",d.name,d.range)),
+        TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding and named saved views are removed; explicit formatting is kept. You can undo this change.",d.name,d.range)),
     }
     let content = div()
         .w(px(if creating { 560.0 } else { 470.0 }))
