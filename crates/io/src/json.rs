@@ -52,6 +52,39 @@ mod tests {
     use visigrid_engine::sheet::SheetId;
 
     #[test]
+    fn full_json_comments_preserve_empty_text_formula_and_spill_cells() {
+        use visigrid_engine::{cell::CellComment, workbook::Workbook};
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
+        wb.set_cell_text_exact_tracked(0, 1, 1, "00123");
+        wb.set_cell_value_tracked(0, 2, 1, "=1+2");
+        wb.set_cell_value_tracked(0, 4, 1, "=SEQUENCE(2,1)");
+        for (row, col) in [(0, 0), (1, 1), (2, 1), (5, 1)] {
+            wb.active_sheet_mut().set_comment(row, col, Some(CellComment {
+                text: format!("  Note {row}\n\u{65e5}\u{672c}\u{8a9e}  "),
+                author: "Author".into(),
+            }));
+        }
+        for json in [export_full(wb.active_sheet()).unwrap(), export_workbook(&wb, &[], 0).unwrap()] {
+            let loaded = import_any(&json).unwrap().0;
+            for (row, col) in [(0, 0), (1, 1), (2, 1), (5, 1)] {
+                assert_eq!(loaded.active_sheet().comment(row, col), wb.active_sheet().comment(row, col));
+            }
+            assert_eq!(loaded.active_sheet().get_raw(0, 0), "");
+            assert_eq!(loaded.active_sheet().get_raw(1, 1), "00123");
+            assert_eq!(loaded.active_sheet().get_raw(2, 1), "=1+2");
+            assert_eq!(loaded.active_sheet().get_display(5, 1), "2");
+            let (single, _) = import_full_with_layout(&export_full(loaded.active_sheet()).unwrap()).unwrap();
+            assert_eq!(single.comment(0, 0), wb.active_sheet().comment(0, 0));
+        }
+        // Absent additive fields do not change existing JSON or its version.
+        let legacy = r#"{"format":"visigrid-json","version":1,"cells":[{"row":0,"col":0,"value":"Old"}]}"#;
+        let loaded = import_any(legacy).unwrap().0;
+        let exported: serde_json::Value = serde_json::from_str(&export_full(loaded.active_sheet()).unwrap()).unwrap();
+        assert!(exported["cells"][0].get("comment").is_none());
+        assert_eq!(exported["version"], 1);
+    }
+
+    #[test]
     fn test_json_export() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.json");
@@ -80,7 +113,7 @@ mod tests {
 // visigrid-json v1 — full-fidelity JSON interchange
 // ============================================================================
 //
-// A stable, versioned schema carrying values, formulas, formats, and merges,
+// A stable, versioned schema carrying values, formulas, formats, comments and merges,
 // so external tools (the web app, VisiAPI, scripts) can round-trip sheets
 // through the engine without parsing xlsx or the native SQLite format.
 //
@@ -439,6 +472,8 @@ struct FullCell {
     formula: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fmt: Option<FullFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comment: Option<visigrid_engine::cell::CellComment>,
     /// True when this value was kept rather than recomputed, because the build
     /// that wrote the file had no definition for the formula's function.
     ///
@@ -643,7 +678,8 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         let raw = sheet.get_raw(row, col);
         let format = sheet.get_format(row, col);
         let has_format = !format.is_default();
-        if raw.is_empty() && !has_format {
+        let comment = sheet.comment(row, col).cloned();
+        if raw.is_empty() && !has_format && comment.is_none() {
             continue;
         }
 
@@ -729,7 +765,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         };
 
         let stale_custom_fn = sheet.kept_uncomputable.contains(&(row, col));
-        cells.push(FullCell { row, col, value, formula, fmt, spill_from: None, stale_custom_fn });
+        cells.push(FullCell { row, col, value, formula, fmt, comment, spill_from: None, stale_custom_fn });
     }
 
     // Cells a formula spilled into. They hold no Cell of their own, so the loop
@@ -755,6 +791,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
                 value,
                 formula: None,
                 fmt: None,
+                comment: None,
                 spill_from: Some([parent.0, parent.1]),
                 stale_custom_fn: false,
             });
@@ -1007,6 +1044,13 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     }
 
     for cell in &body.cells {
+        // Metadata survives even when cached spill values are regenerated.
+        if let Some(comment) = &cell.comment {
+            if cell.row >= sheet.rows || cell.col >= sheet.cols {
+                return Err("Comment cell is outside the worksheet.".into());
+            }
+            sheet.set_comment(cell.row, cell.col, Some(comment.clone()));
+        }
         // Spill receivers are written for readers without an engine. Loading
         // them would occupy the range the spill needs and turn it into #SPILL!,
         // so they are skipped and the recompute puts them back.

@@ -74,6 +74,8 @@ pub struct CellChange {
 
 #[derive(Clone, Debug)]
 pub struct CommentPatch {
+    /// The editor materialized an absent cell; undo must restore that absence.
+    pub remove_cell_on_undo: bool,
     pub row: usize,
     pub col: usize,
     pub before: Option<visigrid_engine::cell::CellComment>,
@@ -83,7 +85,12 @@ pub struct CommentPatch {
 /// Apply only the comment metadata; never replace cell values or formats.
 pub(crate) fn apply_comment_patches(workbook: &mut Workbook, sheet_index: usize, patches: &[CommentPatch], forward: bool) {
     if let Some(sheet) = workbook.sheet_mut(sheet_index) {
-        for p in patches { sheet.set_comment(p.row, p.col, if forward { p.after.clone() } else { p.before.clone() }); }
+        for p in patches {
+            sheet.set_comment(p.row, p.col, if forward { p.after.clone() } else { p.before.clone() });
+            if !forward && p.remove_cell_on_undo && p.before.is_none() {
+                sheet.remove_empty_comment_cell(p.row, p.col);
+            }
+        }
         workbook.bump_revision_for_structure();
     }
 }
@@ -1686,6 +1693,8 @@ impl History {
         }
         match action {
             UndoAction::Comments { sheet_index, patches, .. } => {
+                crate::comments::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
                 let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Missing comment sheet".into()))?;
                 for patch in patches { sheet.set_comment(patch.row, patch.col, patch.after.clone()); }
             }
@@ -2877,7 +2886,7 @@ mod comment_tests {
         wb.active_sheet_mut().set_text(0, 0, "00123");
         let before = CellComment { text: "Original".into(), author: "Alice".into() };
         let after = CellComment { text: "Updated\n日本語".into(), author: "Alice".into() };
-        let patches = vec![CommentPatch { row: 0, col: 0, before: Some(before.clone()), after: Some(after.clone()) }];
+        let patches = vec![CommentPatch { remove_cell_on_undo: false, row: 0, col: 0, before: Some(before.clone()), after: Some(after.clone()) }];
         apply_comment_patches(&mut wb, 0, &patches, true);
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
         let rev = wb.revision();
@@ -2889,7 +2898,7 @@ mod comment_tests {
         History::apply_action_forward(&mut wb, &mut Default::default(), &action).unwrap();
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
         assert_eq!(wb.active_sheet().get_raw(0,0), "00123");
-        let delete = vec![CommentPatch {row:0,col:0,before:Some(after.clone()),after:None}];
+        let delete = vec![CommentPatch {remove_cell_on_undo: false,row:0,col:0,before:Some(after.clone()),after:None}];
         apply_comment_patches(&mut wb,0,&delete,true);
         assert!(wb.active_sheet().comment(0,0).is_none());
         apply_comment_patches(&mut wb,0,&delete,false);

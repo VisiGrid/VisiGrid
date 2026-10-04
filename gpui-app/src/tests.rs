@@ -2995,7 +2995,7 @@ fn review_mode_workbook_mutators_are_guarded() {
     for function in ["freeze_top_row", "freeze_first_column", "freeze_panes", "unfreeze_panes"] {
         assert_contains_near(include_str!("sheet_ops.rs"), function, "block_active_sheet_metadata_edit(cx)");
     }
-    assert_contains_near(include_str!("comments.rs"), "change_comment", "block_sheet_metadata_edit(sheet_index, cx)");
+    assert_contains_near(include_str!("comments.rs"), "change_comment", "block_if_previewing_only(cx)");
     let conditional_formats = include_str!("cond_format_ui.rs");
     for function in [
         "show_add_cond_format",

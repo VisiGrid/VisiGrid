@@ -647,7 +647,7 @@ impl Spreadsheet {
                     });
                 }
                 if let Some(before) = self.sheet(cx).comment(data_row, col).cloned() {
-                    comment_patches.push(CommentPatch { row: data_row, col, before: Some(before), after: None });
+                    comment_patches.push(CommentPatch { remove_cell_on_undo: false, row: data_row, col, before: Some(before), after: None });
                     self.active_sheet_mut(cx, |s| s.set_comment(data_row, col, None));
                 }
                 self.set_cell_value(data_row, col, "", cx);
@@ -929,7 +929,7 @@ impl Spreadsheet {
                         let before = self.sheet(cx).comment(*data_row, *col).cloned();
                         if before != after {
                             self.active_sheet_mut(cx, |s| s.set_comment(*data_row, *col, after.clone()));
-                            comment_patches.push(CommentPatch { row: *data_row, col: *col, before, after });
+                            comment_patches.push(CommentPatch { remove_cell_on_undo: false, row: *data_row, col: *col, before, after });
                         }
                     }
                     if with_formats {
@@ -1095,7 +1095,7 @@ impl Spreadsheet {
                             let before = self.sheet(cx).comment(target_data_row, col).cloned();
                             if before != after {
                                 self.active_sheet_mut(cx, |s| s.set_comment(target_data_row, col, after.clone()));
-                                comment_patches.push(CommentPatch { row: target_data_row, col, before, after });
+                                comment_patches.push(CommentPatch { remove_cell_on_undo: false, row: target_data_row, col, before, after });
                             }
                         }
                         if with_formats {

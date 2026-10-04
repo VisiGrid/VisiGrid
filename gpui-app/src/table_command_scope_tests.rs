@@ -113,7 +113,7 @@ fn metadata_rewind_preserves_filtered_records_and_restores_the_other_sheet() {
             bold(1),
             UndoAction::Comments {
                 sheet_index: 1,
-                patches: vec![CommentPatch {
+                patches: vec![CommentPatch { remove_cell_on_undo: false,
                     row: 0,
                     col: 0,
                     before: None,

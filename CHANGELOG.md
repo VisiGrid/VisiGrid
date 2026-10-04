@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add, edit and delete comments on visible sorted/filtered Table records without clearing criteria. Comments stay with canonical cells through undo/redo and history rewind; comment navigation can read hidden records without revealing them. Unsafe adjacent comments and stale drafts are refused before mutation.
+- Full-fidelity JSON now preserves comment text and authors, including comments on empty cells and spill receivers. The additive field leaves comment-free exports unchanged; older readers can still drop comments on re-save.
+
 - Find follows displayed row order and skips filtered-out and manually hidden rows. Replace and Replace All work through Table criteria with atomic validation, sparse undo/redo and History rewind, including edits on other sheets that affect a Table. Stale results and protected targets refuse the whole replacement.
 - Find/Replace retains original UTF-8 offsets and matches formula references at token boundaries. Text replacements preserve leading zeros, whitespace and literal formula-looking text; the shared literal paste/fill path now also preserves whitespace. Search refuses more than 100,000 matches rather than applying a truncated Replace All.
 

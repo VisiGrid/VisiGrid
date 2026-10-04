@@ -39,6 +39,9 @@ impl Spreadsheet {
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
+            if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
                 if let Err(error) = self.preflight_pivot_history(&entry.action, true, cx) {
                     self.history.redo(); self.status_message = Some(error); cx.notify(); return;
@@ -1326,6 +1329,9 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, true) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
