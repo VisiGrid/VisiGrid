@@ -8,8 +8,8 @@ use visigrid_io::recipe::Step;
 
 use crate::app::Spreadsheet;
 use crate::recipe_builder::{
-    cli_line, filter_op_label, missing_label, on_error_label, rule_label, source, step_kind, step_missing, type_label,
-    EditorRow, Pane, RecipeBuilder, ADD_KINDS, SOURCE_ROWS,
+    cli_line, filter_op_label, missing_label, on_error_label, rule_label, step_kind, step_missing, type_label,
+    EditorRow, Pane, RecipeBuilder, ADD_KINDS,
 };
 use crate::theme::TokenKey;
 use crate::ui::{dialog_header_with_subtitle, modal_overlay, Button, DialogFrame};
@@ -126,8 +126,8 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
         .flex()
         .flex_col()
         .gap(px(12.0))
-        .child(section_title("Source", c, focused));
-    for (i, label) in SOURCE_ROWS.iter().enumerate() {
+        .child(section_title(&format!("Source · {}", b.recipe.source.label()), c, focused));
+    for (i, label) in b.source_rows().iter().enumerate() {
         let (value, hint) = b.source_value(i);
         let active = focused && b.source_focus == i;
         let (accent, border, text) = (c.accent, c.border, c.text);
@@ -181,7 +181,7 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
     }
     // The columns the file has, saved with the recipe for next month's check
     let mut list = div().flex().flex_col().gap(px(3.0));
-    let saved = &source(&b.recipe).columns;
+    let saved = b.recipe.source.columns();
     for name in &b.file_columns {
         let new = !saved.is_empty() && !saved.iter().any(|s| s.eq_ignore_ascii_case(name));
         list = list.child(

@@ -48,7 +48,16 @@ pub fn new_workbook(output: &RecipeOutput, table_name: &str, link: TableSource) 
         end_row: output.rows.len(),
         end_col: output.columns.len() - 1,
     };
-    let id = wb.create_table(sheet_id, range, table_name)?.table_id();
+    // The recipe's file name may be a function's (sum, date, db) or
+    // otherwise not usable as a Table name: fall back rather than fail
+    let mut created = Err(String::new());
+    for name in [table_name.to_string(), format!("{table_name}_table"), "Table1".to_string()] {
+        created = wb.create_table(sheet_id, range, &name);
+        if created.is_ok() {
+            break;
+        }
+    }
+    let id = created?.table_id();
     wb.set_table_source(id, Some(link))?;
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
@@ -288,5 +297,14 @@ columns = { Amount = "number" }
         let back = crate::native::load_workbook(&path).unwrap();
         let (_, t) = table(&back);
         assert_eq!(t.source.unwrap().recipe, "/data/orders.recipe.toml");
+    }
+
+    #[test]
+    fn a_recipe_named_like_a_function_still_gets_a_table() {
+        let (out, report) = result("ID,Amount\n1,10\n");
+        for name in ["db", "sum", "date"] {
+            let wb = new_workbook(&out, name, link(&report)).unwrap();
+            assert_eq!(table(&wb).1.name, format!("{name}_table"));
+        }
     }
 }

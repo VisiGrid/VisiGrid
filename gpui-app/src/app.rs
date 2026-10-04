@@ -2572,7 +2572,13 @@ impl Spreadsheet {
             CommandId::NewRecipe => match self.current_csv().map(|d| (d.path.clone(), d.options.clone())) {
                 // From the open CSV, with the settings it was imported with
                 Some((path, options)) => self.new_recipe_from_file(&path, Some(&options), cx),
-                None => self.new_recipe_prompt(cx),
+                // From an open Parquet file, which carries its own types
+                None => match self.current_file.clone().filter(|p| {
+                    p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("parquet"))
+                }) {
+                    Some(path) => self.new_recipe_from_file(&path, None, cx),
+                    None => self.new_recipe_prompt(cx),
+                },
             },
             CommandId::EditRecipe => match self.recipe_strip_table(cx) {
                 Some(t) => {
