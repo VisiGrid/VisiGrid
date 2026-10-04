@@ -417,7 +417,7 @@ impl Recipe {
         let mut best: Option<(std::time::SystemTime, String, PathBuf)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !wildcard_match(pattern, &name) {
+            if !wildcard_match(pattern, &name) || is_partial_download(&name) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -430,7 +430,15 @@ impl Recipe {
                 best = Some((modified, name, entry.path()));
             }
         }
-        best.map(|(_, _, p)| p).ok_or_else(|| format!("no file in {} matches {pattern}", dir.display()))
+        let (modified, name, path) = best.ok_or_else(|| format!("no file in {} matches {pattern}", dir.display()))?;
+        // A file that changed a moment ago may still be downloading or
+        // being written: reading it now could load half an export
+        if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
+            if age < SETTLE_TIME {
+                return Err(format!("{name} is still being written (it changed a moment ago); refresh again in a few seconds"));
+            }
+        }
+        Ok(path)
     }
 
     /// The source file: `over` if given, else the recipe's path, relative
@@ -447,6 +455,19 @@ impl Recipe {
             recipe_dir.join(p)
         }
     }
+}
+
+/// How long the newest file a pattern matches must have been unchanged.
+pub const SETTLE_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Names browsers and tools use while a download or write is in progress,
+/// and hidden files. A pattern never picks these.
+fn is_partial_download(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with('.')
+        || lower.starts_with("~$")
+        || lower.ends_with('~')
+        || [".crdownload", ".part", ".partial", ".download", ".tmp", ".temp", ".opdownload"].iter().any(|s| lower.ends_with(s))
 }
 
 fn is_pattern(name: &str) -> bool {
@@ -1892,5 +1913,28 @@ path = "export-*-*.csv"
         assert!(Snapshot::read(&fifo).unwrap_err().contains("not a regular file"));
         assert!(Recipe::load(&fifo).unwrap_err().contains("not a regular file"));
         assert!(Snapshot::read(Path::new("/dev/zero")).unwrap_err().contains("not a regular file"));
+    }
+
+    #[test]
+    fn patterns_skip_downloads_in_progress_and_files_still_changing() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, secs_ago: u64| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "a\n1\n").unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        };
+        write("export-09.csv", 3600);
+        write("export-10.csv.crdownload", 10);
+        write("export-10.csv.part", 10);
+        write(".export-10.csv", 10);
+        let text = "version = 1\n[source]\nkind = \"csv\"\npath = \"export-*.csv*\"\n";
+        let r = Recipe::from_toml(text).unwrap();
+        assert_eq!(r.resolve_source(dir.path(), None).unwrap(), dir.path().join("export-09.csv"));
+        // The finished file lands but is still changing: wait, don't read half
+        write("export-10.csv", 0);
+        assert!(r.resolve_source(dir.path(), None).unwrap_err().contains("still being written"));
+        write("export-10.csv", 5);
+        assert_eq!(r.resolve_source(dir.path(), None).unwrap(), dir.path().join("export-10.csv"));
     }
 }

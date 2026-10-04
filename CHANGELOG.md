@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- Fixed Refresh failing with "Table range extends beyond the sheet" when a new month's file had more rows than the sheet the recipe first created (over 1,000 rows, or over the first month's count). ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- Large refreshes (over 100,000 changed cells) now publish with a single undo step instead of being refused. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- A recipe reading the newest matching file skips downloads still in progress (`.crdownload`, `.part`, `.download`, `.tmp`, hidden files) and waits when the newest file changed in the last two seconds. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- **Unlink Table from Recipe** in the command palette keeps the records as an ordinary Table; Ctrl+Z relinks it. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- The blocked banner's suggested rename now takes Ctrl+Enter, so Enter in the sheet can't apply it by accident. Edits made while a recipe is opening are no longer replaced by its result, and TOML files that aren't recipes are no longer run as one. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+
 ## 0.45.0
 
 ### Fixed
