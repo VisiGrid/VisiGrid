@@ -42,9 +42,9 @@ pub const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
 /// The engine commit compiled into this binary (set by the build), so the
 /// sequencer can refuse clients on a different engine.
 fn engine_commit() -> &'static str {
-    option_env!("VISIGRID_ENGINE_COMMIT")
-        .or(option_env!("GIT_COMMIT"))
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
+    // Stamped by build.rs with the helper the WASM engine's build uses, so a
+    // browser and this host built from the same source agree exactly.
+    env!("VISIGRID_ENGINE_COMMIT")
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

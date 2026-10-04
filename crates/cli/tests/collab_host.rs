@@ -278,3 +278,22 @@ fn over_long_lines_are_consumed_and_reported() {
     assert_eq!(read_bounded_line(&mut r, 10).unwrap(), Some(Ok("{\"id\":1}".into())));
     assert_eq!(read_bounded_line(&mut r, 10).unwrap(), None);
 }
+
+/// The collaboration server refuses a browser whose engine_commit differs from
+/// its host's, so `vgrid collab-host` and the WASM engine must report the same
+/// identifier when built from the same source. Both build scripts include
+/// build-support/engine_commit.rs; this pins that they agree.
+#[test]
+fn hello_engine_commit_matches_the_wasm_engine() {
+    let mut host = Host::spawn();
+    let hello = host.call(serde_json::json!({"cmd": "hello"}));
+    let host_commit = hello["engine_commit"].as_str().expect("hello carries engine_commit");
+    let wasm_commit = visigrid_engine_wasm::engine_commit();
+    assert_eq!(host_commit, wasm_commit, "collab-host and the WASM engine must report the same engine_commit");
+    // In a git checkout (every CI and Docker build) it identifies a commit.
+    if std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.git")).exists() {
+        let sha = host_commit.trim_end_matches("-modified");
+        assert_eq!(sha.len(), 40, "expected a full commit SHA, got {host_commit:?}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}

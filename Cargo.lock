@@ -8005,6 +8005,7 @@ dependencies = [
  "visigrid-collab",
  "visigrid-config",
  "visigrid-engine",
+ "visigrid-engine-wasm",
  "visigrid-hub-client",
  "visigrid-io",
  "visigrid-protocol",
@@ -8017,7 +8018,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-collab"
-version = "0.45.0"
+version = "0.47.0"
 dependencies = [
  "rand 0.8.7",
  "serde",
