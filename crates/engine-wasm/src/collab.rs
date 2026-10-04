@@ -321,6 +321,14 @@ impl CollabCore {
         Some(wb.sheets()[idx].get_formatted_display(row, col))
     }
 
+    /// What the user typed into a cell (formula text with `=`, or the
+    /// literal input), for an editor to start from.
+    pub(crate) fn raw(&self, sheet: SheetKey, row: usize, col: usize) -> Option<String> {
+        let wb = &self.client.wb;
+        let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
+        Some(wb.sheets()[idx].get_raw(row, col))
+    }
+
     /// The sheets, in tab order: `[{key, name, index}]`.
     pub(crate) fn sheets(&self) -> Value {
         let wb = &self.client.wb;
@@ -643,6 +651,12 @@ impl CollabClient {
     /// `undefined` for an unknown sheet key.
     pub fn display(&self, sheet: f64, row: usize, col: usize) -> Option<String> {
         self.core.display(sheet as SheetKey, row, col)
+    }
+
+    /// A cell's raw input (formula text or literal), or `undefined` for an
+    /// unknown sheet key.
+    pub fn raw(&self, sheet: f64, row: usize, col: usize) -> Option<String> {
+        self.core.raw(sheet as SheetKey, row, col)
     }
 
     /// The sheets in tab order: `[{key, name, index}]`.
@@ -1025,6 +1039,8 @@ mod tests {
             assert_eq!(v["text"][i], json!(c.display(1, r, col).unwrap()));
         }
         assert!(c.viewport(99, 0, 0, 1, 1).is_none());
+        assert_eq!(c.raw(1, 1, 0).as_deref(), Some("=1/0"));
+        assert_eq!(c.raw(1, 0, 1).as_deref(), Some("0.25"));
     }
 
     #[test]
