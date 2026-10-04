@@ -11,7 +11,7 @@ use rand::Rng;
 use visigrid_engine::formula::parser::{format_parsed_expr, parse};
 use visigrid_engine::workbook::Workbook;
 
-use crate::op::{Axis, CellContent, CollabOp, Rect};
+use crate::op::{Axis, CellContent, CollabOp, FormatProps, HAlign, Rect, VAlign};
 
 /// Rows and columns most edits land in.
 pub const HOT_ROWS: usize = 10;
@@ -83,6 +83,37 @@ fn fresh_name(rng: &mut StdRng, wb: &Workbook) -> Option<String> {
     None
 }
 
+/// One to four properties, each set (or sometimes cleared) from a small
+/// pool so concurrent formats of the same cells really collide.
+fn format_props(rng: &mut StdRng) -> FormatProps {
+    let mut p = FormatProps::default();
+    let n = rng.gen_range(1..=4);
+    for _ in 0..n {
+        let clear = rng.gen_bool(0.15);
+        macro_rules! pick {
+            ($v:expr) => {
+                if clear { Some(None) } else { Some(Some($v)) }
+            };
+        }
+        match rng.gen_range(0..12) {
+            0 => p.bold = pick!(rng.gen_bool(0.7)),
+            1 => p.italic = pick!(rng.gen_bool(0.7)),
+            2 => p.underline = pick!(rng.gen_bool(0.5)),
+            3 => p.strikethrough = pick!(rng.gen_bool(0.5)),
+            4 => p.font_family = pick!(["Inter", "Georgia", "Menlo"][rng.gen_range(0..3)].to_string()),
+            5 => p.font_size = pick!([9.0, 11.0, 14.5, 24.0][rng.gen_range(0..4)]),
+            6 => p.color = pick!(["#FF0000", "#00aa00", "#123456"][rng.gen_range(0..3)].to_string()),
+            7 => p.background = pick!(["#FFFF00", "#eeeeee"][rng.gen_range(0..2)].to_string()),
+            // Number formats change what numbers display.
+            8 => p.number_format = pick!(["General", "0.00", "#,##0", "0%"][rng.gen_range(0..4)].to_string()),
+            9 => p.h_align = pick!([HAlign::General, HAlign::Left, HAlign::Center, HAlign::Right][rng.gen_range(0..4)]),
+            10 => p.v_align = pick!([VAlign::Top, VAlign::Middle, VAlign::Bottom][rng.gen_range(0..3)]),
+            _ => p.wrap = pick!(rng.gen_bool(0.5)),
+        }
+    }
+    p
+}
+
 /// One user action against `wb`, as an envelope's op list. `sheet_key`
 /// supplies a new stable id for an added sheet.
 pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<CollabOp> {
@@ -112,10 +143,12 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
             (r0 + rng.gen_range(0..3)).min(HOT_ROWS),
             (c0 + rng.gen_range(0..2)).min(HOT_COLS),
         );
-        CollabOp::SetBold {
-            sheet,
-            rect: Rect::new(r0, c0, r1, c1),
-            bold: rng.gen_bool(0.7),
+        let rect = Rect::new(r0, c0, r1, c1);
+        if rng.gen_bool(0.25) {
+            // Legacy logs still carry SetBold.
+            CollabOp::SetBold { sheet, rect, bold: rng.gen_bool(0.7) }
+        } else {
+            CollabOp::SetFormat { sheet, rect, props: format_props(rng) }
         }
     } else if roll < 77 {
         let axis = if rng.gen_bool(0.75) {

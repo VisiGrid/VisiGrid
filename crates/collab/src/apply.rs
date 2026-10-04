@@ -4,7 +4,8 @@
 //! exactly this code, so this is where determinism lives. An op whose target
 //! no longer exists (its sheet is gone) is a no-op on every replica alike.
 
-use crate::op::{CollabOp, SheetKey};
+use crate::op::{parse_hex_color, CollabOp, FormatProps, HAlign, Rect, SheetKey, VAlign};
+use visigrid_engine::cell::{Alignment, CellFormat, NumberFormat, TextOverflow, VerticalAlignment};
 use visigrid_engine::cell_id::CellId;
 use visigrid_engine::sheet::{Sheet, SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::workbook::Workbook;
@@ -45,11 +46,14 @@ pub struct Changes {
     pub sheets: bool,
     /// Structural ops applied, in order.
     pub structural: Vec<CollabOp>,
+    /// Format ops applied, in order: the rectangle and the properties set or
+    /// cleared (for a mirror to restyle incrementally).
+    pub formats: Vec<(SheetKey, Rect, FormatProps)>,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty() && !self.full && !self.sheets && self.structural.is_empty()
+        self.cells.is_empty() && !self.full && !self.sheets && self.structural.is_empty() && self.formats.is_empty()
     }
 
     fn recalculated(&mut self, r: visigrid_engine::workbook::Recalculated) {
@@ -92,17 +96,20 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             }
             Ok(())
         }
-        CollabOp::SetBold { sheet, rect, bold } => {
-            let idx = index_of(wb, *sheet)?;
+        CollabOp::SetBold { .. } | CollabOp::SetFormat { .. } => {
+            let (sheet, rect, props) = op.format().expect("format op");
+            let idx = index_of(wb, sheet)?;
             let id = wb.sheets()[idx].id;
             if let Some(ch) = changes.as_deref_mut() {
+                ch.formats.push((sheet, rect, props.clone()));
+                // Number formats change what a cell displays: report the cells.
                 let area = (rect.r1.saturating_sub(rect.r0) + 1).saturating_mul(rect.c1.saturating_sub(rect.c0) + 1);
                 if area > MAX_TRACKED_CELLS {
                     ch.full = true;
                 } else {
                     for r in rect.r0..=rect.r1 {
                         for c in rect.c0..=rect.c1 {
-                            ch.cells.push((*sheet, r, c));
+                            ch.cells.push((sheet, r, c));
                         }
                     }
                 }
@@ -110,7 +117,9 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             for r in rect.r0..=rect.r1 {
                 for c in rect.c0..=rect.c1 {
                     if let Some(s) = wb.sheet_mut(idx) {
-                        s.set_bold(r, c, *bold);
+                        let mut fmt = s.get_format(r, c);
+                        apply_props(&mut fmt, &props);
+                        s.set_format(r, c, fmt);
                     }
                     wb.note_format_changed(CellId::new(id, r, c));
                 }
@@ -184,6 +193,66 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             }
             Ok(())
         }
+    }
+}
+
+/// Set or clear each property `props` names on `fmt`; a clear restores the
+/// engine's default for that property.
+pub fn apply_props(fmt: &mut CellFormat, props: &FormatProps) {
+    let d = CellFormat::default();
+    if let Some(v) = props.bold {
+        fmt.bold = v.unwrap_or(d.bold);
+    }
+    if let Some(v) = props.italic {
+        fmt.italic = v.unwrap_or(d.italic);
+    }
+    if let Some(v) = props.underline {
+        fmt.underline = v.unwrap_or(d.underline);
+    }
+    if let Some(v) = props.strikethrough {
+        fmt.strikethrough = v.unwrap_or(d.strikethrough);
+    }
+    if let Some(v) = &props.font_family {
+        fmt.font_family = v.clone();
+    }
+    if let Some(v) = props.font_size {
+        fmt.font_size = v.map(|s| s as f32);
+    }
+    if let Some(v) = &props.color {
+        fmt.font_color = v.as_deref().and_then(parse_hex_color);
+    }
+    if let Some(v) = &props.background {
+        fmt.background_color = v.as_deref().and_then(parse_hex_color);
+    }
+    if let Some(v) = &props.number_format {
+        fmt.number_format = match v.as_deref() {
+            None => d.number_format.clone(),
+            Some(code) if code.is_empty() || code.eq_ignore_ascii_case("general") => NumberFormat::General,
+            Some(code) => NumberFormat::Custom(code.to_string()),
+        };
+    }
+    if let Some(v) = props.h_align {
+        fmt.alignment = match v {
+            None | Some(HAlign::General) => Alignment::General,
+            Some(HAlign::Left) => Alignment::Left,
+            Some(HAlign::Center) => Alignment::Center,
+            Some(HAlign::Right) => Alignment::Right,
+        };
+    }
+    if let Some(v) = props.v_align {
+        fmt.vertical_alignment = match v {
+            None => d.vertical_alignment,
+            Some(VAlign::Top) => VerticalAlignment::Top,
+            Some(VAlign::Middle) => VerticalAlignment::Middle,
+            Some(VAlign::Bottom) => VerticalAlignment::Bottom,
+        };
+    }
+    if let Some(v) = props.wrap {
+        fmt.text_overflow = match v {
+            Some(true) => TextOverflow::Wrap,
+            Some(false) => TextOverflow::Clip,
+            None => d.text_overflow,
+        };
     }
 }
 
@@ -275,7 +344,8 @@ fn sheet_changed(changes: Option<&mut Changes>) {
 }
 
 /// Everything convergence compares: tab order, ids and names, then every
-/// non-empty cell's raw text, cached computed display, and bold flag.
+/// non-empty cell's raw text, cached computed display, and full format (as
+/// JSON, empty for the default format).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Fingerprint {
     pub sheets: Vec<SheetPrint>,
@@ -285,8 +355,8 @@ pub struct Fingerprint {
 pub struct SheetPrint {
     pub id: u64,
     pub name: String,
-    /// (row, col, raw, computed, bold), sorted by position.
-    pub cells: Vec<(usize, usize, String, String, bool)>,
+    /// (row, col, raw, computed, format), sorted by position.
+    pub cells: Vec<(usize, usize, String, String, String)>,
 }
 
 pub fn fingerprint(wb: &Workbook) -> Fingerprint {
@@ -294,18 +364,19 @@ pub fn fingerprint(wb: &Workbook) -> Fingerprint {
         .sheets()
         .iter()
         .map(|s| {
-            let mut cells: Vec<(usize, usize, String, String, bool)> = s
+            let default = CellFormat::default();
+            let mut cells: Vec<(usize, usize, String, String, String)> = s
                 .cells_iter()
                 .map(|((r, c), _)| {
-                    (
-                        r,
-                        c,
-                        s.get_raw(r, c),
-                        s.get_formatted_display(r, c),
-                        s.get_format(r, c).bold,
-                    )
+                    let fmt = s.get_format(r, c);
+                    let fmt = if fmt == default {
+                        String::new()
+                    } else {
+                        serde_json::to_string(&fmt).expect("format serializes")
+                    };
+                    (r, c, s.get_raw(r, c), s.get_formatted_display(r, c), fmt)
                 })
-                .filter(|(_, _, raw, shown, bold)| !raw.is_empty() || !shown.is_empty() || *bold)
+                .filter(|(_, _, raw, shown, fmt)| !raw.is_empty() || !shown.is_empty() || !fmt.is_empty())
                 .collect();
             cells.sort_by_key(|(r, c, ..)| (*r, *c));
             SheetPrint {

@@ -425,7 +425,7 @@ impl Client {
 
     /// The server replaced the whole document (an old client's whole-file
     /// save) at `seq`. Pending envelopes made only of cell content and
-    /// formatting (SetCell, SetBold, ReplaceRange) on sheets that still exist
+    /// formatting (SetCell, SetBold, SetFormat, ReplaceRange) on sheets that still exist
     /// are kept and resent on top of the new document: they name cells by
     /// stable sheet id and position, which a replacement keeps meaning.
     /// Envelopes with structural or sheet edits are dropped: their row,
@@ -441,6 +441,7 @@ impl Client {
             let keep = p.ops.iter().all(|op| match op {
                 CollabOp::SetCell { sheet, .. }
                 | CollabOp::SetBold { sheet, .. }
+                | CollabOp::SetFormat { sheet, .. }
                 | CollabOp::ReplaceRange { sheet, .. } => present.contains(sheet),
                 _ => false,
             });
@@ -483,7 +484,10 @@ pub fn positional_inverse(ops: &[CollabOp], before: &Workbook) -> Vec<CollabOp> 
             wb.sheets().iter().find(|s| s.id.0 == sheet).map(|s| s.name.clone())
         };
         match op {
-            CollabOp::SetCell { .. } | CollabOp::SetBold { .. } | CollabOp::ReplaceRange { .. } => {}
+            CollabOp::SetCell { .. }
+            | CollabOp::SetBold { .. }
+            | CollabOp::SetFormat { .. }
+            | CollabOp::ReplaceRange { .. } => {}
             CollabOp::Structural { sheet, sheet_name, axis, at, count, delete } => {
                 inverse.push(CollabOp::Structural {
                     sheet: *sheet,

@@ -71,6 +71,14 @@ impl Rect {
         self.r0 <= o.r1 && o.r0 <= self.r1 && self.c0 <= o.c1 && o.c0 <= self.c1
     }
 
+    /// The overlap of two rectangles, if any.
+    pub fn intersection(&self, o: &Rect) -> Option<Rect> {
+        if !self.intersects(o) {
+            return None;
+        }
+        Some(Rect::new(self.r0.max(o.r0), self.c0.max(o.c0), self.r1.min(o.r1), self.c1.min(o.c1)))
+    }
+
     /// `self` minus `o`, as up to four disjoint rectangles.
     pub fn subtract(&self, o: &Rect) -> Vec<Rect> {
         if !self.intersects(o) {
@@ -94,6 +102,150 @@ impl Rect {
     }
 }
 
+/// `Option<Option<T>>` from JSON: an absent field is `None` (unchanged), an
+/// explicit `null` is `Some(None)` (clear to the default), a value is
+/// `Some(Some(v))` (set).
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// Horizontal alignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HAlign {
+    General,
+    Left,
+    Center,
+    Right,
+}
+
+/// Vertical alignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VAlign {
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// The format properties one op sets or clears. Every field is
+/// `None` = unchanged, `Some(None)` = clear to the default, `Some(Some(v))` =
+/// set. Colors are `#RRGGBB`. `number_format` is an Excel format code
+/// (`"General"` or e.g. `"#,##0.00"`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormatProps {
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub bold: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub italic: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub underline: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub background: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub h_align: Option<Option<HAlign>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub v_align: Option<Option<VAlign>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<Option<bool>>,
+}
+
+/// `font_size` is the only float. Ops are compared exactly (tests, dedupe);
+/// `validate` rejects non-finite sizes, so equality is reflexive.
+impl Eq for FormatProps {}
+
+macro_rules! each_prop {
+    ($m:ident) => {
+        $m!(bold);
+        $m!(italic);
+        $m!(underline);
+        $m!(strikethrough);
+        $m!(font_family);
+        $m!(font_size);
+        $m!(color);
+        $m!(background);
+        $m!(number_format);
+        $m!(h_align);
+        $m!(v_align);
+        $m!(wrap);
+    };
+}
+
+impl FormatProps {
+    pub fn bold(bold: bool) -> Self {
+        FormatProps { bold: Some(Some(bold)), ..Default::default() }
+    }
+
+    /// No property is set or cleared.
+    pub fn is_empty(&self) -> bool {
+        let mut empty = true;
+        macro_rules! check {
+            ($f:ident) => {
+                empty &= self.$f.is_none();
+            };
+        }
+        each_prop!(check);
+        empty
+    }
+
+    /// `self` without the properties `other` sets or clears: what survives
+    /// of an earlier op where a later one overlaps it.
+    pub fn without(&self, other: &FormatProps) -> FormatProps {
+        let mut out = self.clone();
+        macro_rules! drop_shared {
+            ($f:ident) => {
+                if other.$f.is_some() {
+                    out.$f = None;
+                }
+            };
+        }
+        each_prop!(drop_shared);
+        out
+    }
+
+    /// Reject values no replica could apply identically.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(Some(size)) = self.font_size {
+            if !size.is_finite() || size <= 0.0 || size > 409.0 {
+                return Err(format!("font_size {size} out of range"));
+            }
+        }
+        for (name, c) in [("color", &self.color), ("background", &self.background)] {
+            if let Some(Some(c)) = c {
+                if parse_hex_color(c).is_none() {
+                    return Err(format!("{name} must be #RRGGBB"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `#RRGGBB` (case-insensitive) as RGBA with full opacity.
+pub fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?, 255])
+}
+
 /// One operation. V1 vocabulary (see the spec's pair table).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CollabOp {
@@ -105,11 +257,18 @@ pub enum CollabOp {
         col: usize,
         content: CellContent,
     },
-    /// Format range (V1: the bold property; others follow the same rules).
+    /// Legacy bold-only format range, kept so existing logs replay. Every
+    /// transform and apply treats it as `SetFormat { bold }`.
     SetBold {
         sheet: SheetKey,
         rect: Rect,
         bold: bool,
+    },
+    /// Format range: set or clear any of `props` on every cell of `rect`.
+    SetFormat {
+        sheet: SheetKey,
+        rect: Rect,
+        props: FormatProps,
     },
     /// Insert or delete `count` rows/columns starting at `at`.
     Structural {
@@ -151,11 +310,45 @@ impl CollabOp {
         match self {
             CollabOp::SetCell { sheet, .. }
             | CollabOp::SetBold { sheet, .. }
+            | CollabOp::SetFormat { sheet, .. }
             | CollabOp::Structural { sheet, .. }
             | CollabOp::AddSheet { sheet, .. }
             | CollabOp::RenameSheet { sheet, .. }
             | CollabOp::DeleteSheet { sheet, .. }
             | CollabOp::ReplaceRange { sheet, .. } => *sheet,
+        }
+    }
+
+    /// `SetBold` as the `SetFormat` it stands for; every other op unchanged.
+    pub fn normalized(&self) -> CollabOp {
+        match self {
+            CollabOp::SetBold { sheet, rect, bold } => CollabOp::SetFormat {
+                sheet: *sheet,
+                rect: *rect,
+                props: FormatProps::bold(*bold),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// The rectangle and properties of a format op (`SetBold` or `SetFormat`).
+    pub fn format(&self) -> Option<(SheetKey, Rect, FormatProps)> {
+        match self.normalized() {
+            CollabOp::SetFormat { sheet, rect, props } => Some((sheet, rect, props)),
+            _ => None,
+        }
+    }
+
+    /// Reject ops no replica could apply identically.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            CollabOp::SetFormat { rect, props, .. } => {
+                if rect.r0 > rect.r1 || rect.c0 > rect.c1 {
+                    return Err("format rect is inverted".into());
+                }
+                props.validate()
+            }
+            _ => Ok(()),
         }
     }
 
@@ -191,8 +384,7 @@ pub struct Envelope {
 #[cfg(feature = "protocol")]
 /// Map a v1 protocol op onto the collaboration vocabulary. Protocol v1 names
 /// sheets by index, so the caller resolves the stable key and the name.
-/// Ops outside the V1 collaboration vocabulary (number formats, italic,
-/// underline, pivots) return `None`; they are later rows of the table.
+/// Ops outside the collaboration vocabulary (pivots, borders) return `None`.
 pub fn from_protocol(
     op: &visigrid_protocol::Op,
     sheet_key: SheetKey,
@@ -230,14 +422,19 @@ pub fn from_protocol(
             start_col,
             end_row,
             end_col,
-            bold: Some(b),
-            italic: None,
-            underline: None,
+            bold,
+            italic,
+            underline,
             ..
-        } => CollabOp::SetBold {
+        } if bold.is_some() || italic.is_some() || underline.is_some() => CollabOp::SetFormat {
             sheet: sheet_key,
             rect: Rect::new(*start_row, *start_col, *end_row, *end_col),
-            bold: *b,
+            props: FormatProps {
+                bold: bold.map(Some),
+                italic: italic.map(Some),
+                underline: underline.map(Some),
+                ..Default::default()
+            },
         },
         _ => return None,
     })
@@ -247,13 +444,17 @@ pub fn from_protocol(
 /// envelope's atomic op list as a JSON array. A single op object is accepted
 /// on input too, so a writer with one op need not wrap it.
 pub fn ops_from_json(v: &serde_json::Value) -> Result<Vec<CollabOp>, String> {
-    if v.is_array() {
-        serde_json::from_value(v.clone()).map_err(|e| format!("invalid op list: {e}"))
+    let ops: Vec<CollabOp> = if v.is_array() {
+        serde_json::from_value(v.clone()).map_err(|e| format!("invalid op list: {e}"))?
     } else {
         serde_json::from_value::<CollabOp>(v.clone())
             .map(|op| vec![op])
-            .map_err(|e| format!("invalid op: {e}"))
+            .map_err(|e| format!("invalid op: {e}"))?
+    };
+    for op in &ops {
+        op.validate()?;
     }
+    Ok(ops)
 }
 
 pub fn ops_to_json(ops: &[CollabOp]) -> serde_json::Value {

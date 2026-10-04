@@ -308,7 +308,8 @@ impl CollabCore {
                     "raw": sheet.get_raw(*row, *col),
                     "value": r.value,
                     "error": r.error,
-                    "display": r.display,
+                    // What the desktop shows: number formats applied.
+                    "display": sheet.get_formatted_display(*row, *col),
                 }));
             }
         }
@@ -325,9 +326,17 @@ impl CollabCore {
             Some((url, seq)) => (json!(url), json!(seq)),
             None => (Value::Null, Value::Null),
         };
+        // Format ops in apply order: the rectangle and only the properties the
+        // op set (value) or cleared (null), for incremental restyling.
+        let formats: Vec<Value> = ch
+            .formats
+            .iter()
+            .map(|(sheet, rect, props)| json!({"sheet": sheet, "rect": rect, "props": props}))
+            .collect();
         let out = json!({
             "full": ch.full,
             "cells": cells,
+            "formats": formats,
             "sheets": sheets,
             "structural": ops_to_json(&ch.structural),
             "rejected": std::mem::take(&mut self.rejected),
@@ -515,6 +524,30 @@ mod tests {
 
     fn cell<'a>(fx: &'a Value, row: u64, col: u64) -> Option<&'a Value> {
         fx["cells"].as_array().unwrap().iter().find(|c| c["row"] == row && c["col"] == col)
+    }
+
+    #[test]
+    fn a_local_format_reports_its_props_and_the_display_it_changes() {
+        let mut c = CollabCore::new(&doc(), 0).unwrap();
+        c.local(&set(0, 0, "0.25")).unwrap();
+        let op = json!([{"SetFormat": {"sheet": 1, "rect": {"r0":0,"c0":0,"r1":0,"c1":0},
+            "props": {"number_format": "0%", "bold": true, "color": null}}}]);
+        let fx = c.local(&op).unwrap();
+        assert_eq!(fx["full"], false);
+        assert_eq!(fx["formats"], json!([{"sheet": 1, "rect": {"r0":0,"c0":0,"r1":0,"c1":0},
+            "props": {"bold": true, "color": null, "number_format": "0%"}}]));
+        assert_eq!(cell(&fx, 0, 0).unwrap()["display"], "25%");
+        // A full repaint reads formats from the snapshot, so they must survive
+        // the visigrid-json export and a reload.
+        let snap = c.snapshot().unwrap();
+        let text = snap.to_string();
+        assert!(text.contains("0%") && text.contains("bold"), "formats in the snapshot: {text}");
+        let reloaded = CollabCore::new(&snap, c.last_seen()).unwrap();
+        assert_eq!(
+            checksum(&reloaded.client.wb),
+            checksum(&c.client.wb),
+            "the optimistic workbook, formats included, round-trips through the snapshot"
+        );
     }
 
     #[test]

@@ -53,6 +53,8 @@ pub enum Transformed {
 
 /// Transform `a` past `b`.
 pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
+    // A legacy SetBold is a SetFormat { bold }: one set of rules for both.
+    let (a, b) = (&a.normalized(), &b.normalized());
     if let Some(reason) = conflict(a, b) {
         return match order {
             Order::Later => Transformed::Refused(reason),
@@ -143,34 +145,37 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
 
         // ---- a is a format range ----
         (
-            SetBold { sheet, rect, bold },
-            SetBold {
+            SetFormat { sheet, rect, props },
+            SetFormat {
                 sheet: bs,
                 rect: br,
-                ..
+                props: bp,
             },
         ) => {
-            if sheet == bs && !later && rect.intersects(br) {
-                let rest: Vec<CollabOp> = rect
-                    .subtract(br)
-                    .into_iter()
-                    .map(|r| SetBold {
-                        sheet: *sheet,
-                        rect: r,
-                        bold: *bold,
-                    })
-                    .collect();
-                if rest.is_empty() {
-                    Transformed::Dropped("a later format of the same cells won")
-                } else {
-                    Transformed::Ops(rest)
+            // Overlapping formats merge per property: the later-sequenced op
+            // wins each property it sets or clears; the earlier keeps the rest.
+            match (sheet == bs && !later).then(|| rect.intersection(br)).flatten() {
+                None => one(a),
+                Some(overlap) => {
+                    let mut out: Vec<CollabOp> = rect
+                        .subtract(br)
+                        .into_iter()
+                        .map(|r| SetFormat { sheet: *sheet, rect: r, props: props.clone() })
+                        .collect();
+                    let kept = props.without(bp);
+                    if !kept.is_empty() {
+                        out.push(SetFormat { sheet: *sheet, rect: overlap, props: kept });
+                    }
+                    if out.is_empty() {
+                        Transformed::Dropped("a later format of the same cells won")
+                    } else {
+                        Transformed::Ops(out)
+                    }
                 }
-            } else {
-                one(a)
             }
         }
         (
-            SetBold { sheet, rect, bold },
+            SetFormat { sheet, rect, props },
             Structural {
                 sheet: bs,
                 axis,
@@ -187,19 +192,16 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
                 Transformed::Ops(
                     pieces
                         .into_iter()
-                        .map(|r| SetBold {
-                            sheet: *sheet,
-                            rect: r,
-                            bold: *bold,
-                        })
+                        .map(|r| SetFormat { sheet: *sheet, rect: r, props: props.clone() })
                         .collect(),
                 )
             }
         }
-        (SetBold { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
+        (SetFormat { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
             Transformed::Dropped("its sheet was deleted")
         }
-        (SetBold { .. }, _) => one(a),
+        (SetFormat { .. }, _) => one(a),
+        (SetBold { .. }, _) => unreachable!("transform normalizes SetBold to SetFormat"),
 
         // ---- a is a structural edit ----
         (
@@ -553,7 +555,7 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
         }
         let hit = match other {
             SetCell { row, col, .. } => rect.contains(*row, *col),
-            SetBold { rect: r, .. } => rect.intersects(r),
+            SetFormat { rect: r, .. } => rect.intersects(r),
             ReplaceRange { .. } => rect.intersects(&other.replace_rect().unwrap()),
             Structural {
                 axis,

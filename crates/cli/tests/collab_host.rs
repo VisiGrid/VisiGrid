@@ -261,6 +261,26 @@ fn every_command_over_stdio() {
     let both = submit(&mut h, 9, &[added, on_new], &[]);
     assert_eq!(both["op"].as_array().unwrap().len(), 2, "{both}");
 
+    // A format op applies through the host and survives into the snapshot.
+    let before = h.ok(json!({"cmd": "snapshot"}));
+    let seq = before["seq"].as_u64().unwrap();
+    let pct = json!([{"SetFormat": {"sheet": 1, "rect": {"r0":2,"c0":2,"r1":2,"c1":2},
+        "props": {"number_format": "0.00", "h_align": "center", "color": "#00aa00"}}}]);
+    let r = h.ok(json!({"cmd": "submit", "envelope": {"client_op_id": "00000000-0000-0000-0000-0000000000f0",
+        "base_seq": seq, "actor": 1, "op": pct}, "concurrent": []}));
+    assert_eq!(r["result"], json!("op"), "{r}");
+    assert_eq!(r["op"][0]["SetFormat"]["props"]["h_align"], json!("center"));
+    assert_ne!(r["checksum"], before["checksum"], "a format change changes the checksum");
+    let after = h.ok(json!({"cmd": "snapshot"}));
+    assert_eq!(after["checksum"], r["checksum"]);
+    let text = after["document"].to_string();
+    assert!(text.contains("0.00"), "the number format is in the snapshot: {text}");
+    // An invalid format is refused at the wire, never applied.
+    let bad = json!([{"SetFormat": {"sheet": 1, "rect": {"r0":0,"c0":0,"r1":0,"c1":0}, "props": {"color": "red"}}}]);
+    let r = h.call(json!({"cmd": "submit", "envelope": {"client_op_id": "00000000-0000-0000-0000-0000000000f1",
+        "base_seq": seq + 1, "actor": 1, "op": bad}, "concurrent": []}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+
     // End of input ends the process cleanly.
     h.stdin.take();
     let status = h.child.wait().unwrap();
