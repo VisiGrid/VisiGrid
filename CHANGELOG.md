@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Excel interchange
+
+- Fixed Excel files with a large sheet (over 32 MB of sheet data) dropping every Table in the workbook with an "XLSX part … is too large" warning, even when the large sheet had no Tables. A problem reading one sheet's Tables now affects only that sheet. ([#96](https://github.com/VisiGrid/VisiGrid/pull/96))
+
 ## 0.46.0
 
 ### Formulas

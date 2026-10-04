@@ -65,6 +65,26 @@ fn target(source: &str, path: &str) -> Result<String, String> {
     }
     Ok(parts.join("/"))
 }
+/// The relationship ids of a worksheet's `<tablePart>`s, read as a stream:
+/// worksheet parts hold every cell and can be any size.
+fn table_part_ids(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Vec<String>, String> {
+    let file = zip.by_name(name).map_err(|e| format!("Missing XLSX part {name}: {e}"))?;
+    let mut reader = Reader::from_reader(std::io::BufReader::new(file));
+    let mut buf = Vec::new();
+    let mut ids = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf).map_err(|e| e.to_string())? {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"tablePart" => {
+                ids.push(attr(&e, b"id")?.ok_or("Missing Table relationship")?)
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(ids)
+}
+
 fn rel_path(part: &str) -> String {
     let (base, file) = part.rsplit_once('/').unwrap_or(("", part));
     format!("{base}/_rels/{file}.rels")
@@ -390,25 +410,29 @@ fn read_tables(
                 if !rel.kind.ends_with("/worksheet") || rel.external {
                     continue;
                 }
-                let sheet_xml = part(&mut zip, &rel.target)?;
-                let mut sr = Reader::from_str(&sheet_xml);
-                let mut ids = Vec::new();
-                loop {
-                    match sr.read_event().map_err(|e| e.to_string())? {
-                        Event::Start(e) | Event::Empty(e)
-                            if e.local_name().as_ref() == b"tablePart" =>
-                        {
-                            ids.push(attr(&e, b"id")?.ok_or("Missing Table relationship")?)
-                        }
-                        Event::Eof => break,
-                        _ => {}
-                    }
+                // A sheet's Tables are related to it in its small rels part.
+                // Read that first: a sheet with no Table relationship (most
+                // large data sheets) is never opened, whatever its size.
+                let rels_name = rel_path(&rel.target);
+                if !zip.file_names().any(|n| n == rels_name) {
+                    continue;
                 }
+                let sheet_rels = part(&mut zip, &rels_name).and_then(|xml| relationships(&xml, &rel.target));
+                if sheet_rels.as_ref().is_ok_and(|rs| !rs.values().any(|r| r.kind.ends_with("/table"))) {
+                    continue;
+                }
+                // Otherwise find its <tablePart>s by streaming the sheet: no
+                // size cap on the sheet itself, which holds all its cells
+                let ids = match table_part_ids(&mut zip, &rel.target) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        result.warnings.push(format!("Excel Tables on {name} were kept as plain cells: {error}. Formulas referencing them may show errors."));
+                        continue;
+                    }
+                };
                 if ids.is_empty() {
                     continue;
                 }
-                let sheet_rels = part(&mut zip, &rel_path(&rel.target))
-                    .and_then(|xml| relationships(&xml, &rel.target));
                 for id in ids {
                     let imported = (|| {
                         let rs = sheet_rels.as_ref().map_err(|e| e.clone())?;

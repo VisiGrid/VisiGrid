@@ -427,7 +427,7 @@ Web/cloud preservation and authoring remain deferred to the separate frontend re
 
 ### Inherited PR #83 follow-ups for Phase 4
 
-- Inspect worksheet relationships before reading worksheet XML for Tables, so the 32 MB Table-parser limit does not reject unrelated large sheets or produce a misleading warning.
+- ~~Inspect worksheet relationships before reading worksheet XML for Tables~~ Done: the Tables pass reads each sheet's relationships first and skips sheets with no Table relationship; sheets that have one are streamed for `<tablePart>`s, so the 32 MB cap applies only to the small metadata parts. A failure on one sheet now warns for that sheet instead of dropping every Table in the workbook.
 - Bound Table counts and reduce repeated import validation to prevent pathological import times from many tiny Tables.
 - Confirm the recovery export policy: XLSX salvage is currently blocked along with other exports; any future salvage path must explicitly describe lost definitions and potentially stale values.
 - Document automation boundaries for agent users: direct MCP/session writes use canonical addresses and may explicitly change hidden records without a desktop approval step. Reviewed proposals and Lua row-deletion reviews use their separate approval flow.
