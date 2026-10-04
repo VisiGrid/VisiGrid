@@ -667,6 +667,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                             };
                             // Strip ODS OpenFormula namespace prefix (e.g. "=of:SUM()" → "=SUM()")
                             let formula_str = strip_ods_prefix(&formula_str);
+                            let formula_str = crate::xlsx_arrays::normalize_formula(&formula_str);
 
                             // Analyze formula for unknown functions
                             match parse_formula(&formula_str) {
@@ -790,6 +791,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     };
                     eprintln!("[XLSX backfill] {}{}: ={}",
                         col_to_letter(*col), *row + 1, formula_text);
+                    let formula_str = crate::xlsx_arrays::normalize_formula(&formula_str);
                     sheet.set_value_deferred(*row, *col, &formula_str);
                     formula_backfill_count += 1;
                 }
@@ -824,6 +826,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 
         // Install ownership only after formula/value backfill, including footer cells.
         table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, false);
+        let array_caches = crate::xlsx_arrays::prepare(path, &mut workbook, &mut result.warnings)?;
         // Rebuild dependency graph after loading all data
         workbook.rebuild_dep_graph();
 
@@ -890,7 +893,11 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         // read yet. This pass evaluates each once with its dependencies present,
         // and places any spills afterwards — which is also what stops a spill
         // overwriting a cell purely because it happened to be listed first.
-        let recalc_report = workbook.recompute_full_ordered();
+        let mut recalc_report = workbook.recompute_full_ordered();
+        if crate::xlsx_arrays::finish(array_caches, &mut workbook, &mut result.warnings)? {
+            workbook.rebuild_dep_graph();
+            recalc_report = workbook.recompute_full_ordered();
+        }
         eprintln!("[XLSX import] Recomputed {} formulas in topo order (cycles: {})",
             recalc_report.cells_recomputed, recalc_report.had_cycles);
 
@@ -1770,7 +1777,7 @@ fn export_sheet_cells(
 
     // Iterate over all cells in the sheet
     for ((row, col), cell) in sheet.cells_iter() {
-        // Skip spill receiver cells - they'll be filled by Excel when recalculating
+        // Write receivers after all array masters, whose writer pads their ranges.
         if cell.is_spill_receiver() {
             continue;
         }
@@ -1841,9 +1848,24 @@ fn export_sheet_cells(
                     let formula_str = excel_source.strip_prefix('=').unwrap_or(&excel_source);
                     let format = apply_number_format(format, &cell.format().number_format);
 
-                    worksheet
-                        .write_formula_with_format(row32, col16, formula_str, &format)
-                        .map_err(|e| format!("Failed to write formula ({}, {}): {}", row, col, e))?;
+                    if let Some(spill) = cell.spill_info() {
+                        let end_row = row.checked_add(spill.rows.saturating_sub(1));
+                        let end_col = col.checked_add(spill.cols.saturating_sub(1));
+                        if spill.rows == 0 || spill.cols == 0
+                            || !end_row.is_some_and(|r| r < 1_048_576)
+                            || !end_col.is_some_and(|c| c < 16_384)
+                        {
+                            return Err(format!("Spill at {} exceeds Excel's worksheet limits.", cell_address(row, col)));
+                        }
+                        worksheet.write_dynamic_array_formula_with_format(
+                            row32, col16, end_row.unwrap() as u32,
+                            end_col.unwrap() as u16, formula_str, &format,
+                        )
+                            .map_err(|e| format!("Failed to write array formula ({row}, {col}): {e}"))?;
+                    } else {
+                        worksheet.write_formula_with_format(row32, col16, formula_str, &format)
+                            .map_err(|e| format!("Failed to write formula ({}, {}): {}", row, col, e))?;
+                    }
                     formulas_exported += 1;
                 } else {
                     // Invalid formula - export computed value instead
@@ -1874,6 +1896,15 @@ fn export_sheet_cells(
         }
     }
 
+    // The array writer pads receivers with zeroes using the parent's format.
+    // Restore their own formats here; the typed-cache pass replaces the zeroes.
+    for (row, col) in sheet.spill_receiver_coords() {
+        let cell_format = sheet.get_format(row, col);
+        let format = apply_number_format(build_excel_format(&cell_format), &cell_format.number_format);
+        worksheet.write_number_with_format(row as u32, col as u16, 0.0, &format)
+            .map_err(|e| format!("Failed to write spilled result ({row}, {col}): {e}"))?;
+        cells_exported += 1;
+    }
     Ok((cells_exported, formulas_exported, formulas_as_values, converted_formulas, precision_warnings))
 }
 

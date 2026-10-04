@@ -27,6 +27,8 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
         .is_some_and(|cell| cell.has_spill_error())
     {
         Some(Value::Error("#SPILL!".into()))
+    } else if let Some(value) = sheet.get_spill_value(row, col) {
+        Some(value.clone())
     } else {
         sheet.get_cached_value(row, col)
     };
@@ -86,8 +88,8 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
 fn exported_formula(sheet: &Sheet, row: usize, col: usize) -> bool {
     !sheet.is_merge_hidden(row, col)
         && sheet.get_cell_opt(row, col).is_some_and(|cell| {
-            !cell.is_spill_receiver()
-                && matches!(cell.value(), ValueRef::Formula { ast: Some(_), .. })
+            cell.is_spill_receiver()
+                || matches!(cell.value(), ValueRef::Formula { ast: Some(_), .. })
         })
 }
 
@@ -217,7 +219,7 @@ pub(crate) fn finish(
 }
 
 // Calamine decodes SpreadsheetML escapes in shared/inline strings but not in
-// formula <v> strings. Identify that exact storage type before decoding once.
+// formula and array-receiver <v> strings. Identify that exact storage type before decoding once.
 // Called lazily only when imported text actually contains an escape candidate.
 pub(crate) fn string_cells(path: &Path) -> Result<HashSet<(usize, usize, usize)>, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
@@ -240,7 +242,6 @@ pub(crate) fn string_cells(path: &Path) -> Result<HashSet<(usize, usize, usize)>
         let mut reader = Reader::from_reader(BufReader::new(entry));
         let mut buffer = Vec::new();
         let mut coord = None;
-        let mut formula = false;
         loop {
             buffer.clear();
             match reader
@@ -248,7 +249,6 @@ pub(crate) fn string_cells(path: &Path) -> Result<HashSet<(usize, usize, usize)>
                 .map_err(|e| e.to_string())?
             {
                 Event::Start(e) if e.local_name().as_ref() == b"c" => {
-                    formula = false;
                     coord = if super::xlsx_tables::attr(&e, b"t")?.as_deref() == Some("str") {
                         super::xlsx_tables::attr(&e, b"r")?
                             .and_then(|a| super::xlsx_tables::range(&a).ok())
@@ -257,14 +257,9 @@ pub(crate) fn string_cells(path: &Path) -> Result<HashSet<(usize, usize, usize)>
                         None
                     };
                 }
-                Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"f" => {
-                    formula = true
-                }
                 Event::End(e) if e.local_name().as_ref() == b"c" => {
-                    if formula {
-                        if let Some(c) = coord {
-                            cells.insert(c);
-                        }
+                    if let Some(c) = coord {
+                        cells.insert(c);
                     }
                     coord = None;
                 }

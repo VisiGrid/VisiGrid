@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- XLSX exports retain the full calculated spill range, with typed cached values and individual cell formatting. Reopening supported array formulas rebuilds live spills instead of treating their cached values as obstructions. Unsupported or unsafe array metadata retains cached member cells with a warning; values-only import keeps the saved results.
+
 - XLSX formulas retain typed calculated results for values-only readers, including numeric-looking text, booleans and standard errors. Missing/unsupported caches are omitted with a warning; imported string caches preserve whitespace and escaped characters.
 
 - Preserve workbook-wide cell/range names and descriptions in XLSX, including references to moved Table totals; remap intact named targets during sorted export and report unsupported Excel name types explicitly.
