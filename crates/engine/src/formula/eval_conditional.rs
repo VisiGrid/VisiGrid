@@ -142,7 +142,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#VALUE! Empty sum range for nonempty criteria range".into()));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             let (min_row, min_col) = (range.min_row(), range.min_col());
 
             for row_offset in 0..range.num_rows() {
@@ -163,7 +163,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     }
                 }
             }
-            EvalResult::Number(sum)
+            EvalResult::Number(sum.value())
         }
         "AVERAGEIF" => {
             // AVERAGEIF(range, criteria, [average_range])
@@ -187,7 +187,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#VALUE! Empty average range for nonempty criteria range".into()));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             let mut count = 0;
             let (min_row, min_col) = (range.min_row(), range.min_col());
 
@@ -215,7 +215,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if count == 0 {
                 EvalResult::Error("#DIV/0!".to_string())
             } else {
-                EvalResult::Number(sum / count as f64)
+                EvalResult::Number(sum.value() / count as f64)
             }
         }
         "COUNTIF" => {
@@ -300,7 +300,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 criteria_values.push(evaluate(criteria_arg, lookup));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             for row_offset in 0..num_rows {
                 for col_offset in 0..num_cols {
                     let mut all_match = true;
@@ -325,7 +325,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     }
                 }
             }
-            EvalResult::Number(sum)
+            EvalResult::Number(sum.value())
         }
         "AVERAGEIFS" => {
             // AVERAGEIFS(average_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
@@ -363,7 +363,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 criteria_values.push(evaluate(criteria_arg, lookup));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             let mut count = 0;
             for row_offset in 0..num_rows {
                 for col_offset in 0..num_cols {
@@ -396,7 +396,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if count == 0 {
                 EvalResult::Error("#DIV/0!".to_string())
             } else {
-                EvalResult::Number(sum / count as f64)
+                EvalResult::Number(sum.value() / count as f64)
             }
         }
         "COUNTIFS" => {

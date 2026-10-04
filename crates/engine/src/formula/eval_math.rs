@@ -14,7 +14,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
         "SUM" => {
             let values = collect_numbers(args, lookup);
             match values {
-                Ok(vals) => EvalResult::Number(vals.iter().sum()),
+                Ok(vals) => EvalResult::Number(crate::numeric::sum(&vals)),
                 Err(e) => EvalResult::Error(e),
             }
         }
@@ -25,7 +25,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.is_empty() {
                         EvalResult::Error("AVERAGE requires at least one value".to_string())
                     } else {
-                        EvalResult::Number(vals.iter().sum::<f64>() / vals.len() as f64)
+                        EvalResult::Number(crate::numeric::sum(&vals) / vals.len() as f64)
                     }
                 }
                 Err(e) => EvalResult::Error(e),

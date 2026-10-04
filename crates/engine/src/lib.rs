@@ -9,6 +9,7 @@ pub mod events;
 pub mod filter;
 pub mod formula;
 pub mod named_range;
+pub mod numeric;
 pub mod operation_plan;
 pub mod pivot;
 pub mod provenance;
