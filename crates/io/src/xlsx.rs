@@ -1801,8 +1801,18 @@ fn export_sheet_cells(
                     let formula_str = excel_source.strip_prefix('=').unwrap_or(&excel_source);
                     let format = apply_number_format(format, &cell.format().number_format);
 
+                    // Save the computed result with the formula. Excel
+                    // recalculates on open, but readers that use saved results
+                    // (pandas, previews, other spreadsheets) otherwise see 0.
+                    let result = match sheet.get_computed_value(row, col) {
+                        visigrid_engine::formula::eval::Value::Number(n) if n.is_finite() => n.to_string(),
+                        visigrid_engine::formula::eval::Value::Text(t) => t,
+                        visigrid_engine::formula::eval::Value::Boolean(b) => if b { "TRUE" } else { "FALSE" }.to_string(),
+                        visigrid_engine::formula::eval::Value::Error(e) => e,
+                        _ => String::new(),
+                    };
                     worksheet
-                        .write_formula_with_format(row32, col16, formula_str, &format)
+                        .write_formula_with_format(row32, col16, rust_xlsxwriter::Formula::new(formula_str).set_result(result), &format)
                         .map_err(|e| format!("Failed to write formula ({}, {}): {}", row, col, e))?;
                     formulas_exported += 1;
                 } else {
