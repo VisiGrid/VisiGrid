@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve supported modern Excel formula errors, including `#SPILL!` and `#CALC!`, through rich-value metadata and values-only import. Older readers receive a conventional error fallback; malformed metadata keeps fallback cells with a warning.
+- Clearing a spill obstruction retries the array and its dependents. Restoring an obstruction through ordinary value undo removes generated receivers and recalculates their readers.
+
 - XLSX exports retain the full calculated spill range, with typed cached values and individual cell formatting. Reopening supported array formulas rebuilds live spills instead of treating their cached values as obstructions. Unsupported or unsafe array metadata retains cached member cells with a warning; values-only import keeps the saved results.
 
 - XLSX formulas retain typed calculated results for values-only readers, including numeric-looking text, booleans and standard errors. Missing/unsupported caches are omitted with a warning; imported string caches preserve whitespace and escaped characters.

@@ -1441,8 +1441,9 @@ impl Workbook {
         // --- Phase 1: Invalidation (clear caches) ---
         let phase_start = Instant::now();
         // Clear computed value caches from previous recalc
-        for sheet in &self.sheets {
+        for sheet in &mut self.sheets {
             sheet.clear_computed_cache();
+            sheet.reset_spill_blockers();
         }
         report.phase_invalidation_us = phase_start.elapsed().as_micros() as u64;
 
@@ -2009,6 +2010,12 @@ impl Workbook {
             let mut readers: FxHashSet<CellId> = dynamic_readers.iter().copied().collect();
             let mut stack: Vec<CellId> = touched.into_iter().chain(dynamic_readers.iter().copied()).collect();
             while let Some(cell) = stack.pop() {
+                if let Some(sheet) = self.sheet_by_id(cell.sheet) {
+                    for (row, col) in sheet.spills_blocked_by(cell.row, cell.col) {
+                        let parent = CellId::new(cell.sheet, row, col);
+                        if readers.insert(parent) { stack.push(parent); }
+                    }
+                }
                 for dependent in self.dep_graph.dependents(cell) {
                     if readers.insert(dependent) {
                         stack.push(dependent);
@@ -2592,7 +2599,26 @@ impl Workbook {
         let mut dirty_set = FxHashSet::default();
         let mut queue = VecDeque::new();
 
-        for &cell_id in changed {
+        let mut retired = Vec::new();
+        let changed_sheets: FxHashSet<_> = changed.iter().map(|cell| cell.sheet).collect();
+        for id in changed_sheets {
+            if let Some(sheet) = self.sheets.iter_mut().find(|sheet| sheet.id == id) {
+                retired.extend(sheet.take_retired_spill_cells().into_iter().map(|(row, col)| CellId::new(id, row, col)));
+                for (row, col) in sheet.take_edited_spill_parents() {
+                    if sheet.get_cell_opt(row, col).is_some_and(|cell| cell.value().formula_ast().is_some()) {
+                        let parent = CellId::new(id, row, col);
+                        if dirty_set.insert(parent) { queue.push_back(parent); }
+                    }
+                }
+            }
+        }
+        for &cell_id in changed.iter().chain(&retired) {
+            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                for (row, col) in sheet.spills_blocked_by(cell_id.row, cell_id.col) {
+                    let parent = CellId::new(cell_id.sheet, row, col);
+                    if dirty_set.insert(parent) { queue.push_back(parent); }
+                }
+            }
             // A changed cell that is itself a formula is re-evaluated here, at
             // the workbook level, with the custom-function handler. The sheet's
             // eager evaluation on entry has no handler, so without this a
@@ -2621,7 +2647,7 @@ impl Workbook {
         }
 
         if dirty_set.is_empty() {
-            return Recalculated::Cells(Vec::new());
+            return Recalculated::Cells(retired);
         }
 
         // 2. Clear cached values for dirty cells
@@ -2671,7 +2697,7 @@ impl Workbook {
                 // arrays changed, since those cells changed as surely.
                 let mut delta = order;
                 let mut seen: FxHashSet<CellId> = delta.iter().copied().collect();
-                for cell in settled {
+                for cell in retired.into_iter().chain(settled) {
                     if seen.insert(cell) {
                         delta.push(cell);
                     }

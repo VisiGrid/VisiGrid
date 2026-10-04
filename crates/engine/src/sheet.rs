@@ -309,6 +309,16 @@ pub struct Sheet {
     /// Spilled values from array formulas: (row, col) -> Value
     #[serde(skip)]
     spill_values: HashMap<(usize, usize), Value>,
+    /// Occupancy dependencies are separate from formula value dependencies:
+    /// an obstruction can itself refer to its blocked parent without a cycle.
+    #[serde(skip)]
+    blocked_spills: HashMap<(usize, usize), HashSet<(usize, usize)>>,
+    /// Authored writes (including undo) can replace derived receivers. Retry
+    /// those parents without treating occupancy as a formula dependency.
+    #[serde(skip)]
+    edited_spill_parents: HashSet<(usize, usize)>,
+    #[serde(skip)]
+    retired_spill_cells: HashSet<(usize, usize)>,
     /// Cells whose value was kept because this build could not recompute the
     /// formula — a custom function it has no definition for.
     ///
@@ -561,6 +571,9 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
+            blocked_spills: HashMap::new(),
+            edited_spill_parents: HashSet::new(),
+            retired_spill_cells: HashSet::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
@@ -596,6 +609,9 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
+            blocked_spills: HashMap::new(),
+            edited_spill_parents: HashSet::new(),
+            retired_spill_cells: HashSet::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             validations: ValidationStore::new(),
@@ -785,6 +801,8 @@ impl Sheet {
     }
 
     pub(crate) fn write_table_header(&mut self, row: usize, col: usize, value: CellValue) {
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| { cell.value = value; cell.clear_spill_state(); });
@@ -800,6 +818,8 @@ impl Sheet {
     /// writes them. `Value::Empty` clears the cell.
     pub(crate) fn write_pivot_cell(&mut self, row: usize, col: usize, value: &crate::formula::eval::Value) {
         use crate::formula::eval::Value;
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         match value {
@@ -853,6 +873,8 @@ impl Sheet {
         }
 
         // Clear any existing spill from this cell before setting new value
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
 
         // Invalidate computed cache (cell changed, dependents may need recompute)
@@ -879,6 +901,8 @@ impl Sheet {
         if !self.accept_value_write(row, col) {
             return;
         }
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set_text_exact(text));
@@ -900,6 +924,8 @@ impl Sheet {
         if !self.accept_value_write(row, col) {
             return;
         }
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set(value));
@@ -1056,17 +1082,16 @@ impl Sheet {
     /// path and by the ordered recompute, so both answer the question the same
     /// way — placing an array is one rule and belongs in one place.
     pub fn place_spill(&mut self, row: usize, col: usize, array: &crate::formula::eval::Array2D) {
+        self.clear_spill_error(row, col);
         match self.check_spill_collision(row, col, array.rows(), array.cols()) {
             Ok(()) => {
-                // A collision reported earlier is over once the array fits.
-                // Nothing else clears it on the recalc path, so a #SPILL!
-                // would otherwise outlive the obstruction that caused it.
-                self.clear_spill_error(row, col);
                 self.apply_spill(row, col, array);
             }
             Err(blocked_by) => {
+                self.blocked_spills.entry(blocked_by).or_default().insert((row, col));
                 self.cells.update(row, col, |cell| {
-                    cell.set_spill_error(Some(SpillError { blocked_by }));
+                    cell.set_spill_error(Some(SpillError { blocked_by,
+                        dimensions: Some(SpillInfo { rows: array.rows(), cols: array.cols() }) }));
                 });
             }
         }
@@ -1083,9 +1108,48 @@ impl Sheet {
 
     /// Forget a #SPILL! on a cell, whatever it currently holds.
     pub fn clear_spill_error(&mut self, row: usize, col: usize) {
+        if let Some(blocker) = self.cells.get(row, col).and_then(|c| c.spill_error()).map(|e| e.blocked_by) {
+            if let Some(parents) = self.blocked_spills.get_mut(&blocker) {
+                parents.remove(&(row, col));
+                if parents.is_empty() { self.blocked_spills.remove(&blocker); }
+            }
+        }
         self.cells.update(row, col, |cell| {
             cell.set_spill_error(None);
         });
+    }
+
+    pub(crate) fn reset_spill_blockers(&mut self) {
+        self.blocked_spills.clear();
+        self.edited_spill_parents.clear();
+        self.retired_spill_cells.clear();
+    }
+
+    fn note_spill_write(&mut self, row: usize, col: usize) {
+        if let Some(info) = self.get_cell_opt(row, col).and_then(|c| c.spill_info().cloned()) {
+            for dr in 0..info.rows {
+                for dc in 0..info.cols {
+                    if dr != 0 || dc != 0 { self.retired_spill_cells.insert((row + dr, col + dc)); }
+                }
+            }
+        }
+        if let Some(parent) = self.get_spill_parent(row, col) {
+            self.edited_spill_parents.insert(parent);
+        }
+    }
+
+    pub(crate) fn take_edited_spill_parents(&mut self) -> HashSet<(usize, usize)> {
+        std::mem::take(&mut self.edited_spill_parents)
+    }
+
+    pub(crate) fn take_retired_spill_cells(&mut self) -> HashSet<(usize, usize)> {
+        std::mem::take(&mut self.retired_spill_cells)
+    }
+
+    pub(crate) fn spills_blocked_by(&self, row: usize, col: usize) -> impl Iterator<Item=(usize, usize)> + '_ {
+        self.blocked_spills.get(&(row, col)).into_iter().flatten().copied().filter(move |(r, c)| {
+            self.cells.get(*r, *c).and_then(|cell| cell.spill_error()).is_some_and(|e| e.blocked_by == (row, col))
+        })
     }
 
     /// Whether any array recorded during evaluation is still waiting to be placed.
@@ -1598,6 +1662,8 @@ impl Sheet {
     /// Restore an authoritative cell image for guarded history replay. Derived
     /// spill state and computed caches are rebuilt by the workbook, never saved.
     pub(crate) fn restore_history_cell(&mut self, row: usize, col: usize, image: Option<Cell>) {
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.remove(row, col);
         self.spill_values.remove(&(row, col));
@@ -1727,6 +1793,8 @@ impl Sheet {
             return;
         }
 
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         let comment = self
             .cells

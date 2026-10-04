@@ -1,11 +1,12 @@
 //! Write typed last-calculated results without evaluating or mutating the source.
 //! The writer's string-result API guesses types, so patch its generated XML.
+use super::xlsx_rich_errors::ModernError;
 use quick_xml::{
     events::{BytesEnd, BytesStart, BytesText, Event},
     Reader, Writer,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File,
     io::{BufRead, BufReader, Cursor, Write},
     path::Path,
@@ -20,6 +21,7 @@ struct Omitted {
 struct Cache {
     kind: Option<&'static str>,
     value: Option<String>,
+    rich: Option<ModernError>,
 }
 fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache {
     let value = if sheet
@@ -38,6 +40,17 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
         Some(Value::Text(s)) => ("str", s),
         Some(Value::Empty) => ("str", String::new()),
         Some(Value::Error(e)) => {
+            let dimensions = sheet
+                .get_cell_opt(row, col)
+                .and_then(|c| c.spill_error())
+                .and_then(|e| e.dimensions.as_ref());
+            if let Some(rich) = ModernError::from_error(&e, dimensions) {
+                return Cache {
+                    kind: Some("e"),
+                    value: Some("#VALUE!".into()),
+                    rich: Some(rich),
+                };
+            }
             let code = [
                 "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!",
             ]
@@ -62,6 +75,7 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
                 return Cache {
                     kind: None,
                     value: None,
+                    rich: None,
                 };
             }
         }
@@ -70,6 +84,7 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
             return Cache {
                 kind: None,
                 value: None,
+                rich: None,
             };
         }
         None => {
@@ -77,12 +92,14 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
             return Cache {
                 kind: None,
                 value: None,
+                rich: None,
             };
         }
     };
     Cache {
         kind: Some(kind),
         value: Some(value),
+        rich: None,
     }
 }
 fn exported_formula(sheet: &Sheet, row: usize, col: usize) -> bool {
@@ -98,6 +115,7 @@ fn patch<R: BufRead, W: Write>(
     output: W,
     sheet: &Sheet,
     omitted: &mut Omitted,
+    rich: &BTreeMap<ModernError, usize>,
 ) -> Result<(), String> {
     let mut reader = Reader::from_reader(source);
     let mut writer = Writer::new(output);
@@ -129,6 +147,11 @@ fn patch<R: BufRead, W: Write>(
                         }
                         if let Some(kind) = result.kind {
                             e.push_attribute(("t", kind));
+                        }
+                        if let Some(error) = result.rich {
+                            let index =
+                                rich.get(&error).ok_or("Missing rich error cache binding")? + 1;
+                            e.push_attribute(("vm", index.to_string().as_str()));
                         }
                         cache = Some(result);
                     }
@@ -199,6 +222,19 @@ pub(crate) fn finish(
     let mut input = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let mut omitted = Omitted::default();
+    let mut rich = BTreeMap::new();
+    for sheet in wb.sheets() {
+        for ((row, col), _) in sheet.cells_iter() {
+            if exported_formula(sheet, row, col) {
+                if let Some(error) = cached(sheet, row, col, &mut Omitted::default()).rich {
+                    rich.insert(error, 0);
+                }
+            }
+        }
+    }
+    for (index, (_, value)) in rich.iter_mut().enumerate() {
+        *value = index;
+    }
     for i in 0..input.len() {
         let entry = input.by_index(i).map_err(|e| e.to_string())?;
         if let Some(sheet) = sheets.get(entry.name()) {
@@ -209,13 +245,22 @@ pub(crate) fn finish(
                         .compression_method(zip::CompressionMethod::Deflated),
                 )
                 .map_err(|e| e.to_string())?;
-            patch(BufReader::new(entry), &mut output, sheet, &mut omitted)?;
+            patch(
+                BufReader::new(entry),
+                &mut output,
+                sheet,
+                &mut omitted,
+                &rich,
+            )?;
         } else {
             output.raw_copy_file(entry).map_err(|e| e.to_string())?;
         }
     }
     warnings.extend(omission_warnings(&omitted));
-    Ok(output.finish().map_err(|e| e.to_string())?.into_inner())
+    super::xlsx_rich_errors::finish(
+        output.finish().map_err(|e| e.to_string())?.into_inner(),
+        &rich,
+    )
 }
 
 // Calamine decodes SpreadsheetML escapes in shared/inline strings but not in

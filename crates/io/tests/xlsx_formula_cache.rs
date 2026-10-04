@@ -140,7 +140,7 @@ fn absent_and_unrepresentable_caches_are_omitted_and_custom_results_are_kept() {
     }
     let sheet = wb.sheet(0).unwrap();
     sheet.clear_cached(0, 0);
-    sheet.cache_computed(1, 0, Value::Error("#SPILL!".into()));
+    sheet.cache_computed(1, 0, Value::Error("#CYCLE!".into()));
     sheet.cache_computed(2, 0, Value::Number(f64::NAN));
     sheet.cache_computed(3, 0, Value::Number(123.5));
     sheet.cache_computed(5, 0, Value::Empty);

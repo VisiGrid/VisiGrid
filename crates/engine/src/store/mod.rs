@@ -172,7 +172,7 @@ mod differential {
                     0 => cell.set_style_id(Some(3)),
                     1 => cell.set_spill_parent(Some((1, 1))),
                     2 => cell.set_spill_info(Some(SpillInfo { rows: 2, cols: 3 })),
-                    3 => cell.set_spill_error(Some(SpillError { blocked_by: (4, 2) })),
+                    3 => cell.set_spill_error(Some(SpillError { blocked_by: (4, 2), ..Default::default() })),
                     _ => cell.clear_spill_state(),
                 };
                 a.upsert_with(r, c, &f);

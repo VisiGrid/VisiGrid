@@ -17,6 +17,7 @@ mod xlsx_comments;
 mod xlsx_names;
 mod xlsx_formula_cache;
 mod xlsx_arrays;
+mod xlsx_rich_errors;
 mod xlsx_tables;
 mod xlsx_table_filters;
 mod xlsx_table_sorts;

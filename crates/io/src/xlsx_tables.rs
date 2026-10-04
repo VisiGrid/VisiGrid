@@ -72,7 +72,7 @@ fn table_part(zip: &mut zip::ZipArchive<File>, name: &str, budget: &mut TableBud
     }
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
-fn target(source: &str, path: &str) -> Result<String, String> {
+pub(super) fn target(source: &str, path: &str) -> Result<String, String> {
     let joined = if path.starts_with('/') {
         path.trim_start_matches('/').into()
     } else {

@@ -406,6 +406,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         .map_err(|e| format!("Failed to open Excel file: {}", e))?;
 
     let mut result = ImportResult::default();
+    let modern_errors = crate::xlsx_rich_errors::read(path, &mut result.warnings);
     let mut sheets: Vec<Sheet> = Vec::new();
     let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
 
@@ -553,7 +554,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     }
                     Data::Error(e) => {
                         // Store error as text representation
-                        let error_str = e.to_string();
+                        let error_str = modern_errors.get(&(sheet_index, target_row, target_col))
+                            .map_or_else(|| e.to_string(), |code| (*code).to_owned());
                         sheet.set_value(target_row, target_col, &error_str);
                         stats.cells_imported += 1;
                         total_cells += 1;
