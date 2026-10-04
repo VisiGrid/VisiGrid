@@ -242,6 +242,22 @@ pub enum StructureOp {
     },
 }
 
+impl StructureOp {
+    /// How long a host may take to answer this op. A recipe refresh reads
+    /// and shapes a whole file in the background (up to 256 MB, or 512 MB
+    /// appended), so it gets far longer than an edit's 30 seconds; a client
+    /// waits a little longer still, so the host's answer arrives first.
+    pub fn host_timeout(&self) -> std::time::Duration {
+        match self {
+            StructureOp::RefreshRecipeTable { .. } => std::time::Duration::from_secs(RECIPE_REFRESH_TIMEOUT_SECS),
+            _ => std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+/// The longest a desktop host spends on one recipe refresh.
+pub const RECIPE_REFRESH_TIMEOUT_SECS: u64 = 600;
+
 /// One value field of a `create_pivot` op.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PivotValueSpec {

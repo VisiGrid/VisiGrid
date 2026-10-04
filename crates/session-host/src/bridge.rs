@@ -157,6 +157,7 @@ impl SessionBridgeHandle {
         client: Option<String>,
     ) -> Result<StructureOutcome, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let timeout = op.host_timeout();
         self.tx
             .send(SessionRequest::Structure {
                 op,
@@ -166,7 +167,7 @@ impl SessionBridgeHandle {
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
         reply_rx
-            .blocking_recv_timeout(std::time::Duration::from_secs(30))
+            .blocking_recv_timeout(timeout)
             .map_err(|_| BridgeError::ChannelClosed)
     }
 

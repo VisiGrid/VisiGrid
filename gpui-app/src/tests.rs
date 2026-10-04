@@ -3088,7 +3088,13 @@ fn review_mode_workbook_mutators_are_guarded() {
     for guard in ["self.review_mode.is_some()", "self.recovery_warning.is_some()", "self.is_previewing()", "has_table_criteria("] {
         assert_contains_near(recipe_ui, "agent_refresh_blocker", guard);
     }
-    assert_contains_near(recipe_ui, "refresh_recipe_table_now", "self.agent_refresh_blocker(cx)");
+    assert_contains_near(recipe_ui, "prepare_agent_refresh", "self.agent_refresh_blocker(cx)");
+    // The recipe runs in the background: the window may have changed by the
+    // time it finishes, so the checks run again before anything is published
+    assert_contains_near(recipe_ui, "finish_agent_refresh", "self.agent_refresh_blocker(cx)");
+    let start = recipe_ui.find("fn start_agent_refresh").expect("start_agent_refresh");
+    let body = &recipe_ui[start..recipe_ui[start..].find("fn prepare_agent_refresh").map_or(recipe_ui.len(), |e| start + e)];
+    assert!(body.contains("background_executor()"), "an agent's refresh must run the recipe off the UI thread");
     assert_contains_near(recipe_ui, "refresh_recipe_table", "block_if_previewing(cx)");
 
     // File replacement remains available in a Table view, but still checks
