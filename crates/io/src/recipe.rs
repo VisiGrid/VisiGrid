@@ -393,6 +393,60 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "is_default_missing")]
         missing: Missing,
     },
+    /// Order the rows by these columns, the first deciding. Each column
+    /// sorts as its type (numbers as numbers, dates as dates, text ignoring
+    /// case); empty values go last either way. Rows that tie keep their
+    /// order.
+    Sort {
+        by: Vec<SortKey>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Fill each empty cell in these columns with the value above it, as in
+    /// a report that prints a group's name only on its first row. Never
+    /// across appended files.
+    FillDown {
+        columns: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Replace `find` with `with` in these columns (none named: every
+    /// column). By default a cell must equal `find` entirely, ignoring case;
+    /// an empty `find` then replaces empty cells. With `part = true`, every
+    /// occurrence inside a cell is replaced.
+    Replace {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        columns: Vec<String>,
+        find: String,
+        #[serde(default)]
+        with: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        part: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        match_case: bool,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Split a column at a delimiter into the columns named in `into`, which
+    /// take its place. It splits at the first `into.len() - 1` delimiters, so
+    /// the last column keeps the rest and nothing is lost; a value with fewer
+    /// pieces leaves the later columns empty.
+    Split {
+        column: String,
+        by: String,
+        into: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+}
+
+/// One column of a Sort step: `{ column = "Amount", descending = true }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SortKey {
+    pub column: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub descending: bool,
 }
 
 fn attribute() -> String {
@@ -528,6 +582,22 @@ impl Step {
             Step::Unpivot { keep, names_to, values_to, .. } => {
                 format!("Unpivot all but {} into {names_to}, {values_to}", list(keep))
             }
+            Step::Sort { by, .. } => {
+                let keys: Vec<String> =
+                    by.iter().map(|k| if k.descending { format!("{} (descending)", k.column) } else { k.column.clone() }).collect();
+                format!("Sort by {}", keys.join(", "))
+            }
+            Step::FillDown { columns, .. } => format!("Fill down {}", list(columns)),
+            Step::Replace { columns, find, with, part, .. } => {
+                let what = match (part, find.is_empty()) {
+                    (false, true) => "empty cells".to_string(),
+                    (false, false) => format!("{find:?}"),
+                    (true, _) => format!("{find:?} inside cells"),
+                };
+                let place = if columns.is_empty() { "every column".to_string() } else { list(columns) };
+                format!("Replace {what} with {with:?} in {place}")
+            }
+            Step::Split { column, by, into, .. } => format!("Split {column} at {by:?} into {}", list(into)),
         }
     }
 
@@ -541,16 +611,23 @@ impl Step {
             | Step::Filter { missing, .. }
             | Step::Dedupe { missing, .. }
             | Step::Group { missing, .. }
-            | Step::Unpivot { missing, .. } => *missing,
+            | Step::Unpivot { missing, .. }
+            | Step::Sort { missing, .. }
+            | Step::FillDown { missing, .. }
+            | Step::Replace { missing, .. }
+            | Step::Split { missing, .. } => *missing,
         }
     }
 
     /// Every column the step names.
     fn named_columns(&self) -> Vec<&str> {
         match self {
-            Step::Select { columns, .. } | Step::Remove { columns, .. } | Step::Trim { columns, .. } | Step::Dedupe { columns, .. } => {
-                columns.iter().map(String::as_str).collect()
-            }
+            Step::Select { columns, .. }
+            | Step::Remove { columns, .. }
+            | Step::Trim { columns, .. }
+            | Step::Dedupe { columns, .. }
+            | Step::FillDown { columns, .. }
+            | Step::Replace { columns, .. } => columns.iter().map(String::as_str).collect(),
             Step::Rename { columns, .. } | Step::Types { columns, .. } => columns.keys().map(String::as_str).collect(),
             Step::Filter { column, .. } => vec![column.as_str()],
             Step::Group { by, totals, .. } => by
@@ -559,6 +636,8 @@ impl Step {
                 .chain(totals.iter().filter(|t| !t.column.is_empty()).map(|t| t.column.as_str()))
                 .collect(),
             Step::Unpivot { keep, .. } => keep.iter().map(String::as_str).collect(),
+            Step::Sort { by, .. } => by.iter().map(|k| k.column.as_str()).collect(),
+            Step::Split { column, .. } => vec![column.as_str()],
         }
     }
 }
@@ -644,7 +723,27 @@ impl Recipe {
                 Step::Select { columns, .. } => {
                     swap(columns, &mut changed);
                 }
-                Step::Trim { columns, .. } | Step::Dedupe { columns, .. } => swap(columns, &mut changed),
+                Step::Trim { columns, .. }
+                | Step::Dedupe { columns, .. }
+                | Step::FillDown { columns, .. }
+                | Step::Replace { columns, .. } => swap(columns, &mut changed),
+                Step::Sort { by, .. } => {
+                    for k in by.iter_mut().filter(|k| same(&k.column)) {
+                        k.column = new.to_string();
+                        changed = true;
+                    }
+                }
+                Step::Split { column, into, .. } => {
+                    let created = into.iter().any(|n| same(n));
+                    if same(column) {
+                        *column = new.to_string();
+                        changed = true;
+                        break; // split away
+                    }
+                    if created {
+                        break;
+                    }
+                }
                 Step::Types { columns, .. } => swap_keys(columns, &mut changed),
                 Step::Filter { column, .. } => {
                     if same(column) {
@@ -2096,6 +2195,10 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
         Step::Unpivot { keep, names_to, values_to, drop_empty, .. } => {
             unpivot(keep, names_to, values_to, *drop_empty, frame, report)
         }
+        Step::Sort { by, .. } => sort(by, frame, report),
+        Step::FillDown { columns, .. } => fill_down(columns, frame),
+        Step::Replace { columns, find, with, part, match_case, .. } => replace(columns, find, with, *part, *match_case, frame, report),
+        Step::Split { column, by, into, .. } => split(column, by, into, frame, report),
     }
 }
 
@@ -2371,6 +2474,207 @@ fn unpivot(keep: &[String], names_to: &str, values_to: &str, drop_empty: bool, f
         plural(n),
         if dropped > 0 { format!("; {dropped} empty value{} left out", plural(dropped)) } else { String::new() }
     ))
+}
+
+fn sort(by: &[SortKey], frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    if by.is_empty() {
+        return fail(report, "a Sort needs at least one column".into());
+    }
+    let keys: Vec<(usize, bool, ColumnRule)> =
+        by.iter().filter_map(|k| frame.find(&k.column).map(|i| (i, k.descending, frame.columns[i].rule))).collect();
+    let dc = frame.decimal_comma;
+    let mut order: Vec<usize> = (0..frame.rows.len()).collect();
+    // Stable: rows that tie keep their order
+    order.sort_by(|&a, &b| {
+        for &(i, descending, rule) in &keys {
+            let (x, y) = (frame.rows[a][i].trim(), frame.rows[b][i].trim());
+            // Values that fit the column's type, then ones that don't, then
+            // empty values, whichever way the column sorts
+            let class = |v: &str| if v.is_empty() { 2 } else if fits_sort_type(v, rule, dc) { 0 } else { 1 };
+            let ord = class(x).cmp(&class(y)).then_with(|| {
+                let o = if x.is_empty() { std::cmp::Ordering::Equal } else { compare_values(x, y, rule, dc) };
+                if descending { o.reverse() } else { o }
+            });
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    reorder(&mut frame.rows, &order);
+    reorder(&mut frame.lines, &order);
+    if !frame.files.is_empty() {
+        reorder(&mut frame.files, &order);
+    }
+    None
+}
+
+/// Put `v` in the order `order` lists its indexes.
+fn reorder<T>(v: &mut Vec<T>, order: &[usize]) {
+    let mut old: Vec<Option<T>> = std::mem::take(v).into_iter().map(Some).collect();
+    *v = order.iter().map(|&r| old[r].take().expect("each index once")).collect();
+}
+
+/// Whether a value sorts as its column's type (a number in a number or Auto
+/// column, a date in a date column); text always does.
+fn fits_sort_type(v: &str, rule: ColumnRule, decimal_comma: bool) -> bool {
+    match rule {
+        ColumnRule::Number => parse_number(v, decimal_comma).is_some(),
+        ColumnRule::Date(order) => parse_date(v, order).is_some(),
+        ColumnRule::Text | ColumnRule::Skip => true,
+        // In a column of numbers and text, the numbers come first
+        ColumnRule::Auto => keep_as_text(v, false).is_none() && parse_number(v, decimal_comma).is_some(),
+    }
+}
+
+/// Order two non-empty values of the same class (see `fits_sort_type`) as
+/// their column is typed.
+fn compare_values(a: &str, b: &str, rule: ColumnRule, decimal_comma: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let text = || a.to_lowercase().cmp(&b.to_lowercase());
+    let typed = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => text(),
+    };
+    let number = |v: &str| parse_number(v, decimal_comma);
+    match rule {
+        ColumnRule::Number => typed(number(a), number(b)),
+        ColumnRule::Date(order) => match (parse_date(a, order), parse_date(b, order)) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => text(),
+        },
+        ColumnRule::Text | ColumnRule::Skip => text(),
+        // As filters compare: IDs such as 001 stay text
+        ColumnRule::Auto => {
+            let n = |v: &str| if keep_as_text(v, false).is_some() { None } else { number(v) };
+            typed(n(a), n(b))
+        }
+    }
+}
+
+fn fill_down(columns: &[String], frame: &mut Frame) -> Option<String> {
+    let idx: Vec<usize> = columns.iter().filter_map(|c| frame.find(c)).collect();
+    let mut filled = 0usize;
+    for &i in &idx {
+        let mut above: Option<String> = None;
+        for r in 0..frame.rows.len() {
+            // A new file starts with nothing above
+            if r > 0 && !frame.files.is_empty() && frame.files[r] != frame.files[r - 1] {
+                above = None;
+            }
+            if frame.rows[r][i].trim().is_empty() {
+                if let Some(v) = &above {
+                    frame.rows[r][i] = v.clone();
+                    filled += 1;
+                }
+            } else {
+                above = Some(frame.rows[r][i].clone());
+            }
+        }
+    }
+    Some(format!("filled {filled} empty cell{}", plural(filled)))
+}
+
+fn replace(columns: &[String], find: &str, with: &str, part: bool, match_case: bool, frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    if part && find.is_empty() {
+        return fail(report, "Replace inside cells needs text to find".into());
+    }
+    let idx: Vec<usize> = if columns.is_empty() {
+        (0..frame.columns.len()).collect()
+    } else {
+        columns.iter().filter_map(|c| frame.find(c)).collect()
+    };
+    let mut changed = 0usize;
+    for row in &mut frame.rows {
+        for &i in &idx {
+            let cell = &row[i];
+            let next = if !part {
+                let hit = if find.is_empty() {
+                    cell.trim().is_empty()
+                } else if match_case {
+                    cell == find
+                } else {
+                    cell.to_lowercase() == find.to_lowercase()
+                };
+                hit.then(|| with.to_string())
+            } else if match_case {
+                cell.contains(find).then(|| cell.replace(find, with))
+            } else {
+                replace_ignoring_case(cell, find, with)
+            };
+            if let Some(v) = next {
+                if v != *cell {
+                    row[i] = v;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    Some(format!("replaced {changed} value{}", plural(changed)))
+}
+
+/// Every occurrence of `find` in `cell`, ignoring case; None if there is
+/// none. Matches on characters, so a letter whose lowercase form has a
+/// different length can't shift the result.
+fn replace_ignoring_case(cell: &str, find: &str, with: &str) -> Option<String> {
+    let fold = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<Vec<char>>();
+    let (hay, needle) = (cell.chars().collect::<Vec<char>>(), fold(find));
+    let mut out = String::new();
+    let mut found = false;
+    let mut i = 0;
+    while i < hay.len() {
+        let end = i + needle.len();
+        if end <= hay.len() && fold(&hay[i..end].iter().collect::<String>()) == needle {
+            out.push_str(with);
+            found = true;
+            i = end;
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    found.then_some(out)
+}
+
+fn split(column: &str, by: &str, into: &[String], frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    let i = frame.find(column)?;
+    if by.is_empty() {
+        return fail(report, "Split needs a delimiter (by)".into());
+    }
+    if into.len() < 2 {
+        return fail(report, "Split needs at least two new column names (into)".into());
+    }
+    for (n, name) in into.iter().enumerate() {
+        if name.trim().is_empty() {
+            return fail(report, "Split's new columns need names".into());
+        }
+        if into[..n].iter().any(|o| o.eq_ignore_ascii_case(name)) {
+            return fail(report, format!("Split names two new columns {name}"));
+        }
+        if frame.columns.iter().enumerate().any(|(j, c)| j != i && c.name.eq_ignore_ascii_case(name)) {
+            return fail(report, format!("a column is already named {name}"));
+        }
+    }
+    let mut short = 0usize;
+    for row in &mut frame.rows {
+        let value = std::mem::take(&mut row[i]);
+        let mut pieces: Vec<String> = value.splitn(into.len(), by).map(str::to_string).collect();
+        if !value.is_empty() && pieces.len() < into.len() {
+            short += 1;
+        }
+        pieces.resize(into.len(), String::new());
+        row.splice(i..=i, pieces);
+    }
+    let new: Vec<OutColumn> =
+        into.iter().map(|name| OutColumn { name: name.clone(), rule: ColumnRule::Auto, kind: ValueKind::Plain }).collect();
+    frame.columns.splice(i..=i, new);
+    (short > 0).then(|| {
+        format!("{short} value{} had fewer than {} pieces; the rest are empty", plural(short), into.len())
+    })
 }
 
 /// A number as recipes write them: a point for decimals, no thousands
@@ -3406,6 +3710,111 @@ values_to = "Sales"
         // Round trip keeps defaults out of the file
         let plain = Recipe::from_toml("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"unpivot\"\n").unwrap();
         assert!(!plain.to_toml().contains("names_to"));
+    }
+
+    fn with_steps(steps: &str) -> Recipe {
+        Recipe::from_toml(&format!("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n{steps}")).unwrap()
+    }
+
+    #[test]
+    fn sort_orders_by_type_with_empty_values_last() {
+        let r = with_steps(
+            "[[step]]\nop = \"sort\"\nby = [{ column = \"Region\" }, { column = \"Amount\", descending = true }]\n",
+        );
+        let res = run(&r, &snap("Region,Amount,ID\nwest,9,001\nEast,10,002\n,5,003\nWest,100,004\neast,2,005\nWest,,006\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        let ids: Vec<&str> = res.output.rows.iter().map(|r| r[2].as_str()).collect();
+        // Text ignores case (East before west); 100 > 9 as numbers; empty last
+        assert_eq!(ids, ["002", "005", "004", "001", "006", "003"]);
+        assert_eq!(r.steps[0].describe(), "Sort by Region, Amount (descending)");
+        // IDs stay text, after the numbers (not all equal as numbers);
+        // typed dates sort as dates
+        let ids = with_steps("[[step]]\nop = \"sort\"\nby = [{ column = \"ID\" }]\n");
+        let res = run(&ids, &snap("ID\n01\n001\n1\n"));
+        assert_eq!(res.output.rows, vec![vec!["1"], vec!["001"], vec!["01"]]);
+        let dates = with_steps(
+            "[[step]]\nop = \"types\"\ncolumns = { Day = \"date:dmy\" }\n[[step]]\nop = \"sort\"\nby = [{ column = \"Day\" }]\n",
+        );
+        let res = run(&dates, &snap("Day\n02/01/2026\n31/12/2025\n01/02/2026\n"));
+        assert_eq!(res.output.rows, vec![vec!["31/12/2025"], vec!["02/01/2026"], vec!["01/02/2026"]]);
+        // Text in a number column stays after the numbers, descending too
+        let desc = with_steps("[[step]]\nop = \"sort\"\nby = [{ column = \"N\", descending = true }]\n");
+        let res = run(&desc, &snap("N,K\nn/a,a\n3,b\n,c\n10,d\n"));
+        assert_eq!(res.output.rows.iter().map(|r| r[1].as_str()).collect::<Vec<_>>(), ["d", "b", "a", "c"]);
+        // Error lines follow their rows
+        let bad = with_steps(
+            "[[step]]\nop = \"sort\"\nby = [{ column = \"N\" }]\n[[step]]\nop = \"types\"\ncolumns = { N = \"number\" }\n",
+        );
+        let res = run(&bad, &snap("N\n5\nx\n1\n"));
+        assert_eq!(res.report.errors[0].line, 3);
+    }
+
+    #[test]
+    fn fill_down_fills_empty_cells_but_not_across_files() {
+        let r = with_steps("[[step]]\nop = \"fill_down\"\ncolumns = [\"Region\"]\n");
+        let res = run(&r, &snap("Region,Amount\n,0\nWest,1\n,2\n  ,3\nEast,4\n,5\n"));
+        assert_eq!(
+            res.output.rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
+            ["", "West", "West", "West", "East", "East"]
+        );
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("filled 3 empty cells"));
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [("a-1.csv", "Region,Amount\nWest,1\n,2\n"), ("a-2.csv", "Region,Amount\n,3\n")] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        }
+        let r = Recipe::from_toml(
+            "version = 1\n[source]\nkind = \"csv\"\npath = \"a-*.csv\"\ncombine = true\n[[step]]\nop = \"fill_down\"\ncolumns = [\"Region\"]\n",
+        )
+        .unwrap();
+        let res = run(&r, &r.read_snapshot(dir.path(), None).unwrap());
+        assert_eq!(res.output.rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(), ["West", "West", ""]);
+    }
+
+    #[test]
+    fn replace_whole_cells_parts_and_empty_cells() {
+        let csv = "Status,Note\nN/A,n/a here\nn/a,\nOpen,N/A\n";
+        let whole = with_steps("[[step]]\nop = \"replace\"\ncolumns = [\"Status\"]\nfind = \"n/a\"\nwith = \"\"\n");
+        let res = run(&whole, &snap(csv));
+        assert_eq!(res.output.rows, vec![vec!["", "n/a here"], vec!["", ""], vec!["Open", "N/A"]]);
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("replaced 2 values"));
+        let cased = with_steps("[[step]]\nop = \"replace\"\nfind = \"N/A\"\nwith = \"-\"\nmatch_case = true\n");
+        let res = run(&cased, &snap(csv));
+        assert_eq!(res.output.rows, vec![vec!["-", "n/a here"], vec!["n/a", ""], vec!["Open", "-"]]);
+        let part = with_steps("[[step]]\nop = \"replace\"\ncolumns = [\"Note\"]\nfind = \"N/A\"\nwith = \"none\"\npart = true\n");
+        let res = run(&part, &snap(csv));
+        assert_eq!(res.output.rows[0][1], "none here");
+        let blanks = with_steps("[[step]]\nop = \"replace\"\ncolumns = [\"Note\"]\nfind = \"\"\nwith = \"0\"\n");
+        assert_eq!(run(&blanks, &snap(csv)).output.rows[1][1], "0");
+        assert_eq!(blanks.steps[0].describe(), "Replace empty cells with \"0\" in Note");
+        let nothing = with_steps("[[step]]\nop = \"replace\"\nfind = \"\"\npart = true\n");
+        assert!(!run(&nothing, &snap(csv)).report.ok);
+        assert_eq!(replace_ignoring_case("Straße STRASSE", "straße", "St"), Some("St STRASSE".into()));
+    }
+
+    #[test]
+    fn split_replaces_the_column_and_keeps_the_rest_in_the_last_piece() {
+        let r = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \", \"\ninto = [\"Last\", \"First\"]\n");
+        let res = run(&r, &snap("ID,Name,Rep\n1,\"Doe, Jane\",KM\n2,Cher,AL\n3,\"Smith, J, Jr\",KM\n4,,KM\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["ID", "Last", "First", "Rep"]);
+        assert_eq!(res.output.rows[0], vec!["1", "Doe", "Jane", "KM"]);
+        assert_eq!(res.output.rows[1], vec!["2", "Cher", "", "AL"]);
+        assert_eq!(res.output.rows[2], vec!["3", "Smith", "J, Jr", "KM"]);
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("1 value had fewer than 2 pieces; the rest are empty"));
+        // New names can't collide, and the split column can be reused
+        let clash = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"Rep\", \"X\"]\n");
+        assert!(run(&clash, &snap("Name,Rep\na b,K\n")).report.failures[0].contains("already named Rep"));
+        let reuse = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"Name\", \"Rest\"]\n");
+        assert_eq!(run(&reuse, &snap("Name\na b c\n")).output.rows, vec![vec!["a", "b c"]]);
+        let one = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"A\"]\n");
+        assert!(!run(&one, &snap("Name\na b\n")).report.ok);
+        // Renaming the source column follows into the step
+        let mut renamed = r.clone();
+        assert!(renamed.rename_source_column("Name", "Full name"));
+        assert!(matches!(&renamed.steps[0], Step::Split { column, .. } if column == "Full name"));
     }
 
     #[test]
