@@ -78,6 +78,21 @@ fn run_recipe_needs_the_users_approval_then_runs_and_writes() {
     assert_eq!(body["columns"], serde_json::json!(["ID", "Amount"]));
     assert_eq!(body["preview"], serde_json::json!([["001", "10"], ["003", "7"]]));
     assert_eq!(std::fs::read_to_string(&out).unwrap().lines().collect::<Vec<_>>(), ["ID,Amount", "001,10", "003,7"]);
+
+    // An agent only creates files: never replaces one, never writes into
+    // VisiGrid's settings (where the approvals live)
+    let again = mcp(home.path(), &[serde_json::json!({"name": "run_recipe", "arguments": {"recipe": recipe, "output": out}})]);
+    assert!(text(&again[0]).contains("already exists"), "{}", again[0]);
+    let workbook = dir.path().join("q3.xlsx");
+    std::fs::write(&workbook, "the user's work").unwrap();
+    let r = mcp(home.path(), &[serde_json::json!({"name": "run_recipe", "arguments": {"recipe": recipe, "output": workbook}})]);
+    assert_eq!(r[0]["result"]["isError"], true);
+    assert_eq!(std::fs::read_to_string(&workbook).unwrap(), "the user's work");
+    let settings = if cfg!(target_os = "macos") { "Library/Application Support/visigrid/x.json" } else { "xdg/visigrid/x.json" };
+    let settings = home.path().join(settings);
+    let r = mcp(home.path(), &[serde_json::json!({"name": "run_recipe", "arguments": {"recipe": recipe, "output": settings}})]);
+    assert_eq!(r[0]["result"]["isError"], true, "{}", r[0]);
+    assert!(!settings.exists());
 }
 
 #[test]
@@ -102,6 +117,12 @@ fn refresh_table_is_offered() {
     let tools: serde_json::Value = serde_json::from_str(&line).unwrap();
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"refresh_table") && names.contains(&"run_recipe"), "{names:?}");
+    // Both change something the user owns: clients must not auto-approve them
+    for tool in tools["result"]["tools"].as_array().unwrap() {
+        if matches!(tool["name"].as_str(), Some("refresh_table" | "run_recipe")) {
+            assert_eq!(tool["annotations"]["destructiveHint"], true, "{}", tool["name"]);
+        }
+    }
 }
 
 #[test]

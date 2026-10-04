@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use crate::recipe::Recipe;
 
 fn store_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("visigrid")
-        .join("recipe_sources.json")
+    config_dir().join("recipe_sources.json")
+}
+
+/// VisiGrid's settings folder, where the approvals live. Nothing a recipe
+/// produces may be written here.
+pub fn config_dir() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("visigrid")
 }
 
 /// The recipe file and the source path as the recipe states it (a pattern

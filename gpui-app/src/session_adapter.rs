@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::app::{PairingPrompt, Problem, Spreadsheet};
 
-fn plan_under_review_error() -> (String, String) {
+pub(crate) fn plan_under_review_error() -> (String, String) {
     (
         "plan_under_review".to_string(),
         "this workbook has a plan under review; wait for the user to apply or dismiss it"

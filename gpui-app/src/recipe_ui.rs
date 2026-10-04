@@ -523,12 +523,34 @@ impl Spreadsheet {
         }
     }
 
+    /// Why an agent may not change the workbook right now, as (code, message).
+    fn agent_refresh_blocker(&self, cx: &App) -> Option<(String, String)> {
+        if self.review_mode.is_some() {
+            return Some(crate::session_adapter::plan_under_review_error());
+        }
+        if self.recovery_warning.is_some() {
+            return Some(("read_only_recovery".into(), "this window is a read-only recovery; it can't be changed".into()));
+        }
+        if self.is_previewing() || self.mode.is_editing() {
+            return Some(("busy".into(), "the user is previewing history or editing a cell; try again when they're done".into()));
+        }
+        if crate::table_filter_ui::has_table_criteria(self.workbook.read(cx)) {
+            return Some(("table_view_active".into(), crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into()));
+        }
+        None
+    }
+
     /// A refresh asked for over the session protocol (MCP `refresh_table`):
     /// the same run and publish as Alt+F5, done now, with the outcome
     /// returned as (code, message) on failure. Never asks: a recipe source
     /// the user hasn't approved in the app is refused, so an agent can't
-    /// make the app read a file the user never agreed to.
+    /// make the app read a file the user never agreed to. What blocks Alt+F5
+    /// blocks an agent too: never under a plan the user is reviewing, a
+    /// read-only recovery, a rewind preview or a filtered Table view.
     pub(crate) fn refresh_recipe_table_now(&mut self, table: Option<&str>, cx: &mut Context<Self>) -> Result<String, (String, String)> {
+        if let Some(blocked) = self.agent_refresh_blocker(cx) {
+            return Err(blocked);
+        }
         let linked: Vec<DataTable> = self.wb(cx).tables().filter(|(_, t)| t.source.is_some()).map(|(_, t)| t.clone()).collect();
         let names = || linked.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ");
         let target = match table {

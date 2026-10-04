@@ -305,18 +305,28 @@ columns = { Amount = "number" }
         let recipe = dir.path().join("recipes").join("orders.recipe.toml");
         let link = TableSource { recipe: recipe.display().to_string(), refreshed: Some(stamp(&report, Path::new("orders.csv"))) };
         let wb = new_workbook(&out, "orders", link).unwrap();
+        let stored = |path: &Path| -> String {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0)).unwrap()
+        };
         let path = dir.path().join("book.sheet");
         crate::native::save_workbook(&wb, &path).unwrap();
-        let back = crate::native::load_workbook(&path).unwrap();
-        assert_eq!(table(&back).1.source.unwrap().recipe, "recipes/orders.recipe.toml");
+        assert!(stored(&path).contains(r#""recipe":"recipes/orders.recipe.toml""#), "{}", stored(&path));
         // The workbook in memory keeps its absolute link
         assert_eq!(table(&wb).1.source.unwrap().recipe, recipe.display().to_string());
-        // A recipe elsewhere stays absolute
+        // Loading resolves it against the workbook's folder, wherever that now is
+        let moved = tempfile::tempdir().unwrap();
+        std::fs::copy(&path, moved.path().join("book.sheet")).unwrap();
+        let back = crate::native::load_workbook(&moved.path().join("book.sheet")).unwrap();
+        assert_eq!(Path::new(&table(&back).1.source.unwrap().recipe), moved.path().join("recipes/orders.recipe.toml"));
+        // Save As elsewhere keeps pointing at the same recipe: a recipe
+        // outside the new folder stays absolute
+        let back = crate::native::load_workbook(&path).unwrap();
         let far = tempfile::tempdir().unwrap();
         let path = far.path().join("book.sheet");
-        crate::native::save_workbook(&wb, &path).unwrap();
+        crate::native::save_workbook(&back, &path).unwrap();
         let back = crate::native::load_workbook(&path).unwrap();
-        assert_eq!(table(&back).1.source.unwrap().recipe, recipe.display().to_string());
+        assert_eq!(Path::new(&table(&back).1.source.unwrap().recipe), recipe);
     }
 
     #[test]

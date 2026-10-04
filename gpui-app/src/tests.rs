@@ -3081,6 +3081,15 @@ fn review_mode_workbook_mutators_are_guarded() {
         session_adapter.matches("if self.review_mode.is_some()").count() >= 3,
         "session apply, structure, and history mutations must all reject during review"
     );
+    // An agent's recipe refresh returns before the structure checks, so it
+    // makes its own: never under a plan in review, a recovery, a rewind
+    // preview or a Table view
+    let recipe_ui = include_str!("recipe_ui.rs");
+    for guard in ["self.review_mode.is_some()", "self.recovery_warning.is_some()", "self.is_previewing()", "has_table_criteria("] {
+        assert_contains_near(recipe_ui, "agent_refresh_blocker", guard);
+    }
+    assert_contains_near(recipe_ui, "refresh_recipe_table_now", "self.agent_refresh_blocker(cx)");
+    assert_contains_near(recipe_ui, "refresh_recipe_table", "block_if_previewing(cx)");
 
     // File replacement remains available in a Table view, but still checks
     // recovery, rewind and Review Mode at entry and async completion.

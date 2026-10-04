@@ -1009,6 +1009,10 @@ pub struct Snapshot {
 /// The largest source file a recipe reads. The whole file is held in memory
 /// (once as bytes, once parsed), so this also bounds what a run costs.
 pub const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+/// Appending a folder holds every file at once: at most this many bytes in
+/// all, and this many files.
+pub const MAX_APPEND_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_APPEND_FILES: usize = 1000;
 /// The largest recipe file read. Recipes are a few kilobytes of TOML.
 pub const MAX_RECIPE_BYTES: u64 = 1024 * 1024;
 
@@ -1078,9 +1082,34 @@ impl Snapshot {
     /// snapshot's own; the hash covers them all.
     pub fn read_all(paths: &[PathBuf]) -> Result<Snapshot, String> {
         let (first, rest) = paths.split_first().ok_or("no files to read")?;
+        if paths.len() > MAX_APPEND_FILES {
+            return Err(format!(
+                "the pattern matches {} files; a recipe appends at most {MAX_APPEND_FILES}. Narrow the pattern",
+                paths.len()
+            ));
+        }
+        let too_big = |total: u64| {
+            format!(
+                "the matching files hold {} MB; a recipe appends at most {} MB. Narrow the pattern",
+                total / (1024 * 1024),
+                MAX_APPEND_BYTES / (1024 * 1024)
+            )
+        };
+        // Sizes first, so nothing is read when the total is too big; then as
+        // read, in case a file grew
+        let stated: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        if stated > MAX_APPEND_BYTES {
+            return Err(too_big(stated));
+        }
         let mut snapshot = Snapshot::read(first)?;
+        let mut total = snapshot.bytes.len() as u64;
         for p in rest {
-            snapshot.more.push(Snapshot::read(p)?);
+            let next = Snapshot::read(p)?;
+            total += next.bytes.len() as u64;
+            if total > MAX_APPEND_BYTES {
+                return Err(too_big(total));
+            }
+            snapshot.more.push(next);
         }
         if !snapshot.more.is_empty() {
             let mut h = blake3::Hasher::new();
@@ -2292,6 +2321,19 @@ fn unpivot(keep: &[String], names_to: &str, values_to: &str, drop_empty: bool, f
         return Some("nothing to unpivot: every column is kept".into());
     }
     // The values keep their type when every unpivoted column agrees
+    // The result is rows × columns: refuse one larger than a sheet before
+    // building it, so a wide, mostly empty file can't exhaust memory
+    let out_rows: u64 = if drop_empty {
+        frame.rows.iter().map(|row| others.iter().filter(|&&j| !row[j].trim().is_empty()).count() as u64).sum()
+    } else {
+        frame.rows.len() as u64 * others.len() as u64
+    };
+    if out_rows >= NUM_ROWS as u64 {
+        return fail(
+            report,
+            format!("unpivoting would make {out_rows} rows; a sheet holds {} below the header row", NUM_ROWS - 1),
+        );
+    }
     let first = &frame.columns[others[0]];
     let same = others.iter().all(|&i| frame.columns[i].rule == first.rule && frame.columns[i].kind == first.kind);
     let (rule, kind) = if same { (first.rule, first.kind) } else { (ColumnRule::Auto, ValueKind::Plain) };
@@ -3364,6 +3406,38 @@ values_to = "Sales"
         // Round trip keeps defaults out of the file
         let plain = Recipe::from_toml("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"unpivot\"\n").unwrap();
         assert!(!plain.to_toml().contains("names_to"));
+    }
+
+    #[test]
+    fn unpivot_refuses_a_result_larger_than_a_sheet_before_building_it() {
+        // 1,100 rows × 1,000 columns would be 1.1 million rows
+        let mut csv = String::from("K");
+        for c in 0..1000 {
+            csv.push_str(&format!(",c{c}"));
+        }
+        csv.push('\n');
+        let row = format!("k{}\n", ",1".repeat(1000));
+        csv.push_str(&row.repeat(1100));
+        let r = Recipe::from_toml("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"unpivot\"\nkeep = [\"K\"]\n").unwrap();
+        let res = run(&r, &snap(&csv));
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("1100000 rows"), "{:?}", res.report.failures);
+    }
+
+    #[test]
+    fn append_folder_caps_the_file_count_and_total_size() {
+        let many: Vec<PathBuf> = (0..=MAX_APPEND_FILES).map(|i| PathBuf::from(format!("f{i}.csv"))).collect();
+        assert!(Snapshot::read_all(&many).unwrap_err().contains("at most 1000"));
+        // Sparse files: their stated size alone is refused, nothing is read
+        let dir = tempfile::tempdir().unwrap();
+        let big: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = dir.path().join(format!("big-{i}.csv"));
+                std::fs::File::create(&p).unwrap().set_len(200 * 1024 * 1024).unwrap();
+                p
+            })
+            .collect();
+        assert!(Snapshot::read_all(&big).unwrap_err().contains("at most 512 MB"));
     }
 
     #[test]

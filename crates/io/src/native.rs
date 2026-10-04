@@ -1573,7 +1573,7 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
     }
     // After cells: a pivot's ownership must not block loading its own output.
     load_pivots(&conn, &mut workbook);
-    let issue = match load_tables(&conn, &mut workbook) {
+    let issue = match load_tables(&conn, &mut workbook, path.parent()) {
         Ok(()) => None,
         Err(issue) if recovery => Some(issue),
         Err(issue) => return Err(issue.to_string()),
@@ -1782,13 +1782,28 @@ fn relative_recipe_path(recipe: &str, dir: &Path) -> String {
     }
 }
 
-fn load_tables(conn: &Connection, workbook: &mut Workbook) -> Result<(), crate::table_recovery::TableLoadIssue> {
+/// A relative recipe link (saved beside the workbook) is made absolute
+/// against the workbook's folder as it loads, so Save As elsewhere still
+/// finds the recipe; saving makes it relative again where it can.
+fn load_tables(conn: &Connection, workbook: &mut Workbook, dir: Option<&Path>) -> Result<(), crate::table_recovery::TableLoadIssue> {
     use crate::table_recovery::{decode_catalog, TableLoadIssue};
     use rusqlite::OptionalExtension;
     let json: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0))
         .optional().map_err(|e| TableLoadIssue::Corrupt(e.to_string()))?;
     if let Some(json) = json {
-        let saved = decode_catalog(&json)?;
+        let mut saved = decode_catalog(&json)?;
+        if let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+            for sheet in &mut saved.sheets {
+                for table in &mut sheet.tables {
+                    if let Some(source) = &mut table.source {
+                        if Path::new(&source.recipe).is_relative() {
+                            source.recipe = dir.join(&source.recipe).display().to_string();
+                        }
+                    }
+                }
+            }
+        }
         workbook.restore_tables(saved).map_err(TableLoadIssue::Corrupt)?;
     }
     Ok(())
