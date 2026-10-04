@@ -14,6 +14,7 @@ pub mod table_recovery;
 pub mod truth;
 pub mod xlsx;
 mod xlsx_comments;
+mod xlsx_names;
 mod xlsx_tables;
 mod xlsx_table_filters;
 mod xlsx_table_sorts;

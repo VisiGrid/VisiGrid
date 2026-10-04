@@ -13,6 +13,7 @@ use visigrid_engine::{
         structured::TableSection,
     },
     sheet::UnboundSheetRef,
+    named_range::NamedRangeTarget,
     table::TableRange,
     table_view::TableView,
     workbook::Workbook,
@@ -306,10 +307,12 @@ impl Plan<'_> {
                 self.expr(left, sheet, row, col, false)?;
                 self.expr(right, sheet, row, col, false)?;
             }
-            Expr::NamedRange(_) => {
-                return Err(
-                    "Named-range formulas are not supported for materialized sorting".into(),
-                )
+            Expr::NamedRange(name) => {
+                if self.wb.named_ranges().get(name).is_none() {
+                    return Err(format!("Unresolved named reference {name}"));
+                }
+                // Targets are mapped once below. Keep ordered shape even for
+                // aggregate uses: another consumer may use INDEX on this name.
             }
             Expr::ReferenceError(_) | Expr::RefError | Expr::EmptyRange { .. } => {
                 return Err("A formula has an unresolved reference".into())
@@ -417,6 +420,22 @@ pub(super) fn prepare_inner<'a>(
     if plan.sheets.is_empty() {
         return Ok(Cow::Borrowed(wb));
     }
+    let mut names = Vec::new();
+    for original in wb.named_ranges().list() {
+        let mut name = original.clone();
+        match &mut name.target {
+            NamedRangeTarget::Cell { sheet, row, col } => *row = plan.row(*sheet, *row, *col),
+            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                let mapped = plan.range(*sheet, TableRange {
+                    start_row: *start_row, start_col: *start_col,
+                    end_row: *end_row, end_col: *end_col,
+                }, false).map_err(|e| format!("Defined name '{}': {e}", name.name))?;
+                *start_row = mapped.start_row;
+                *end_row = mapped.end_row;
+            }
+        }
+        names.push(name);
+    }
     let mut changes = BTreeMap::new();
     let mut images = Vec::new();
     for (sid, sheet) in wb.sheets().iter().enumerate() {
@@ -494,6 +513,7 @@ pub(super) fn prepare_inner<'a>(
     }
     let mut out = wb.clone();
     out.set_auto_recalc(false);
+    for name in names { out.named_ranges_mut().set(name)?; }
     for ((sid, row, col), image) in changes {
         out.restore_cell_tracked(sid, row, col, image)?;
     }

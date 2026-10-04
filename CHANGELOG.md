@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve workbook-wide cell/range names and descriptions in XLSX, including references to moved Table totals; remap intact named targets during sorted export and report unsupported Excel name types explicitly.
+
 - Fixed references to Table totals follow the footer when rows are appended or the Table is resized. Formula cells, named targets, calculated rules, custom totals and rule formulas update together with undo/redo and rewind. Larger ranges retain their worksheet bounds; dynamic references still require explicit or structured references before moving totals.
 - Workbook named ranges now evaluate on their defined sheets, including references used in arithmetic, aggregates, lookup arguments, arrays and custom functions.
 

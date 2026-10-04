@@ -1615,7 +1615,7 @@ fn sorted_export_refuses_discontiguous_ranges_and_coordinate_or_dynamic_function
         ("=OFFSET(Sheet1!B4,1,0)", "Function OFFSET"),
         ("=INDEX(Sales[Qty],1)", "Function INDEX"),
         ("=RAND()", "Function RAND"),
-        ("=UnknownName", "Named-range"),
+        ("=UnknownName", "Unresolved named reference"),
         ("=1+", "Unexpected"),
     ] {
         let (mut wb, id) = book();
@@ -1905,7 +1905,11 @@ fn stored_order_is_explicit_fallback_for_unsupported_materialization_with_loss_w
         }
         set_saved_sort(&mut wb, id, 0, true, true);
         let before = authored_snapshot(&wb);
-        assert!(xlsx::export(&wb, &file, None).is_err());
+        if mode == 3 {
+            xlsx::export(&wb, &file, None).unwrap();
+        } else {
+            assert!(xlsx::export(&wb, &file, None).is_err());
+        }
         let report = xlsx::export_with_order(&wb, &file, None, ExportOrder::Stored).unwrap();
         if mode == 1 {
             assert!(report
@@ -1914,10 +1918,7 @@ fn stored_order_is_explicit_fallback_for_unsupported_materialization_with_loss_w
                 .any(|w| w.contains("Conditional formatting")));
         }
         if mode == 3 {
-            assert!(report
-                .warnings
-                .iter()
-                .any(|w| w.contains("Named-range definitions")));
+            assert!(!report.warnings.iter().any(|w| w.contains("Named-range definitions")));
         }
         let (loaded, _) = xlsx::import(&file).unwrap();
         assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "2");
@@ -2744,7 +2745,7 @@ fn changed_manual_visibility_recalculates_and_roundtrips_native_and_excel() {
 }
 
 #[test]
-fn relocated_footer_links_roundtrip_with_native_names_and_stored_excel_cells() {
+fn relocated_footer_links_and_names_survive_native_and_stored_excel_roundtrips() {
     let dir = tempfile::tempdir().unwrap();
     let (mut wb, id) = book();
     wb.set_table_totals_visible(id, true, Default::default()).unwrap();
@@ -2758,21 +2759,20 @@ fn relocated_footer_links_roundtrip_with_native_names_and_stored_excel_cells() {
     assert_eq!(wb.sheet(1).unwrap().get_display(2, 0), expected);
     let path = dir.path().join("footer-links.sheet");
     native::save_workbook(&wb, &path).unwrap();
-    let mut wb = native::load_workbook(&path).unwrap();
+    let wb = native::load_workbook(&path).unwrap();
     assert_eq!(wb.named_ranges().get("SalesTotal").unwrap().reference_string(), "D10");
     assert_eq!(wb.sheet(1).unwrap().get_display(2, 0), expected);
-    // Defined-name XLSX interchange is not implemented. Keep the XLSX half
-    // scoped to direct references; the native half above verifies names.
-    wb.clear_cell_tracked(1, 2, 0);
-    wb.delete_named_range("SalesTotal");
     let path = dir.path().join("footer-links.xlsx");
     xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
     let (mut loaded, report) = xlsx::import(&path).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert!(loaded.sheet(1).unwrap().get_raw(1, 0).ends_with("!$D$10"));
     assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
+    assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
     let id = loaded.sheet(0).unwrap().tables()[0].id;
     loaded.append_table_rows(id, 1, &[]).unwrap();
     assert!(loaded.sheet(1).unwrap().get_raw(1, 0).ends_with("!$D$11"));
+    assert_eq!(loaded.named_ranges().get("SalesTotal").unwrap().reference_string(), "D11");
+    assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
     assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
 }

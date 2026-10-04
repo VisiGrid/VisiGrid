@@ -750,6 +750,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     result.import_duration_ms = start_time.elapsed().as_millis();
 
     let mut workbook = Workbook::from_sheets(sheets, 0);
+    crate::xlsx_names::import(path, &mut workbook, &mut result.warnings);
 
     // Import formatting from styles.xml and per-cell style IDs
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
@@ -1526,6 +1527,7 @@ fn export_to_buffer_impl(
         .map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
     let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_names::finish(bytes, workbook)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
 }
@@ -1562,6 +1564,7 @@ fn build_export(
     result.warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
 
     let mut xlsx_workbook = XlsxWorkbook::new();
+    crate::xlsx_names::export(workbook, &mut xlsx_workbook)?;
 
     for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
         let worksheet = xlsx_workbook

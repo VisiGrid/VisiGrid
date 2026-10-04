@@ -579,9 +579,6 @@ pub(crate) fn export_warnings(
                 .into(),
         );
     }
-    if !wb.named_ranges().is_empty() {
-        warnings.push("Named-range definitions are not exported to Excel. Formulas using those names may show errors in the exported copy.".into());
-    }
     if !wb.pivots().is_empty() {
         warnings.push("Pivot results are exported as cells. Pivot definitions and Table-source bindings are not exported to Excel.".into());
     }
