@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use visigrid_engine::cell::{CellFormat, ValueRef};
-use visigrid_engine::sheet::SheetId;
+use visigrid_engine::sheet::{SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::table::{self, RefreshStamp, TableId, TableRange, TableSource};
 use visigrid_engine::workbook::Workbook;
 
@@ -140,6 +140,18 @@ pub fn refresh_table(
             sheet.clear_cell(row, col);
         }
     }
+    // A sheet made from a recipe is sized to its first result; a larger
+    // refresh needs room before the Table can grow into it
+    if range.end_row >= NUM_ROWS || range.end_col >= NUM_COLS {
+        return Err(format!(
+            "The new result needs {} rows × {} columns from {}, more than a sheet holds",
+            output.rows.len() + 1,
+            width,
+            visigrid_engine::formula::parser::column_letters_pub(c0)
+        ));
+    }
+    sheet.rows = sheet.rows.max(range.end_row + 1);
+    sheet.cols = sheet.cols.max(range.end_col + 1);
     // resize_table names added columns from the header cells beside the Table
     for (c, name) in names.iter().enumerate().skip(old.columns.len()) {
         sheet.set_text(r0, c0 + c, name);
@@ -288,5 +300,22 @@ columns = { Amount = "number" }
         let back = crate::native::load_workbook(&path).unwrap();
         let (_, t) = table(&back);
         assert_eq!(t.source.unwrap().recipe, "/data/orders.recipe.toml");
+    }
+
+    #[test]
+    fn refresh_grows_past_the_sheet_size_the_first_result_gave_it() {
+        let (out, report) = result("ID,Amount\n1,10\n");
+        let mut wb = new_workbook(&out, "orders", link(&report)).unwrap();
+        let (sheet_id, t) = table(&wb);
+        let before = wb.sheet_by_id(sheet_id).unwrap().rows;
+        let mut csv = String::from("ID,Amount\n");
+        for i in 0..before + 500 {
+            csv.push_str(&format!("{i},{i}\n"));
+        }
+        let (out, report) = result(&csv);
+        refresh_table(&mut wb, t.id, &out, link(&report)).unwrap();
+        let (_, t) = table(&wb);
+        assert_eq!(t.range.end_row, before + 500);
+        assert_eq!(wb.sheet_by_id(sheet_id).unwrap().get_display(before + 500, 0), (before + 499).to_string());
     }
 }
