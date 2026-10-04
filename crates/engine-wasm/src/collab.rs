@@ -287,30 +287,47 @@ impl CollabCore {
         self.client.confirmed.set_recalc_clock(clock);
     }
 
+    /// The optimistic display of one cell, by stable sheet key.
+    pub(crate) fn display(&self, sheet: SheetKey, row: usize, col: usize) -> Option<String> {
+        let wb = &self.client.wb;
+        let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
+        Some(wb.sheets()[idx].get_formatted_display(row, col))
+    }
+
     /// What changed since the last call, for the page to repaint.
     fn effects(&mut self) -> Value {
         let ch: Changes = self.client.take_changes();
         let wb = &self.client.wb;
         let mut cells = Vec::new();
-        if !ch.full {
+        if ch.full {
+            // A full repaint (join, resync, refusal rebuild) must carry the
+            // engine's display for every cell, or the page shows raw values.
+            // The store is sparse, so this is proportional to populated cells.
+            for (idx, sheet) in wb.sheets().iter().enumerate() {
+                let mut coords: Vec<(usize, usize)> = sheet
+                    .cells_iter()
+                    .map(|(pos, _)| pos)
+                    .chain(sheet.spill_receiver_coords())
+                    .collect();
+                coords.sort_unstable();
+                coords.dedup();
+                for (row, col) in coords {
+                    if sheet.get_raw(row, col).is_empty()
+                        && matches!(sheet.get_computed_value(row, col), visigrid_engine::formula::eval::Value::Empty)
+                    {
+                        continue; // format-only cell: its style comes from the snapshot
+                    }
+                    cells.push(cell_json(idx, sheet, row, col));
+                }
+            }
+        } else {
             let mut seen = std::collections::HashSet::new();
             for (key, row, col) in &ch.cells {
                 if !seen.insert((*key, *row, *col)) {
                     continue;
                 }
                 let Some(idx) = wb.idx_for_sheet_id(SheetId(*key)) else { continue };
-                let sheet = &wb.sheets()[idx];
-                let r = out_result(idx, sheet, *row, *col);
-                cells.push(json!({
-                    "sheet": key,
-                    "row": row,
-                    "col": col,
-                    "raw": sheet.get_raw(*row, *col),
-                    "value": r.value,
-                    "error": r.error,
-                    // What the desktop shows: number formats applied.
-                    "display": sheet.get_formatted_display(*row, *col),
-                }));
+                cells.push(cell_json(idx, &wb.sheets()[idx], *row, *col));
             }
         }
         let sheets: Vec<Value> = if ch.full || ch.sheets {
@@ -429,6 +446,12 @@ impl CollabClient {
         to_js(&self.core.snapshot().map_err(js_err)?)
     }
 
+    /// What the engine shows in a cell (number formats applied), or
+    /// `undefined` for an unknown sheet key.
+    pub fn display(&self, sheet: f64, row: usize, col: usize) -> Option<String> {
+        self.core.display(sheet as SheetKey, row, col)
+    }
+
     /// Fingerprint of the confirmed state, as the server's checksum frames.
     pub fn checksum(&self) -> String {
         self.core.checksum()
@@ -438,6 +461,21 @@ impl CollabClient {
     pub fn set_clock(&mut self, now_ms: Option<f64>, utc_offset_minutes: Option<i32>, seed: Option<f64>) {
         self.core.set_clock(now_ms, utc_offset_minutes, seed);
     }
+}
+
+/// One repainted cell: raw input, computed value or error, and what the
+/// desktop shows (number formats applied).
+fn cell_json(idx: usize, sheet: &visigrid_engine::sheet::Sheet, row: usize, col: usize) -> Value {
+    let r = out_result(idx, sheet, row, col);
+    json!({
+        "sheet": sheet.id.0,
+        "row": row,
+        "col": col,
+        "raw": sheet.get_raw(row, col),
+        "value": r.value,
+        "error": r.error,
+        "display": sheet.get_formatted_display(row, col),
+    })
 }
 
 #[cfg(test)]
@@ -668,5 +706,41 @@ mod tests {
         assert_eq!(snap["collab_sheet_ids"], json!([1]));
         let again = CollabCore::new(&snap, 1).unwrap();
         assert_eq!(checksum(&again.client.wb), checksum(&c.client.wb));
+    }
+
+    #[test]
+    fn full_effects_carry_the_display_of_every_populated_cell() {
+        let mut c = CollabCore::new(&doc(), 0).unwrap();
+        c.local(&set(0, 0, "3.5")).unwrap(); // unformatted decimal
+        c.local(&set(1, 0, "0.25")).unwrap();
+        c.local(&json!([{"SetFormat": {"sheet": 1, "rect": {"r0": 1, "c0": 0, "r1": 1, "c1": 0},
+            "props": {"number_format": "0.00%"}}}])).unwrap();
+        c.local(&set(2, 0, "=1/0")).unwrap(); // error
+        c.local(&set(3, 0, "=SEQUENCE(3)")).unwrap(); // spills into A5:A6
+        c.local(&json!([{"SetFormat": {"sheet": 1, "rect": {"r0": 9, "c0": 9, "r1": 9, "c1": 9},
+            "props": {"bold": true}}}])).unwrap(); // format-only, no content
+        let snap = c.snapshot().unwrap();
+        let mut fresh = CollabCore::new(&doc(), 0).unwrap();
+        let fx = fresh.load_snapshot(&snap, 0).unwrap();
+        assert_eq!(fx["full"], true);
+        let c00 = cell(&fx, 0, 0).expect("unformatted decimal");
+        assert_eq!(c00["display"], "3.50", "the engine's display, not the raw value");
+        assert_eq!(c00["raw"], "3.5");
+        assert_eq!(cell(&fx, 1, 0).expect("formatted")["display"], "25.00%");
+        let err = cell(&fx, 2, 0).expect("error cell");
+        assert_eq!(err["error"], "#DIV/0!");
+        assert_eq!(err["display"], "#DIV/0!");
+        assert_eq!(cell(&fx, 3, 0).expect("spill parent")["display"], "1");
+        let receiver = cell(&fx, 5, 0).expect("spill receiver");
+        assert_eq!(receiver["display"], "3");
+        assert_eq!(receiver["raw"], "");
+        assert!(cell(&fx, 9, 9).is_none(), "format-only cells come from the snapshot, not cells");
+        assert_eq!(fx["cells"].as_array().unwrap().len(), 6);
+        for c in fx["cells"].as_array().unwrap() {
+            assert_eq!(c["sheet"], 1);
+            assert_eq!(fresh.display(1, c["row"].as_u64().unwrap() as usize, c["col"].as_u64().unwrap() as usize).as_deref(),
+                c["display"].as_str());
+        }
+        assert_eq!(fresh.display(99, 0, 0), None);
     }
 }
