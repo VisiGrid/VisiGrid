@@ -6,6 +6,7 @@
 //! - [`apply`]: applying ops to the real engine, and convergence fingerprints.
 //! - [`server`]: the in-memory per-workbook sequencer.
 //! - [`client`]: a replica with optimistic local edits and rebase.
+//! - [`undo`]: per-user undo as inverse operations.
 //! - [`sim`]: the headless convergence simulator; [`gen`]: its op generator.
 
 pub mod apply;
@@ -17,3 +18,4 @@ pub mod server;
 #[cfg(feature = "sim")]
 pub mod sim;
 pub mod transform;
+pub mod undo;

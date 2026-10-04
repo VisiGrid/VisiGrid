@@ -33,6 +33,9 @@ pub struct SimConfig {
     pub toggle_prob: f64,
     /// Ticks between scheduling steps.
     pub step_gap: u64,
+    /// Chance that an edit is instead an undo (3 in 4) or redo of the
+    /// client's own history. Zero leaves the random stream unchanged.
+    pub undo_prob: f64,
 }
 
 impl Default for SimConfig {
@@ -43,6 +46,7 @@ impl Default for SimConfig {
             max_delay: 12,
             toggle_prob: 0.05,
             step_gap: 3,
+            undo_prob: 0.0,
         }
     }
 }
@@ -196,6 +200,15 @@ impl Sim {
         let i = self.rng.gen_range(0..self.clients.len());
         let burst = self.rng.gen_range(1..=3).min(*edits_left);
         for _ in 0..burst {
+            if self.cfg.undo_prob > 0.0 && self.rng.gen_bool(self.cfg.undo_prob) {
+                *edits_left -= 1;
+                let id = Uuid::from_u128(self.rng.gen());
+                let redo = self.rng.gen_bool(0.25);
+                let out = if redo { self.clients[i].redo(id) } else { self.clients[i].undo(id) };
+                let line = format!("c{i} {} {} {:?}", if redo { "redo" } else { "undo" }, short(id), out);
+                self.log(line);
+                continue;
+            }
             let key = (1u64 << 62) | self.rng.gen_range(0..(1u64 << 40));
             let ops = random_ops(&mut self.rng, &self.clients[i].wb, key);
             *edits_left -= 1;
@@ -297,6 +310,9 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
         clients: (0..n)
             .map(|i| {
                 let mut c = Client::new(i as u64 + 1);
+                if cfg.undo_prob > 0.0 {
+                    c.enable_undo();
+                }
                 // Measurement only: compare against the pre-10/4 policy.
                 c.legacy_refusal = std::env::var_os("COLLAB_LEGACY_REFUSAL").is_some();
                 c

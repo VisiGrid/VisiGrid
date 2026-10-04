@@ -483,6 +483,13 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
             return Some(format!("another sheet was just named \"{}\"", na));
         }
     }
+    // Two adds of the same sheet: concurrent undos both restoring one
+    // deleted sheet. Only the first can apply.
+    if let (AddSheet { sheet: sa, .. }, AddSheet { sheet: sb, .. }) = (a, b) {
+        if sa == sb {
+            return Some("the sheet was just restored".into());
+        }
+    }
     // A rename concurrent with a row/column edit (on any sheet) is
     // serialized. References are stored by sheet *name* and the engine does
     // not rewrite them on rename, so whether a structural edit adjusts a

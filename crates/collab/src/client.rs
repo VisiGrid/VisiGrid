@@ -29,6 +29,17 @@ use crate::apply::{apply_ops, apply_ops_tracked, filter_unappliable, Changes};
 use crate::op::{CollabOp, Envelope, SheetKey};
 use crate::server::Committed;
 use crate::transform::{transform, transform_lists, Order, Transformed};
+use crate::undo::{apply_recording, resolve, UndoEntry, UndoOutcome};
+
+/// Undo and redo entries kept per user.
+pub const MAX_UNDO: usize = 100;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Edit,
+    Undo,
+    Redo,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToServer {
@@ -102,6 +113,10 @@ pub struct Client {
     /// for a UI mirroring it (the browser client). The caller takes it with
     /// `take_changes`. Recording never changes what is applied.
     pub changes: Option<Changes>,
+    /// Per-user undo (`enable_undo`): entries in the current frame of `wb`.
+    pub undo_stack: Vec<UndoEntry>,
+    pub redo_stack: Vec<UndoEntry>,
+    track_undo: bool,
 }
 
 impl Client {
@@ -120,7 +135,15 @@ impl Client {
             stats: ClientStats::default(),
             legacy_refusal: false,
             changes: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            track_undo: false,
         }
+    }
+
+    /// Record undo entries for local edits from now on.
+    pub fn enable_undo(&mut self) {
+        self.track_undo = true;
     }
 
     /// Start recording changes to the optimistic state.
@@ -136,15 +159,21 @@ impl Client {
         }
     }
 
-    /// Apply ops to the optimistic state, recording them when asked.
+    /// Apply ops to the optimistic state, recording them when asked, and
+    /// carry the undo history past them.
     fn apply_optimistic(&mut self, ops: &[CollabOp]) {
-        match self.changes.as_mut() {
-            Some(ch) => {
-                apply_ops_tracked(&mut self.wb, ops, ch);
-            }
-            None => {
-                apply_ops(&mut self.wb, ops);
-            }
+        apply_to(&mut self.wb, &mut self.changes, ops);
+        self.shift_history(ops);
+    }
+
+    /// Transform every undo and redo entry past ops just applied to `wb`.
+    fn shift_history(&mut self, ops: &[CollabOp]) {
+        if ops.is_empty() {
+            return;
+        }
+        for e in self.undo_stack.iter_mut().chain(self.redo_stack.iter_mut()) {
+            e.inverse = e.inverse.iter().flat_map(|x| permissive(x, ops)).collect();
+            e.expect = e.expect.iter().flat_map(|x| permissive(x, ops)).collect();
         }
     }
 
@@ -154,7 +183,55 @@ impl Client {
 
     /// A local edit: applied now, queued for the server.
     pub fn local(&mut self, client_op_id: Uuid, ops: Vec<CollabOp>) {
-        self.apply_optimistic(&ops);
+        self.local_kind(client_op_id, ops, Kind::Edit);
+    }
+
+    /// Undo this user's most recent change still on the stack, as a new
+    /// local envelope with id `client_op_id`. Cells someone else changed
+    /// since are left alone.
+    pub fn undo(&mut self, client_op_id: Uuid) -> UndoOutcome {
+        self.undo_redo(client_op_id, Kind::Undo)
+    }
+
+    /// Redo the most recently undone change (until a new edit clears it).
+    pub fn redo(&mut self, client_op_id: Uuid) -> UndoOutcome {
+        self.undo_redo(client_op_id, Kind::Redo)
+    }
+
+    fn undo_redo(&mut self, client_op_id: Uuid, kind: Kind) -> UndoOutcome {
+        let stack = if kind == Kind::Undo { &mut self.undo_stack } else { &mut self.redo_stack };
+        let Some(entry) = stack.pop() else {
+            return UndoOutcome { reason: Some("empty"), ..Default::default() };
+        };
+        let (ops, kept_others) = resolve(&entry, &self.wb);
+        let ops = with_current_tab_positions(&self.wb, filter_unappliable(&self.wb, &ops).0);
+        if ops.is_empty() {
+            return UndoOutcome { applied: false, kept_others, reason: Some("gone") };
+        }
+        self.local_kind(client_op_id, ops, kind);
+        UndoOutcome { applied: true, kept_others, reason: None }
+    }
+
+    fn local_kind(&mut self, client_op_id: Uuid, ops: Vec<CollabOp>, kind: Kind) {
+        if self.track_undo {
+            let changes = &mut self.changes;
+            let entry = apply_recording(&mut self.wb, client_op_id, &ops, |wb, op| apply_to(wb, changes, op));
+            self.shift_history(&ops);
+            let stack = match kind {
+                Kind::Edit => {
+                    self.redo_stack.clear();
+                    &mut self.undo_stack
+                }
+                Kind::Undo => &mut self.redo_stack,
+                Kind::Redo => &mut self.undo_stack,
+            };
+            stack.push(entry);
+            if stack.len() > MAX_UNDO {
+                stack.remove(0);
+            }
+        } else {
+            self.apply_optimistic(&ops);
+        }
         self.buffer.push_back(Pending { client_op_id, ops });
         self.stats.local_envelopes += 1;
         self.stats.max_pending = self.stats.max_pending.max(self.pending_count());
@@ -285,10 +362,19 @@ impl Client {
         entries.extend(self.buffer.drain(..));
         let mut inflight_alive = had_inflight;
         let mut rebuild = false;
+        // How the optimistic frame moves when envelopes are removed: each
+        // removal's inverse, then the remote op (for the undo history).
+        let mut delta: Vec<CollabOp> = Vec::new();
+        let mut removed: Vec<Uuid> = Vec::new();
         let mut k = 0;
         while k < entries.len() {
             match transform_lists(&entries[k].ops, &remote, Order::Later) {
                 Ok((p2, r2)) => {
+                    if p2.is_empty() && !entries[k].ops.is_empty() {
+                        // The remote op made ours moot (the same row or sheet
+                        // deleted twice): there is nothing of ours to undo.
+                        removed.push(entries[k].client_op_id);
+                    }
                     entries[k].ops = p2;
                     remote = r2;
                     k += 1;
@@ -299,7 +385,8 @@ impl Client {
                         // refuses it too; its `rejected` will find nothing.
                         inflight_alive = false;
                     }
-                    self.remove_entry(&mut entries, k);
+                    removed.push(entries[k].client_op_id);
+                    delta.extend(self.remove_entry(&mut entries, k));
                     rebuild = true;
                 }
             }
@@ -311,9 +398,19 @@ impl Client {
         self.buffer.extend(it);
         if rebuild {
             self.rebuild();
+            delta.extend(remote);
+            self.forget(&removed);
+            self.shift_history(&delta);
         } else {
             self.apply_optimistic(&remote);
+            self.forget(&removed);
         }
+    }
+
+    /// Drop the undo and redo entries of envelopes that never took effect.
+    fn forget(&mut self, removed: &[Uuid]) {
+        self.undo_stack.retain(|e| !removed.contains(&e.origin));
+        self.redo_stack.retain(|e| !removed.contains(&e.origin));
     }
 
     /// Remove `entries[k]`, rebasing every later entry past its positional
@@ -323,7 +420,10 @@ impl Client {
     /// how much of the user's later intent survives. It is therefore
     /// permissive: V1 conflicts keep the later op unchanged, and only an op
     /// whose target no longer exists is dropped (an entry left empty goes).
-    fn remove_entry(&mut self, entries: &mut Vec<Pending>, k: usize) {
+    ///
+    /// Returns the removed envelope's inverse as rebased to the end of the
+    /// envelopes after it (empty if it had no positional effect).
+    fn remove_entry(&mut self, entries: &mut Vec<Pending>, k: usize) -> Vec<CollabOp> {
         // The state the removed envelope was written against: confirmed plus
         // the envelopes before it (all in the current frame).
         let mut before = self.confirmed.clone();
@@ -336,7 +436,7 @@ impl Client {
             let lost = entries.len() - k;
             entries.truncate(k);
             self.stats.discarded_after_refusal += lost as u64;
-            return;
+            return Vec::new();
         }
         let removed = entries.remove(k);
         self.stats.refused_envelopes += 1;
@@ -353,6 +453,11 @@ impl Client {
                 j += 1;
             }
         }
+        if j < entries.len() {
+            // Stopped early: nothing left to rebase past the rest.
+            return Vec::new();
+        }
+        inverse
     }
 
     /// The server refused our in-flight envelope without our own transform
@@ -363,9 +468,12 @@ impl Client {
             return;
         }
         entries.extend(self.buffer.drain(..));
-        self.remove_entry(&mut entries, 0);
+        let removed = entries[0].client_op_id;
+        let delta = self.remove_entry(&mut entries, 0);
         self.buffer.extend(entries);
         self.rebuild();
+        self.forget(&[removed]);
+        self.shift_history(&delta);
     }
 
     /// Optimistic state = confirmed + pending envelopes, in order.
@@ -387,11 +495,13 @@ impl Client {
         // (`filter_unappliable`). Kept here, it would still shift positions
         // and rewrite formulas in remote ops transformed past it.
         let mut emptied = 0u64;
+        let mut moot = Vec::new();
         for p in self.buffer.iter_mut() {
             let had_ops = !p.ops.is_empty();
             p.ops = filter_unappliable(&wb, &p.ops).0;
             if had_ops && p.ops.is_empty() {
                 emptied += 1;
+                moot.push(p.client_op_id);
             }
             for op in p.ops.iter_mut() {
                 let current = wb.sheets().iter().find(|s| s.id.0 == op.sheet()).map(|s| s.name.clone());
@@ -412,6 +522,7 @@ impl Client {
             }
         }
         if emptied > 0 {
+            self.forget(&moot);
             self.buffer.retain(|p| !p.ops.is_empty());
             self.stats.discarded_after_refusal += emptied;
         }
@@ -459,6 +570,9 @@ impl Client {
         self.confirmed = document;
         self.last_seen = seq;
         self.committed.clear();
+        // Positions in the old document mean nothing in the new one.
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.rebuild();
     }
 
@@ -562,6 +676,42 @@ fn permissive(a: &CollabOp, bs: &[CollabOp]) -> Vec<CollabOp> {
         cur = next;
     }
     cur
+}
+
+/// Sheet ops carry tab positions that transforms compute with, so they must
+/// describe the state the ops apply to. An undo entry's recorded positions
+/// can be stale (an add asked for a position past the end), so set each
+/// from the tab order as the list applies, as `rebuild` does.
+fn with_current_tab_positions(wb: &Workbook, mut ops: Vec<CollabOp>) -> Vec<CollabOp> {
+    let mut tabs: Vec<SheetKey> = wb.sheets().iter().map(|s| s.id.0).collect();
+    for op in ops.iter_mut() {
+        match op {
+            CollabOp::DeleteSheet { sheet, index } => {
+                if let Some(at) = tabs.iter().position(|s| s == sheet) {
+                    *index = at;
+                    tabs.remove(at);
+                }
+            }
+            CollabOp::AddSheet { sheet, index, .. } => {
+                *index = (*index).min(tabs.len());
+                tabs.insert(*index, *sheet);
+            }
+            _ => {}
+        }
+    }
+    ops
+}
+
+/// Apply ops to `wb`, recording into `changes` when it is set.
+fn apply_to(wb: &mut Workbook, changes: &mut Option<Changes>, ops: &[CollabOp]) {
+    match changes.as_mut() {
+        Some(ch) => {
+            apply_ops_tracked(wb, ops, ch);
+        }
+        None => {
+            apply_ops(wb, ops);
+        }
+    }
 }
 
 /// A deterministic new id derived from an old one and the barrier seq.

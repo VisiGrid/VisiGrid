@@ -118,6 +118,7 @@ fn simulator_converges() {
             max_delay: 4,
             toggle_prob: 0.0,
             step_gap: 1,
+            undo_prob: 0.0,
         },
         SimConfig {
             clients: 5,
@@ -125,6 +126,7 @@ fn simulator_converges() {
             max_delay: 20,
             toggle_prob: 0.08,
             step_gap: 2,
+            undo_prob: 0.0,
         },
         SimConfig {
             clients: 10,
@@ -132,6 +134,7 @@ fn simulator_converges() {
             max_delay: 30,
             toggle_prob: 0.03,
             step_gap: 1,
+            undo_prob: 0.0,
         },
     ];
     let mut committed = 0;
@@ -180,4 +183,30 @@ fn simulator_converges() {
         cycle.len(),
         cycle.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
     );
+}
+
+/// Undo and redo are ordinary local edits, so convergence must hold with
+/// them mixed into every configuration.
+#[test]
+fn simulator_converges_with_undo() {
+    let n = seeds(1000);
+    let configs = [
+        SimConfig { undo_prob: 0.3, ..SimConfig::default() },
+        SimConfig { clients: 5, edits: 60, max_delay: 20, toggle_prob: 0.08, step_gap: 2, undo_prob: 0.4 },
+    ];
+    // COLLAB_UNDO_SEED replays one seed.
+    let only: Option<u64> = std::env::var("COLLAB_UNDO_SEED").ok().and_then(|s| s.parse().ok());
+    for seed in only.map_or(0..n, |s| s..s + 1) {
+        let cfg = &configs[(seed % configs.len() as u64) as usize];
+        let r = run(seed ^ 0x0d0e, cfg, false);
+        if !r.ok() {
+            let s = shrink(seed ^ 0x0d0e, cfg);
+            panic!(
+                "seed {seed} {cfg:?}: {}\nshrunk to {} events:\n{}",
+                s.failure.clone().unwrap_or_default(),
+                s.trace.len(),
+                s.trace.join("\n")
+            );
+        }
+    }
 }

@@ -123,6 +123,7 @@ impl CollabCore {
         client.wb = wb;
         client.last_seen = seq;
         client.record_changes();
+        client.enable_undo();
         Ok(CollabCore {
             client,
             layouts,
@@ -141,6 +142,24 @@ impl CollabCore {
             self.client.local(new_op_id(), ops);
         }
         Ok(self.effects())
+    }
+
+    /// Undo this user's last change (spec §Undo): Effects plus `undo`, the
+    /// outcome (`applied`, `kept_others`, `reason`: "empty" or "gone").
+    pub(crate) fn undo(&mut self) -> Value {
+        let outcome = self.client.undo(new_op_id());
+        self.with_outcome(outcome)
+    }
+
+    pub(crate) fn redo(&mut self) -> Value {
+        let outcome = self.client.redo(new_op_id());
+        self.with_outcome(outcome)
+    }
+
+    fn with_outcome(&mut self, outcome: visigrid_collab::undo::UndoOutcome) -> Value {
+        let mut fx = self.effects();
+        fx["undo"] = serde_json::to_value(outcome).expect("outcome serializes");
+        fx
     }
 
     pub(crate) fn poll_send(&mut self) -> Option<Value> {
@@ -362,6 +381,8 @@ impl CollabCore {
             "snapshot_url": snapshot_url,
             "snapshot_seq": snapshot_seq,
             "reconnect": self.reconnect,
+            "can_undo": !self.client.undo_stack.is_empty(),
+            "can_redo": !self.client.redo_stack.is_empty(),
         });
         self.checksum_mismatch = false;
         self.reconnect = false;
@@ -405,6 +426,17 @@ impl CollabClient {
     pub fn local(&mut self, ops: JsValue) -> Result<JsValue, JsValue> {
         let ops = from_js(ops)?;
         to_js(&self.core.local(&ops).map_err(js_err)?)
+    }
+
+    /// Undo this user's most recent change as a new op (never another
+    /// user's): Effects plus `undo: {applied, kept_others, reason}`.
+    pub fn undo(&mut self) -> Result<JsValue, JsValue> {
+        to_js(&self.core.undo())
+    }
+
+    /// Redo the most recently undone change: Effects plus `undo`.
+    pub fn redo(&mut self) -> Result<JsValue, JsValue> {
+        to_js(&self.core.redo())
     }
 
     /// The next envelope to send as `{type: "op", envelope}`, or null.
@@ -742,5 +774,32 @@ mod tests {
                 c["display"].as_str());
         }
         assert_eq!(fresh.display(99, 0, 0), None);
+    }
+
+    #[test]
+    fn undo_reverts_only_this_users_edit_and_reaches_the_other_browser() {
+        let mut room = Room::new(2);
+        let mut clients = [CollabCore::new(&doc(), 0).unwrap(), CollabCore::new(&doc(), 0).unwrap()];
+        clients[0].local(&set(1, 0, "mine")).unwrap();
+        clients[1].local(&set(2, 0, "theirs")).unwrap();
+        room.settle(&mut clients);
+        let fx = clients[0].undo();
+        assert_eq!(fx["undo"]["applied"], true);
+        assert_eq!(cell(&fx, 1, 0).unwrap()["raw"], "");
+        assert_eq!(fx["can_redo"], true);
+        room.settle(&mut clients);
+        for c in &clients {
+            assert_eq!(c.client.wb.sheets()[0].get_raw(1, 0), "");
+            assert_eq!(c.client.wb.sheets()[0].get_raw(2, 0), "theirs");
+        }
+        assert_eq!(checksum(&clients[0].client.wb), checksum(&room.server.wb));
+        let fx = clients[0].redo();
+        assert_eq!(cell(&fx, 1, 0).unwrap()["raw"], "mine");
+        assert_eq!(clients[1].undo()["undo"]["applied"], true);
+        room.settle(&mut clients);
+        assert_eq!(clients[1].client.wb.sheets()[0].get_raw(2, 0), "");
+        assert_eq!(clients[0].undo()["undo"]["reason"], Value::Null);
+        let empty = CollabCore::new(&doc(), 0).unwrap().undo();
+        assert_eq!(empty["undo"]["reason"], "empty");
     }
 }
