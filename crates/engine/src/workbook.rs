@@ -1313,8 +1313,7 @@ impl Workbook {
         // ranges from scratch, which is quadratic up a running total.
         self.dep_graph.any_upstream(CellId::new(sheet_id, row, col), |current| {
             self.sheet_by_id(current.sheet)
-                .and_then(|sheet| sheet.get_cell_opt(current.row, current.col))
-                .is_some_and(|cell| cell.value().is_cycle_error())
+                .is_some_and(|sheet| sheet.is_cycle_error(current.row, current.col))
         })
     }
 

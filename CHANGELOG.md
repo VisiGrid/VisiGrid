@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.46.1
+
+### Fixed
+
+- **Circular references no longer delete your formulas.** When an edit closed a reference cycle (for example `=B1+1` in A1 and `=A1+1` in B1), every formula in the cycle was replaced by the text `#CYCLE!` and could only be recovered with undo. The formulas now stay; `#CYCLE!` is shown as their result, as in Excel, and they calculate again as soon as the cycle is broken. Saving to `.sheet`, JSON and `.xlsx` keeps them. Files that already contain the `#CYCLE!` text from earlier versions still show it as a cycle error, but the lost formulas can't be recovered. ([#97](https://github.com/VisiGrid/VisiGrid/pull/97), [#95](https://github.com/VisiGrid/VisiGrid/issues/95))
+
+### Excel interchange
+
+- **Exported formulas keep their results.** Excel files saved by VisiGrid stored 0 as every formula's result; Excel recalculated on open, but pandas, file previews and other tools that read saved results saw zeros. Each formula now carries its computed value. ([#100](https://github.com/VisiGrid/VisiGrid/pull/100))
+- Fixed Excel files with a large sheet (over 32 MB of sheet data) dropping every Table in the workbook with an "XLSX part … is too large" warning, even when the large sheet had no Tables. A problem reading one sheet's Tables now affects only that sheet. ([#96](https://github.com/VisiGrid/VisiGrid/pull/96))
+
+## 0.46.0
+
+### Formulas
+
+- **21 more functions, 163 in all:** HYPERLINK, LARGE, LOOKUP, MAXIFS, MINIFS, MODE, MODE.SNGL, NA, PERCENTILE, PERCENTILE.INC, QUARTILE, QUARTILE.INC, RANK, RANK.EQ, SMALL, SORTBY, TEXTSPLIT, WEEKNUM and XOR. HYPERLINK shows its friendly name (or the link) as the cell's value. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **LET and LAMBDA.** Name intermediate results with LET. A LAMBDA can be called in place (`=LAMBDA(x, x*2)(5)`), through a LET name, or curried. MAP, REDUCE, BYROW and recursive LAMBDAs aren't supported yet, and a LAMBDA that is never called returns `#CALC!`. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **Array constants** such as `={1,2;3,4}` can be typed in formulas. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **Faster edits in large workbooks.** Editing a cell with few dependents no longer scans the whole workbook for INDIRECT/OFFSET readers on every edit; on a 200,000-formula workbook, a one-dependent edit went from about 42 ms to a fraction of a millisecond. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **Not yet in Excel files:** LET, LAMBDA, TEXTSPLIT, SORTBY and other newer functions are written to `.xlsx` without Excel's `_xlfn.` prefixes, so Excel shows `#NAME?` for them, and `.xlsx` files that use those prefixes don't import them yet ([#89](https://github.com/VisiGrid/VisiGrid/issues/89)).
+
+### Import recipes
+
+- **Fixed:** Refresh failing with "Table range extends beyond the sheet" when a new month's file had more rows than the sheet the recipe first created (over 1,000 rows, or over the first month's count). ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- Large refreshes (over 100,000 changed cells) now publish with a single undo step instead of being refused. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- A recipe reading the newest matching file skips downloads still in progress (`.crdownload`, `.part`, `.download`, `.tmp`, hidden files) and waits when the newest file changed in the last two seconds. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- **Unlink Table from Recipe** in the command palette keeps the records as an ordinary Table; Ctrl+Z relinks it. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- The blocked banner's suggested rename now takes Ctrl+Enter, so Enter in the sheet can't apply it by accident. Edits made while a recipe is opening are no longer replaced by its result, and TOML files that aren't recipes are no longer run as one. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+
 ## 0.45.0
 
 ### Fixed

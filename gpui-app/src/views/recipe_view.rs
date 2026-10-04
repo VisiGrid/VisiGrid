@@ -252,7 +252,7 @@ fn problems(b: &RecipeBlocked, c: &Colors, cx: &mut Context<Spreadsheet>) -> Vec
                     actions.push(
                         action(
                             format!("recipe-use-{}-{name}", step.index),
-                            if is_primary { format!("Use {new}  ↵") } else { format!("Use {new}") },
+                            if is_primary { format!("Use {new}  Ctrl+↵") } else { format!("Use {new}") },
                             true,
                             c,
                             cx,

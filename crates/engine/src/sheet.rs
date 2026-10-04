@@ -280,6 +280,9 @@ pub const NUM_ROWS: usize = 1_048_576;
 /// Columns in a sheet. See [`NUM_ROWS`].
 pub const NUM_COLS: usize = 16_384;
 
+/// The computed value of every member of a reference cycle.
+const CYCLE_ERROR: &str = "#CYCLE!";
+
 /// The cell map's key: two u32 rather than two usize.
 ///
 /// The grid is 1,048,576 x 16,384, so neither coordinate can approach u32, and
@@ -883,21 +886,37 @@ impl Sheet {
         pending
     }
 
-    /// Mark a cell as having a cycle error.
+    /// Mark a cell as a member of a reference cycle.
     ///
-    /// Used when loading workbooks with circular references to mark
-    /// participating cells without crashing.
+    /// The formula stays the cell's content; `#CYCLE!` is only its computed
+    /// value, as Excel shows a circular reference. Writing the error into the
+    /// content (as this did until #95) destroyed every member's formula, so a
+    /// cycle could never be repaired by editing one cell.
     pub fn set_cycle_error(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
         if !self.accept_value_write(row, col) {
             return;
         }
+        // Cached as text, exactly what the cell used to hold, so everything
+        // downstream (#VALUE! in arithmetic, inspectors, exports) behaves as
+        // before. Only the formula is no longer lost.
+        self.cells.set_computed(row, col, Value::Text(CYCLE_ERROR.to_string()));
+    }
 
-        // Store #CYCLE! as the cell value while preserving the formula source
-        // For now, we just set a text value - the original formula is lost
-        // A future improvement could preserve the formula for editing
-        self.with_cell(row, col, |cell| cell.value = CellValue::Text("#CYCLE!".to_string()));
+    /// Whether this cell is a reference-cycle member: a formula whose computed
+    /// value is the `#CYCLE!` marker, or the literal `#CYCLE!` text that files
+    /// saved before #95 contain in place of the lost formula.
+    pub fn is_cycle_error(&self, row: usize, col: usize) -> bool {
+        match self.cells.get(row, col) {
+            Some(cell) => match cell.value() {
+                ValueRef::Formula { ast: Some(_), .. } => self.cells.with_computed(row, col, |v| {
+                    matches!(v, Some(Value::Text(t)) if t == CYCLE_ERROR)
+                }),
+                other => other.is_cycle_error(),
+            },
+            None => false,
+        }
     }
 
     /// Replace a formula cell with a static cached value, preserving the
@@ -5237,6 +5256,9 @@ mod tests {
         let mut sheet = Sheet::new(SheetId(1), 10, 10);
         sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
 
+        // Only formula cells can be cycle members: give the origin one.
+        sheet.set_value(0, 0, "=A1+1");
+
         // Set bold on hidden cell B1
         sheet.toggle_bold(0, 1);
         assert!(sheet.get_format(0, 1).bold);
@@ -5244,8 +5266,9 @@ mod tests {
         // Cycle error on B1 — redirects to origin A1
         sheet.set_cycle_error(0, 1);
 
-        // Origin holds the cycle error
+        // Origin shows the cycle error and keeps its formula (#95)
         assert_eq!(sheet.get_display(0, 0), "#CYCLE!");
+        assert_eq!(sheet.get_raw(0, 0), "=A1+1");
         // B1 style unchanged
         assert!(sheet.get_format(0, 1).bold);
         // B1 has no stored value
