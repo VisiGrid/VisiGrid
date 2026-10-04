@@ -423,11 +423,10 @@ impl Spreadsheet {
                     && chosen.file_name().and_then(|n| n.to_str()).zip(pattern_path.file_name().and_then(|n| n.to_str()))
                         .is_some_and(|(n, p)| recipe::wildcard_match(p, n));
                 if !matches_pattern {
-                    let visigrid_io::recipe::Source::Csv(src) = &mut recipe.source;
-                    src.path = match chosen.parent() {
+                    recipe.source.set_path(match chosen.parent() {
                         Some(p) if p == dir => chosen.file_name().unwrap().to_string_lossy().into_owned(),
                         _ => chosen.display().to_string(),
-                    };
+                    });
                     if let Err(e) = recipe.save(&recipe_path) {
                         this.status_message = Some(format!("Couldn't save the recipe: {e}"));
                         cx.notify();
