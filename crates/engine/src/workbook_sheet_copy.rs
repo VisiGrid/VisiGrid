@@ -55,7 +55,7 @@ impl Workbook {
             .ok_or("The reviewed source sheet is unavailable.")?
             .clone();
         if sheet.tables().iter().any(|t| t.totals.is_some()) {
-            return Err("Copying sheets with imported totals-row Tables is not supported yet.".into());
+            return Err("Copying sheets with totals-row Tables is not supported yet.".into());
         }
         let mut names = HashMap::new();
         let mut reserved: HashSet<String> = self

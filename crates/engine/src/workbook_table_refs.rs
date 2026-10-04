@@ -85,7 +85,7 @@ impl Workbook {
                         if let Some(source) = &total.formula {
                             if self.rewrite_table_formula_source(owner_sheet, before, after, sheet.id,
                                 table.range.end_row + 1, table.range.start_col + offset, source)? != *source {
-                                return Err("This schema change would rewrite imported totals metadata. Native totals editing is not supported yet.".into());
+                                return Err("This schema change would rewrite totals metadata. Totals reference rewriting is not supported yet.".into());
                             }
                         }
                     }
@@ -111,7 +111,7 @@ impl Workbook {
                 )?;
                 if rewritten != source {
                     if sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
-                        return Err("This schema change would rewrite an imported totals formula. Native totals editing is not supported yet.".into());
+                        return Err("This schema change would rewrite a totals formula. Totals reference rewriting is not supported yet.".into());
                     }
                     changes.push(TableFormulaChange {
                         cell: CellId::new(sheet.id, row, col),
@@ -172,7 +172,7 @@ impl Workbook {
                 }
                 // A released row must not silently adopt another table's
                 // local context when that rectangle is reused later.
-                if reference.table.is_none() && !after.range.contains(row, col) {
+                if reference.table.is_none() && !after.full_range().contains(row, col) {
                     rewritten.table = Some(after.name.clone());
                 }
                 if rewritten == reference {

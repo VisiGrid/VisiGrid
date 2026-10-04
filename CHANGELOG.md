@@ -2,8 +2,10 @@
 
 ## Unreleased
 
+- Author native Table totals from the Table bar: show/hide the footer and choose Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or a custom formula for each column. Aggregates follow Table filters; settings survive hiding, saving and XLSX round trips. Changes support undo/redo and history rewind with active criteria. Showing totals refuses occupied cells below the Table. Moving totals during append/resize remains a follow-up.
+
 - Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
-- Imported totals use Table metadata version 5; earlier releases open these files in read-only recovery. Footer/schema editing and affected structural operations remain guarded. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning); native totals-row authoring remains future work.
+- Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes, schema editing and affected structural operations remain guarded. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
 
 ## 0.45.0
 

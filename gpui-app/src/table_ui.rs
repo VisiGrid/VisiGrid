@@ -16,6 +16,7 @@ pub(crate) enum TableDialogKind {
     Rename(TableId),
     Resize(TableId),
     Convert(TableId),
+    Total(TableId, usize),
     ColumnFormula(TableId, usize, bool),
 }
 
@@ -482,11 +483,12 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if !matches!(kind, TableDialogKind::Resize(_)) && self.block_table_view_edit(cx) { return; }
+        if !matches!(kind, TableDialogKind::Resize(_) | TableDialogKind::Total(..)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
             TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
             | TableDialogKind::Convert(id)
+            | TableDialogKind::Total(id, _)
             | TableDialogKind::ColumnFormula(id, _, _) => id,
             _ => return,
         };
@@ -496,7 +498,9 @@ impl Spreadsheet {
         self.table_dialog = Some(TableDialog {
             kind,
             sheet,
-            name: if let TableDialogKind::ColumnFormula(_, col, _) = kind {
+            name: if let TableDialogKind::Total(_, col) = kind {
+                self.sheet(cx).get_raw(table.range.end_row + 1, col)
+            } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
                 let row = self.row_view.view_to_data(self.view_state.selected.0);
                 if table.columns[col - table.range.start_col].formula.is_some() {
                     table.columns[col - table.range.start_col]
@@ -509,7 +513,10 @@ impl Spreadsheet {
             } else {
                 table.name.clone()
             },
-            range: if let TableDialogKind::ColumnFormula(_, col, _) = kind {
+            range: if let TableDialogKind::Total(_, col) = kind {
+                let total = table.totals.as_ref().and_then(|t| t.columns.get(col - table.range.start_col));
+                total.map(|t| if t.formula.is_some() { "custom" } else if let Some(f) = t.function.as_deref().filter(|f| *f != "none") { f } else if t.label.is_some() { "label" } else { "none" }).unwrap_or("none").into()
+            } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
                 let column = &table.columns[col - table.range.start_col];
                 if column.formula.is_some() {
                     (table.range.start_row + column.formula_origin).to_string()
@@ -545,6 +552,16 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        if let TableDialogKind::Total(id, col) = draft.kind {
+            let result = crate::table_totals::total_setting(&draft.range, &draft.name)
+                .and_then(|total| self.change_table_totals(id, Some((col, total)), cx));
+            match result {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
         if draft.kind == TableDialogKind::Create {
             match parse_range(&draft.range).and_then(|range| self.submit_table_creation(draft.sheet, range, draft.name.trim(), draft.has_headers, cx)) {
                 Ok(()) => self.table_dialog = None,
@@ -562,6 +579,7 @@ impl Spreadsheet {
                 parse_range(&draft.range).and_then(|r| wb.resize_table(id, r))
             }
             TableDialogKind::Convert(id) => wb.remove_table(id),
+            TableDialogKind::Total(..) => unreachable!(),
             TableDialogKind::ColumnFormula(id, col, replace) => {
                 let row = draft
                     .range
@@ -577,6 +595,7 @@ impl Spreadsheet {
                     TableDialogKind::Rename(_) => "Rename Table",
                     TableDialogKind::Resize(_) => "Resize Table",
                     TableDialogKind::Convert(_) => "Convert Table to range",
+                    TableDialogKind::Total(..) => "Change Table totals",
                     TableDialogKind::ColumnFormula(_, _, _) => "Set column formula",
                 };
                 self.record_table_commit(commit, format!("{verb}: {}", draft.name.trim()), cx);
@@ -645,6 +664,9 @@ impl Spreadsheet {
     ) -> bool {
         if crate::table_create::is_creation(commit) {
             return self.replay_table_creation(commit, header_layout, undo, cx);
+        }
+        if commit.is_totals_change() {
+            return self.replay_table_totals(commit, undo, cx);
         }
         if crate::table_resize::is_resize(commit) {
             return self.replay_table_resize(commit, undo, cx);
@@ -816,6 +838,26 @@ impl Spreadsheet {
         if key.key == "enter" {
             self.submit_table_dialog(cx);
             return true;
+        }
+        if matches!(d.kind, TableDialogKind::Total(..)) {
+            if key.key == "tab" {
+                d.field = if d.field == 2 && matches!(d.range.as_str(), "label" | "custom") { 0 } else { 2 };
+                d.select_all = true;
+                cx.notify();
+                return true;
+            }
+            if d.field == 2 || !matches!(d.range.as_str(), "label" | "custom") {
+                let choices = crate::table_totals::CHOICES;
+                let index = choices.iter().position(|(key, _)| *key == d.range).unwrap_or(0);
+                let next = match key.key.as_str() {
+                    "left" | "up" => Some((index + choices.len() - 1) % choices.len()),
+                    "right" | "down" => Some((index + 1) % choices.len()),
+                    _ => None,
+                };
+                if let Some(next) = next { d.range = choices[next].0.into(); d.error = None; }
+                cx.notify();
+                return true;
+            }
         }
         if matches!(d.kind, TableDialogKind::Convert(_)) {
             return true;

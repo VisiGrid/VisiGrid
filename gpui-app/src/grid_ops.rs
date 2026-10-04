@@ -488,7 +488,7 @@ impl Spreadsheet {
     /// Hide selected rows (Ctrl+9)
     pub(crate) fn hide_rows(&mut self, cx: &mut Context<Self>) {
         if self.workbook.read(cx).active_sheet().tables().iter().any(|t| t.totals.is_some()) {
-            self.status_message = Some("Manual visibility changes on imported totals-row sheets are not supported yet. Convert the Table to a range first.".into());
+            self.status_message = Some("Manual visibility changes on totals-row sheets are not supported yet. Existing manual visibility is retained for SUBTOTAL calculations.".into());
             cx.notify();
             return;
         }
@@ -527,7 +527,7 @@ impl Spreadsheet {
     /// E.g., if rows 5-8 are hidden, select rows 4-9 and press Ctrl+Shift+9.
     pub(crate) fn unhide_rows(&mut self, cx: &mut Context<Self>) {
         if self.workbook.read(cx).active_sheet().tables().iter().any(|t| t.totals.is_some()) {
-            self.status_message = Some("Manual visibility changes on imported totals-row sheets are not supported yet. Convert the Table to a range first.".into());
+            self.status_message = Some("Manual visibility changes on totals-row sheets are not supported yet. Existing manual visibility is retained for SUBTOTAL calculations.".into());
             cx.notify();
             return;
         }

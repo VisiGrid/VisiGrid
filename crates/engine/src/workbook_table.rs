@@ -9,6 +9,8 @@ mod columns;
 pub use columns::TableColumnHistory;
 #[path = "workbook_table_create.rs"]
 mod create;
+#[path = "workbook_table_totals.rs"]
+mod totals;
 
 use super::table_refs::TableFormulaChange;
 use super::Workbook;
@@ -46,9 +48,14 @@ pub struct TableCommit {
     append_region: Option<TableRange>,
     header_insertion: Option<Box<create::HeaderInsertion>>,
     rules: Vec<calculated::RuleChange>,
+    totals_edit: bool,
 }
 
 impl TableCommit {
+    pub fn is_totals_change(&self) -> bool {
+        self.totals_edit
+    }
+
     pub fn inserted_header_row(&self) -> Option<usize> {
         self.header_insertion.as_ref().map(|h| h.at)
     }
@@ -680,7 +687,7 @@ impl Workbook {
     pub fn remove_table(&mut self, id: TableId) -> Result<TableCommit, String> {
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
         if old.totals.as_ref().is_some_and(|t| !t.hidden_rows.is_empty()) {
-            return Err("Converting this Table would discard the manual row visibility used by its totals. Keep it as a Table until native totals editing is supported.".into());
+            return Err("Converting this Table would discard the manual row visibility used by its totals. Keep it as a Table to preserve those calculations.".into());
         }
         let commit = self.table_commit(sheet_id, id, Some(old.clone()), None)?;
         self.apply_table_commit(&commit, false)?;
@@ -696,7 +703,7 @@ impl Workbook {
     ) -> Result<TableCommit, String> {
         if before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
             && (a.range != b.range || a.name != b.name || a.columns != b.columns)) {
-            return Err("Resizing or changing the schema of an imported totals-row Table is not supported yet. Convert it to a range first.".into());
+            return Err("Resizing or changing the schema of a totals-row Table is not supported yet. Convert it to a range first.".into());
         }
         let sheet = self
             .sheet_by_id(sheet_id)
@@ -763,6 +770,7 @@ impl Workbook {
         }
         let rules = rules.into_iter().filter(|r| r.table != id).collect();
         Ok(TableCommit {
+            totals_edit: false,
             rules,
             cells: Vec::new(),
             append_region: None,
@@ -787,6 +795,7 @@ impl Workbook {
     /// `undo = true` restores the before state; false reapplies the after
     /// state. A stale commit fails atomically instead of overwriting edits.
     pub fn apply_table_commit(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
+        self.ensure_writable()?;
         if commit.header_insertion.is_some() {
             return self.apply_headerless_table_commit(commit, undo);
         }
@@ -866,12 +875,22 @@ impl Workbook {
         if let Some(table) = &target.table {
             table.validate(sheet.rows, sheet.cols)?;
             self.validate_table_name_available(&table.name, Some(commit.id))?;
-            self.validate_table_region(commit.sheet_id, table.range, Some(commit.id))?;
+            self.validate_table_region(commit.sheet_id, table.full_range(), Some(commit.id))?;
             if self
                 .tables()
                 .any(|(s, t)| t.id == table.id && s != commit.sheet_id)
             {
                 return Err("Table identity is already used on another sheet.".into());
+            }
+        }
+        // Footer writes are outside the body range, including when hiding a
+        // footer. Replay must reject a newly merged/spilled/pivot-owned cell.
+        if commit.is_totals_change() {
+            if let (Some((first, _)), Some((last, _))) = (commit.cells.first(), commit.cells.last()) {
+                self.validate_table_region(commit.sheet_id, TableRange {
+                    start_row: first.row, end_row: last.row,
+                    start_col: first.col, end_col: last.col,
+                }, Some(commit.id))?;
             }
         }
         // Headers share one row. Validate their bounding span once, avoiding
@@ -948,6 +967,16 @@ impl Workbook {
         }) {
             return Err("New calculated-column references require a fresh Table operation.".into());
         }
+        // A pivot can source a formula on another sheet that depends on this
+        // footer. Recalculation alone doesn't advance that sheet's generation.
+        let totals_dependents: Vec<_> = if commit.is_totals_change() {
+            self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
+                sheet.cells_iter().filter_map(move |((row, col), cell)| {
+                    matches!(cell.value(), ValueRef::Formula { .. })
+                        .then(|| (sheet.id, row, col, sheet.get_computed_value(row, col)))
+                })
+            }).collect()
+        } else { Vec::new() };
         let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
         sheet.data_tables.retain(|t| t.id != commit.id);
         for cell in &target.headers {
@@ -995,6 +1024,10 @@ impl Workbook {
         // cell was written (including empty -> nonempty bodies).
         self.rebuild_dep_graph();
         self.recompute_full_ordered();
+        let changed: HashSet<_> = totals_dependents.into_iter().filter_map(|(id, row, col, value)| {
+            (self.sheet_by_id(id)?.get_computed_value(row, col) != value).then_some(id)
+        }).collect();
+        for id in changed { self.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
         self.bump_revision_for_structure();
         Ok(())
     }

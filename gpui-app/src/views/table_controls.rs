@@ -91,7 +91,7 @@ pub(crate) fn render_table_controls(
             if view_only {
                 controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Editing visible records").into_any_element());
             }
-            if !view_only && column.formula.is_some() {
+            if !view_only && table.totals_row() != Some(row) && column.formula.is_some() {
                 let exception = app.sheet(cx).is_calculated_exception(row, col);
                 controls.push(
                     div()
@@ -139,7 +139,7 @@ pub(crate) fn render_table_controls(
                     )
                     .into_any_element(),
                 );
-            } else if !view_only && row > table.range.start_row
+            } else if !view_only && table.totals_row() != Some(row) && row > table.range.start_row
                 && app.sheet(cx).get_raw(row, col).starts_with('=')
             {
                 controls.push(
@@ -156,6 +156,13 @@ pub(crate) fn render_table_controls(
                 );
             }
             controls
+        })
+        .child(button("table-totals", if table.totals_row().is_some() { "✓ Totals row" } else { "Totals row" },
+            app, move |s, cx| s.toggle_table_totals(id, cx), cx))
+        .when(table.totals_row().is_some(), |d| {
+            let col = app.view_state.selected.1;
+            d.child(button("table-edit-total", "Edit total…", app,
+                move |s, cx| s.open_table_dialog(TableDialogKind::Total(id, col), cx), cx))
         })
         .child(button(
             "table-add-row",
@@ -209,6 +216,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
         TableDialogKind::Rename(_) => "Rename Table",
         TableDialogKind::Resize(_) => "Resize Table",
         TableDialogKind::Convert(_) => "Convert to range",
+        TableDialogKind::Total(..) => "Column total",
         TableDialogKind::ColumnFormula(_, _, true) => "Use formula for entire column",
         TableDialogKind::ColumnFormula(_, _, false) => "Edit column formula",
     };
@@ -221,6 +229,8 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
     for (index, label, value) in [(0, "Table name", &d.name), (1, "Range", &d.range)] {
         let label = if matches!(d.kind, TableDialogKind::ColumnFormula(..)) {
             "Column formula"
+        } else if matches!(d.kind, TableDialogKind::Total(..)) {
+            if d.range == "custom" { "Custom formula" } else { "Label text" }
         } else {
             label
         };
@@ -229,6 +239,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
             TableDialogKind::Rename(_) | TableDialogKind::ColumnFormula(..) => index == 0,
             TableDialogKind::Resize(_) => index == 1,
             TableDialogKind::Convert(_) => false,
+            TableDialogKind::Total(..) => index == 0 && matches!(d.range.as_str(), "label" | "custom"),
         };
         if !show {
             continue;
@@ -273,6 +284,29 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                         ),
                 ),
         );
+    }
+    if let TableDialogKind::Total(id, col) = d.kind {
+        let context = app.wb(cx).table(id).map(|(_, table)| format!("{} · {}", table.name, table.columns[col-table.range.start_col].name)).unwrap_or_default();
+        let mut choices = div().flex().flex_wrap().gap_2();
+        for (index, &(key, label)) in crate::table_totals::CHOICES.iter().enumerate() {
+            let selected = d.range == key;
+            choices = choices.child(div().id(("total-choice", index)).px_3().py_2().rounded_md()
+                .border_1().border_color(if selected { accent } else { border })
+                .bg(if selected { accent.opacity(0.12) } else { app.token(TokenKey::EditorBg) })
+                .text_color(if selected { accent } else { text }).text_size(px(13.0))
+                .cursor_pointer().hover(|s| s.bg(accent.opacity(0.08)))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |s, _, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(d) = &mut s.table_dialog {
+                        d.range = key.into(); d.field = if matches!(key, "label" | "custom") { 0 } else { 2 };
+                        d.select_all = true; d.error = None;
+                    }
+                    cx.notify();
+                })).child(label));
+        }
+        fields = div().flex().flex_col().gap_3()
+            .child(div().text_size(px(13.0)).text_color(muted).child(context))
+            .child(choices).child(fields);
     }
     if d.kind == TableDialogKind::Create {
         fields = div().flex().flex_col().gap_4().child(fields).child(div()
@@ -365,6 +399,10 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                     .border_color(app.token(TokenKey::Error).opacity(0.4))
                     .text_color(app.token(TokenKey::Error)).child(e)),
             }
+        }
+        TableDialogKind::Total(..) => {
+            preview = preview.child("Aggregates use visible records and update when filters change. Count counts nonempty cells; Count numbers counts numeric cells.")
+                .child("Choose a function with the arrow keys. Tab moves to label or formula text. Enter applies; Esc cancels.");
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
         TableDialogKind::Resize(_)=>preview=preview.child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Shrinking removes records from the Table by stored row position, not the displayed sort order. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),

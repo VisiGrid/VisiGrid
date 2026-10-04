@@ -1222,7 +1222,11 @@ impl History {
                 (Some(*sheet_index), vec![], Some((r.start_row, r.start_col, r.end_row, r.end_col)))
             }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
-                let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
+                let range=commit.after_table().or_else(||commit.before_table()).map(|t| {
+                    let mut range = t.full_range();
+                    if commit.is_totals_change() { range.end_row = t.range.end_row + 1; }
+                    (range.start_row,range.start_col,range.end_row,range.end_col)
+                });
                 (Some(*sheet_index),vec![],range)
             }
             UndoAction::Comments { sheet_index, patches, .. } => {
@@ -1812,6 +1816,10 @@ impl History {
                     if let (Some(layout), Some(view)) = (header_layout, view_state.per_sheet.get_mut(*sheet_index)) {
                         view.structure_layout = Some(layout.after.clone());
                     }
+                } else if commit.is_totals_change() {
+                    let candidate = crate::table_totals::prepare_replay(workbook, commit, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
                 } else if crate::table_resize::is_resize(commit) {
                     let candidate = crate::table_resize::prepare_resize_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
@@ -2485,6 +2493,32 @@ mod tests {
                 assert_eq!(replay.sheet(0).unwrap().get_display(r,c), workbook.sheet(0).unwrap().get_display(r,c));
             }}
             assert_eq!(replay.sheet(summary).unwrap().get_raw(0,0), workbook.sheet(summary).unwrap().get_raw(0,0));
+        }
+    }
+
+    #[test]
+    fn native_totals_rewind_with_active_filters_keeps_footer_and_criteria() {
+        use visigrid_engine::{table::TableRange, table_view::{TableViewSpec, TableFilter}, filter::{ColumnFilter, NormalizedFilterKey}};
+        let mut wb = Workbook::new();
+        for (row, value) in ["Amount", "10", "20"].iter().enumerate() { wb.set_cell_value_tracked(0, row, 0, value); }
+        let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row:0, start_col:0, end_row:2, end_col:0 }, "Sales").unwrap().table_id();
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter { column: wb.table(id).unwrap().1.columns[0].id,
+            criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Number(10.0.into())].into()), text_filter: None } });
+        wb.set_table_view_spec(wb.active_sheet_id(), Some(spec.clone())).unwrap();
+        let mut replay = wb.clone();
+        let show = wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let edit = wb.set_table_total(id, 0, crate::table_totals::total_setting("countNums", "").unwrap()).unwrap();
+        let hide = wb.set_table_totals_visible(id, false, Default::default()).unwrap();
+        let mut view = crate::app::PreviewViewState::default();
+        for (commit, expected) in [(show, "10"), (edit, "1"), (hide, "")] {
+            let action = UndoAction::TableCommit { sheet_index: 0, commit: Box::new(commit.clone()), header_layout: None, description: "Totals".into() };
+            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            assert_eq!(replay.sheet(0).unwrap().get_display(3, 0), expected);
+            assert_eq!(replay.sheet(0).unwrap().table_view_spec(), Some(&spec));
+            let before = crate::table_totals::prepare_replay(&replay, &commit, true).unwrap();
+            let after = crate::table_totals::prepare_replay(&before, &commit, false).unwrap();
+            assert_eq!(after.sheet(0).unwrap().get_display(3, 0), expected);
         }
     }
 

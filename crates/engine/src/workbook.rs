@@ -2421,7 +2421,7 @@ impl Workbook {
                         for formula in total.formula.iter().chain(cell.as_ref().filter(|s| s.starts_with('='))) {
                             if crate::structural::adjust_formula_text(formula, &edit, &owner.name)
                                 .is_some_and(|rewritten| rewritten != *formula) {
-                                return Err("This structural edit would rewrite an imported totals formula. Native totals editing is not supported yet.".into());
+                                return Err("This structural edit would rewrite a totals formula. Totals reference rewriting is not supported yet.".into());
                             }
                         }
                     }

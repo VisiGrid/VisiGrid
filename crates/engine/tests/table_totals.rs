@@ -56,6 +56,272 @@ fn book() -> Workbook {
     wb
 }
 
+fn native_book() -> (Workbook, visigrid_engine::table::TableId) {
+    let mut wb = Workbook::new();
+    for (row, cells) in [
+        ["Region", "Amount"],
+        ["West", "10"],
+        ["East", "20"],
+        ["West", "30"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (col, cell) in cells.iter().enumerate() {
+            wb.set_cell_value_tracked(0, row, col, cell);
+        }
+    }
+    let id = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: 0,
+                end_row: 3,
+                start_col: 0,
+                end_col: 1,
+            },
+            "Sales",
+        )
+        .unwrap()
+        .table_id();
+    (wb, id)
+}
+
+#[test]
+fn native_totals_show_edit_hide_and_replay_preserve_body_and_settings() {
+    let (mut wb, id) = native_book();
+    let show = wb
+        .set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    assert!(show.is_totals_change());
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 0), "Total");
+    wb.set_cell_value_tracked(0, 0, 4, "=SUM(Sales[[#Totals],[Amount]])");
+    let summary = wb.add_sheet_named("Summary").unwrap();
+    wb.set_cell_value_tracked(summary, 0, 0, "=SUM(Sales[[#Totals],[Amount]])");
+    let generation = wb.sheet(summary).unwrap().edit_generation();
+    let custom = wb
+        .set_table_total(
+            id,
+            1,
+            TableTotal {
+                function: Some("custom".into()),
+                formula: Some("= SUM([Amount]) * 2".into()),
+                label: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "120");
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "120");
+    assert!(
+        wb.sheet(summary).unwrap().edit_generation() > generation,
+        "cross-sheet pivot sources must become stale when totals change"
+    );
+    let label = wb
+        .set_table_total(
+            id,
+            0,
+            TableTotal {
+                label: Some("=Literal label".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        wb.sheet(0).unwrap().get_cell(4, 0).value,
+        visigrid_engine::cell::CellValue::Text(_)
+    ));
+    let hide = wb
+        .set_table_totals_visible(id, false, Default::default())
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "");
+    assert!(wb.sheet(0).unwrap().get_display(0, 4).starts_with("#REF!"));
+    assert_eq!(wb.table(id).unwrap().1.range.data_rows(), 3);
+    let reshow = wb
+        .set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "= SUM([Amount]) * 2");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 0), "=Literal label");
+    for commit in [&reshow, &hide, &label, &custom, &show] {
+        wb.apply_table_commit(commit, true).unwrap();
+    }
+    assert!(wb.table(id).unwrap().1.totals.is_none());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "");
+    for commit in [&show, &custom, &label, &hide, &reshow] {
+        wb.apply_table_commit(commit, false).unwrap();
+    }
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "120");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(2, 1), "20");
+}
+
+#[test]
+fn native_totals_aggregate_settings_follow_filters_and_manual_hides() {
+    let (mut wb, id) = native_book();
+    wb.set_table_totals_visible(id, true, [2].into_iter().collect())
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "40");
+    let table = wb.table(id).unwrap().1.clone();
+    let mut spec = TableViewSpec::new(id);
+    spec.filters.push(TableFilter {
+        column: table.columns[0].id,
+        criteria: ColumnFilter {
+            selected: Some([NormalizedFilterKey::Text("east".into())].into()),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(wb.active_sheet_id(), Some(spec))
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "0");
+    wb.set_table_view_spec(wb.active_sheet_id(), None).unwrap();
+    for (function, expected) in [
+        ("average", "20"),
+        ("min", "10"),
+        ("max", "30"),
+        ("count", "2"),
+        ("countNums", "2"),
+        ("var", "200"),
+    ] {
+        let commit = wb
+            .set_table_total(
+                id,
+                1,
+                TableTotal {
+                    function: Some(function.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            wb.sheet(0).unwrap().get_display(4, 1),
+            expected,
+            "{function}"
+        );
+        wb.apply_table_commit(&commit, true).unwrap();
+        wb.apply_table_commit(&commit, false).unwrap();
+    }
+}
+
+#[test]
+fn native_totals_refuse_collisions_bad_formulas_and_stale_replay_atomically() {
+    let (mut wb, id) = native_book();
+    wb.set_cell_value_tracked(0, 4, 1, "Notes below");
+    assert!(wb
+        .set_table_totals_visible(id, true, Default::default())
+        .is_err());
+    assert!(wb.table(id).unwrap().1.totals.is_none());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "Notes below");
+    wb.clear_cell_tracked(0, 4, 1);
+    assert!(wb
+        .set_table_totals_visible(id, true, [4].into_iter().collect())
+        .is_err());
+    let show = wb
+        .set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    let before = wb.sheet(0).unwrap().get_raw(4, 1);
+    assert!(wb
+        .set_table_total(
+            id,
+            1,
+            TableTotal {
+                function: Some("custom".into()),
+                formula: Some("=SUM(".into()),
+                label: None
+            }
+        )
+        .is_err());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), before);
+    wb.apply_table_commit(&show, true).unwrap();
+    wb.set_cell_value_tracked(0, 4, 1, "Later data");
+    assert!(wb.apply_table_commit(&show, false).is_err());
+    assert!(wb.table(id).unwrap().1.totals.is_none());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "Later data");
+}
+
+#[test]
+fn native_footer_cannot_claim_merges_comments_other_tables_or_out_of_bounds_cells() {
+    use visigrid_engine::{
+        cell::CellComment,
+        sheet::{MergedRegion, NUM_ROWS},
+    };
+    let (mut wb, id) = native_book();
+    wb.sheet_mut(0)
+        .unwrap()
+        .add_merge(MergedRegion::new(4, 0, 4, 1))
+        .unwrap();
+    assert!(wb
+        .set_table_totals_visible(id, true, Default::default())
+        .is_err());
+    wb.sheet_mut(0).unwrap().remove_merge((4, 0));
+    wb.sheet_mut(0).unwrap().set_comment(
+        4,
+        1,
+        Some(CellComment {
+            text: "Keep me".into(),
+            author: "QA".into(),
+        }),
+    );
+    assert!(wb
+        .set_table_totals_visible(id, true, Default::default())
+        .is_err());
+    wb.sheet_mut(0).unwrap().set_comment(4, 1, None);
+    wb.create_table(
+        wb.active_sheet_id(),
+        TableRange {
+            start_row: 4,
+            end_row: 5,
+            start_col: 0,
+            end_col: 1,
+        },
+        "Below",
+    )
+    .unwrap();
+    assert!(wb
+        .set_table_totals_visible(id, true, Default::default())
+        .is_err());
+    let id = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: NUM_ROWS - 1,
+                end_row: NUM_ROWS - 1,
+                start_col: 3,
+                end_col: 3,
+            },
+            "Last",
+        )
+        .unwrap()
+        .table_id();
+    assert!(wb
+        .set_table_totals_visible(id, true, Default::default())
+        .is_err());
+}
+
+#[test]
+fn empty_native_table_and_escaped_column_name_have_valid_totals() {
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "Amount [net]");
+    let id = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: 0,
+                end_row: 0,
+                start_col: 0,
+                end_col: 0,
+            },
+            "Empty",
+        )
+        .unwrap()
+        .table_id();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(1, 0), "0");
+    assert_eq!(
+        wb.sheet(0).unwrap().get_raw(1, 0),
+        "=SUBTOTAL(109,[Amount '[net']])"
+    );
+}
+
 #[test]
 fn subtotal_function_numbers_and_hidden_rows_remain_distinct() {
     let mut wb = book();

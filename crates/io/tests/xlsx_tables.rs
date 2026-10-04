@@ -49,6 +49,40 @@ fn book() -> (Workbook, TableId) {
     );
     (wb, id)
 }
+
+#[test]
+fn native_authored_totals_survive_native_and_excel_roundtrip() {
+    use visigrid_engine::table::TableTotal;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 1, TableTotal { label: Some("Grand total".into()), ..Default::default() }).unwrap();
+    wb.set_table_total(id, 2, TableTotal { function: Some("custom".into()), formula: Some("=SUM([Price])*2".into()), label: None }).unwrap();
+    let expected = wb.sheet(0).unwrap().get_display(8, 3);
+    let path = dir.path().join("native-totals.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let wb = native::load_workbook(&path).unwrap();
+    let path = dir.path().join("native-totals.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let table_xml = xml(&path, "xl/tables/table1.xml");
+    assert!(table_xml.contains("totalsRowCount=\"1\""));
+    assert!(table_xml.contains("totalsRowLabel=\"Grand total\""));
+    assert!(table_xml.contains("totalsRowFunction=\"sum\""));
+    let (mut wb, _) = xlsx::import(&path).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 3), expected);
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 2), "100");
+    let id = wb.tables().next().unwrap().1.id;
+    wb.set_table_totals_visible(id, false, Default::default()).unwrap();
+    let path = dir.path().join("dormant-native-totals.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (mut wb, _) = xlsx::import(&path).unwrap();
+    let id = wb.tables().next().unwrap().1.id;
+    assert!(wb.table(id).unwrap().1.totals_row().is_none());
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 3), expected);
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 2), "100");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(8, 1), "Grand total");
+}
 fn xml(path: &Path, name: &str) -> String {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
     let mut out = String::new();

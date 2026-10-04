@@ -714,7 +714,7 @@ impl Sheet {
     /// these writes; callers use this to reject an entire batch with a reason.
     pub fn table_value_write_error(&self, row: usize, col: usize) -> Option<String> {
         if let Some(t) = self.tables().iter().find(|t| t.totals_row() == Some(row) && t.full_range().contains(row, col)) {
-            return Some(format!("{} has an imported totals row. Totals-row editing is not supported yet; convert it to a range first.", t.name));
+            return Some(format!("{} has a protected totals row. Use the Table’s Edit total control to change its function, label or formula.", t.name));
         }
         self.table_header_at(row, col).map(|t| format!(
             "'{}' has a protected table header; use the table column rename operation.", t.name
@@ -737,7 +737,7 @@ impl Sheet {
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
         for t in self.tables() {
             if t.totals.is_some() && at <= if is_row { t.full_range().end_row.max(t.totals.as_ref().and_then(|t| t.hidden_rows.last().copied()).unwrap_or(0)) } else { t.range.end_col } {
-                return Some("Structural edits affecting imported totals-row Tables are not supported yet. Convert the Table to a range first.".into());
+                return Some("Structural edits affecting totals-row Tables are not supported yet. Convert the Table to a range first.".into());
             }
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };

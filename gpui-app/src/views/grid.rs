@@ -603,6 +603,7 @@ fn render_cell(
 
     let table_fill = display_sheet.table_at(display_data_row,col).and_then(|t| {
         if display_data_row == t.range.start_row { Some(app.token(TokenKey::Accent).opacity(0.20)) }
+        else if t.totals_row() == Some(display_data_row) { Some(app.token(TokenKey::Accent).opacity(0.12)) }
         else if t.style.banded_rows && (display_data_row-t.range.start_row)%2 == 0 { Some(app.token(TokenKey::Accent).opacity(0.07)) }
         else { None }
     });
@@ -675,13 +676,18 @@ fn render_cell(
         } else { cell_base_background_with_role(app,is_editing,format.background_color,cell_style.fill,role_style) })
         .border_color(border_color);
 
+    if display_sheet.table_at(display_data_row, col).is_some_and(|t| t.totals_row() == Some(display_data_row)) {
+        cell = cell.child(non_interactive_overlay().border_t_1()
+            .border_color(app.token(TokenKey::Accent).opacity(0.35)));
+    }
+
     // Membership outline for the Table containing the active cell. This is a
     // viewport-only overlay; no borders or fills are stamped into cell storage.
     if !is_frozen_review && !app.is_previewing() {
         if let Some(table) = display_sheet.table_at(display_data_row,col) {
             let (selected_row,selected_col)=view_state.selected;
-            if table.range.contains(app.row_view.view_to_data(selected_row),selected_col) {
-                let range=table.range;
+            if table.full_range().contains(app.row_view.view_to_data(selected_row),selected_col) {
+                let range=table.full_range();
                 cell=cell.child(non_interactive_overlay()
                     .border_color(app.token(TokenKey::Accent).opacity(0.7))
                     .when(display_data_row==range.start_row,|d|d.border_t_1())
