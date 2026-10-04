@@ -869,13 +869,19 @@ impl Sheet {
     /// For values arriving from a source that already declared them as strings
     /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
     pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
+        self.set_text_exact(row, col, text.trim());
+    }
+
+    /// Import text whose source declared its type; keep whitespace verbatim.
+    /// Ordinary typed entry and set_text retain their existing trimming behavior.
+    pub fn set_text_exact(&mut self, row: usize, col: usize, text: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
         if !self.accept_value_write(row, col) {
             return;
         }
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
-        self.with_cell(row, col, |cell| cell.set_text(text));
+        self.with_cell(row, col, |cell| cell.set_text_exact(text));
     }
 
     /// Set a cell without evaluating it.

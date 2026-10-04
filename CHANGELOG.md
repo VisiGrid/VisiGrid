@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- XLSX formulas retain typed calculated results for values-only readers, including numeric-looking text, booleans and standard errors. Missing/unsupported caches are omitted with a warning; imported string caches preserve whitespace and escaped characters.
+
 - Preserve workbook-wide cell/range names and descriptions in XLSX, including references to moved Table totals; remap intact named targets during sorted export and report unsupported Excel name types explicitly.
 
 - Fixed references to Table totals follow the footer when rows are appended or the Table is resized. Formula cells, named targets, calculated rules, custom totals and rule formulas update together with undo/redo and rewind. Larger ranges retain their worksheet bounds; dynamic references still require explicit or structured references before moving totals.

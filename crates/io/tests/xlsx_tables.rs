@@ -961,8 +961,15 @@ fn boolean_and_error_values_and_values_only_import_keep_filter_membership() {
     assert!(xml(&file, "xl/tables/table1.xml").contains("val=\"#DIV/0!\""));
     let (loaded, _) = xlsx::import(&file).unwrap();
     assert_eq!(loaded.sheet(0).unwrap().table_view_spec(), Some(&expected));
-    // Values-only imports use the writer's cached formula results. Verify
-    // that criteria survive without assuming those caches contain live results.
+    // Values-only import consumes actual typed caches. Its static boolean/error
+    // representation is text, so verify membership rather than identical key types.
+    let (values, report) = xlsx::import_with_options(&file, &xlsx::ImportOptions { values_only: true, ..Default::default() }).unwrap();
+    assert_eq!(values.sheet(0).unwrap().get_raw(3, 1), "TRUE");
+    assert_eq!(values.sheet(0).unwrap().get_raw(4, 1), "#DIV/0!");
+    let sheet = values.sheet(0).unwrap();
+    let view = visigrid_engine::table_view::TableView::build(sheet, sheet.table_view_spec().unwrap().clone(), 20, None).unwrap();
+    assert_eq!((3..8).filter(|r| view.rows().is_data_row_visible(*r)).collect::<Vec<_>>(), vec![3, 4], "{:?}", report.warnings);
+    // Numeric calculated-column results and blank overrides retain their criteria.
     let (mut wb, id) = book();
     select_values(&mut wb, id, 2, &[3, 5], true);
     xlsx::export(&wb, &file, None).unwrap();

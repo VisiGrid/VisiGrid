@@ -55,6 +55,7 @@ fn names_descriptions_and_cross_sheet_formulas_roundtrip_in_both_modes() {
             wb.named_ranges().get("Amounts")
         );
         assert_eq!(values.sheet(0).unwrap().get_display(0, 0), "10");
+        assert_eq!(values.sheet(1).unwrap().get_display(0, 0), "40");
         assert!(!values.sheet(1).unwrap().get_raw(0, 0).starts_with('='));
     }
 }

@@ -423,7 +423,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     // Some(CellValue::Empty) which means "Calamine had an explicit empty value").
     let mut cached_snapshots: Vec<HashMap<(usize, usize), (Option<CellValue>, String)>> = Vec::new();
 
-    for sheet_name in &sheet_names {
+    let mut formula_string_cells = None;
+    for (sheet_index, sheet_name) in sheet_names.iter().enumerate() {
         let range = workbook.worksheet_range(sheet_name)
             .map_err(|e| format!("Failed to read sheet '{}': {}", sheet_name, e))?;
 
@@ -513,11 +514,19 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                         // set_value would parse it back to 7 and lose the
                         // zeros silently. Formulas arrive separately from
                         // <f>, so nothing here needs the '=' branch.
-                        if !s.trim().is_empty() {
-                            sheet.set_text(target_row, target_col, s);
-                            stats.cells_imported += 1;
-                            total_cells += 1;
-                        }
+                        let decoded;
+                        let text = if s.contains("_x") && formula_string_cells.get_or_insert_with(|| {
+                            crate::xlsx_formula_cache::string_cells(path).unwrap_or_else(|e| {
+                                result.warnings.push(format!("Formula cached-text escapes could not be decoded: {e}"));
+                                Default::default()
+                            })
+                        }).contains(&(sheet_index, target_row, target_col)) {
+                            decoded = crate::xlsx_comments::decode_excel(s);
+                            &decoded
+                        } else { s };
+                        sheet.set_text_exact(target_row, target_col, text);
+                        stats.cells_imported += 1;
+                        total_cells += 1;
                     }
                     Data::Float(n) => {
                         // Format nicely: integers without decimals
@@ -544,7 +553,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     }
                     Data::Error(e) => {
                         // Store error as text representation
-                        let error_str = format!("#{:?}", e);
+                        let error_str = e.to_string();
                         sheet.set_value(target_row, target_col, &error_str);
                         stats.cells_imported += 1;
                         total_cells += 1;
@@ -1528,6 +1537,7 @@ fn export_to_buffer_impl(
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
     let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
     let bytes = crate::xlsx_names::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_formula_cache::finish(bytes, workbook, &mut result.warnings)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
 }
@@ -1546,10 +1556,11 @@ pub fn table_export_warnings_with_order(
     order: ExportOrder,
 ) -> Result<Vec<String>, String> {
     workbook.ensure_writable()?;
-    let warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
-    if order == ExportOrder::Sorted {
-        crate::xlsx_sorted_export::prepare(workbook, layouts)?;
-    }
+    let mut warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
+    let prepared = if order == ExportOrder::Sorted {
+        crate::xlsx_sorted_export::prepare(workbook, layouts)?
+    } else { std::borrow::Cow::Borrowed(workbook) };
+    warnings.extend(crate::xlsx_formula_cache::warnings(prepared.as_ref()));
     Ok(warnings)
 }
 
@@ -1980,7 +1991,7 @@ fn count_shared_formula_groups(path: &Path) -> usize {
 }
 
 /// Read a file from a ZIP archive, returning None on error.
-fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
+pub(super) fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Option<String> {
@@ -1992,7 +2003,7 @@ fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
 }
 
 /// Resolve worksheet XML paths from workbook.xml + workbook.xml.rels
-fn resolve_worksheet_paths(workbook_xml: &str, rels_xml: &str) -> Vec<String> {
+pub(super) fn resolve_worksheet_paths(workbook_xml: &str, rels_xml: &str) -> Vec<String> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
 

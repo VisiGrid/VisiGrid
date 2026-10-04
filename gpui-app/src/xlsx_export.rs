@@ -135,11 +135,24 @@ mod tests {
         let mut wb = book();
         let mut review = ExportReview::new(&wb, &[]).unwrap();
         review.select(ExportOrder::Stored);
-        wb.define_name_for_cell("FirstKey", 0, 1, 0).unwrap();
+        wb.set_cell_value_tracked(0, 4, 0, "=SUM(A2:A3)");
+        wb.sheet(0).unwrap().clear_cached(4, 0);
         assert!(review
             .check_current(&wb, &[])
             .unwrap_err()
             .contains("details changed"));
+    }
+    #[test]
+    fn preserved_names_do_not_create_loss_warnings_but_missing_caches_do() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "12");
+        wb.define_name_for_cell("Selected", 0, 0, 0).unwrap();
+        wb.set_cell_value_tracked(0, 1, 0, "=Selected");
+        assert!(!ExportReview::new(&wb, &[]).unwrap().needs_review());
+        wb.sheet(0).unwrap().clear_cached(1, 0);
+        let review = ExportReview::new(&wb, &[]).unwrap();
+        assert!(review.needs_review());
+        assert!(review.warnings().iter().any(|w| w.contains("1 not calculated")));
     }
     #[test]
     fn sorted_eligibility_is_rechecked_without_silently_switching_modes() {

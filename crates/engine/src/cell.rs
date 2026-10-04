@@ -1667,7 +1667,12 @@ impl Cell {
     ///
     /// Trims to match `from_input`, so ordinary text imports unchanged.
     pub fn set_text(&mut self, text: &str) {
-        self.value = CellValue::Text(text.trim().to_string());
+        self.set_text_exact(text.trim());
+    }
+
+    /// Preserve an already-typed external string, including significant whitespace.
+    pub fn set_text_exact(&mut self, text: &str) {
+        self.value = CellValue::Text(text.to_string());
         self.clear_spill_state();
         self.set_frozen_formula(None);
     }
