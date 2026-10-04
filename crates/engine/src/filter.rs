@@ -620,10 +620,22 @@ impl TextFilter {
 pub struct ColumnFilter {
     /// Selected normalized filter keys to INCLUDE (None = all pass)
     /// Uses NormalizedFilterKey for consistent comparison
+    #[serde(serialize_with = "serialize_selected")]
     pub selected: Option<HashSet<NormalizedFilterKey>>,
 
     /// Optional text predicate (AND with selected)
     pub text_filter: Option<TextFilter>,
+}
+
+fn serialize_selected<S: serde::Serializer>(
+    selected: &Option<HashSet<NormalizedFilterKey>>, serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let ordered = selected.as_ref().map(|values| {
+        let mut values: Vec<_> = values.iter().collect();
+        values.sort_unstable();
+        values
+    });
+    ordered.serialize(serializer)
 }
 
 impl ColumnFilter {
