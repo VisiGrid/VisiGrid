@@ -22,7 +22,7 @@ fn workbook() -> Workbook {
 fn bold(sheet_index: usize) -> UndoAction {
     UndoAction::Format {
         sheet_index,
-        patches: vec![CellFormatPatch {
+        patches: vec![CellFormatPatch { remove_cell_on_undo: false,
             row: 0,
             col: 0,
             before: CellFormat::default(),
@@ -55,7 +55,7 @@ fn metadata_scope_follows_the_target_sheet_even_after_switching_tabs() {
         assert!(!sheet_metadata_allowed(&wb, 0));
         assert!(metadata_history_allowed(&wb, &bold(1)));
         assert!(metadata_history_allowed(&wb, &freeze()));
-        assert!(!metadata_history_allowed(&wb, &bold(0)));
+        assert!(metadata_history_allowed(&wb, &bold(0)));
     }
     assert!(!sheet_metadata_allowed(&wb, 999));
     assert!(!metadata_history_allowed(&wb, &bold(999)));
@@ -87,7 +87,7 @@ fn mixed_history_groups_cannot_bypass_the_criteria_guard() {
         &wb,
         &group(vec![bold(1), freeze()])
     ));
-    assert!(!metadata_history_allowed(
+    assert!(metadata_history_allowed(
         &wb,
         &group(vec![bold(1), bold(0)])
     ));

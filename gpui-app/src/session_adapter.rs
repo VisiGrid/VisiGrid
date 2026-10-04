@@ -896,7 +896,7 @@ impl Spreadsheet {
                         *sheet_idx,
                         patches
                             .iter()
-                            .map(|p| CellFormatPatch {
+                            .map(|p| CellFormatPatch { remove_cell_on_undo: false,
                                 row: p.row,
                                 col: p.col,
                                 before: p.before.clone(),

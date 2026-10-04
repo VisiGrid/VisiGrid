@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Format visible records in sorted/filtered Tables without clearing criteria: fonts, colors, alignment, number formats, styles, borders, Clear Formatting and Format Painter use canonical cells and atomic validation. F4 repeat and undo/redo keep the same targeting; hidden records stay unchanged.
+- Resolve Table borders against visible neighbors, preserve empty-cell absence through formatting undo, and keep the copied format available after a refused paste/painter operation. Adjacent body formatting and percentage-text conversion remain explicit refusals.
+
 - Add, edit and delete comments on visible sorted/filtered Table records without clearing criteria. Comments stay with canonical cells through undo/redo and history rewind; comment navigation can read hidden records without revealing them. Unsafe adjacent comments and stale drafts are refused before mutation.
 - Full-fidelity JSON now preserves comment text and authors, including comments on empty cells and spill receivers. The additive field leaves comment-free exports unchanged; older readers can still drop comments on re-save.
 

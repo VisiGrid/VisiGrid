@@ -43,12 +43,11 @@ pub(crate) fn sheet_metadata_allowed(wb: &Workbook, index: usize) -> bool {
 /// must be admitted as a whole before any child action is replayed.
 pub(crate) fn metadata_history_allowed(wb: &Workbook, action: &UndoAction) -> bool {
     match action {
-        UndoAction::Format { sheet_index, .. }
-        | UndoAction::CondFormatAdded { sheet_index, .. }
+        UndoAction::CondFormatAdded { sheet_index, .. }
         | UndoAction::CondFormatsCleared { sheet_index, .. } => {
             sheet_metadata_allowed(wb, *sheet_index)
         }
-        UndoAction::Comments { sheet_index, .. } => wb.sheet(*sheet_index).is_some(),
+        UndoAction::Format { sheet_index, .. } | UndoAction::Comments { sheet_index, .. } => wb.sheet(*sheet_index).is_some(),
         UndoAction::FreezePanesChanged { sheet_id, .. } => wb
             .sheet_index_by_id(*sheet_id)
             .is_some_and(|index| sheet_metadata_allowed(wb, index)),

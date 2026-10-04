@@ -39,6 +39,9 @@ impl Spreadsheet {
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
+            if let Err(error) = crate::formatting::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, false) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
@@ -106,14 +109,8 @@ impl Spreadsheet {
                     self.status_message = Some("Undo".to_string());
                 }
                 UndoAction::Format { sheet_index, patches, description, .. } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for patch in patches {
-                                sheet.set_format(patch.row, patch.col, patch.before);
-                            }
-                            sheet.scan_border_flag();
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, false));
+                    self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: {}", description));
                 }
                 UndoAction::NamedRangeDeleted { named_range } => {
@@ -617,14 +614,8 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::Format { sheet_index, patches, .. } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        for patch in patches {
-                            sheet.set_format(patch.row, patch.col, patch.before);
-                        }
-                        sheet.scan_border_flag();
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, false));
+                self.bump_cells_rev();
             }
             UndoAction::NamedRangeDeleted { named_range } => {
                 self.workbook.update(cx, |wb, _| { let _ = wb.named_ranges_mut().set(named_range); });
@@ -1031,12 +1022,8 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::Format { sheet_index, patches, .. } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
-                    for patch in patches {
-                        sheet.set_format(patch.row, patch.col, patch.after);
-                    }
-                    sheet.scan_border_flag();
-                });
+                self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, true));
+                self.bump_cells_rev();
             }
             UndoAction::NamedRangeDeleted { named_range } => {
                 let name = named_range.name.clone();
@@ -1331,6 +1318,9 @@ impl Spreadsheet {
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
+            if let Err(error) = crate::formatting::plan::validate_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, true) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
@@ -1399,14 +1389,8 @@ impl Spreadsheet {
                     self.status_message = Some("Redo".to_string());
                 }
                 UndoAction::Format { sheet_index, patches, description, .. } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for patch in patches {
-                                sheet.set_format(patch.row, patch.col, patch.after);
-                            }
-                            sheet.scan_border_flag();
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, true));
+                    self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: {}", description));
                 }
                 UndoAction::NamedRangeDeleted { named_range } => {

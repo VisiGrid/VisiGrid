@@ -753,7 +753,7 @@ impl Spreadsheet {
         }
         if before != format {
             self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
-            patches.push(CellFormatPatch { row, col, before, after: format });
+            patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after: format });
         }
     }
 
@@ -1907,7 +1907,7 @@ impl Spreadsheet {
 
                     // Track change for history
                     if old_format != *format {
-                        format_patches.push(CellFormatPatch {
+                        format_patches.push(CellFormatPatch { remove_cell_on_undo: false,
                             row: target_data_row,
                             col,
                             before: old_format,

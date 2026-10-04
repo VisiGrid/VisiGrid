@@ -434,7 +434,7 @@ fn test_format_coalescing_same_cells_merges() {
     let mut history = History::new();
 
     // First decimal change on cell (0,0)
-    let patches1 = vec![CellFormatPatch {
+    let patches1 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 0,
         before: CellFormat::default(),
@@ -443,7 +443,7 @@ fn test_format_coalescing_same_cells_merges() {
     history.record_format(0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Second decimal change on same cell within 500ms window
-    let patches2 = vec![CellFormatPatch {
+    let patches2 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 0,
         before: CellFormat { bold: true, ..Default::default() },
@@ -475,7 +475,7 @@ fn test_format_coalescing_different_cells_separate() {
     let mut history = History::new();
 
     // First decimal change on cell (0,0)
-    let patches1 = vec![CellFormatPatch {
+    let patches1 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 0,
         before: CellFormat::default(),
@@ -484,7 +484,7 @@ fn test_format_coalescing_different_cells_separate() {
     history.record_format(0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Second decimal change on DIFFERENT cell (0,1) within 500ms window
-    let patches2 = vec![CellFormatPatch {
+    let patches2 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 1,  // Different column!
         before: CellFormat::default(),
@@ -543,9 +543,9 @@ fn test_format_undo_restores_mixed_state() {
 
     // Record format change with individual before/after for each cell
     let patches = vec![
-        CellFormatPatch { row: 0, col: 0, before: before_a1.clone(), after: sheet.get_format(0, 0) },
-        CellFormatPatch { row: 1, col: 0, before: before_a2.clone(), after: sheet.get_format(1, 0) },
-        CellFormatPatch { row: 2, col: 0, before: before_a3.clone(), after: sheet.get_format(2, 0) },
+        CellFormatPatch { remove_cell_on_undo: false, row: 0, col: 0, before: before_a1.clone(), after: sheet.get_format(0, 0) },
+        CellFormatPatch { remove_cell_on_undo: false, row: 1, col: 0, before: before_a2.clone(), after: sheet.get_format(1, 0) },
+        CellFormatPatch { remove_cell_on_undo: false, row: 2, col: 0, before: before_a3.clone(), after: sheet.get_format(2, 0) },
     ];
     history.record_format(0, patches, FormatActionKind::Bold, "Bold on".into());
 
@@ -3343,7 +3343,7 @@ fn test_format_painter_undo_reverts_multi_cell() {
         if b != paint_format {
             sheet.set_format(0, col, paint_format.clone());
             let a = sheet.get_format(0, col);
-            patches.push(CellFormatPatch { row: 0, col, before: b, after: a });
+            patches.push(CellFormatPatch { remove_cell_on_undo: false, row: 0, col, before: b, after: a });
         }
     }
     assert_eq!(patches.len(), 3, "All 3 cells should change");
@@ -3427,7 +3427,7 @@ fn test_format_painter_locked_mode_persists() {
             if before != snapshot {
                 sheet.set_format(0, col, snapshot.clone());
                 let after = sheet.get_format(0, col);
-                patches.push(CellFormatPatch { row: 0, col, before, after });
+                patches.push(CellFormatPatch { remove_cell_on_undo: false, row: 0, col, before, after });
             }
         }
         assert_eq!(patches.len(), 3, "Selection A: all 3 cells should change");
@@ -3451,7 +3451,7 @@ fn test_format_painter_locked_mode_persists() {
             if before != snapshot {
                 sheet.set_format(1, col, snapshot.clone());
                 let after = sheet.get_format(1, col);
-                patches.push(CellFormatPatch { row: 1, col, before, after });
+                patches.push(CellFormatPatch { remove_cell_on_undo: false, row: 1, col, before, after });
             }
         }
         assert_eq!(patches.len(), 3, "Selection B: all 3 cells should change");
@@ -3539,7 +3539,7 @@ fn test_format_painter_applies_to_range() {
                 if before != paint_format {
                     sheet.set_format(row, col, paint_format.clone());
                     let after = sheet.get_format(row, col);
-                    patches.push(CellFormatPatch { row, col, before, after });
+                    patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                 }
             }
         }

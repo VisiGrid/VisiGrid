@@ -88,7 +88,7 @@ pub(crate) fn apply_comment_patches(workbook: &mut Workbook, sheet_index: usize,
         for p in patches {
             sheet.set_comment(p.row, p.col, if forward { p.after.clone() } else { p.before.clone() });
             if !forward && p.remove_cell_on_undo && p.before.is_none() {
-                sheet.remove_empty_comment_cell(p.row, p.col);
+                sheet.remove_empty_metadata_cell(p.row, p.col);
             }
         }
         workbook.bump_revision_for_structure();
@@ -98,6 +98,8 @@ pub(crate) fn apply_comment_patches(workbook: &mut Workbook, sheet_index: usize,
 /// A patch for a single cell's format (before/after snapshot)
 #[derive(Clone, Debug)]
 pub struct CellFormatPatch {
+    /// Restore an absent cell when undo removes its only authored metadata.
+    pub remove_cell_on_undo: bool,
     pub row: usize,
     pub col: usize,
     pub before: CellFormat,
@@ -1722,6 +1724,8 @@ impl History {
                 }
             }
             UndoAction::Format { sheet_index, patches, .. } => {
+                crate::formatting::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
                         format!("Format action references invalid sheet {}", sheet_index)
@@ -2687,7 +2691,7 @@ mod tests {
             old_value: "a".to_string(),
             new_value: "b".to_string(),
         }];
-        let patches = vec![CellFormatPatch {
+        let patches = vec![CellFormatPatch { remove_cell_on_undo: false,
             row: 0,
             col: 0,
             before: CellFormat::default(),

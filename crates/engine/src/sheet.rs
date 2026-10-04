@@ -1722,10 +1722,10 @@ impl Sheet {
         self.with_cell(row, col, |cell| cell.set_comment(comment));
     }
 
-    /// Undo materializing a previously absent cell solely to hold a comment.
+    /// Undo materializing a previously absent cell solely for cell metadata.
     /// Preserve any intervening value/format/other metadata and all derived
     /// spill state: removing this metadata slot must not clear a spill receiver.
-    pub fn remove_empty_comment_cell(&mut self, row: usize, col: usize) {
+    pub fn remove_empty_metadata_cell(&mut self, row: usize, col: usize) {
         let empty = self.cells.get(row, col).is_some_and(|cell| {
             matches!(cell.value(), ValueRef::Empty)
                 && *cell.format() == self.inherited_format(row, col)

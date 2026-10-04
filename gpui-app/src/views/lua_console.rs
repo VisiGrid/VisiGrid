@@ -1317,7 +1317,7 @@ fn apply_captured_lua_ops_inner(
                     .unwrap_or_default();
                 guard.clear_cell_tracked(sheet_index, row, col);
                 if before != Default::default() {
-                    format_patches.push(CellFormatPatch {
+                    format_patches.push(CellFormatPatch { remove_cell_on_undo: false,
                         row,
                         col,
                         before,
@@ -1350,7 +1350,7 @@ fn apply_captured_lua_ops_inner(
                         if before != after {
                             let id = guard.sheet(sheet_index).unwrap().id;
                             guard.note_format_changed(visigrid_engine::cell_id::CellId::new(id,row,col));
-                            format_patches.push(CellFormatPatch { row, col, before, after });
+                            format_patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                         }
                     }
                 }
