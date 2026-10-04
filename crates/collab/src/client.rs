@@ -9,20 +9,26 @@
 //! transformed past them; the transformed op is then applied on top of the
 //! local state. TP1 makes that equal to "committed + their op + our ops".
 //!
-//! If a pending envelope is refused (a V1-serialized conflict), that
-//! envelope and everything queued after it are discarded and the replica is
-//! rebuilt from the committed log ("refresh"). Later queued edits are
-//! discarded too because each was written on top of the refused one.
+//! The replica keeps two workbooks: `confirmed` (exactly the server's state
+//! as of `last_seen`) and `wb`, the optimistic state the user sees
+//! (confirmed plus every pending envelope, in order).
+//!
+//! If a pending envelope is refused (a V1-serialized conflict), only that
+//! envelope is discarded. Envelopes queued after it were written on top of
+//! it, so each is transformed past the refused envelope's *positional
+//! inverse* (an insert it made is undone as a delete, and so on) before it
+//! is kept; one that no longer applies is discarded with it. The optimistic
+//! state is then rebuilt as confirmed + the remaining pending envelopes.
 
 use std::collections::VecDeque;
 
 use uuid::Uuid;
 use visigrid_engine::workbook::Workbook;
 
-use crate::apply::apply_ops;
-use crate::op::{CollabOp, Envelope};
+use crate::apply::{apply_ops, filter_unappliable};
+use crate::op::{CollabOp, Envelope, SheetKey};
 use crate::server::Committed;
-use crate::transform::{transform_lists, Order};
+use crate::transform::{transform, transform_lists, Order, Transformed};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToServer {
@@ -56,15 +62,28 @@ pub struct Pending {
 pub struct ClientStats {
     pub local_envelopes: u64,
     pub acked: u64,
+    /// Envelopes refused themselves (the conflicting edit).
     pub refused_envelopes: u64,
+    /// Other pending envelopes lost because of a refusal: ones built on
+    /// the refused edit that no longer apply without it.
     pub discarded_after_refusal: u64,
+    /// Of `discarded_after_refusal`: lost because the removed edit's effect
+    /// could not be excluded (a sheet rename or delete).
+    pub discarded_no_inverse: u64,
+    /// Pending envelopes dropped by a document replacement.
+    pub discarded_by_replacement: u64,
+    /// Pending envelopes kept across a document replacement and resent.
+    pub kept_across_replacement: u64,
     pub resyncs: u64,
     pub max_pending: usize,
 }
 
 pub struct Client {
     pub actor: u64,
+    /// Optimistic state: `confirmed` plus every pending envelope.
     pub wb: Workbook,
+    /// The server's state as of `last_seen`.
+    pub confirmed: Workbook,
     pub last_seen: u64,
     /// Everything sequenced so far, in order (what a real client would get
     /// as a snapshot plus the log tail when it refreshes).
@@ -76,6 +95,9 @@ pub struct Client {
     pub syncing: bool,
     resend_inflight: bool,
     pub stats: ClientStats,
+    /// Measurement only: the pre-10/4 refusal policy, which discarded every
+    /// envelope queued after a refused one. Off by default.
+    pub legacy_refusal: bool,
 }
 
 impl Client {
@@ -83,6 +105,7 @@ impl Client {
         Client {
             actor,
             wb: Workbook::new(),
+            confirmed: Workbook::new(),
             last_seen: 0,
             committed: Vec::new(),
             inflight: None,
@@ -91,6 +114,7 @@ impl Client {
             syncing: false,
             resend_inflight: false,
             stats: ClientStats::default(),
+            legacy_refusal: false,
         }
     }
 
@@ -156,7 +180,7 @@ impl Client {
                 // arrived first (FIFO) and our own transform refused the
                 // envelope. If not, refresh now.
                 if self.inflight.as_ref().map(|p| p.client_op_id) == Some(client_op_id) {
-                    self.refuse_from(0);
+                    self.refuse_inflight();
                 }
             }
             ToClient::Welcome { .. } => {
@@ -198,7 +222,7 @@ impl Client {
                     self.inflight = None;
                     self.stats.acked += 1;
                 } else {
-                    self.refuse_from(0);
+                    self.refuse_inflight();
                 }
             }
             _ => {}
@@ -211,77 +235,311 @@ impl Client {
         }
         assert_eq!(c.seq, self.last_seen + 1, "ops arrive in sequence order");
         self.last_seen = c.seq;
+        apply_ops(&mut self.confirmed, &c.ops);
         self.committed.push(c.clone());
         if self.inflight.as_ref().map(|p| p.client_op_id) == Some(c.client_op_id) {
-            // Our own op: the acknowledgement. Its effect is already local.
+            // Our own op: the acknowledgement. Its effect is already local,
+            // and the committed form equals our pending form (the server
+            // transformed it past the same ops we did).
             self.inflight = None;
             self.stats.acked += 1;
             return;
         }
         // Someone else's: transform our pending envelopes past it, and it
-        // past them, in order.
+        // past them, in order. A refused envelope is removed (with its
+        // positional effect excluded from the envelopes after it) and the
+        // remaining ones continue past the remote op.
         let mut remote = c.ops.clone();
+        let had_inflight = self.inflight.is_some();
         let mut entries: Vec<Pending> = self.inflight.take().into_iter().collect();
-        let had_inflight = !entries.is_empty();
         entries.extend(self.buffer.drain(..));
-        let mut refused_at = None;
-        for (k, p) in entries.iter_mut().enumerate() {
-            match transform_lists(&p.ops, &remote, Order::Later) {
+        let mut inflight_alive = had_inflight;
+        let mut rebuild = false;
+        let mut k = 0;
+        while k < entries.len() {
+            match transform_lists(&entries[k].ops, &remote, Order::Later) {
                 Ok((p2, r2)) => {
-                    p.ops = p2;
+                    entries[k].ops = p2;
                     remote = r2;
+                    k += 1;
                 }
                 Err(_) => {
-                    refused_at = Some(k);
-                    break;
+                    if k == 0 && had_inflight {
+                        // The server sees the same pair in the same order and
+                        // refuses it too; its `rejected` will find nothing.
+                        inflight_alive = false;
+                    }
+                    self.remove_entry(&mut entries, k);
+                    rebuild = true;
                 }
             }
         }
-        // Put the (transformed) entries back.
         let mut it = entries.into_iter();
-        if had_inflight {
+        if inflight_alive {
             self.inflight = it.next();
         }
         self.buffer.extend(it);
-        match refused_at {
-            None => {
-                apply_ops(&mut self.wb, &remote);
-            }
-            Some(k) => self.refuse_from(k),
+        if rebuild {
+            self.rebuild();
+        } else {
+            apply_ops(&mut self.wb, &remote);
         }
     }
 
-    /// Drop pending entry `k` (0 = in-flight when present) and everything
-    /// after it, then rebuild from the committed log plus what remains.
-    fn refuse_from(&mut self, k: usize) {
-        let mut entries: Vec<Pending> = self.inflight.take().into_iter().collect();
-        let had_inflight = !entries.is_empty();
-        entries.extend(self.buffer.drain(..));
-        let dropped = entries.len().saturating_sub(k);
-        entries.truncate(k);
+    /// Remove `entries[k]`, rebasing every later entry past its positional
+    /// inverse. Pending envelopes reach no other replica until sent, and the
+    /// optimistic state is rebuilt as confirmed + exactly the envelopes we
+    /// will send, so this rebase cannot affect convergence: it only decides
+    /// how much of the user's later intent survives. It is therefore
+    /// permissive: V1 conflicts keep the later op unchanged, and only an op
+    /// whose target no longer exists is dropped (an entry left empty goes).
+    fn remove_entry(&mut self, entries: &mut Vec<Pending>, k: usize) {
+        // The state the removed envelope was written against: confirmed plus
+        // the envelopes before it (all in the current frame).
+        let mut before = self.confirmed.clone();
+        for e in &entries[..k] {
+            apply_ops(&mut before, &e.ops);
+        }
+        if self.legacy_refusal {
+            entries.remove(k);
+            self.stats.refused_envelopes += 1;
+            let lost = entries.len() - k;
+            entries.truncate(k);
+            self.stats.discarded_after_refusal += lost as u64;
+            return;
+        }
+        let removed = entries.remove(k);
         self.stats.refused_envelopes += 1;
-        self.stats.discarded_after_refusal += dropped.saturating_sub(1) as u64;
-        let mut it = entries.into_iter();
-        if had_inflight && k > 0 {
-            self.inflight = it.next();
+        let mut inverse = positional_inverse(&removed.ops, &before);
+        let mut j = k;
+        while j < entries.len() && !inverse.is_empty() {
+            let (e2, inv2) = rebase(&entries[j].ops, &inverse);
+            inverse = inv2;
+            if e2.is_empty() && !entries[j].ops.is_empty() {
+                entries.remove(j);
+                self.stats.discarded_after_refusal += 1;
+            } else {
+                entries[j].ops = e2;
+                j += 1;
+            }
         }
-        self.buffer.extend(it);
-        self.resync();
     }
 
-    /// Rebuild the replica: committed log, then pending edits on top.
-    pub fn resync(&mut self) {
-        self.stats.resyncs += 1;
-        let mut wb = Workbook::new();
-        for c in &self.committed {
-            apply_ops(&mut wb, &c.ops);
+    /// The server refused our in-flight envelope without our own transform
+    /// having seen the conflict.
+    fn refuse_inflight(&mut self) {
+        let mut entries: Vec<Pending> = self.inflight.take().into_iter().collect();
+        if entries.is_empty() {
+            return;
         }
+        entries.extend(self.buffer.drain(..));
+        self.remove_entry(&mut entries, 0);
+        self.buffer.extend(entries);
+        self.rebuild();
+    }
+
+    /// Optimistic state = confirmed + pending envelopes, in order.
+    ///
+    /// Every buffered op's carried sheet name is reset to the name its sheet
+    /// has in the state it applies to. Ops carry names because formula
+    /// rewriting is name based, and after a refused rename is removed the
+    /// names in later envelopes would otherwise describe a state that never
+    /// existed (the simulator found the resulting reference rewrites
+    /// diverging). The in-flight envelope is left as sent.
+    fn rebuild(&mut self) {
+        self.stats.resyncs += 1;
+        let mut wb = self.confirmed.clone();
         if let Some(p) = &self.inflight {
             apply_ops(&mut wb, &p.ops);
         }
-        for p in &self.buffer {
-            apply_ops(&mut wb, &p.ops);
+        // An op that cannot apply where it lands (missing sheet, taken name,
+        // last sheet) is removed: the rule the sequencer applies
+        // (`filter_unappliable`). Kept here, it would still shift positions
+        // and rewrite formulas in remote ops transformed past it.
+        let mut emptied = 0u64;
+        for p in self.buffer.iter_mut() {
+            let had_ops = !p.ops.is_empty();
+            p.ops = filter_unappliable(&wb, &p.ops).0;
+            if had_ops && p.ops.is_empty() {
+                emptied += 1;
+            }
+            for op in p.ops.iter_mut() {
+                let current = wb.sheets().iter().find(|s| s.id.0 == op.sheet()).map(|s| s.name.clone());
+                if let Some(name) = current {
+                    *op = with_carried_name(op, op.sheet(), &name);
+                }
+                // Tab positions describe the state too.
+                match op {
+                    CollabOp::DeleteSheet { sheet, index } => {
+                        if let Some(at) = wb.sheets().iter().position(|s| s.id.0 == *sheet) {
+                            *index = at;
+                        }
+                    }
+                    CollabOp::AddSheet { index, .. } => *index = (*index).min(wb.sheets().len()),
+                    _ => {}
+                }
+                apply_ops(&mut wb, std::slice::from_ref(op));
+            }
+        }
+        if emptied > 0 {
+            self.buffer.retain(|p| !p.ops.is_empty());
+            self.stats.discarded_after_refusal += emptied;
         }
         self.wb = wb;
     }
+
+    /// The server replaced the whole document (an old client's whole-file
+    /// save) at `seq`. Pending envelopes made only of cell content and
+    /// formatting (SetCell, SetBold, ReplaceRange) on sheets that still exist
+    /// are kept and resent on top of the new document: they name cells by
+    /// stable sheet id and position, which a replacement keeps meaning.
+    /// Envelopes with structural or sheet edits are dropped: their row,
+    /// column and tab positions were relative to a document that no longer
+    /// exists. The in-flight envelope, if any, is resent (the server refuses
+    /// it as `document_replaced` if it arrived before the barrier, and the id
+    /// keeps a duplicate harmless).
+    pub fn replace_document(&mut self, document: Workbook, seq: u64) {
+        let present: std::collections::HashSet<SheetKey> = document.sheets().iter().map(|s| s.id.0).collect();
+        let mut entries: Vec<Pending> = self.inflight.take().into_iter().collect();
+        entries.extend(self.buffer.drain(..));
+        for p in entries {
+            let keep = p.ops.iter().all(|op| match op {
+                CollabOp::SetCell { sheet, .. }
+                | CollabOp::SetBold { sheet, .. }
+                | CollabOp::ReplaceRange { sheet, .. } => present.contains(sheet),
+                _ => false,
+            });
+            if keep {
+                self.stats.kept_across_replacement += 1;
+                // A fresh id: the old one may already be refused at the server.
+                self.buffer.push_back(Pending {
+                    client_op_id: Uuid::from_u128(rand_like(p.client_op_id, seq)),
+                    ops: p.ops,
+                });
+            } else {
+                self.stats.discarded_by_replacement += 1;
+            }
+        }
+        self.confirmed = document;
+        self.last_seen = seq;
+        self.committed.clear();
+        self.rebuild();
+    }
+
+    /// Rebuild the optimistic state from the confirmed copy.
+    pub fn resync(&mut self) {
+        self.rebuild();
+    }
+}
+
+/// Ops that undo `ops`' effect on positions and sheet names, for rebasing
+/// envelopes that were written after them. `before` is the state `ops` were
+/// written against. Content and formatting have no such effect. A rename is
+/// undone with the name it replaced; a sheet delete with an add at its old
+/// tab index (the name only matters for conflict checks, which the rebase
+/// does not apply).
+pub fn positional_inverse(ops: &[CollabOp], before: &Workbook) -> Vec<CollabOp> {
+    // Step through the ops on a scratch copy so a rename or delete inside
+    // the same envelope sees the name it actually replaced.
+    let mut scratch = before.clone();
+    let mut inverse = Vec::new();
+    for op in ops {
+        let name_of = |wb: &Workbook, sheet: SheetKey| {
+            wb.sheets().iter().find(|s| s.id.0 == sheet).map(|s| s.name.clone())
+        };
+        match op {
+            CollabOp::SetCell { .. } | CollabOp::SetBold { .. } | CollabOp::ReplaceRange { .. } => {}
+            CollabOp::Structural { sheet, sheet_name, axis, at, count, delete } => {
+                inverse.push(CollabOp::Structural {
+                    sheet: *sheet,
+                    sheet_name: sheet_name.clone(),
+                    axis: *axis,
+                    at: *at,
+                    count: *count,
+                    delete: !*delete,
+                });
+            }
+            CollabOp::AddSheet { sheet, index, .. } => {
+                inverse.push(CollabOp::DeleteSheet { sheet: *sheet, index: *index });
+            }
+            CollabOp::RenameSheet { sheet, .. } => {
+                if let Some(name) = name_of(&scratch, *sheet) {
+                    inverse.push(CollabOp::RenameSheet { sheet: *sheet, name });
+                }
+            }
+            CollabOp::DeleteSheet { sheet, index } => {
+                inverse.push(CollabOp::AddSheet {
+                    sheet: *sheet,
+                    name: name_of(&scratch, *sheet).unwrap_or_default(),
+                    index: *index,
+                });
+            }
+        }
+        apply_ops(&mut scratch, std::slice::from_ref(op));
+    }
+    // Undo in reverse order.
+    inverse.reverse();
+    inverse
+}
+
+/// Rebase `entry` past `inverse` and `inverse` past `entry` (the usual
+/// list transform), keeping a conflicting op unchanged instead of refusing
+/// it and dropping ops whose target is gone.
+fn rebase(entry: &[CollabOp], inverse: &[CollabOp]) -> (Vec<CollabOp>, Vec<CollabOp>) {
+    let mut inv: Vec<CollabOp> = inverse.to_vec();
+    let mut out = Vec::with_capacity(entry.len());
+    for e in entry {
+        let mut cur = vec![e.clone()];
+        let mut next_inv = Vec::with_capacity(inv.len());
+        for iv in &inv {
+            next_inv.extend(permissive(iv, &cur));
+            cur = cur.iter().flat_map(|x| permissive(x, std::slice::from_ref(iv))).collect();
+        }
+        out.extend(cur);
+        inv = next_inv;
+    }
+    (out, inv)
+}
+
+/// `a` past every op of `bs` in turn; V1 conflicts keep `a`. A rename is
+/// applied as what it is to a later op, a new carried sheet name, without
+/// the V1 rename conflict: a stale carried name would make formula
+/// rewriting in later transforms resolve the wrong sheet.
+fn permissive(a: &CollabOp, bs: &[CollabOp]) -> Vec<CollabOp> {
+    let mut cur = vec![a.clone()];
+    for b in bs {
+        let mut next = Vec::new();
+        for x in &cur {
+            if let CollabOp::RenameSheet { sheet, name } = b {
+                next.push(with_carried_name(x, *sheet, name));
+                continue;
+            }
+            match transform(x, b, Order::Later) {
+                Transformed::Ops(v) => next.extend(v),
+                Transformed::Dropped(_) => {}
+                Transformed::Refused(_) => next.push(x.clone()),
+            }
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// A deterministic new id derived from an old one and the barrier seq.
+fn rand_like(id: Uuid, seq: u64) -> u128 {
+    id.as_u128() ^ (u128::from(seq).wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835))
+}
+
+/// `op` with the sheet name it carries for `sheet` set to `name`.
+fn with_carried_name(op: &CollabOp, sheet: SheetKey, name: &str) -> CollabOp {
+    let mut op = op.clone();
+    match &mut op {
+        CollabOp::SetCell { sheet: s, sheet_name, .. } | CollabOp::Structural { sheet: s, sheet_name, .. }
+            if *s == sheet =>
+        {
+            *sheet_name = name.to_string();
+        }
+        _ => {}
+    }
+    op
 }

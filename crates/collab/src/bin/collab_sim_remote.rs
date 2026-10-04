@@ -9,7 +9,10 @@
 //!
 //! The sheet must start as the blank workbook (one sheet, "Sheet1", no
 //! cells): every replica here starts from `Workbook::new()` and catches up
-//! from seq 0. The token is sent as `Authorization: Bearer`.
+//! from seq 0. The token is sent as `Authorization: Bearer`. A reconnecting
+//! client whose last seq has been folded gets `snapshot_url`: the harness
+//! downloads it, loads it (with `collab_sheet_ids`), and applies it as a
+//! document replacement at `snapshot_seq`.
 //!
 //! After quiescence (no pending edits, no traffic for `--quiet-ms`):
 //! 1. every client has the same head and an identical fingerprint;
@@ -34,7 +37,7 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 use uuid::Uuid;
-use visigrid_collab::apply::{apply_ops, checksum, fingerprint, first_difference, Fingerprint};
+use visigrid_collab::apply::{apply_ops, checksum, checksum_of, fingerprint, first_difference, Fingerprint};
 use visigrid_collab::client::{Client, ToClient, ToServer};
 use visigrid_collab::gen::random_ops;
 use visigrid_collab::op::{ops_from_json, ops_to_json};
@@ -54,6 +57,7 @@ struct Args {
     quiet_ms: u64,
     timeout_s: u64,
     engine_commit: String,
+    legacy_refusal: bool,
 }
 
 fn default_engine_commit() -> String {
@@ -78,6 +82,7 @@ fn parse_args() -> Result<Args, String> {
         quiet_ms: 1500,
         timeout_s: 120,
         engine_commit: default_engine_commit(),
+        legacy_refusal: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -94,6 +99,7 @@ fn parse_args() -> Result<Args, String> {
             "--quiet-ms" => a.quiet_ms = val()?.parse().map_err(|_| "bad --quiet-ms")?,
             "--timeout-s" => a.timeout_s = val()?.parse().map_err(|_| "bad --timeout-s")?,
             "--engine-commit" => a.engine_commit = val()?,
+            "--legacy-refusal" => a.legacy_refusal = true,
             "-h" | "--help" => {
                 return Err("usage: collab-sim-remote --url ws://HOST:PORT --sheet PID --token JWT \
 [--clients N] [--seed S] [--edits E] [--max-delay-ms D] [--toggle-prob P] \
@@ -204,13 +210,32 @@ impl Peer {
         })
     }
 
+    /// Download and load the snapshot a welcome points at.
+    fn load_snapshot(&self, path: &str) -> Result<Workbook, String> {
+        let http = self.args.url.replacen("ws://", "http://", 1);
+        let base = url::Url::parse(&http).map_err(|e| format!("bad url: {e}"))?;
+        let host = base.host_str().ok_or("url without host")?;
+        let port = base.port().unwrap_or(80);
+        let body = http_get(host, port, path, &self.args.token)?;
+        let v: Value = serde_json::from_slice(&body).map_err(|e| format!("snapshot is not JSON: {e}"))?;
+        let doc = match v.get("transport").and_then(Value::as_str) {
+            Some("inline") => v.get("document").cloned().ok_or("inline snapshot without document")?,
+            Some(other) => return Err(format!("snapshot transport {other} not supported by the harness")),
+            None => v,
+        };
+        import_document(&doc)
+    }
+
     fn handle(&mut self, text: &str) -> Result<(), String> {
         let v: Value = serde_json::from_str(text).map_err(|e| format!("server sent invalid JSON: {e}"))?;
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
             "welcome" => {
-                if v.get("snapshot_url").is_some_and(|u| !u.is_null()) {
-                    return Err("welcome pointed at a snapshot: the harness needs the full log from seq 0".into());
+                if let Some(path) = v.get("snapshot_url").and_then(Value::as_str) {
+                    let at = v.get("snapshot_seq").and_then(Value::as_u64).ok_or("snapshot without snapshot_seq")?;
+                    let wb = self.load_snapshot(path)?;
+                    self.log(format!("snapshot seq={at}"));
+                    self.client.replace_document(wb, at);
                 }
                 let ops = v.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
                 for o in &ops {
@@ -402,7 +427,11 @@ fn main() {
             let mut peer = Peer {
                 index,
                 rng: StdRng::seed_from_u64(args.seed.wrapping_mul(1_000_003).wrapping_add(index as u64)),
-                client: Client::new(index as u64 + 1),
+                client: {
+                    let mut c = Client::new(index as u64 + 1);
+                    c.legacy_refusal = args.legacy_refusal;
+                    c
+                },
                 ws: None,
                 checksums: BTreeMap::new(),
                 trace: Vec::new(),
@@ -413,8 +442,15 @@ fn main() {
             peer.disconnect();
             let s = &peer.client.stats;
             let stats = format!(
-                "local={} acked={} refused={} discarded={} resyncs={} max_pending={}",
-                s.local_envelopes, s.acked, s.refused_envelopes, s.discarded_after_refusal, s.resyncs, s.max_pending
+                "local={} acked={} refused={} discarded={} replaced_kept={} replaced_dropped={} resyncs={} max_pending={}",
+                s.local_envelopes,
+                s.acked,
+                s.refused_envelopes,
+                s.discarded_after_refusal,
+                s.kept_across_replacement,
+                s.discarded_by_replacement,
+                s.resyncs,
+                s.max_pending
             );
             outcomes.lock().unwrap().push(Outcome {
                 index,
@@ -445,6 +481,9 @@ fn verify(args: &Args, outcomes: &[Outcome]) -> i32 {
     }
     let head = outcomes.iter().map(|o| o.last_seen).max().unwrap_or(0);
     let reference = outcomes.iter().find(|o| o.last_seen == head);
+    // Checksums are replayed from the blank workbook, so they need a client
+    // that saw the whole log (one that loaded a snapshot did not).
+    let complete = outcomes.iter().find(|o| o.last_seen == head && o.committed.len() as u64 == head);
     if let Some(r) = reference {
         for o in outcomes {
             if o.last_seen != head {
@@ -467,13 +506,18 @@ fn verify(args: &Args, outcomes: &[Outcome]) -> i32 {
         }
         let mut wb = Workbook::new();
         let mut applied = 0u64;
+        let replay_from = complete.unwrap_or(r);
+        let mut verified = 0usize;
         for (seq, sum) in &published {
+            if complete.is_none() {
+                break;
+            }
             if *seq > head {
                 failures.push(format!("checksum for seq {seq} beyond head {head}"));
                 continue;
             }
             while applied < *seq {
-                let c = &r.committed[applied as usize];
+                let c = &replay_from.committed[applied as usize];
                 apply_ops(&mut wb, &c.ops);
                 applied += 1;
             }
@@ -481,12 +525,20 @@ fn verify(args: &Args, outcomes: &[Outcome]) -> i32 {
             if &ours != sum {
                 failures.push(format!("server checksum at seq {seq} is {sum}, replicas compute {ours}"));
             }
+            verified += 1;
+        }
+        // The final state must match the server's last published checksum.
+        if let Some((seq, sum)) = published.iter().next_back() {
+            if *seq == head && &checksum_of(&r.print) != sum {
+                failures.push(format!("final state differs from the server's checksum at seq {seq}"));
+            }
         }
         println!(
-            "seed {} clients {} head {} server checksums verified {}",
+            "seed {} clients {} head {} server checksums verified {} of {}",
             args.seed,
             outcomes.len(),
             head,
+            verified,
             published.len()
         );
     }
@@ -508,4 +560,39 @@ fn verify(args: &Args, outcomes: &[Outcome]) -> i32 {
         }
     }
     1
+}
+
+/// GET over HTTP/1.0 (the server then closes instead of chunking).
+fn http_get(host: &str, port: u16, path: &str, token: &str) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    let mut s = TcpStream::connect((host, port)).map_err(|e| format!("snapshot connect: {e}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    write!(s, "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nAuthorization: Bearer {token}\r\n\r\n")
+        .map_err(|e| format!("snapshot request: {e}"))?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).map_err(|e| format!("snapshot read: {e}"))?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("snapshot: no HTTP header end")?;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    if !head.starts_with("HTTP/1.0 200") && !head.starts_with("HTTP/1.1 200") {
+        return Err(format!("snapshot: {}", head.lines().next().unwrap_or("")));
+    }
+    Ok(raw[split + 4..].to_vec())
+}
+
+/// visigrid-json to a workbook with stable sheet ids (`collab_sheet_ids`),
+/// as the engine host loads it.
+fn import_document(doc: &Value) -> Result<Workbook, String> {
+    let (mut wb, _, _) = visigrid_io::json::import_any(&doc.to_string())?;
+    if let Some(ids) = doc.get("collab_sheet_ids") {
+        let ids: Vec<u64> = serde_json::from_value(ids.clone()).map_err(|_| "bad collab_sheet_ids")?;
+        if ids.len() != wb.sheets().len() {
+            return Err("collab_sheet_ids does not match the sheet count".into());
+        }
+        for (i, id) in ids.iter().enumerate() {
+            wb.sheet_mut(i).ok_or("sheet index")?.id = visigrid_engine::sheet::SheetId(*id);
+        }
+        let next = ids.iter().copied().max().unwrap_or(0) + 1;
+        wb.set_next_sheet_id(next.max(wb.next_sheet_id()));
+    }
+    Ok(wb)
 }

@@ -55,6 +55,13 @@ pub struct SimReport {
     pub resyncs: u64,
     pub max_pending: usize,
     pub disconnects: u64,
+    /// Local envelopes created by all clients.
+    pub local_envelopes: u64,
+    /// Envelopes refused themselves (the conflicting edit).
+    pub refused_envelopes: u64,
+    /// Other pending envelopes lost because of a refusal.
+    pub discarded_after_refusal: u64,
+    pub discarded_no_inverse: u64,
     pub failure: Option<String>,
     /// Converged documents whose cached values differed until a full
     /// recompute: the engine's incremental recalc is order dependent.
@@ -116,6 +123,8 @@ struct Sim {
     trace: Vec<String>,
     disconnects: u64,
     record: bool,
+    /// First broken invariant seen while running.
+    invariant: Option<String>,
 }
 
 impl Sim {
@@ -224,6 +233,12 @@ impl Sim {
                         c.ops
                     );
                     self.log(line);
+                    let mut names: Vec<String> =
+                        self.server.wb.sheets().iter().map(|s| s.name.to_lowercase()).collect();
+                    names.sort();
+                    if names.windows(2).any(|w| w[0] == w[1]) {
+                        self.invariant = Some(format!("duplicate sheet names after seq {}: {:?}", c.seq, names));
+                    }
                     for j in 0..self.clients.len() {
                         if self.live[j] {
                             self.send(j, Msg::Down(ToClient::Op(c.clone())));
@@ -279,7 +294,14 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
         queue: BinaryHeap::new(),
         events: Vec::new(),
         server: Server::new(),
-        clients: (0..n).map(|i| Client::new(i as u64 + 1)).collect(),
+        clients: (0..n)
+            .map(|i| {
+                let mut c = Client::new(i as u64 + 1);
+                // Measurement only: compare against the pre-10/4 policy.
+                c.legacy_refusal = std::env::var_os("COLLAB_LEGACY_REFUSAL").is_some();
+                c
+            })
+            .collect(),
         live: vec![true; n],
         up: (0..n)
             .map(|_| Link {
@@ -297,6 +319,7 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
         trace: Vec::new(),
         disconnects: 0,
         record,
+        invariant: None,
     };
     let mut edits_left = cfg.edits;
     sim.schedule(0, Event::Step);
@@ -337,6 +360,9 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
         }
     }
     // Quiescent: no messages anywhere. Nothing may still be pending.
+    if let Some(msg) = sim.invariant.clone() {
+        return report(seed, &sim, Some(msg));
+    }
     for (i, c) in sim.clients.iter().enumerate() {
         if c.pending_count() > 0 || !c.connected || c.syncing {
             let msg = format!(
@@ -359,6 +385,22 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
                     sim.server.head()
                 )),
             );
+        }
+    }
+    // With nothing pending, the optimistic state must be exactly the
+    // confirmed copy.
+    for (i, c) in sim.clients.iter().enumerate() {
+        let (opt, conf) = (fingerprint(&c.wb), fingerprint(&c.confirmed));
+        if let Some(d) = first_difference(&opt, &conf) {
+            // Engine bug VisiGrid#95 (fixed by #97, not on this branch): the
+            // full recompute replaces a cycle's formula text with "#CYCLE!",
+            // so a rebased formula that closes a cycle diverges by order.
+            if has_cycle_text(&opt) || has_cycle_text(&conf) {
+                let mut r = report(seed, &sim, None);
+                r.engine_cycle = Some(format!("c{i} optimistic vs confirmed: {d}"));
+                return r;
+            }
+            return report(seed, &sim, Some(format!("c{i}: optimistic differs from confirmed at rest: {d}")));
         }
     }
     let server_print = fingerprint(&sim.server.wb);
@@ -407,6 +449,10 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
     r
 }
 
+fn has_cycle_text(p: &crate::apply::Fingerprint) -> bool {
+    p.sheets.iter().any(|s| s.cells.iter().any(|(_, _, raw, ..)| raw == "#CYCLE!"))
+}
+
 fn report(seed: u64, sim: &Sim, failure: Option<String>) -> SimReport {
     SimReport {
         seed,
@@ -420,6 +466,10 @@ fn report(seed: u64, sim: &Sim, failure: Option<String>) -> SimReport {
             .max()
             .unwrap_or(0),
         disconnects: sim.disconnects,
+        local_envelopes: sim.clients.iter().map(|c| c.stats.local_envelopes).sum(),
+        refused_envelopes: sim.clients.iter().map(|c| c.stats.refused_envelopes).sum(),
+        discarded_after_refusal: sim.clients.iter().map(|c| c.stats.discarded_after_refusal).sum(),
+        discarded_no_inverse: sim.clients.iter().map(|c| c.stats.discarded_no_inverse).sum(),
         failure,
         engine_stale: None,
         engine_cycle: None,

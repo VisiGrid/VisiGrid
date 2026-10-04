@@ -136,6 +136,7 @@ fn simulator_converges() {
     ];
     let mut committed = 0;
     let mut refused = 0;
+    let (mut local, mut own, mut collateral, mut no_inverse) = (0u64, 0u64, 0u64, 0u64);
     let mut stale = Vec::new();
     let mut cycle = Vec::new();
     for seed in 0..n {
@@ -143,6 +144,10 @@ fn simulator_converges() {
         let r = run(seed, cfg, false);
         committed += r.committed;
         refused += r.refused;
+        local += r.local_envelopes;
+        own += r.refused_envelopes;
+        collateral += r.discarded_after_refusal;
+        no_inverse += r.discarded_no_inverse;
         if let Some(d) = &r.engine_stale {
             stale.push(format!("seed {seed}: {d}"));
         }
@@ -159,6 +164,13 @@ fn simulator_converges() {
             );
         }
     }
+    let pct = |x: u64| 100.0 * x as f64 / local.max(1) as f64;
+    eprintln!(
+        "local envelopes {local}: refused themselves {own} ({:.2}%), discarded as collateral {collateral} ({:.2}%; {no_inverse} after a sheet rename/delete), total lost {:.2}%",
+        pct(own),
+        pct(collateral),
+        pct(own + collateral)
+    );
     eprintln!(
         "{n} simulations converged: {committed} envelopes committed, {refused} refused; \
          {} needed a full recompute (engine incremental recalc):\n{}\n\

@@ -8027,6 +8027,7 @@ dependencies = [
  "url",
  "uuid",
  "visigrid-engine",
+ "visigrid-io",
  "visigrid-protocol",
 ]
 

@@ -24,7 +24,7 @@ use std::io::{BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde_json::{json, Map, Value};
-use visigrid_collab::apply::{apply_ops, checksum, filter_missing_sheets, NO_SUCH_SHEET};
+use visigrid_collab::apply::{apply_ops, checksum, filter_unappliable};
 use visigrid_collab::op::{ops_from_json, ops_to_json, CollabOp};
 use visigrid_collab::transform::{transform_lists, Order};
 use visigrid_engine::sheet::SheetId;
@@ -238,13 +238,15 @@ impl Host {
                 "every operation targeted something a concurrent edit removed",
             ));
         }
-        // An op naming a sheet this replica does not have would sequence and
-        // broadcast a no-op. Drop it here; the rest of the envelope applies.
-        let (kept, missing) = filter_missing_sheets(self.wb()?, &ops);
+        // An op that cannot apply here (missing sheet, taken name, last
+        // sheet) would sequence and broadcast a no-op that still moves
+        // positions in every concurrent transform. Drop it; the rest of the
+        // envelope applies. The reason is the first dropped op's.
+        let (kept, reasons) = filter_unappliable(self.wb()?, &ops);
         if kept.is_empty() {
-            return Ok(rejected("dropped", NO_SUCH_SHEET));
+            return Ok(rejected("dropped", reasons.first().copied().unwrap_or("not_applicable")));
         }
-        if missing > 0 {
+        if !reasons.is_empty() {
             ops = kept;
         }
         let wb = self.wb_mut()?;

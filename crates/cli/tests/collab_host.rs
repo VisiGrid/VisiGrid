@@ -251,6 +251,10 @@ fn every_command_over_stdio() {
     let mixed = submit(&mut h, 8, &[ghost(0), set(2, 2, val("kept"))], &[]);
     assert_eq!(mixed["result"], json!("op"));
     assert_eq!(mixed["op"].as_array().unwrap().len(), 1, "{mixed}");
+    // An add or rename to a name already in use is dropped too.
+    let dup = CollabOp::AddSheet { sheet: 55, name: "sheet1".into(), index: 0 };
+    let r = submit(&mut h, 9, &[dup], &[]);
+    assert_eq!((r["result"].clone(), r["reason"].clone()), (json!("dropped"), json!("name_taken")), "{r}");
     // A sheet added earlier in the same envelope counts as present.
     let added = CollabOp::AddSheet { sheet: 77, name: "Fresh".into(), index: 1 };
     let on_new = CollabOp::SetCell { sheet: 77, sheet_name: "Fresh".into(), row: 0, col: 0, content: val("1") };

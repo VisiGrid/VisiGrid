@@ -18,6 +18,7 @@ sha2 = { workspace = true }
 # default so nothing that depends on this crate pulls in a WebSocket stack.
 tungstenite = { version = "0.24", optional = true }
 url = { version = "2", optional = true }
+visigrid-io = { path = "../io", optional = true }
 
 [[bin]]
 name = "collab-sim-remote"
@@ -25,7 +26,7 @@ path = "src/bin/collab_sim_remote.rs"
 required-features = ["remote"]
 
 [features]
-remote = ["dep:tungstenite", "dep:url"]
+remote = ["dep:tungstenite", "dep:url", "dep:visigrid-io"]
 # Long fuzz runs read COLLAB_FUZZ_SEEDS; this feature only exists so CI can
 # opt a job in without an environment variable.
 long-fuzz = []

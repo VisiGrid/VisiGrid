@@ -115,33 +115,72 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
 }
 
 /// Apply a list in order. Skips are collected, never fatal.
-/// Keep only the ops whose target sheet exists on `wb` when they apply.
-/// Ops in an envelope are sequential, so an `AddSheet` earlier in the list
-/// makes its sheet available to later ops, and a `DeleteSheet` removes it.
-/// The sequencer runs this on its own replica before sequencing, so an op
-/// naming a sheet that does not exist is dropped there and never reaches
-/// any client: no replica ever applies (or broadcasts) a no-op.
-/// Returns the kept ops and how many were dropped.
-pub fn filter_missing_sheets(wb: &Workbook, ops: &[CollabOp]) -> (Vec<CollabOp>, usize) {
-    let mut present: std::collections::HashSet<SheetKey> = wb.sheets().iter().map(|s| s.id.0).collect();
+/// Keep only the ops that can apply to `wb`: the target sheet exists, an
+/// added sheet's id and name are free, a rename's name is free (names
+/// compare with the engine's own `normalize_sheet_name`), and a delete does
+/// not remove the last sheet: exactly what the engine itself refuses. Ops in an
+/// envelope are sequential, so earlier adds, renames and deletes in the list
+/// count. The sequencer runs this on its own replica before sequencing, so
+/// an op that cannot apply is dropped there and never reaches any client;
+/// kept, it would be a no-op everywhere but still shift positions and
+/// rewrite names in the transforms of every concurrent op. Clients run it
+/// when they rebuild, for the same reason.
+/// Returns the kept ops and the reason for each dropped one.
+pub fn filter_unappliable(wb: &Workbook, ops: &[CollabOp]) -> (Vec<CollabOp>, Vec<&'static str>) {
+    let key = visigrid_engine::sheet::normalize_sheet_name;
+    let mut sheets: Vec<(SheetKey, String)> = wb.sheets().iter().map(|s| (s.id.0, key(&s.name))).collect();
     let mut kept = Vec::with_capacity(ops.len());
-    let mut dropped = 0;
+    let mut dropped = Vec::new();
     for op in ops {
+        let exists = |sheets: &Vec<(SheetKey, String)>, id: SheetKey| sheets.iter().any(|(s, _)| *s == id);
+        let taken = |sheets: &Vec<(SheetKey, String)>, name: &str, except: SheetKey| {
+            sheets.iter().any(|(s, n)| *s != except && *n == key(name))
+        };
         match op {
-            CollabOp::AddSheet { sheet, .. } => {
-                present.insert(*sheet);
-                kept.push(op.clone());
+            CollabOp::AddSheet { sheet, name, .. } => {
+                if exists(&sheets, *sheet) || taken(&sheets, name, *sheet) || key(name).is_empty() {
+                    dropped.push(NAME_TAKEN);
+                    continue;
+                }
+                sheets.push((*sheet, key(name)));
             }
-            _ if !present.contains(&op.sheet()) => dropped += 1,
+            _ if !exists(&sheets, op.sheet()) => {
+                dropped.push(NO_SUCH_SHEET);
+                continue;
+            }
+            CollabOp::RenameSheet { sheet, name } => {
+                if taken(&sheets, name, *sheet) || key(name).is_empty() {
+                    dropped.push(NAME_TAKEN);
+                    continue;
+                }
+                if let Some(entry) = sheets.iter_mut().find(|(s, _)| s == sheet) {
+                    entry.1 = key(name);
+                }
+            }
             CollabOp::DeleteSheet { sheet, .. } => {
-                present.remove(sheet);
-                kept.push(op.clone());
+                if sheets.len() <= 1 {
+                    dropped.push(LAST_SHEET);
+                    continue;
+                }
+                sheets.retain(|(s, _)| s != sheet);
             }
-            _ => kept.push(op.clone()),
+            _ => {}
         }
+        kept.push(op.clone());
     }
     (kept, dropped)
 }
+
+/// Backwards-compatible count form of [`filter_unappliable`].
+pub fn filter_missing_sheets(wb: &Workbook, ops: &[CollabOp]) -> (Vec<CollabOp>, usize) {
+    let (kept, dropped) = filter_unappliable(wb, ops);
+    (kept, dropped.len())
+}
+
+/// Drop reason: an added or renamed sheet's name (or id) is in use.
+pub const NAME_TAKEN: &str = "name_taken";
+/// Drop reason: deleting the only sheet.
+pub const LAST_SHEET: &str = "last_sheet";
 
 /// The drop reason for ops whose sheet does not exist.
 pub const NO_SUCH_SHEET: &str = "no_such_sheet";
