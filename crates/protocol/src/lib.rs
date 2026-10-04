@@ -232,6 +232,14 @@ pub enum StructureOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pivot: Option<String>,
     },
+    /// Re-run the import recipe a Table is linked to and replace its records
+    /// if every check passes (added 2026-10-04, additive). `table` is the
+    /// Table's name; omit when the workbook has one linked Table. Desktop
+    /// hosts only, and only for a recipe source the user has approved.
+    RefreshRecipeTable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table: Option<String>,
+    },
 }
 
 /// One value field of a `create_pivot` op.

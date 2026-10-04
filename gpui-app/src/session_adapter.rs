@@ -946,6 +946,25 @@ impl Spreadsheet {
             ..Default::default()
         };
 
+        // Recipe refreshes (like Alt+F5) have their own checks (the Table, the user's
+        // approval of what the recipe reads) and publish their own history
+        if let StructureOp::RefreshRecipeTable { table } = op {
+            match self.refresh_recipe_table_now(table.as_deref(), cx) {
+                Ok(description) => {
+                    if let Some(client) = client.clone() {
+                        self.history.retag_last_source(MutationSource::Agent { client });
+                    }
+                    out.description = description;
+                }
+                Err(error) => out.error = Some(error),
+            }
+            let wb = self.workbook.read(cx);
+            out.revision = wb.revision();
+            out.sheet_count = wb.sheets().len();
+            out.active_sheet = wb.active_sheet_index();
+            return out;
+        }
+
         if crate::table_filter_ui::has_table_criteria(self.wb(cx))
             && !matches!(
                 op,
@@ -1079,6 +1098,12 @@ impl Spreadsheet {
                         return out;
                     }
                 }
+            }
+            // Answered before the shared checks; never reaches here
+            StructureOp::RefreshRecipeTable { .. } => {
+                self.suppress_repeat_capture = false;
+                out.error = Some(("invalid_op".to_string(), "recipe refresh was not handled".to_string()));
+                return out;
             }
             StructureOp::RefreshPivot { pivot } => {
                 let ids = visigrid_session_host::resolve_refresh_pivots(

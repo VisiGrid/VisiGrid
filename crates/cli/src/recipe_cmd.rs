@@ -56,29 +56,33 @@ pub(crate) fn cmd_recipe_run(
             let bytes = write_format(&sheet, Format::Csv, ',', false, 0, None, None)?;
             std::io::stdout().write_all(&bytes).map_err(|e| CliError::io(e.to_string()))?;
         }
-        Some(path) => {
-            let format = infer_format(&path)?;
-            write_replacing(&path, |tmp| match format {
-                Format::Xlsx => {
-                    let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
-                    crate::convert::write_xlsx(&wb, Some(tmp), None)
-                }
-                Format::Sheet => visigrid_io::native::save(&sheet, tmp).map_err(CliError::io),
-                Format::Parquet => Err(CliError::format("parquet output is not supported by recipes yet")),
-                other => {
-                    let bytes = write_format(&sheet, other, ',', false, 0, None, None)?;
-                    std::fs::write(tmp, bytes).map_err(|e| CliError::io(e.to_string()))
-                }
-            })?;
-        }
+        Some(path) => write_output(&sheet, &path)?,
     }
     Ok(())
+}
+
+/// Write a recipe's result to `path` in the format its extension names,
+/// replacing it atomically. Shared with the MCP `run_recipe` tool.
+pub(crate) fn write_output(sheet: &visigrid_engine::sheet::Sheet, path: &Path) -> Result<(), CliError> {
+    let format = infer_format(&path.to_path_buf())?;
+    write_replacing(path, |tmp| match format {
+        Format::Xlsx => {
+            let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
+            crate::convert::write_xlsx(&wb, Some(tmp), None)
+        }
+        Format::Sheet => visigrid_io::native::save(sheet, tmp).map_err(CliError::io),
+        Format::Parquet => Err(CliError::format("parquet output is not supported by recipes yet")),
+        other => {
+            let bytes = write_format(sheet, other, ',', false, 0, None, None)?;
+            std::fs::write(tmp, bytes).map_err(|e| CliError::io(e.to_string()))
+        }
+    })
 }
 
 /// The output and report must not land on each other, the source or the
 /// recipe: a failed run would otherwise replace the previous output (or the
 /// source) with a JSON report. Checked before anything is read or written.
-fn check_paths(recipe: &Path, source: &Path, output: Option<&Path>, report: Option<&Path>) -> Result<(), CliError> {
+pub(crate) fn check_paths(recipe: &Path, source: &Path, output: Option<&Path>, report: Option<&Path>) -> Result<(), CliError> {
     let clash = |what: &str, a: &Path, other: &str, b: &Path| -> Result<(), CliError> {
         if same_file(a, b) {
             return Err(CliError::args(format!("the {what} {} is also the {other}", a.display()))

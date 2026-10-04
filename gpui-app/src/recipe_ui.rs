@@ -523,6 +523,56 @@ impl Spreadsheet {
         }
     }
 
+    /// A refresh asked for over the session protocol (MCP `refresh_table`):
+    /// the same run and publish as Alt+F5, done now, with the outcome
+    /// returned as (code, message) on failure. Never asks: a recipe source
+    /// the user hasn't approved in the app is refused, so an agent can't
+    /// make the app read a file the user never agreed to.
+    pub(crate) fn refresh_recipe_table_now(&mut self, table: Option<&str>, cx: &mut Context<Self>) -> Result<String, (String, String)> {
+        let linked: Vec<DataTable> = self.wb(cx).tables().filter(|(_, t)| t.source.is_some()).map(|(_, t)| t.clone()).collect();
+        let names = || linked.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ");
+        let target = match table {
+            Some(name) => linked.iter().find(|t| t.name.eq_ignore_ascii_case(name)).cloned().ok_or_else(|| {
+                ("table_not_found".to_string(), format!("no recipe-linked Table named {name}; linked Tables: {}", if linked.is_empty() { "none".into() } else { names() }))
+            })?,
+            None => match linked.len() {
+                1 => linked[0].clone(),
+                0 => return Err(("table_not_found".into(), "this workbook has no recipe-linked Table".into())),
+                _ => return Err(("ambiguous".into(), format!("name the Table to refresh: {}", names()))),
+            },
+        };
+        if self.recipe_run_in_progress {
+            return Err(("busy".into(), "a recipe is already running in this window".into()));
+        }
+        let recipe_path = self.recipe_link_path(&target.source.as_ref().unwrap().recipe);
+        let recipe = Recipe::load(&recipe_path).map_err(|e| ("recipe_invalid".to_string(), e))?;
+        if !crate::recipe_trust::is_approved(&recipe_path, &recipe) {
+            return Err((
+                "needs_approval".into(),
+                format!(
+                    "the user hasn't approved what {} reads; ask them to refresh {} once in VisiGrid (Alt+F5) and confirm the file",
+                    file_name(&recipe_path.display().to_string()),
+                    target.name
+                ),
+            ));
+        }
+        let outcome = run_job(&recipe_path, Some(recipe), None).map_err(|e| ("recipe_failed".to_string(), e))?;
+        let summary = outcome.report.summary();
+        self.finish_recipe_run(RecipeTarget::Table(target.id), recipe_path, outcome, Instant::now(), cx);
+        // A refresh that didn't publish leaves the banner up for the user,
+        // and the Table as it was
+        match self.recipe_blocked.as_ref().filter(|b| b.target == RecipeTarget::Table(target.id)) {
+            Some(b) => Err((
+                "recipe_blocked".into(),
+                match &b.refused {
+                    Some(reason) => format!("{} was not refreshed: {reason}", target.name),
+                    None => format!("{} was not refreshed; it keeps its last good result.\n{summary}", target.name),
+                },
+            )),
+            None => Ok(self.status_message.clone().unwrap_or_else(|| format!("Refreshed {}", target.name))),
+        }
+    }
+
     /// Palette "Unlink Table from Recipe": the Table keeps its records and
     /// becomes an ordinary Table. One undo step relinks it.
     pub fn unlink_recipe_table(&mut self, cx: &mut Context<Self>) {
