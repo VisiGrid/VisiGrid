@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- **Sort rows** step: order rows by one or more columns, ascending or descending. Each column sorts as its type (numbers as numbers, dates as dates, text ignoring case; IDs such as `007` stay text); values that don't fit, then empty values, go last either way, and ties keep their order. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+- **Fill down** step: empty cells take the value above, for reports that print a group's name once. Never fills across appended files. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+- **Replace values** step: replace a whole cell (ignoring case by default; an empty Find fills empty cells, such as with 0) or text inside cells, in chosen columns or all of them. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+- **Split column** step: split a column at a delimiter into named columns that take its place; the last keeps the rest of the value, so nothing is lost. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+
 ## 0.48.0
 
 ### Import recipes
