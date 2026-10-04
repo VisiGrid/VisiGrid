@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.46.1
+
+### Fixed
+
+- **Circular references no longer delete your formulas.** When an edit closed a reference cycle (for example `=B1+1` in A1 and `=A1+1` in B1), every formula in the cycle was replaced by the text `#CYCLE!` and could only be recovered with undo. The formulas now stay; `#CYCLE!` is shown as their result, as in Excel, and they calculate again as soon as the cycle is broken. Saving to `.sheet`, JSON and `.xlsx` keeps them. Files that already contain the `#CYCLE!` text from earlier versions still show it as a cycle error, but the lost formulas can't be recovered. ([#97](https://github.com/VisiGrid/VisiGrid/pull/97), [#95](https://github.com/VisiGrid/VisiGrid/issues/95))
 
 ### Excel interchange
 
