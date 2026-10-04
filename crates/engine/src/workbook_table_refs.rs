@@ -94,7 +94,7 @@ impl Workbook {
         owner_sheet: SheetId,
         before: Option<&DataTable>,
         after: Option<&DataTable>,
-        renaming: bool,
+        allow_totals: bool,
     ) -> Result<Vec<TableFormulaChange>, String> {
         let Some(before) = before else {
             return Ok(Vec::new());
@@ -102,7 +102,7 @@ impl Workbook {
         let mut changes = Vec::new();
         for sheet in self.sheets() {
             for table in sheet.tables().iter().filter(|t| t.id != before.id) {
-                if let Some(totals) = table.totals.as_ref().filter(|_| !renaming) {
+                if let Some(totals) = table.totals.as_ref().filter(|_| !allow_totals) {
                     for (offset, total) in totals.columns.iter().enumerate() {
                         if let Some(source) = &total.formula {
                             if self.rewrite_table_formula_source(owner_sheet, before, after, sheet.id,
@@ -132,7 +132,7 @@ impl Workbook {
                     source,
                 )?;
                 if rewritten != source {
-                    if !renaming && sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
+                    if !allow_totals && sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
                         return Err("This schema change would rewrite a totals formula. Totals reference rewriting is not supported yet.".into());
                     }
                     changes.push(TableFormulaChange {
@@ -156,7 +156,9 @@ impl Workbook {
         let mut changes = Vec::new();
         for (sheet, table) in self.tables() {
             let Some(totals) = &table.totals else { continue; };
-            let mut rewritten = totals.clone();
+            let mut rewritten = if table.id == before.id {
+                after.totals.clone().unwrap()
+            } else { totals.clone() };
             // Dormant footers still bind local references to their owning Table.
             let mut context = before.clone();
             let mut target = after.clone();
@@ -166,9 +168,13 @@ impl Workbook {
             }
             for (offset, total) in rewritten.columns.iter_mut().enumerate() {
                 if let Some(source) = &mut total.formula {
+                    let old_offset = if table.id == before.id {
+                        table.columns.iter().position(|c| c.id == after.columns[offset].id)
+                            .ok_or("A new totals column cannot already have a custom formula.")?
+                    } else { offset };
                     *source = self.rewrite_table_formula_source(
                         owner, &context, Some(&target), sheet,
-                        table.range.end_row + 1, table.range.start_col + offset, source,
+                        table.range.end_row + 1, table.range.start_col + old_offset, source,
                     )?;
                 }
             }

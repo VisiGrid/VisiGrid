@@ -105,6 +105,7 @@ impl Workbook {
         let mut commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
         commit.calculated_edit = true;
         commit.cells = cells;
+        self.capture_table_cell_absence(&mut commit);
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
     }
@@ -138,6 +139,7 @@ impl Workbook {
                 value: CellValue::from_input(&formula),
             },
         ));
+        self.capture_table_cell_absence(&mut commit);
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
     }

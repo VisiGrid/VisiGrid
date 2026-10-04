@@ -186,6 +186,7 @@ impl Workbook {
         if showing {
             commit.append_region = Some(region);
         }
+        self.capture_table_cell_absence(&mut commit);
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
     }

@@ -2500,3 +2500,38 @@ fn totals_worksheet_row_edits_keep_native_and_excel_metadata_aligned() {
         assert!(loaded.sheet(0).unwrap().get_raw(10, 3).starts_with('='));
     }
 }
+
+
+#[test]
+fn horizontally_resized_totals_survive_native_and_xlsx_roundtrips() {
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.set_cell_value_tracked(0, 2, 4, "Extra");
+        wb.set_cell_value_tracked(0, 3, 4, "17");
+        let original = wb.table(id).unwrap().1.range;
+        wb.resize_table(id, TableRange { end_col: 4, ..original }).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("width.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("width.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        assert_eq!(loaded.table(id).unwrap().1.columns.len(), 4);
+        let totals = loaded.table(id).unwrap().1.totals.as_ref().unwrap();
+        assert_eq!(totals.visible, visible);
+        assert_eq!(totals.columns.len(), 4);
+        assert_eq!(totals.columns[2].function.as_deref(), Some("sum"));
+        assert_eq!(totals.columns[3].function.as_deref().unwrap_or("none"), "none");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 4), "17");
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        loaded.resize_table(id, original).unwrap();
+        assert_eq!(loaded.table(id).unwrap().1.totals.as_ref().unwrap().columns.len(), 3);
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 4), "17");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 4), "");
+    }
+}

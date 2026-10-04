@@ -501,4 +501,51 @@ mod tests {
         assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 8).is_some());
         assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 3).is_none());
     }
+    #[test]
+    fn totals_width_resize_preserves_criteria_and_rewinds_after_total_edit_undo() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_cell_value_tracked(0, 2, 4, "Extra");
+        let spec = base.active_sheet().table_view_spec().cloned();
+        let (mut after, commit) = resize(&base, 6, 4).unwrap();
+        assert!(is_resize(&commit));
+        assert_eq!(after.active_sheet().tables()[0].totals.as_ref().unwrap().columns.len(), 4);
+        assert_eq!(after.active_sheet().get_display(7, 3), "180");
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        let total = after.set_table_total(id, 4, visigrid_engine::table::TableTotal {
+            function: Some("sum".into()), ..Default::default()
+        }).unwrap();
+        after.apply_table_commit(&total, true).unwrap();
+        let undone = prepare_resize_replay(&after, &commit, true).unwrap();
+        assert_eq!(undone.active_sheet().get_display(7, 3), "180");
+        assert_eq!(undone.active_sheet().tables()[0].columns.len(), 3);
+        let redone = prepare_resize_replay(&undone, &commit, false).unwrap();
+        let mut history = History::new();
+        history.record_action_with_provenance(UndoAction::TableCommit {
+            header_layout: None, sheet_index: 0, commit: Box::new(commit), description: "Widen Table".into(),
+        }, None);
+        let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().tables(), redone.active_sheet().tables());
+        assert_eq!(preview.workbook.active_sheet().get_display(7, 3), "180");
+        let (shrunk, _) = resize(&redone, 6, 3).unwrap();
+        assert_eq!(shrunk.active_sheet().table_view_spec(), spec.as_ref());
+        assert_eq!(shrunk.active_sheet().tables()[0].columns.len(), 3);
+        assert!(resize(&redone, 6, 1).is_err()); // Amount is the sort field.
+    }
+
+    #[test]
+    fn totals_width_resize_refuses_occupied_footer_and_unsafe_released_records() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_cell_value_tracked(0, 7, 4, "Keep note");
+        let revision = base.revision();
+        assert!(resize(&base, 6, 4).is_err());
+        assert_eq!(base.revision(), revision);
+        assert_eq!(base.active_sheet().get_raw(7, 4), "Keep note");
+        assert!(resize(&base, 6, 2).is_err()); // Released Result cells would sit beside a projected Table.
+        assert_eq!(base.active_sheet().get_display(7, 3), "180");
+    }
+
 }

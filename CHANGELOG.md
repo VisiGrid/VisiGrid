@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Resize Tables horizontally with visible or hidden totals. Surviving columns retain their rules and totals; released cells stay in place, and newly added footer cells must be empty. Combined width/height changes apply atomically, with undo/redo and history rewind. Undoing a total or calculated rule now restores originally absent cells so an earlier resize can also be undone.
+
+- Save checkbox-filter values in a stable order in native and JSON files. Existing files with unordered values still load without a format-version change.
+
 - Insert and delete worksheet rows around Tables with totals. Footers, custom formulas and manual hidden-row positions follow the moved cells; inserting at a visible footer adds calculated body records above it. Deleting the footer hides totals while retaining their settings. Filtered deletion preserves hidden records, with atomic undo/redo and history rewind. Headerless Table creation can move neighboring totals in the same undo step.
 
 - Insert and delete worksheet columns around Tables with visible or hidden totals. Footer settings, formulas, formatting and comments follow surviving columns; references to deleted fields become `#REF!`. Saved criteria remain active, with atomic validation, undo/redo and history rewind.
@@ -17,7 +21,7 @@
 - Author native Table totals from the Table bar: show/hide the footer and choose Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or a custom formula for each column. Aggregates follow Table filters; settings survive hiding, saving and XLSX round trips. Changes support undo/redo and history rewind with active criteria. Showing totals refuses occupied cells below the Table.
 
 - Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
-- Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes and horizontal Table resizing remain guarded. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
+- Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes remain protected. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
 
 ## 0.45.0
 
