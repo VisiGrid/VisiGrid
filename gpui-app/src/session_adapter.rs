@@ -738,8 +738,9 @@ impl Spreadsheet {
             let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).collect();
             coords.sort_unstable();
             for (row, col) in coords {
-                // Computed errors surface as Value::Error; cycle-marked cells
-                // store the literal text "#CYCLE!" instead (see set_cycle_error).
+                // Computed errors surface as Value::Error; cycle members carry
+                // the "#CYCLE!" marker as their computed text (see
+                // set_cycle_error), and so do files saved before #95.
                 let error = match sheet.get_computed_value(row, col) {
                     Value::Error(e) => Some(e),
                     Value::Text(t) if t == "#CYCLE!" => Some(t),

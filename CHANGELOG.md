@@ -8,6 +8,17 @@
 - **Recipes read Excel sheets.** Choose the sheet (kept by name, so reordering sheets is safe) and the header row below any title rows, which VisiGrid guesses. A recipe reads the values Excel saved and never recalculates formulas; Excel date formats come through as dates. Start one with **New Import Recipe…** from an open `.xlsx`, `.xlsm` or `.xls` file. ([#98](https://github.com/VisiGrid/VisiGrid/pull/98))
 - Fixed a recipe named like a function (`db`, `sum`, `date`) failing to create its Table; the Table is named `db_table` instead. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
 
+## 0.46.1
+
+### Fixed
+
+- **Circular references no longer delete your formulas.** When an edit closed a reference cycle (for example `=B1+1` in A1 and `=A1+1` in B1), every formula in the cycle was replaced by the text `#CYCLE!` and could only be recovered with undo. The formulas now stay; `#CYCLE!` is shown as their result, as in Excel, and they calculate again as soon as the cycle is broken. Saving to `.sheet`, JSON and `.xlsx` keeps them. Files that already contain the `#CYCLE!` text from earlier versions still show it as a cycle error, but the lost formulas can't be recovered. ([#97](https://github.com/VisiGrid/VisiGrid/pull/97), [#95](https://github.com/VisiGrid/VisiGrid/issues/95))
+
+### Excel interchange
+
+- **Exported formulas keep their results.** Excel files saved by VisiGrid stored 0 as every formula's result; Excel recalculated on open, but pandas, file previews and other tools that read saved results saw zeros. Each formula now carries its computed value. ([#100](https://github.com/VisiGrid/VisiGrid/pull/100))
+- Fixed Excel files with a large sheet (over 32 MB of sheet data) dropping every Table in the workbook with an "XLSX part … is too large" warning, even when the large sheet had no Tables. A problem reading one sheet's Tables now affects only that sheet. ([#96](https://github.com/VisiGrid/VisiGrid/pull/96))
+
 ## 0.46.0
 
 ### Formulas
