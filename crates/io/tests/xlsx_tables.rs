@@ -1999,3 +1999,52 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
         assert_eq!(authored_snapshot(&wb), before);
     }
 }
+
+/// Formulas are saved with their computed results. Excel recalculates on
+/// open, but readers of saved results (pandas, previews, recipes) used to
+/// see 0 for every formula.
+#[test]
+fn exported_formulas_carry_their_computed_results() {
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "7");
+    wb.set_cell_value_tracked(0, 0, 1, "=A1*3");
+    wb.set_cell_value_tracked(0, 0, 2, "=\"id-\"&A1");
+    wb.set_cell_value_tracked(0, 0, 3, "=A1>5");
+    wb.set_cell_value_tracked(0, 0, 4, "=1/0");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("results.xlsx");
+    xlsx::export(&wb, &path, None).unwrap();
+    let sheet = xml(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<f>A1*3</f><v>21</v>"), "{sheet}");
+    assert!(sheet.contains("<v>id-7</v>"), "{sheet}");
+    assert!(sheet.contains("<v>TRUE</v>"), "{sheet}");
+    assert!(sheet.contains("<v>#DIV/0!</v>"), "{sheet}");
+    // And they import as formulas again, with the same results
+    let (back, _) = xlsx::import(&path).unwrap();
+    assert_eq!(back.sheet(0).unwrap().get_display(0, 1), "21");
+}
+
+/// Worksheet parts hold every cell. A sheet over the 32 MB cap for small
+/// metadata parts used to abort the whole Table pass ("XLSX part … is too
+/// large"), dropping every Table in the workbook, even on sheets without one.
+#[test]
+fn large_worksheet_parts_do_not_block_table_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wb, _) = book();
+    let small = dir.path().join("small.xlsx");
+    xlsx::export(&wb, &small, None).unwrap();
+    let big = dir.path().join("big.xlsx");
+    let padding = format!("<!--{}-->", " ".repeat(33 * 1024 * 1024));
+    rewrite(&small, &big, |name, data| {
+        if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+            let at = data.find("?>").map_or(0, |i| i + 2);
+            (name.into(), format!("{}{}{}", &data[..at], padding, &data[at..]))
+        } else {
+            (name.into(), data)
+        }
+    });
+    let (imported, result) = xlsx::import(&big).unwrap();
+    assert!(!result.warnings.iter().any(|w| w.contains("too large")), "{:?}", result.warnings);
+    assert_eq!(result.tables_imported, 1, "{:?}", result.warnings);
+    assert_eq!(imported.tables().count(), 1);
+}

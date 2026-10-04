@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.47.0
+
+### Import recipes
+
+- **Recipes read Parquet files and DuckDB tables.** Columns keep the types the file declares (numbers, dates, date-times, times, text), and the values come through exactly as when opening the file. The builder shows the settings each source has, with a Table setting for DuckDB. Start one with **New Import Recipe…** from an open Parquet file or by choosing a `.parquet` or `.duckdb` file. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
+- **Recipes read Excel sheets.** Choose the sheet (kept by name, so reordering sheets is safe) and the header row below any title rows, which VisiGrid guesses. A recipe reads the values Excel saved and never recalculates formulas; Excel date formats come through as dates. Start one with **New Import Recipe…** from an open `.xlsx`, `.xlsm` or `.xls` file. ([#98](https://github.com/VisiGrid/VisiGrid/pull/98))
+- Fixed a recipe named like a function (`db`, `sum`, `date`) failing to create its Table; the Table is named `db_table` instead. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
+
+### Formulas
+
+- **INDIRECT and OFFSET results stay current.** A cell reading through `INDIRECT` or `OFFSET` used to keep its old value when the cell it pointed at changed; it now updates on every edit, as in Excel. `NOW`, `TODAY`, `RAND` and `RANDBETWEEN` also refresh on every recalculation instead of only on a full recompute. Workbooks that don't use these functions recalculate as fast as before. ([#88](https://github.com/VisiGrid/VisiGrid/issues/88), ([#99](https://github.com/VisiGrid/VisiGrid/pull/99)))
+- **INDIRECT can reach other sheets**, for example `=INDIRECT("Data!B5")` or `=INDIRECT("'My Data'!A1:A2")`; these returned `#REF!` before. ([#99](https://github.com/VisiGrid/VisiGrid/pull/99))
+- **Spills behave like Excel.** Typing into a cell a spilled formula covers turns the formula into `#SPILL!`, and clearing that value lets it spill again, including for formulas that were already blocked when the file opened. Rewriting or clearing a spilling formula empties every cell it filled. ([#91](https://github.com/VisiGrid/VisiGrid/issues/91), ([#99](https://github.com/VisiGrid/VisiGrid/pull/99)))
+- Fixed inserting or deleting rows or columns next to a spilled formula leaving stale values behind and blanking the rest of the spill. ([#99](https://github.com/VisiGrid/VisiGrid/pull/99))
+
+## 0.46.1
+
+### Fixed
+
+- **Circular references no longer delete your formulas.** When an edit closed a reference cycle (for example `=B1+1` in A1 and `=A1+1` in B1), every formula in the cycle was replaced by the text `#CYCLE!` and could only be recovered with undo. The formulas now stay; `#CYCLE!` is shown as their result, as in Excel, and they calculate again as soon as the cycle is broken. Saving to `.sheet`, JSON and `.xlsx` keeps them. Files that already contain the `#CYCLE!` text from earlier versions still show it as a cycle error, but the lost formulas can't be recovered. ([#97](https://github.com/VisiGrid/VisiGrid/pull/97), [#95](https://github.com/VisiGrid/VisiGrid/issues/95))
+
+### Excel interchange
+
+- **Exported formulas keep their results.** Excel files saved by VisiGrid stored 0 as every formula's result; Excel recalculated on open, but pandas, file previews and other tools that read saved results saw zeros. Each formula now carries its computed value. ([#100](https://github.com/VisiGrid/VisiGrid/pull/100))
+- Fixed Excel files with a large sheet (over 32 MB of sheet data) dropping every Table in the workbook with an "XLSX part … is too large" warning, even when the large sheet had no Tables. A problem reading one sheet's Tables now affects only that sheet. ([#96](https://github.com/VisiGrid/VisiGrid/pull/96))
+
+## 0.46.0
+
+### Formulas
+
+- **21 more functions, 163 in all:** HYPERLINK, LARGE, LOOKUP, MAXIFS, MINIFS, MODE, MODE.SNGL, NA, PERCENTILE, PERCENTILE.INC, QUARTILE, QUARTILE.INC, RANK, RANK.EQ, SMALL, SORTBY, TEXTSPLIT, WEEKNUM and XOR. HYPERLINK shows its friendly name (or the link) as the cell's value. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **LET and LAMBDA.** Name intermediate results with LET. A LAMBDA can be called in place (`=LAMBDA(x, x*2)(5)`), through a LET name, or curried. MAP, REDUCE, BYROW and recursive LAMBDAs aren't supported yet, and a LAMBDA that is never called returns `#CALC!`. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **Array constants** such as `={1,2;3,4}` can be typed in formulas. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **Faster edits in large workbooks.** Editing a cell with few dependents no longer scans the whole workbook for INDIRECT/OFFSET readers on every edit; on a 200,000-formula workbook, a one-dependent edit went from about 42 ms to a fraction of a millisecond. ([#87](https://github.com/VisiGrid/VisiGrid/pull/87))
+- **Not yet in Excel files:** LET, LAMBDA, TEXTSPLIT, SORTBY and other newer functions are written to `.xlsx` without Excel's `_xlfn.` prefixes, so Excel shows `#NAME?` for them, and `.xlsx` files that use those prefixes don't import them yet ([#89](https://github.com/VisiGrid/VisiGrid/issues/89)).
+
+### Import recipes
+
+- **Fixed:** Refresh failing with "Table range extends beyond the sheet" when a new month's file had more rows than the sheet the recipe first created (over 1,000 rows, or over the first month's count). ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- Large refreshes (over 100,000 changed cells) now publish with a single undo step instead of being refused. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- A recipe reading the newest matching file skips downloads still in progress (`.crdownload`, `.part`, `.download`, `.tmp`, hidden files) and waits when the newest file changed in the last two seconds. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- **Unlink Table from Recipe** in the command palette keeps the records as an ordinary Table; Ctrl+Z relinks it. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+- The blocked banner's suggested rename now takes Ctrl+Enter, so Enter in the sheet can't apply it by accident. Edits made while a recipe is opening are no longer replaced by its result, and TOML files that aren't recipes are no longer run as one. ([#92](https://github.com/VisiGrid/VisiGrid/pull/92))
+
 ## 0.45.0
 
 ### Fixed

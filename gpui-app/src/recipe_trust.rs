@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use visigrid_io::recipe::{Recipe, Source};
+use visigrid_io::recipe::Recipe;
 
 fn store_path() -> PathBuf {
     dirs::config_dir()
@@ -25,9 +25,8 @@ fn store_path() -> PathBuf {
 /// stays a pattern), so next month's file under an approved pattern is
 /// covered and a recipe edited to read elsewhere is not.
 pub fn approval_key(recipe_path: &Path, recipe: &Recipe) -> String {
-    let Source::Csv(src) = &recipe.source;
     let recipe_path = std::path::absolute(recipe_path).unwrap_or_else(|_| recipe_path.to_path_buf());
-    let text = format!("{}\0{}", recipe_path.display(), src.path);
+    let text = format!("{}\0{}", recipe_path.display(), recipe.source.path());
     blake3::hash(text.as_bytes()).to_hex()[..32].to_string()
 }
 

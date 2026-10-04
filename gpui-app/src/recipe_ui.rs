@@ -15,7 +15,12 @@ use visigrid_io::recipe::{self, OnError, Recipe, RecipeOutput, RunReport, Snapsh
 use visigrid_io::recipe_table;
 
 use crate::app::Spreadsheet;
+use crate::mode::Mode;
 use crate::history::MutationSource;
+
+/// Largest refresh (cells before plus after) kept as sparse cell history;
+/// the guarded batch refuses past 100,000 changed cells.
+const SPARSE_REFRESH_CELLS: usize = 90_000;
 
 /// Height of the strip above a linked Table's sheet.
 pub(crate) const RECIPE_STRIP_HEIGHT: f32 = 30.0;
@@ -206,6 +211,9 @@ impl Spreadsheet {
             }
         };
         self.recipe_run_in_progress = true;
+        // Opening replaces the window's workbook: note its revision, so edits
+        // made while the recipe runs are not thrown away
+        self.recipe_open_revision = (target == RecipeTarget::NewWorkbook).then(|| self.wb(cx).revision());
         self.status_message = Some(format!("Running {}…", file_name(&recipe_path.display().to_string())));
         cx.notify();
         let started = Instant::now();
@@ -267,6 +275,12 @@ impl Spreadsheet {
         };
         let ms = started.elapsed().as_millis();
         match target {
+            RecipeTarget::NewWorkbook if self.recipe_open_revision.take().is_some_and(|r| r != self.wb(cx).revision()) && self.is_dirty() => {
+                self.status_message = Some(format!(
+                    "You edited this workbook while {} ran, so it was not replaced. Save your work, then open the recipe again.",
+                    file_name(&recipe_path.display().to_string())
+                ));
+            }
             RecipeTarget::NewWorkbook => match recipe_table::new_workbook(&output, &table_name, link) {
                 Ok(wb) => {
                     self.recipe_blocked = None;
@@ -283,12 +297,23 @@ impl Spreadsheet {
             },
             RecipeTarget::Table(id) => {
                 let mut candidate = self.wb(cx).clone();
-                let refreshed = recipe_table::refresh_table(&mut candidate, id, &output, link)
-                    .and_then(|r| Ok((r, self.wb(cx).capture_guarded_batch(&candidate)?)));
+                let width = output.columns.len().max(table.as_ref().map_or(0, |t| t.columns.len()));
+                let refreshed = recipe_table::refresh_table(&mut candidate, id, &output, link);
                 match refreshed {
-                    Ok((r, commit)) => {
+                    Ok(r) => {
                         let description = format!("Refresh {table_name}");
-                        match self.publish_table_batch(candidate, commit, description, MutationSource::Human, cx) {
+                        // Sparse cell history while it stays small (most monthly
+                        // files); past its limit, one whole-workbook undo step
+                        // rather than refusing the refresh
+                        let changed = (r.rows_before + r.rows_after + 1) * width;
+                        let published = if changed <= SPARSE_REFRESH_CELLS {
+                            self.wb(cx)
+                                .capture_guarded_batch(&candidate)
+                                .and_then(|commit| self.publish_table_batch(candidate, commit, description, MutationSource::Human, cx))
+                        } else {
+                            self.publish_workbook_snapshot(candidate, description, cx)
+                        };
+                        match published {
                             Ok(()) => {
                                 self.recipe_blocked = None;
                                 let delta = r.rows_after as i64 - r.rows_before as i64;
@@ -298,10 +323,14 @@ impl Spreadsheet {
                                     d => format!("{d}"),
                                 };
                                 self.status_message = Some(format!(
-                                    "Refreshed {table_name}: {} rows ({since}) from {} · all {} steps ran{}",
+                                    "Refreshed {table_name}: {} rows ({since}) from {} · {}{}",
                                     r.rows_after,
                                     file_name(&report.source),
-                                    report.steps.len(),
+                                    match report.steps.len() {
+                                        0 => "no steps".to_string(),
+                                        1 => "its step ran".to_string(),
+                                        n => format!("all {n} steps ran"),
+                                    },
                                     if r.columns_changed { " · columns changed" } else { "" }
                                 ));
                             }
@@ -394,11 +423,10 @@ impl Spreadsheet {
                     && chosen.file_name().and_then(|n| n.to_str()).zip(pattern_path.file_name().and_then(|n| n.to_str()))
                         .is_some_and(|(n, p)| recipe::wildcard_match(p, n));
                 if !matches_pattern {
-                    let visigrid_io::recipe::Source::Csv(src) = &mut recipe.source;
-                    src.path = match chosen.parent() {
+                    recipe.source.set_path(match chosen.parent() {
                         Some(p) if p == dir => chosen.file_name().unwrap().to_string_lossy().into_owned(),
                         _ => chosen.display().to_string(),
-                    };
+                    });
                     if let Err(e) = recipe.save(&recipe_path) {
                         this.status_message = Some(format!("Couldn't save the recipe: {e}"));
                         cx.notify();
@@ -451,6 +479,8 @@ impl Spreadsheet {
     /// While the confirmation is open it takes every key: Ctrl+Enter loads,
     /// Esc cancels, nothing else reaches the grid. Plain Enter does not load,
     /// so a keypress meant for the sheet cannot approve reading a file.
+    /// With the blocked banner showing, Ctrl+Enter takes its suggested
+    /// rename; other keys pass through.
     pub(crate) fn intercept_recipe_confirm_keys(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         let this = cx.entity().downgrade();
         let handle = window.window_handle();
@@ -460,8 +490,12 @@ impl Spreadsheet {
             }
             let Some(this) = this.upgrade() else { return };
             let handled = this.update(cx, |this, cx| {
+                let k = &event.keystroke;
+                let ctrl_enter = k.key == "enter" && (k.modifiers.control || k.modifiers.platform);
+                // The blocked banner's suggested rename is a guess: it takes
+                // Ctrl+Enter, never the Enter that moves down the sheet
                 if this.recipe_confirm.is_none() {
-                    return false;
+                    return ctrl_enter && this.mode == Mode::Navigation && this.recipe_primary_fix(cx);
                 }
                 let k = &event.keystroke;
                 if k.key == "escape" {
@@ -482,6 +516,34 @@ impl Spreadsheet {
             self.status_message = Some("Nothing was loaded".into());
             cx.notify();
         }
+    }
+
+    /// Palette "Unlink Table from Recipe": the Table keeps its records and
+    /// becomes an ordinary Table. One undo step relinks it.
+    pub fn unlink_recipe_table(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.recipe_strip_table(cx) else {
+            self.status_message = Some("No recipe-backed Table on this sheet".into());
+            cx.notify();
+            return;
+        };
+        if self.block_if_previewing(cx) || self.block_read_only_recovery(cx) {
+            return;
+        }
+        let recipe = table.source.as_ref().map(|s| file_name(&s.recipe)).unwrap_or_default();
+        // Metadata only: a Table commit, like changing its banding, not a
+        // cell-by-cell comparison of the whole sheet
+        let result = self.workbook.update(cx, |wb, _| wb.set_table_source(table.id, None));
+        self.status_message = Some(match result {
+            Ok(commit) => {
+                self.record_table_commit(commit, format!("Unlink {} from its recipe", table.name), cx);
+                if self.recipe_blocked.as_ref().is_some_and(|b| b.target == RecipeTarget::Table(table.id)) {
+                    self.recipe_blocked = None;
+                }
+                format!("{} is no longer linked to {recipe}; its records stay. Ctrl+Z relinks it.", table.name)
+            }
+            Err(e) => format!("Couldn't unlink {}: {e}", table.name),
+        });
+        cx.notify();
     }
 
     /// Open the recipe file in the system's editor for TOML.

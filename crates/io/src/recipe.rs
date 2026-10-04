@@ -52,6 +52,116 @@ pub struct Recipe {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Source {
     Csv(CsvSource),
+    /// An Apache Parquet file: column names and types come from its schema.
+    Parquet(ParquetSource),
+    /// One table of a local DuckDB database, opened read-only.
+    Duckdb(DuckdbSource),
+    /// One sheet of an Excel workbook (.xlsx, .xlsm, .xls). Formulas are
+    /// never evaluated: the values Excel last calculated are read.
+    Xlsx(XlsxSource),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XlsxSource {
+    /// Relative paths resolve against the recipe file's folder.
+    pub path: String,
+    /// The sheet's name; empty means the first sheet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sheet: String,
+    /// The row holding the column names, counting from 1; rows above it
+    /// are skipped. 0: no header; columns are named by letter.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub header_row: usize,
+    /// The column names when the recipe was saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParquetSource {
+    /// Relative paths resolve against the recipe file's folder.
+    pub path: String,
+    /// The column names when the recipe was saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuckdbSource {
+    /// Relative paths resolve against the recipe file's folder.
+    pub path: String,
+    /// `schema.table`, or a table name that is unique in the database.
+    pub table: String,
+    /// The column names when the recipe was saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
+impl Source {
+    pub fn path(&self) -> &str {
+        match self {
+            Source::Csv(s) => &s.path,
+            Source::Parquet(s) => &s.path,
+            Source::Duckdb(s) => &s.path,
+            Source::Xlsx(s) => &s.path,
+        }
+    }
+
+    pub fn set_path(&mut self, path: String) {
+        match self {
+            Source::Csv(s) => s.path = path,
+            Source::Parquet(s) => s.path = path,
+            Source::Duckdb(s) => s.path = path,
+            Source::Xlsx(s) => s.path = path,
+        }
+    }
+
+    /// The column names saved with the recipe, checked for drift.
+    pub fn columns(&self) -> &[String] {
+        match self {
+            Source::Csv(s) => &s.columns,
+            Source::Parquet(s) => &s.columns,
+            Source::Duckdb(s) => &s.columns,
+            Source::Xlsx(s) => &s.columns,
+        }
+    }
+
+    pub fn columns_mut(&mut self) -> &mut Vec<String> {
+        match self {
+            Source::Csv(s) => &mut s.columns,
+            Source::Parquet(s) => &mut s.columns,
+            Source::Duckdb(s) => &mut s.columns,
+            Source::Xlsx(s) => &mut s.columns,
+        }
+    }
+
+    /// "CSV", "Parquet", "DuckDB"
+    pub fn label(&self) -> &'static str {
+        match self {
+            Source::Csv(_) => "CSV",
+            Source::Parquet(_) => "Parquet",
+            Source::Duckdb(_) => "DuckDB",
+            Source::Xlsx(_) => "Excel",
+        }
+    }
+
+    /// A new source of the kind a file's extension names, reading `path`:
+    /// `.parquet`, `.duckdb`/`.db` (with `table`), anything else as CSV.
+    pub fn for_file(path: String, table: Option<String>) -> Source {
+        let lower = path.to_lowercase();
+        if [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e)) {
+            Source::Xlsx(XlsxSource { path, sheet: table.unwrap_or_default(), header_row: 1, columns: Vec::new() })
+        } else if lower.ends_with(".parquet") {
+            Source::Parquet(ParquetSource { path, columns: Vec::new() })
+        } else if lower.ends_with(".duckdb") || table.is_some() {
+            Source::Duckdb(DuckdbSource { path, table: table.unwrap_or_default(), columns: Vec::new() })
+        } else {
+            Source::Csv(CsvSource { path, delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: Vec::new() })
+        }
+    }
 }
 
 /// A delimited text file, and how to read it.
@@ -313,8 +423,7 @@ impl Recipe {
     pub fn rename_source_column(&mut self, old: &str, new: &str) -> bool {
         let same = |a: &str| a.eq_ignore_ascii_case(old);
         let mut changed = false;
-        let Source::Csv(src) = &mut self.source;
-        for c in &mut src.columns {
+        for c in self.source.columns_mut() {
             if same(c) {
                 *c = new.to_string();
                 changed = true;
@@ -396,8 +505,7 @@ impl Recipe {
 
     /// Whether the source names a pattern (`export-*.csv`) rather than a file.
     pub fn source_is_pattern(&self) -> bool {
-        let Source::Csv(src) = &self.source;
-        is_pattern(Path::new(&src.path).file_name().and_then(|n| n.to_str()).unwrap_or(""))
+        is_pattern(Path::new(self.source.path()).file_name().and_then(|n| n.to_str()).unwrap_or(""))
     }
 
     /// The file a run reads: `over` if given; else the recipe's path, or for
@@ -417,7 +525,7 @@ impl Recipe {
         let mut best: Option<(std::time::SystemTime, String, PathBuf)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !wildcard_match(pattern, &name) {
+            if !wildcard_match(pattern, &name) || is_partial_download(&name) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -430,7 +538,15 @@ impl Recipe {
                 best = Some((modified, name, entry.path()));
             }
         }
-        best.map(|(_, _, p)| p).ok_or_else(|| format!("no file in {} matches {pattern}", dir.display()))
+        let (modified, name, path) = best.ok_or_else(|| format!("no file in {} matches {pattern}", dir.display()))?;
+        // A file that changed a moment ago may still be downloading or
+        // being written: reading it now could load half an export
+        if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
+            if age < SETTLE_TIME {
+                return Err(format!("{name} is still being written (it changed a moment ago); refresh again in a few seconds"));
+            }
+        }
+        Ok(path)
     }
 
     /// The source file: `over` if given, else the recipe's path, relative
@@ -439,14 +555,26 @@ impl Recipe {
         if let Some(p) = over {
             return p.to_path_buf();
         }
-        let Source::Csv(src) = &self.source;
-        let p = Path::new(&src.path);
+        let p = Path::new(self.source.path());
         if p.is_absolute() {
             p.to_path_buf()
         } else {
             recipe_dir.join(p)
         }
     }
+}
+
+/// How long the newest file a pattern matches must have been unchanged.
+pub const SETTLE_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Names browsers and tools use while a download or write is in progress,
+/// and hidden files. A pattern never picks these.
+fn is_partial_download(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with('.')
+        || lower.starts_with("~$")
+        || lower.ends_with('~')
+        || [".crdownload", ".part", ".partial", ".download", ".tmp", ".temp", ".opdownload"].iter().any(|s| lower.ends_with(s))
 }
 
 fn is_pattern(name: &str) -> bool {
@@ -671,6 +799,21 @@ pub struct RunReport {
 pub struct OutColumn {
     pub name: String,
     pub rule: ColumnRule,
+    /// How a typed source declared the column, where the rule alone would
+    /// lose it. A Set types step on the column clears it.
+    pub kind: ValueKind,
+}
+
+/// Typed-source columns written back with their type: numbers as the
+/// source stated them, date-times and times as such (their values are ISO
+/// text in the recipe, so filters compare them in order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum ValueKind {
+    #[default]
+    Plain,
+    Number,
+    DateTime,
+    Time,
 }
 
 /// The shaped table, as text plus a type per column.
@@ -731,7 +874,7 @@ impl Frame {
     }
 
     fn add_blank(&mut self, name: &str) -> usize {
-        self.columns.push(OutColumn { name: name.to_string(), rule: ColumnRule::Auto });
+        self.columns.push(OutColumn { name: name.to_string(), rule: ColumnRule::Auto, kind: ValueKind::Plain });
         for row in &mut self.rows {
             row.push(String::new());
         }
@@ -754,7 +897,7 @@ impl Frame {
 
 /// Run a recipe against a snapshot of its source.
 pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
-    let Source::Csv(src) = &recipe.source;
+    let decimal_comma = matches!(&recipe.source, Source::Csv(s) if s.decimal_comma);
     let mut report = RunReport {
         ok: true,
         source: snapshot.path.display().to_string(),
@@ -769,19 +912,25 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         error_count: 0,
     };
 
-    let mut frame = match read_csv(src, snapshot) {
+    let read = match &recipe.source {
+        Source::Csv(src) => read_csv(src, snapshot),
+        Source::Parquet(_) => read_parquet(snapshot),
+        Source::Duckdb(src) => read_duckdb(src, snapshot),
+        Source::Xlsx(src) => read_xlsx(src, snapshot),
+    };
+    let mut frame = match read {
         Ok(frame) => frame,
         Err(e) => {
             report.ok = false;
             report.failures.push(e);
             return RunResult {
-                output: RecipeOutput { columns: Vec::new(), rows: Vec::new(), decimal_comma: src.decimal_comma },
+                output: RecipeOutput { columns: Vec::new(), rows: Vec::new(), decimal_comma },
                 report,
             };
         }
     };
     report.source_rows = frame.rows.len();
-    report.drift = drift(&src.columns, &frame.columns);
+    report.drift = drift(recipe.source.columns(), &frame.columns);
 
     for (index, step) in recipe.steps.iter().enumerate() {
         let started = Instant::now();
@@ -875,7 +1024,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
     report.rows = frame.rows.len();
     report.columns = frame.columns.len();
     RunResult {
-        output: RecipeOutput { columns: frame.columns, rows: frame.rows, decimal_comma: src.decimal_comma },
+        output: RecipeOutput { columns: frame.columns, rows: frame.rows, decimal_comma },
         report,
     }
 }
@@ -933,6 +1082,275 @@ pub fn guess_header_row(snapshot: &Snapshot) -> usize {
         }
     }
     1
+}
+
+// ============================================================================
+// Typed sources: Parquet and DuckDB
+// ============================================================================
+
+/// The snapshot's bytes as a file, for readers that need a path. The
+/// snapshot stays the only copy of the source a run reads.
+fn snapshot_file(snapshot: &Snapshot, ext: &str) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join(format!("source.{ext}"));
+    std::fs::write(&path, snapshot.bytes.as_slice()).map_err(|e| e.to_string())?;
+    Ok((dir, path))
+}
+
+fn read_parquet(snapshot: &Snapshot) -> Result<Frame, String> {
+    let (_dir, path) = snapshot_file(snapshot, "parquet")?;
+    frame_from_import(crate::parquet::import(&path)?)
+}
+
+fn read_duckdb(src: &DuckdbSource, snapshot: &Snapshot) -> Result<Frame, String> {
+    if src.table.trim().is_empty() {
+        return Err("the recipe names no DuckDB table; set source.table".into());
+    }
+    let (_dir, path) = snapshot_file(snapshot, "duckdb")?;
+    let db = crate::duckdb::Database::open(&path)?;
+    let index = db.resolve(&src.table)?;
+    frame_from_import(db.read_table(index, crate::parquet::MAX_ROWS - 1, None, true)?)
+}
+
+/// What a typed cell is, for choosing its column's kind.
+#[derive(Clone, Copy, PartialEq)]
+enum CellKind {
+    Number,
+    Date,
+    DateTime,
+    Time,
+    Text,
+}
+
+/// A typed import as recipe text: numbers as the importer stated them,
+/// dates as YYYY-MM-DD (a Date column), date-times and times as ISO text.
+/// A column whose cells are all one kind keeps it; a mixed column (huge
+/// integers the importer kept as text, say) becomes text.
+fn frame_from_import(import: crate::parquet::ParquetImport) -> Result<Frame, String> {
+    if import.truncated() {
+        return Err(format!(
+            "the source has {} rows and {} columns; a sheet holds {} rows (including the header) and {} columns",
+            import.total_rows,
+            import.total_cols,
+            crate::parquet::MAX_ROWS,
+            crate::parquet::MAX_COLS
+        ));
+    }
+    Ok(frame_from_sheet(&import.sheet, Some(0), import.rows_loaded, import.cols_loaded))
+}
+
+/// A sheet's typed cells as a recipe frame: names from `header` (a row
+/// index; None names columns by letter), then `count` records below it,
+/// `width` columns wide. Lines in reports are the sheet's row numbers.
+fn frame_from_sheet(sheet: &Sheet, header: Option<usize>, count: usize, width: usize) -> Frame {
+    let first = header.map_or(0, |h| h + 1);
+    let mut columns = Vec::with_capacity(width);
+    let mut rows: Vec<Vec<String>> = vec![Vec::with_capacity(width); count];
+    for col in 0..width {
+        let mut kind: Option<CellKind> = None;
+        let mut mixed = false;
+        let mut values = Vec::with_capacity(count);
+        for row in first..first + count {
+            let (text, k) = typed_cell_text(sheet, row, col);
+            if let Some(k) = k {
+                match kind {
+                    None => kind = Some(k),
+                    Some(prev) if prev != k => mixed = true,
+                    _ => {}
+                }
+            }
+            values.push(text);
+        }
+        let (rule, value_kind) = match (kind, mixed) {
+            (_, true) | (Some(CellKind::Text), _) => (ColumnRule::Text, ValueKind::Plain),
+            (Some(CellKind::Number), _) => (ColumnRule::Number, ValueKind::Number),
+            (Some(CellKind::Date), _) => (ColumnRule::Date(DateOrder::Ymd), ValueKind::Plain),
+            (Some(CellKind::DateTime), _) => (ColumnRule::Text, ValueKind::DateTime),
+            (Some(CellKind::Time), _) => (ColumnRule::Text, ValueKind::Time),
+            (None, _) => (ColumnRule::Auto, ValueKind::Plain),
+        };
+        let name = header.map(|h| sheet.get_raw(h, col).trim().to_string()).filter(|n| !n.is_empty());
+        columns.push(OutColumn { name: name.unwrap_or_else(|| crate::csv_import::col_label(col)), rule, kind: value_kind });
+        for (row, value) in values.into_iter().enumerate() {
+            rows[row].push(value);
+        }
+    }
+    // A record's row number in the sheet (or the file, for Parquet)
+    let lines = (first + 1..first + count + 1).collect();
+    Frame { columns, rows, lines, decimal_comma: false }
+}
+
+/// An Excel workbook's sheet names, in order, without importing it.
+pub fn xlsx_sheet_names(path: &Path) -> Result<Vec<String>, String> {
+    use calamine::Reader as _;
+    let workbook = calamine::open_workbook_auto(path).map_err(|e| e.to_string())?;
+    Ok(workbook.sheet_names().to_vec())
+}
+
+/// The row of `sheet` (counting from 1) that most likely holds the column
+/// names: the same rule as for CSV, applied to the sheet's rows. 1 when
+/// nothing stands out.
+pub fn guess_xlsx_header_row(snapshot: &Snapshot, sheet: &str) -> usize {
+    let probe = XlsxSource { path: String::new(), sheet: sheet.to_string(), header_row: 0, columns: Vec::new() };
+    let Ok(frame) = read_xlsx(&probe, snapshot) else { return 1 };
+    // A header names every column, so it fills as many cells as the widest
+    // row near the top; title rows above it don't. Unlike CSV, empty data
+    // cells leave nothing to count, so rows below may fill fewer.
+    let counts: Vec<usize> = frame.rows.iter().take(40).map(|r| r.iter().filter(|v| !v.trim().is_empty()).count()).collect();
+    let widest = counts.iter().copied().max().unwrap_or(0);
+    if widest < 2 {
+        return 1;
+    }
+    counts.iter().take(10).position(|c| *c == widest).map_or(1, |i| i + 1)
+}
+
+fn read_xlsx(src: &XlsxSource, snapshot: &Snapshot) -> Result<Frame, String> {
+    // The reader picks the format from the extension
+    let ext = snapshot.path.extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_lowercase();
+    let (_dir, path) = snapshot_file(snapshot, &ext)?;
+    // Values only: the results Excel saved, never a recalculation here
+    let options = crate::xlsx::ImportOptions { values_only: true, ..Default::default() };
+    let (wb, result) = crate::xlsx::import_with_options(&path, &options)?;
+    if result.truncated {
+        return Err("the workbook is larger than VisiGrid imports; save the sheet you need on its own".into());
+    }
+    let names: Vec<String> = (0..wb.sheet_count()).filter_map(|i| wb.sheet(i).map(|s| s.name.clone())).collect();
+    let index = if src.sheet.trim().is_empty() {
+        0
+    } else {
+        names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(src.sheet.trim()))
+            .ok_or_else(|| format!("the workbook has no sheet {:?}; its sheets are {}", src.sheet, names.join(", ")))?
+    };
+    let sheet = wb.sheet(index).ok_or("the workbook has no sheets")?;
+    let (mut last_row, mut last_col) = (None::<usize>, 0usize);
+    for ((row, col), _) in sheet.cells_iter() {
+        if !sheet.get_raw(row, col).is_empty() {
+            last_row = Some(last_row.map_or(row, |r| r.max(row)));
+            last_col = last_col.max(col + 1);
+        }
+    }
+    let header = src.header_row.checked_sub(1);
+    let first = header.map_or(0, |h| h + 1);
+    if let Some(h) = header {
+        if last_row.is_none_or(|r| r < h) || (0..last_col).all(|c| sheet.get_raw(h, c).trim().is_empty()) {
+            return Err(format!("row {} of {} is empty; set the header to the row that holds the column names", src.header_row, sheet.name));
+        }
+    }
+    let count = last_row.map_or(0, |r| (r + 1).saturating_sub(first));
+    Ok(frame_from_sheet(sheet, header, count, last_col))
+}
+
+fn typed_cell_text(sheet: &Sheet, row: usize, col: usize) -> (String, Option<CellKind>) {
+    use visigrid_engine::cell::ValueRef;
+    let Some(cell) = sheet.get_cell_opt(row, col) else { return (String::new(), None) };
+    match cell.value() {
+        ValueRef::Empty => (String::new(), None),
+        ValueRef::Text(t) => (t.to_string(), Some(CellKind::Text)),
+        ValueRef::Formula { source, .. } => (source.to_string(), Some(CellKind::Text)),
+        ValueRef::Number(n) => match date_kind(&sheet.get_format(row, col).number_format) {
+            Some(CellKind::Date) => (serial_to_iso(n, false), Some(CellKind::Date)),
+            Some(CellKind::DateTime) => (serial_to_iso(n, true), Some(CellKind::DateTime)),
+            Some(CellKind::Time) => (fraction_to_time(n), Some(CellKind::Time)),
+            _ => (number_text(n), Some(CellKind::Number)),
+        },
+    }
+}
+
+/// Whether a number format shows a date, a date-time or a time. Excel keeps
+/// most date formats as format codes (`yyyy-mm-dd`, `m/d/yyyy h:mm`,
+/// `h:mm`): read them as Excel does, ignoring quoted text, escapes and
+/// [colour] sections. `m` alone is month or minute; it decides nothing.
+fn date_kind(format: &NumberFormat) -> Option<CellKind> {
+    let code = match format {
+        NumberFormat::Date { .. } => return Some(CellKind::Date),
+        NumberFormat::DateTime => return Some(CellKind::DateTime),
+        NumberFormat::Time => return Some(CellKind::Time),
+        NumberFormat::Custom(code) => code.to_lowercase(),
+        _ => return None,
+    };
+    // The first section is the one positive numbers use
+    let mut plain = String::new();
+    let (mut quoted, mut bracket, mut escaped) = (false, false, false);
+    for c in code.chars() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => quoted = !quoted,
+            _ if quoted => {}
+            '[' => bracket = true,
+            // [h], [mm], [ss]: elapsed time
+            ']' => bracket = false,
+            ';' if !bracket => break,
+            _ if bracket => {
+                if "hms".contains(c) {
+                    plain.push(c);
+                }
+            }
+            _ => plain.push(c),
+        }
+    }
+    let date = plain.contains('y') || plain.contains('d');
+    let time = plain.contains('h') || plain.contains('s') || plain.contains("am/pm") || plain.contains("a/p");
+    match (date, time) {
+        (true, true) => Some(CellKind::DateTime),
+        (true, false) => Some(CellKind::Date),
+        (false, true) => Some(CellKind::Time),
+        _ => None,
+    }
+}
+
+/// 1204 rather than 1204.0; the shortest round-trip form otherwise.
+fn number_text(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n:?}")
+    }
+}
+
+fn serial_epoch() -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(1899, 12, 30).unwrap().and_hms_opt(0, 0, 0).unwrap()
+}
+
+/// A date serial as `2026-09-01`, or with `time` as `2026-09-01 14:02:00`
+/// (with microseconds when there are any).
+fn serial_to_iso(serial: f64, time: bool) -> String {
+    let micros = (serial * 86_400_000_000.0).round() as i64;
+    let at = serial_epoch() + chrono::Duration::microseconds(micros);
+    if !time {
+        at.format("%Y-%m-%d").to_string()
+    } else if micros % 1_000_000 == 0 {
+        at.format("%Y-%m-%d %H:%M:%S").to_string()
+    } else {
+        at.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+    }
+}
+
+fn fraction_to_time(fraction: f64) -> String {
+    let micros = (fraction * 86_400_000_000.0).round() as i64;
+    let t = chrono::NaiveTime::MIN + chrono::Duration::microseconds(micros);
+    if micros % 1_000_000 == 0 {
+        t.format("%H:%M:%S").to_string()
+    } else {
+        t.format("%H:%M:%S%.6f").to_string()
+    }
+}
+
+fn parse_iso_datetime(s: &str) -> Option<f64> {
+    let t = s.trim();
+    let at = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f"))
+        .ok()?;
+    let micros = (at - serial_epoch()).num_microseconds()?;
+    Some(micros as f64 / 86_400_000_000.0)
+}
+
+fn parse_iso_time(s: &str) -> Option<f64> {
+    let t = chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M:%S%.f").ok()?;
+    let micros = (t - chrono::NaiveTime::MIN).num_microseconds()?;
+    Some(micros as f64 / 86_400_000_000.0)
 }
 
 fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
@@ -1012,7 +1430,7 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
         row.resize(width, String::new());
     }
     Ok(Frame {
-        columns: names.into_iter().map(|name| OutColumn { name, rule: ColumnRule::Auto }).collect(),
+        columns: names.into_iter().map(|name| OutColumn { name, rule: ColumnRule::Auto, kind: ValueKind::Plain }).collect(),
         rows,
         lines,
         decimal_comma: src.decimal_comma,
@@ -1106,6 +1524,8 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
                 let Some(i) = frame.find(name) else { continue };
                 let rule = parse_type(ty).unwrap_or(ColumnRule::Auto);
                 frame.columns[i].rule = rule;
+                // A declared type replaces what the source said
+                frame.columns[i].kind = ValueKind::Plain;
                 for (r, row) in frame.rows.iter_mut().enumerate() {
                     let value = &row[i];
                     if value.trim().is_empty() {
@@ -1323,6 +1743,30 @@ impl RecipeOutput {
             return;
         }
         let (dr, c) = (row, at_col);
+        match self.columns[col].kind {
+            ValueKind::Plain => {}
+            // As the Parquet importer writes it, so a recipe changes nothing
+            // about a value it doesn't touch
+            ValueKind::Number => return sheet.set_value_deferred(dr, c, value),
+            ValueKind::DateTime => {
+                return match parse_iso_datetime(value) {
+                    Some(serial) => {
+                        sheet.set_value_deferred(dr, c, &interchange_number(serial));
+                        sheet.set_number_format(dr, c, NumberFormat::DateTime);
+                    }
+                    None => sheet.set_text(dr, c, value),
+                }
+            }
+            ValueKind::Time => {
+                return match parse_iso_time(value) {
+                    Some(fraction) => {
+                        sheet.set_value_deferred(dr, c, &interchange_number(fraction));
+                        sheet.set_number_format(dr, c, NumberFormat::Time);
+                    }
+                    None => sheet.set_text(dr, c, value),
+                }
+            }
+        }
         match self.columns[col].rule {
             ColumnRule::Text | ColumnRule::Skip => sheet.set_text(dr, c, value),
             ColumnRule::Number => match parse_number(value, self.decimal_comma) {
@@ -1783,8 +2227,7 @@ is = "not_empty"
 "#;
         let mut r = Recipe::from_toml(text).unwrap();
         assert!(r.rename_source_column("order id", "Order Number"));
-        let Source::Csv(src) = &r.source;
-        assert_eq!(src.columns, ["Order Number", "Amount"]);
+        assert_eq!(r.source.columns(), ["Order Number", "Amount"]);
         assert_eq!(r.steps[0], Step::Trim { columns: vec!["Order Number".into()], missing: Missing::Fail });
         assert!(matches!(&r.steps[1], Step::Rename { columns, .. } if columns.get("Order Number").map(String::as_str) == Some("order_id")));
         // After the rename, "Order ID" would be some other column: untouched
@@ -1892,5 +2335,231 @@ path = "export-*-*.csv"
         assert!(Snapshot::read(&fifo).unwrap_err().contains("not a regular file"));
         assert!(Recipe::load(&fifo).unwrap_err().contains("not a regular file"));
         assert!(Snapshot::read(Path::new("/dev/zero")).unwrap_err().contains("not a regular file"));
+    }
+
+    /// A sheet with text IDs, numbers, dates and date-times, written out by
+    /// the real Parquet and DuckDB exporters.
+    fn typed_sheet() -> Sheet {
+        use visigrid_engine::cell::NumberFormat;
+        let mut sheet = Sheet::new(SheetId(1), 100, 10);
+        for (c, name) in ["ID", "Amount", "Day", "At"].iter().enumerate() {
+            sheet.set_text(0, c, name);
+        }
+        let rows = [("007", "10.5", 46266.0, 46266.5), ("008", "0", 46267.0, 46267.25), ("009", "1204", 46268.0, 46268.75)];
+        for (i, (id, amount, day, at)) in rows.iter().enumerate() {
+            let r = i + 1;
+            sheet.set_text(r, 0, id);
+            sheet.set_value_deferred(r, 1, amount);
+            sheet.set_value_deferred(r, 2, &day.to_string());
+            sheet.set_number_format(r, 2, NumberFormat::Date { style: DateStyle::Iso });
+            sheet.set_value_deferred(r, 3, &at.to_string());
+            sheet.set_number_format(r, 3, NumberFormat::DateTime);
+        }
+        sheet
+    }
+
+    fn typed_plan(sheet: &Sheet) -> crate::parquet_export::Plan<'_> {
+        let columns = ["ID", "Amount", "Day", "At"]
+            .iter()
+            .enumerate()
+            .map(|(index, name)| crate::parquet_export::Column { index, name: name.to_string(), as_text: false })
+            .collect();
+        crate::parquet_export::analyze(sheet, vec![1, 2, 3], columns).unwrap()
+    }
+
+    fn check_typed(res: &RunResult) {
+        assert!(res.report.ok, "{}", res.report.summary());
+        let out = &res.output;
+        // Amount > 0 dropped the zero row
+        assert_eq!(out.rows, vec![
+            vec!["007", "10.5", "2026-09-01", "2026-09-01 12:00:00"],
+            vec!["009", "1204", "2026-09-03", "2026-09-03 18:00:00"],
+        ]);
+        assert_eq!(out.columns[0].rule, ColumnRule::Text);
+        assert_eq!((out.columns[1].rule, out.columns[1].kind), (ColumnRule::Number, ValueKind::Number));
+        assert_eq!(out.columns[2].rule, ColumnRule::Date(DateOrder::Ymd));
+        assert_eq!(out.columns[3].kind, ValueKind::DateTime);
+        let sheet = out.to_sheet();
+        assert_eq!(sheet.get_raw(1, 0), "007");
+        assert_eq!(sheet.get_display(2, 1), "1204");
+        assert!(matches!(sheet.get_format(1, 3).number_format, visigrid_engine::cell::NumberFormat::DateTime));
+        assert_eq!(sheet.get_formatted_display(1, 2), "2026-09-01");
+    }
+
+    const TYPED_STEPS: &str = "[[step]]\nop = \"filter\"\ncolumn = \"Amount\"\nis = \">\"\nvalue = \"0\"\n";
+
+    #[test]
+    fn a_parquet_source_keeps_its_column_types() {
+        let sheet = typed_sheet();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orders.parquet");
+        typed_plan(&sheet).write_path(&path).unwrap();
+        let text = format!("version = 1\n[source]\nkind = \"parquet\"\npath = \"orders.parquet\"\n{TYPED_STEPS}");
+        let r = Recipe::from_toml(&text).unwrap();
+        assert_eq!(r.source.label(), "Parquet");
+        let src = r.resolve_source(dir.path(), None).unwrap();
+        check_typed(&run(&r, &Snapshot::read(&src).unwrap()));
+        // A declared type replaces the source's
+        let typed = format!("{text}[[step]]\nop = \"types\"\ncolumns = {{ At = \"text\" }}\n");
+        let res = run(&Recipe::from_toml(&typed).unwrap(), &Snapshot::read(&src).unwrap());
+        assert_eq!(res.output.columns[3].kind, ValueKind::Plain);
+        assert_eq!(res.output.to_sheet().get_raw(1, 3), "2026-09-01 12:00:00");
+    }
+
+    #[test]
+    fn a_duckdb_source_reads_one_table() {
+        let sheet = typed_sheet();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orders.duckdb");
+        crate::duckdb::export(&typed_plan(&sheet), &path).unwrap();
+        let text = format!("version = 1\n[source]\nkind = \"duckdb\"\npath = \"orders.duckdb\"\ntable = \"main.data\"\n{TYPED_STEPS}");
+        let r = Recipe::from_toml(&text).unwrap();
+        let src = r.resolve_source(dir.path(), None).unwrap();
+        check_typed(&run(&r, &Snapshot::read(&src).unwrap()));
+        // An unknown table fails the run with the tables there are
+        let wrong = text.replace("main.data", "nope");
+        let res = run(&Recipe::from_toml(&wrong).unwrap(), &Snapshot::read(&src).unwrap());
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("main.data"), "{:?}", res.report.failures);
+    }
+
+    #[test]
+    fn patterns_skip_downloads_in_progress_and_files_still_changing() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, secs_ago: u64| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "a\n1\n").unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        };
+        write("export-09.csv", 3600);
+        write("export-10.csv.crdownload", 10);
+        write("export-10.csv.part", 10);
+        write(".export-10.csv", 10);
+        let text = "version = 1\n[source]\nkind = \"csv\"\npath = \"export-*.csv*\"\n";
+        let r = Recipe::from_toml(text).unwrap();
+        assert_eq!(r.resolve_source(dir.path(), None).unwrap(), dir.path().join("export-09.csv"));
+        // The finished file lands but is still changing: wait, don't read half
+        write("export-10.csv", 0);
+        assert!(r.resolve_source(dir.path(), None).unwrap_err().contains("still being written"));
+        write("export-10.csv", 5);
+        assert_eq!(r.resolve_source(dir.path(), None).unwrap(), dir.path().join("export-10.csv"));
+    }
+
+    #[test]
+    fn an_excel_source_reads_one_sheet_below_its_title_rows() {
+        use visigrid_engine::cell::NumberFormat;
+        let mut wb = visigrid_engine::workbook::Workbook::new();
+        let s = wb.sheet_mut(0).unwrap();
+        s.set_text(0, 0, "Acme order export");
+        s.set_text(1, 0, "Generated 2026-09-30");
+        for (c, name) in ["ID", "Amount", "Day", "Double"].iter().enumerate() {
+            s.set_text(2, c, name);
+        }
+        for (i, (id, amount, day)) in [("007", "10.5", 46266.0), ("008", "0", 46267.0), ("009", "1204", 46268.0)].iter().enumerate() {
+            let r = 3 + i;
+            s.set_text(r, 0, id);
+            s.set_value(r, 1, amount);
+            s.set_value(r, 2, &day.to_string());
+            s.set_number_format(r, 2, NumberFormat::Date { style: DateStyle::Iso });
+            s.set_value(r, 3, &format!("=B{}*2", r + 1));
+        }
+        let other = wb.add_sheet_named("Notes").unwrap();
+        wb.sheet_mut(other).unwrap().set_text(0, 0, "unrelated");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orders.xlsx");
+        crate::xlsx::export(&wb, &path, None).unwrap();
+        // Saved results that differ from what the formulas compute: a recipe
+        // reads what Excel saved and never recalculates
+        let saved = dir.path().join("saved.xlsx");
+        {
+            use std::io::{Read, Write};
+            let mut input = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut output = zip::ZipWriter::new(std::fs::File::create(&saved).unwrap());
+            for i in 0..input.len() {
+                let mut entry = input.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                let name = entry.name().to_string();
+                if name == "xl/worksheets/sheet1.xml" {
+                    // Whatever result the exporter saved (0 before #100, the
+                    // computed value after), replace it with one no
+                    // recalculation would produce
+                    let xml = String::from_utf8(bytes).unwrap();
+                    let mut out = String::new();
+                    let mut rest = xml.as_str();
+                    let mut n = 0;
+                    while let Some(at) = rest.find("</f><v>") {
+                        let start = at + "</f><v>".len();
+                        let end = start + rest[start..].find("</v>").unwrap();
+                        out.push_str(&rest[..start]);
+                        out.push_str("99");
+                        rest = &rest[end..];
+                        n += 1;
+                    }
+                    out.push_str(rest);
+                    assert_eq!(n, 3, "{xml}");
+                    bytes = out.into_bytes();
+                }
+                output.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                output.write_all(&bytes).unwrap();
+            }
+            output.finish().unwrap();
+        }
+        std::fs::rename(&saved, &path).unwrap();
+
+        assert_eq!(xlsx_sheet_names(&path).unwrap()[0], wb.sheet(0).unwrap().name);
+        let snap = Snapshot::read(&path).unwrap();
+        assert_eq!(guess_xlsx_header_row(&snap, ""), 3);
+        // Rows with empty cells below the header don't hide it
+        let mut sparse = visigrid_engine::workbook::Workbook::new();
+        let sh = sparse.sheet_mut(0).unwrap();
+        sh.set_text(0, 0, "Report");
+        for (c, v) in ["A", "B", "C"].iter().enumerate() {
+            sh.set_text(1, c, v);
+        }
+        sh.set_text(2, 0, "1");
+        sh.set_text(2, 2, "x");
+        sh.set_text(3, 0, "2");
+        let sparse_path = dir.path().join("sparse.xlsx");
+        crate::xlsx::export(&sparse, &sparse_path, None).unwrap();
+        assert_eq!(guess_xlsx_header_row(&Snapshot::read(&sparse_path).unwrap(), ""), 2);
+
+        let text = "version = 1\n[source]\nkind = \"xlsx\"\npath = \"orders.xlsx\"\nheader_row = 3\n[[step]]\nop = \"filter\"\ncolumn = \"Amount\"\nis = \">\"\nvalue = \"0\"\n";
+        let r = Recipe::from_toml(text).unwrap();
+        assert_eq!(r.source.label(), "Excel");
+        let res = run(&r, &snap);
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["ID", "Amount", "Day", "Double"]);
+        assert_eq!(res.output.rows[0], vec!["007", "10.5", "2026-09-01", "99"]);
+        assert_eq!(res.output.rows.len(), 2);
+        assert_eq!(res.output.columns[2].rule, ColumnRule::Date(DateOrder::Ymd));
+        // Report lines are the sheet's row numbers: the first record is row 4
+        let dates = text.replace("value = \"0\"", "value = \"0\"\n[[step]]\nop = \"types\"\ncolumns = { ID = \"date\" }");
+        let failing = run(&Recipe::from_toml(&dates).unwrap(), &snap);
+        assert_eq!(failing.report.errors[0].line, 4, "{}", failing.report.summary());
+
+        // Another sheet by name, and an unknown one
+        let notes = text.replace("header_row = 3\n", "sheet = \"Notes\"\nheader_row = 0\n").replace("[[step]]\nop = \"filter\"\ncolumn = \"Amount\"\nis = \">\"\nvalue = \"0\"\n", "");
+        let res = run(&Recipe::from_toml(&notes).unwrap(), &snap);
+        assert_eq!(res.output.rows, vec![vec!["unrelated"]]);
+        let missing = run(&Recipe::from_toml(&notes.replace("Notes", "Nope")).unwrap(), &snap);
+        assert!(missing.report.failures[0].contains("its sheets are"), "{:?}", missing.report.failures);
+    }
+
+    #[test]
+    fn excel_date_format_codes_are_recognised() {
+        let k = |code: &str| date_kind(&visigrid_engine::cell::NumberFormat::Custom(code.into()));
+        assert!(matches!(k("yyyy-mm-dd"), Some(CellKind::Date)));
+        assert!(matches!(k("d-mmm-yy"), Some(CellKind::Date)));
+        assert!(matches!(k("m/d/yyyy h:mm"), Some(CellKind::DateTime)));
+        assert!(matches!(k("h:mm AM/PM"), Some(CellKind::Time)));
+        assert!(matches!(k("[h]:mm:ss"), Some(CellKind::Time)));
+        assert!(k("#,##0.00").is_none());
+        assert!(k("0.00\" days\"").is_none());
+        assert!(k("[Red]0.00;[Blue]-0.00").is_none());
+        assert!(k("mm").is_none());
     }
 }

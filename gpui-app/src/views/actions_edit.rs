@@ -307,10 +307,6 @@ pub(crate) fn bind(
                 this.apply_review_if_ready(window, cx);
                 return;
             }
-            // Recipe banner: Enter takes its suggested fix ("Use Order Number")
-            if this.mode == Mode::Navigation && this.open_menu.is_none() && this.recipe_primary_fix(cx) {
-                return;
-            }
             // If autocomplete is visible, Enter accepts the suggestion
             if this.autocomplete_visible {
                 this.autocomplete_accept(cx);

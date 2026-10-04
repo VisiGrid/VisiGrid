@@ -31,7 +31,10 @@ pub enum Pane {
 }
 
 /// Source settings in the left column, in focus order.
-pub const SOURCE_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
+pub const CSV_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
+const PARQUET_ROWS: [&str; 2] = ["File", "Each refresh reads"];
+const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
+const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
 
 /// The kinds of step "Add step" offers, in menu order.
 pub const ADD_KINDS: [(&str, &str); 7] = [
@@ -84,6 +87,8 @@ pub struct RecipeBuilder {
     pub dirty: bool,
     pub confirm_discard: bool,
     pub file_columns: Vec<String>,
+    /// A DuckDB source's tables, for the Table setting.
+    pub tables: Vec<String>,
     /// Columns going into the selected step.
     pub step_columns: Vec<String>,
     pub full: Option<RunReport>,
@@ -93,14 +98,26 @@ pub struct RecipeBuilder {
     pub editor_scroll: ScrollHandle,
 }
 
-fn source_mut(r: &mut Recipe) -> &mut CsvSource {
-    let Source::Csv(s) = &mut r.source;
-    s
+/// The CSV settings, when the source is a CSV.
+fn csv_mut(r: &mut Recipe) -> Option<&mut CsvSource> {
+    match &mut r.source {
+        Source::Csv(s) => Some(s),
+        _ => None,
+    }
 }
 
-pub fn source(r: &Recipe) -> &CsvSource {
-    let Source::Csv(s) = &r.source;
-    s
+pub fn csv(r: &Recipe) -> Option<&CsvSource> {
+    match &r.source {
+        Source::Csv(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// The tables of a DuckDB file, for the Table setting.
+fn duckdb_tables(path: &Path) -> Vec<String> {
+    visigrid_io::duckdb::Database::open(path)
+        .map(|db| db.tables().iter().map(|t| t.name.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// `types` values in the order Space cycles them.
@@ -282,6 +299,7 @@ impl RecipeBuilder {
             dirty: false,
             confirm_discard: false,
             file_columns: Vec::new(),
+            tables: Vec::new(),
             step_columns: Vec::new(),
             full: None,
             preview: None,
@@ -290,8 +308,28 @@ impl RecipeBuilder {
             editor_scroll: ScrollHandle::new(),
         };
         b.selected = b.recipe.steps.len().checked_sub(1);
+        b.refresh_tables();
         b.recompute();
         b
+    }
+
+    /// Re-list a DuckDB source's tables (after opening or choosing a file).
+    pub fn refresh_tables(&mut self) {
+        self.tables = match &self.recipe.source {
+            Source::Duckdb(_) => duckdb_tables(&self.source_path),
+            Source::Xlsx(_) => recipe::xlsx_sheet_names(&self.source_path).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// The source settings this kind of source has, in focus order.
+    pub fn source_rows(&self) -> &'static [&'static str] {
+        match &self.recipe.source {
+            Source::Csv(_) => &CSV_ROWS,
+            Source::Parquet(_) => &PARQUET_ROWS,
+            Source::Duckdb(_) => &DUCKDB_ROWS,
+            Source::Xlsx(_) => &XLSX_ROWS,
+        }
     }
 
     /// Re-run everything the builder shows. Cheap for the monthly exports
@@ -305,7 +343,7 @@ impl RecipeBuilder {
             self.step_columns.clear();
             return;
         };
-        self.info = Some(recipe::source_info(source(&self.recipe), snapshot));
+        self.info = csv(&self.recipe).map(|src| recipe::source_info(src, snapshot));
         let upto = |n: usize| {
             let mut r = self.recipe.clone();
             r.steps.truncate(n);
@@ -567,17 +605,53 @@ impl RecipeBuilder {
 
     /// Left/Right/Space on a source setting.
     pub fn change_source(&mut self, row: usize, back: bool) {
-        if row == 1 {
+        let name = self.source_rows().get(row).copied().unwrap_or("");
+        if name == "Each refresh reads" {
             return self.toggle_pattern();
         }
-        let src = source_mut(&mut self.recipe);
-        match row {
-            2 => {
+        if let Source::Xlsx(src) = &mut self.recipe.source {
+            match name {
+                "Sheet" if !self.tables.is_empty() => {
+                    let i = self.tables.iter().position(|t| t.eq_ignore_ascii_case(&src.sheet)).unwrap_or(0);
+                    let n = self.tables.len();
+                    src.sheet = self.tables[if back { (i + n - 1) % n } else { (i + 1) % n }].clone();
+                    src.columns.clear();
+                }
+                "Header row" => {
+                    src.header_row = if back { src.header_row.saturating_sub(1) } else { (src.header_row + 1).min(50) };
+                }
+                _ => return,
+            }
+            self.changed();
+            return;
+        }
+        if name == "Table" {
+            if let Source::Duckdb(src) = &mut self.recipe.source {
+                if self.tables.is_empty() {
+                    return;
+                }
+                let i = self.tables.iter().position(|t| t.eq_ignore_ascii_case(&src.table));
+                let n = self.tables.len();
+                let next = match (i, back) {
+                    (None, _) => 0,
+                    (Some(i), false) => (i + 1) % n,
+                    (Some(i), true) => (i + n - 1) % n,
+                };
+                src.table = self.tables[next].clone();
+                // The saved column list was for the other table
+                src.columns.clear();
+                self.changed();
+            }
+            return;
+        }
+        let Some(src) = csv_mut(&mut self.recipe) else { return };
+        match name {
+            "Delimiter" => {
                 let all: [Option<&str>; 5] = [None, Some(","), Some(";"), Some("tab"), Some("|")];
                 let current = all.iter().position(|d| delimiter_value(&d.map(String::from)) == delimiter_value(&src.delimiter)).unwrap_or(0);
                 src.delimiter = cycle(&[0usize, 1, 2, 3, 4], current, back).pipe(|i| all[i].map(String::from));
             }
-            3 => {
+            "Encoding" => {
                 let all: [Option<&str>; 4] = [None, Some("utf-8"), Some("windows-1252"), Some("utf-16")];
                 let current = all
                     .iter()
@@ -585,10 +659,10 @@ impl RecipeBuilder {
                     .unwrap_or(0);
                 src.encoding = cycle(&[0usize, 1, 2, 3], current, back).pipe(|i| all[i].map(String::from));
             }
-            4 => {
+            "Header line" => {
                 src.header_row = if back { src.header_row.saturating_sub(1) } else { (src.header_row + 1).min(50) };
             }
-            5 => src.decimal_comma = !src.decimal_comma,
+            "Decimal mark" => src.decimal_comma = !src.decimal_comma,
             _ => return,
         }
         self.changed();
@@ -597,7 +671,7 @@ impl RecipeBuilder {
     /// Switch between reading this file and the newest file like it
     /// (`export-2026-09.csv` <-> `export-*-*.csv`, in the same folder).
     pub fn toggle_pattern(&mut self) {
-        let stored = source(&self.recipe).path.clone();
+        let stored = self.recipe.source.path().to_string();
         let current = Path::new(&stored);
         let name = if self.recipe.source_is_pattern() {
             self.source_path.file_name().and_then(|n| n.to_str()).map(str::to_string)
@@ -608,16 +682,53 @@ impl RecipeBuilder {
             self.error = Some("This file's name has no date or number to match next month's by.".into());
             return;
         };
-        source_mut(&mut self.recipe).path = current.with_file_name(name).display().to_string();
+        self.recipe.source.set_path(current.with_file_name(name).display().to_string());
         self.changed();
     }
 
     /// What a source setting shows, and a hint below it.
     pub fn source_value(&self, row: usize) -> (String, String) {
-        let src = source(&self.recipe);
         let info = self.info.as_ref();
-        match row {
-            0 => {
+        let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Xlsx(src) = &self.recipe.source {
+            match name {
+                "Sheet" => {
+                    let shown = if src.sheet.is_empty() { self.tables.first().cloned().unwrap_or_else(|| "First sheet".into()) } else { src.sheet.clone() };
+                    let hint = match self.tables.len() {
+                        0 => "Can't list this workbook's sheets.".to_string(),
+                        1 => "The only sheet in this workbook.".to_string(),
+                        n => format!("{n} sheets in this workbook. Saved by name, so reordering them is safe."),
+                    };
+                    return (shown, hint);
+                }
+                "Header row" => {
+                    return if src.header_row == 0 {
+                        ("None".into(), "No header; columns are named by letter.".into())
+                    } else if src.header_row == 1 {
+                        ("Row 1".into(), String::new())
+                    } else {
+                        (format!("Row {}", src.header_row), format!("Rows 1–{} skipped.", src.header_row - 1))
+                    };
+                }
+                _ => {}
+            }
+        }
+        if let Source::Duckdb(src) = &self.recipe.source {
+            if name == "Table" {
+                let hint = match self.tables.len() {
+                    0 => "Can't list this database's tables.".to_string(),
+                    1 => "The only table in this database.".to_string(),
+                    n => format!("{n} tables in this database."),
+                };
+                let table = if src.table.is_empty() { "None chosen".into() } else { src.table.clone() };
+                return (table, hint);
+            }
+        }
+        let path_shown = self.recipe.source.path().to_string();
+        let csv_default = CsvSource { path: String::new(), delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: Vec::new() };
+        let src = csv(&self.recipe).unwrap_or(&csv_default);
+        match name {
+            "File" => {
                 let dir = self.source_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
                 let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
                 let dir = match dir.strip_prefix(&home) {
@@ -626,10 +737,10 @@ impl RecipeBuilder {
                 };
                 (self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(), dir)
             }
-            1 => {
+            "Each refresh reads" => {
                 let file = self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if self.recipe.source_is_pattern() {
-                    let pattern = Path::new(&src.path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    let pattern = Path::new(&path_shown).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                     ("Newest match".into(), format!("The newest {pattern}, so next month's export is picked up by itself. Now: {file}."))
                 } else {
                     match recipe::suggest_pattern(file) {
@@ -638,15 +749,15 @@ impl RecipeBuilder {
                     }
                 }
             }
-            2 => match delimiter_value(&src.delimiter) {
+            "Delimiter" => match delimiter_value(&src.delimiter) {
                 None => (format!("Detected · {}", info.map_or("Comma", |i| delimiter_name(i.delimiter))), "Read from the header line down.".into()),
                 Some(d) => (delimiter_name(d).into(), String::new()),
             },
-            3 => match src.encoding.as_deref() {
+            "Encoding" => match src.encoding.as_deref() {
                 None => (format!("Detected · {}", info.map_or("UTF-8", |i| i.encoding.label())), String::new()),
                 Some(e) => (Encoding::parse(e).map_or(e, |e| e.label()).to_string(), String::new()),
             },
-            4 => {
+            "Header line" => {
                 if src.header_row == 0 {
                     ("None".into(), "No header; columns are named by letter.".into())
                 } else {
@@ -661,13 +772,14 @@ impl RecipeBuilder {
                     (format!("Line {}", src.header_row), hint)
                 }
             }
-            _ => {
+            "Decimal mark" => {
                 if src.decimal_comma {
                     ("Comma · 1.234,56".into(), String::new())
                 } else {
                     ("Point · 1,234.56".into(), String::new())
                 }
             }
+            _ => (String::new(), String::new()),
         }
     }
 
@@ -740,6 +852,31 @@ impl Spreadsheet {
     /// it was opened with some.
     pub fn new_recipe_from_file(&mut self, csv_path: &Path, options: Option<&CsvOptions>, cx: &mut Context<Self>) {
         let csv_path = std::path::absolute(csv_path).unwrap_or_else(|_| csv_path.to_path_buf());
+        // Parquet and DuckDB carry their own column names and types: no
+        // source settings to guess (a DuckDB recipe starts on its first table)
+        let lower = csv_path.to_string_lossy().to_lowercase();
+        let excel = [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e));
+        if lower.ends_with(".parquet") || lower.ends_with(".duckdb") || excel {
+            // DuckDB starts on its first table; Excel on its first sheet, kept
+            // by name, with the header row guessed below any title rows
+            let table = if excel {
+                recipe::xlsx_sheet_names(&csv_path).ok().and_then(|names| names.into_iter().next())
+            } else {
+                lower.ends_with(".duckdb").then(|| duckdb_tables(&csv_path).into_iter().next().unwrap_or_default())
+            };
+            let mut source = Source::for_file(csv_path.display().to_string(), table);
+            if let (Source::Xlsx(src), Ok(snap)) = (&mut source, Snapshot::read(&csv_path)) {
+                src.header_row = recipe::guess_xlsx_header_row(&snap, &src.sheet);
+            }
+            let recipe = Recipe { version: RECIPE_VERSION, source, steps: Vec::new() };
+            self.recipe_builder = Some(RecipeBuilder::new(recipe, None, csv_path, None));
+            if let Some(b) = self.recipe_builder.as_mut() {
+                b.dirty = true;
+            }
+            self.mode = Mode::RecipeBuilder;
+            cx.notify();
+            return;
+        }
         let mut src = CsvSource {
             path: csv_path.display().to_string(),
             delimiter: None,
@@ -831,9 +968,10 @@ impl Spreadsheet {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(b) = this.recipe_builder.as_mut() {
                             let recipe_dir = b.recipe_path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
-                            source_mut(&mut b.recipe).path = stored_source_path(&path, recipe_dir.as_deref());
+                            b.recipe.source.set_path(stored_source_path(&path, recipe_dir.as_deref()));
                             b.snapshot = Snapshot::read(&path);
                             b.source_path = path;
+                            b.refresh_tables();
                             b.changed();
                         }
                         cx.notify();
@@ -877,9 +1015,9 @@ impl Spreadsheet {
         // A recipe not yet named stores its source relative to where it lands
         if b.recipe_path.as_ref() != Some(&path) {
             let stored = stored_source_path(&b.source_path, path.parent());
-            source_mut(&mut b.recipe).path = if b.recipe.source_is_pattern() {
+            let new_path = if b.recipe.source_is_pattern() {
                 // Keep the pattern; only where it is looked for changes
-                let pattern = Path::new(&source(&b.recipe).path).file_name().map(|n| n.to_os_string());
+                let pattern = Path::new(b.recipe.source.path()).file_name().map(|n| n.to_os_string());
                 match pattern {
                     Some(p) => Path::new(&stored).with_file_name(p).display().to_string(),
                     None => stored,
@@ -887,10 +1025,11 @@ impl Spreadsheet {
             } else {
                 stored
             };
+            b.recipe.source.set_path(new_path);
         }
         // The columns drift is checked against next time
         if !b.file_columns.is_empty() {
-            source_mut(&mut b.recipe).columns = b.file_columns.clone();
+            *b.recipe.source.columns_mut() = b.file_columns.clone();
         }
         if let Err(e) = b.recipe.save(&path) {
             b.error = Some(format!("Couldn't save the recipe: {e}"));
@@ -995,7 +1134,7 @@ impl Spreadsheet {
         match b.pane {
             Pane::Source => match key.key.as_str() {
                 "up" => b.source_focus = b.source_focus.saturating_sub(1),
-                "down" => b.source_focus = (b.source_focus + 1).min(SOURCE_ROWS.len() - 1),
+                "down" => b.source_focus = (b.source_focus + 1).min(b.source_rows().len() - 1),
                 "enter" | "space" if b.source_focus == 0 => {
                     self.recipe_builder_choose_file(cx);
                     return;
@@ -1187,7 +1326,7 @@ mod tests {
         assert!(b.source_value(1).1.contains("export-*-*.csv"));
         b.change_source(1, false);
         assert!(!b.recipe.source_is_pattern());
-        assert_eq!(super::source(&b.recipe).path, file.display().to_string());
+        assert_eq!(b.recipe.source.path(), file.display().to_string());
     }
 
     #[test]

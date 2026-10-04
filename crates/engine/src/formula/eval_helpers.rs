@@ -251,6 +251,9 @@ pub(crate) fn excel_mod(n: f64, d: f64) -> f64 {
 /// the same number. This is SplitMix64: seeded once from the clock, then advanced on
 /// every call, so neighbouring cells get independent values.
 pub(crate) fn next_random_u64() -> u64 {
+    if let Some(seeded) = crate::timing::seeded_random_u64() {
+        return seeded;
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
     const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
     static STATE: AtomicU64 = AtomicU64::new(0);
