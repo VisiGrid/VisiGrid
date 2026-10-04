@@ -34,6 +34,7 @@ pub enum Pane {
 pub const CSV_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
 const PARQUET_ROWS: [&str; 2] = ["File", "Each refresh reads"];
 const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
+const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
 
 /// The kinds of step "Add step" offers, in menu order.
 pub const ADD_KINDS: [(&str, &str); 7] = [
@@ -316,6 +317,7 @@ impl RecipeBuilder {
     pub fn refresh_tables(&mut self) {
         self.tables = match &self.recipe.source {
             Source::Duckdb(_) => duckdb_tables(&self.source_path),
+            Source::Xlsx(_) => recipe::xlsx_sheet_names(&self.source_path).unwrap_or_default(),
             _ => Vec::new(),
         };
     }
@@ -326,6 +328,7 @@ impl RecipeBuilder {
             Source::Csv(_) => &CSV_ROWS,
             Source::Parquet(_) => &PARQUET_ROWS,
             Source::Duckdb(_) => &DUCKDB_ROWS,
+            Source::Xlsx(_) => &XLSX_ROWS,
         }
     }
 
@@ -606,6 +609,22 @@ impl RecipeBuilder {
         if name == "Each refresh reads" {
             return self.toggle_pattern();
         }
+        if let Source::Xlsx(src) = &mut self.recipe.source {
+            match name {
+                "Sheet" if !self.tables.is_empty() => {
+                    let i = self.tables.iter().position(|t| t.eq_ignore_ascii_case(&src.sheet)).unwrap_or(0);
+                    let n = self.tables.len();
+                    src.sheet = self.tables[if back { (i + n - 1) % n } else { (i + 1) % n }].clone();
+                    src.columns.clear();
+                }
+                "Header row" => {
+                    src.header_row = if back { src.header_row.saturating_sub(1) } else { (src.header_row + 1).min(50) };
+                }
+                _ => return,
+            }
+            self.changed();
+            return;
+        }
         if name == "Table" {
             if let Source::Duckdb(src) = &mut self.recipe.source {
                 if self.tables.is_empty() {
@@ -671,6 +690,29 @@ impl RecipeBuilder {
     pub fn source_value(&self, row: usize) -> (String, String) {
         let info = self.info.as_ref();
         let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Xlsx(src) = &self.recipe.source {
+            match name {
+                "Sheet" => {
+                    let shown = if src.sheet.is_empty() { self.tables.first().cloned().unwrap_or_else(|| "First sheet".into()) } else { src.sheet.clone() };
+                    let hint = match self.tables.len() {
+                        0 => "Can't list this workbook's sheets.".to_string(),
+                        1 => "The only sheet in this workbook.".to_string(),
+                        n => format!("{n} sheets in this workbook. Saved by name, so reordering them is safe."),
+                    };
+                    return (shown, hint);
+                }
+                "Header row" => {
+                    return if src.header_row == 0 {
+                        ("None".into(), "No header; columns are named by letter.".into())
+                    } else if src.header_row == 1 {
+                        ("Row 1".into(), String::new())
+                    } else {
+                        (format!("Row {}", src.header_row), format!("Rows 1–{} skipped.", src.header_row - 1))
+                    };
+                }
+                _ => {}
+            }
+        }
         if let Source::Duckdb(src) = &self.recipe.source {
             if name == "Table" {
                 let hint = match self.tables.len() {
@@ -813,9 +855,19 @@ impl Spreadsheet {
         // Parquet and DuckDB carry their own column names and types: no
         // source settings to guess (a DuckDB recipe starts on its first table)
         let lower = csv_path.to_string_lossy().to_lowercase();
-        if lower.ends_with(".parquet") || lower.ends_with(".duckdb") {
-            let table = lower.ends_with(".duckdb").then(|| duckdb_tables(&csv_path).into_iter().next().unwrap_or_default());
-            let source = Source::for_file(csv_path.display().to_string(), table);
+        let excel = [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e));
+        if lower.ends_with(".parquet") || lower.ends_with(".duckdb") || excel {
+            // DuckDB starts on its first table; Excel on its first sheet, kept
+            // by name, with the header row guessed below any title rows
+            let table = if excel {
+                recipe::xlsx_sheet_names(&csv_path).ok().and_then(|names| names.into_iter().next())
+            } else {
+                lower.ends_with(".duckdb").then(|| duckdb_tables(&csv_path).into_iter().next().unwrap_or_default())
+            };
+            let mut source = Source::for_file(csv_path.display().to_string(), table);
+            if let (Source::Xlsx(src), Ok(snap)) = (&mut source, Snapshot::read(&csv_path)) {
+                src.header_row = recipe::guess_xlsx_header_row(&snap, &src.sheet);
+            }
             let recipe = Recipe { version: RECIPE_VERSION, source, steps: Vec::new() };
             self.recipe_builder = Some(RecipeBuilder::new(recipe, None, csv_path, None));
             if let Some(b) = self.recipe_builder.as_mut() {
