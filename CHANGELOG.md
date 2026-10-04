@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- Fixed the window freezing while an AI agent refreshed a large recipe-linked Table (MCP `refresh_table`): the recipe now runs in the background, as Alt+F5 does, and nothing is published if you open a plan to review before it finishes. ([#106](https://github.com/VisiGrid/VisiGrid/pull/106))
+
 ## 0.49.0
 
 ### Import recipes

@@ -542,13 +542,48 @@ impl Spreadsheet {
     }
 
     /// A refresh asked for over the session protocol (MCP `refresh_table`):
-    /// the same run and publish as Alt+F5, done now, with the outcome
-    /// returned as (code, message) on failure. Never asks: a recipe source
-    /// the user hasn't approved in the app is refused, so an agent can't
-    /// make the app read a file the user never agreed to. What blocks Alt+F5
-    /// blocks an agent too: never under a plan the user is reviewing, a
-    /// read-only recovery, a rewind preview or a filtered Table view.
-    pub(crate) fn refresh_recipe_table_now(&mut self, table: Option<&str>, cx: &mut Context<Self>) -> Result<String, (String, String)> {
+    /// the same run and publish as Alt+F5, with the outcome sent to `reply`
+    /// when it is done. Never asks: a recipe source the user hasn't approved
+    /// in the app is refused, so an agent can't make the app read a file the
+    /// user never agreed to. What blocks Alt+F5 blocks an agent too: never
+    /// under a plan the user is reviewing, a read-only recovery, a rewind
+    /// preview or a filtered Table view. The recipe runs in the background,
+    /// like Alt+F5, so the window stays responsive while a big file is read.
+    pub(crate) fn start_agent_refresh(
+        &mut self,
+        table: Option<String>,
+        client: Option<String>,
+        reply: crate::session_server::bridge::oneshot::Sender<crate::session_server::StructureOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let (target, recipe_path, recipe) = match self.prepare_agent_refresh(table.as_deref(), cx) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply.send(self.structure_outcome(Err(error), cx));
+                return;
+            }
+        };
+        self.recipe_run_in_progress = true;
+        self.status_message = Some(format!("Refreshing {} for {}…", target.name, client.as_deref().unwrap_or("an agent")));
+        cx.notify();
+        let started = Instant::now();
+        let job_path = recipe_path.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx.background_executor().spawn(async move { run_job(&job_path, Some(recipe), None) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.recipe_run_in_progress = false;
+                let result = this.finish_agent_refresh(&target, recipe_path, outcome, started, client, cx);
+                let _ = reply.send(this.structure_outcome(result, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Everything checked before an agent's refresh reads anything: the
+    /// window allows edits, the Table exists and is linked, nothing else is
+    /// running, and the user approved what the recipe reads.
+    fn prepare_agent_refresh(&mut self, table: Option<&str>, cx: &mut Context<Self>) -> Result<(DataTable, PathBuf, Recipe), (String, String)> {
         if let Some(blocked) = self.agent_refresh_blocker(cx) {
             return Err(blocked);
         }
@@ -579,20 +614,61 @@ impl Spreadsheet {
                 ),
             ));
         }
-        let outcome = run_job(&recipe_path, Some(recipe), None).map_err(|e| ("recipe_failed".to_string(), e))?;
+        Ok((target, recipe_path, recipe))
+    }
+
+    /// Publish an agent's finished run, unless the window changed while it
+    /// ran: the user may have opened a plan to review, the Table may be gone.
+    fn finish_agent_refresh(
+        &mut self,
+        target: &DataTable,
+        recipe_path: PathBuf,
+        outcome: Result<RunOutcome, String>,
+        started: Instant,
+        client: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<String, (String, String)> {
+        let outcome = outcome.map_err(|e| ("recipe_failed".to_string(), e))?;
+        if let Some((code, message)) = self.agent_refresh_blocker(cx) {
+            self.status_message = Some(format!("{} was not refreshed: the window changed while its recipe ran", target.name));
+            return Err((code, format!("{message} (the recipe ran, but nothing was changed)")));
+        }
+        if self.wb(cx).table(target.id).is_none() {
+            return Err(("table_not_found".into(), format!("{} was removed while its recipe ran; nothing changed", target.name)));
+        }
         let summary = outcome.report.summary();
-        self.finish_recipe_run(RecipeTarget::Table(target.id), recipe_path, outcome, Instant::now(), cx);
+        let revision = self.wb(cx).revision();
+        self.finish_recipe_run(RecipeTarget::Table(target.id), recipe_path, outcome, started, cx);
         // A refresh that didn't publish leaves the banner up for the user,
         // and the Table as it was
-        match self.recipe_blocked.as_ref().filter(|b| b.target == RecipeTarget::Table(target.id)) {
-            Some(b) => Err((
+        if let Some(b) = self.recipe_blocked.as_ref().filter(|b| b.target == RecipeTarget::Table(target.id)) {
+            return Err((
                 "recipe_blocked".into(),
                 match &b.refused {
                     Some(reason) => format!("{} was not refreshed: {reason}", target.name),
                     None => format!("{} was not refreshed; it keeps its last good result.\n{summary}", target.name),
                 },
-            )),
-            None => Ok(self.status_message.clone().unwrap_or_else(|| format!("Refreshed {}", target.name))),
+            ));
+        }
+        if let (Some(client), true) = (client, self.wb(cx).revision() != revision) {
+            self.history.retag_last_source(crate::history::MutationSource::Agent { client });
+        }
+        Ok(self.status_message.clone().unwrap_or_else(|| format!("Refreshed {}", target.name)))
+    }
+
+    /// A session reply for an agent's refresh, with the workbook as it is now.
+    fn structure_outcome(&self, result: Result<String, (String, String)>, cx: &App) -> crate::session_server::StructureOutcome {
+        let wb = self.workbook.read(cx);
+        let (description, error) = match result {
+            Ok(d) => (d, None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        crate::session_server::StructureOutcome {
+            description,
+            revision: wb.revision(),
+            sheet_count: wb.sheets().len(),
+            active_sheet: wb.active_sheet_index(),
+            error,
         }
     }
 
