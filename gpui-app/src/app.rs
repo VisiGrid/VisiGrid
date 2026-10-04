@@ -3406,14 +3406,15 @@ impl Spreadsheet {
         self.row_heights.get(&self.cached_sheet_id).map_or(false, |h| !h.is_empty())
     }
 
+    /// Canonical manual hides for rendering and navigation, including previews.
+    pub(crate) fn display_hidden_rows(&self) -> Option<&std::collections::BTreeSet<usize>> {
+        self.preview_structure_layout().map(|layout| &layout.hidden_rows)
+            .or_else(|| self.hidden_rows.get(&self.cached_sheet_id))
+    }
+
     /// Check if a row is hidden on the current sheet
     pub fn is_row_hidden(&self, row: usize) -> bool {
-        if let Some(layout) = self.preview_structure_layout() {
-            return layout.hidden_rows.contains(&row);
-        }
-        self.hidden_rows
-            .get(&self.cached_sheet_id)
-            .map_or(false, |set| set.contains(&row))
+        self.display_hidden_rows().is_some_and(|hidden| hidden.contains(&row))
     }
 
     /// Check if a column is hidden on the current sheet
@@ -3428,12 +3429,7 @@ impl Spreadsheet {
 
     /// Check if current sheet has any hidden rows
     pub fn has_hidden_rows(&self) -> bool {
-        if let Some(layout) = self.preview_structure_layout() {
-            return !layout.hidden_rows.is_empty();
-        }
-        self.hidden_rows
-            .get(&self.cached_sheet_id)
-            .map_or(false, |s| !s.is_empty())
+        self.display_hidden_rows().is_some_and(|hidden| !hidden.is_empty())
     }
 
     /// Check if current sheet has any hidden columns

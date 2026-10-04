@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Vertical navigation and formula reference picking skip manually hidden rows after clearing Table criteria. Ctrl+Arrow ignores hidden gaps and hidden values, and moving from a hidden row no longer skips the nearest visible row twice. Picked references under worksheet sorting use canonical cell addresses.
+
 - Hide and unhide records inside sorted or filtered Tables without clearing criteria. Navigation, paste, fill, cut, append and structural edits use the same visible rows; undo/redo and rewind restore visibility and totals together. Formula-reference outlines stay aligned with visible sorted records.
 - Preserve manual hides when importing sorted XLSX Tables and hidden records that pass a supported saved filter. Custom body row heights and freeze boundaries remain restricted.
 

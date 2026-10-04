@@ -11,16 +11,77 @@
 //!
 //! ## Filter-Aware Navigation
 //!
-//! When filtering is active, navigation operates in VIEW space:
+//! Navigation operates in VIEW space and also skips canonical manual hides:
 //! - Arrow keys skip hidden rows (move through visible_rows)
 //! - Ctrl+Arrow stops at visible boundaries
 //! - Page Up/Down move by visible rows
 //!
-//! The `visible_rows` cache in RowView provides O(1) access to the next/previous
-//! visible row via binary search.
+//! The RowView cache supplies filtered slots; manual flags are checked through
+//! the canonical mapping without allocating another worksheet-sized projection.
 
 use gpui::{*};
 use crate::app::{Spreadsheet, NUM_ROWS, NUM_COLS};
+use std::collections::BTreeSet;
+use visigrid_engine::filter::RowView;
+
+/// Navigation composes canonical manual hides with the existing projection,
+/// without changing filter ownership or allocating another worksheet-sized map.
+fn step_visible_row(rows: &RowView, current: usize, delta: i32, manual: Option<&BTreeSet<usize>>) -> usize {
+    if delta == 0 { return current; }
+    let visible = rows.visible_rows();
+    let steps = delta.unsigned_abs() as usize;
+    if manual.is_none_or(|hidden| hidden.is_empty()) {
+        return if delta > 0 {
+            let first = visible.partition_point(|row| *row <= current);
+            visible.get(first.saturating_add(steps - 1).min(visible.len().saturating_sub(1)))
+                .copied().filter(|row| *row > current).unwrap_or(current)
+        } else {
+            let end = visible.partition_point(|row| *row < current);
+            if end == 0 { current } else { visible[end.saturating_sub(steps)] }
+        };
+    }
+    let shown = |slot: &usize| !manual.unwrap().contains(&rows.view_to_data(*slot));
+    if delta > 0 {
+        let first = visible.partition_point(|row| *row <= current);
+        visible[first..].iter().copied().filter(shown).take(steps).last().unwrap_or(current)
+    } else {
+        let end = visible.partition_point(|row| *row < current);
+        visible[..end].iter().rev().copied().filter(shown).take(steps).last().unwrap_or(current)
+    }
+}
+
+fn boundary_in_visible_rows(
+    current: usize, mut following: impl Iterator<Item = usize>,
+    current_empty: bool, empty: impl Fn(usize) -> bool,
+) -> usize {
+    let Some(first) = following.next() else { return current; };
+    let find_data = current_empty || empty(first);
+    let mut result = current;
+    for row in std::iter::once(first).chain(following) {
+        let is_empty = empty(row);
+        if !find_data && is_empty { break; }
+        result = row;
+        if find_data && !is_empty { break; }
+    }
+    result
+}
+
+fn visible_data_boundary(
+    rows: &RowView, current: usize, direction: i32,
+    manual: Option<&BTreeSet<usize>>, empty: impl Fn(usize) -> bool,
+) -> usize {
+    if direction == 0 { return current; }
+    let shown = |slot: &usize| manual.is_none_or(|hidden| !hidden.contains(&rows.view_to_data(*slot)));
+    let current_empty = !rows.is_view_row_visible(current) || !shown(&current) || empty(current);
+    let visible = rows.visible_rows();
+    if direction > 0 {
+        let first = visible.partition_point(|row| *row <= current);
+        boundary_in_visible_rows(current, visible[first..].iter().copied().filter(shown), current_empty, empty)
+    } else {
+        let end = visible.partition_point(|row| *row < current);
+        boundary_in_visible_rows(current, visible[..end].iter().rev().copied().filter(shown), current_empty, empty)
+    }
+}
 
 impl Spreadsheet {
     // =========================================================================
@@ -33,42 +94,13 @@ impl Spreadsheet {
     /// - `current_row`: Current view row
     /// - `delta`: Direction (+1 for down, -1 for up)
     pub(crate) fn next_visible_row(&self, current_row: usize, delta: i32) -> usize {
-        let visible = self.row_view.visible_rows();
-
-        // If not filtered, simple arithmetic
-        if !self.row_view.is_filtered() {
-            return (current_row as i32 + delta).max(0).min(NUM_ROWS as i32 - 1) as usize;
-        }
-
-        // Find current position in visible_rows
-        // Use binary search since visible_rows is sorted
-        let current_idx = match visible.binary_search(&current_row) {
-            Ok(idx) => idx,
-            Err(idx) => {
-                // Current row is hidden - find nearest visible
-                if delta > 0 {
-                    // Moving down: use the row at insertion point (or last)
-                    idx.min(visible.len().saturating_sub(1))
-                } else {
-                    // Moving up: use the row before insertion point (or first)
-                    idx.saturating_sub(1)
-                }
-            }
-        };
-
-        // Move by delta steps in visible_rows
-        let new_idx = if delta > 0 {
-            (current_idx + delta as usize).min(visible.len().saturating_sub(1))
-        } else {
-            current_idx.saturating_sub((-delta) as usize)
-        };
-
-        visible.get(new_idx).copied().unwrap_or(current_row)
+        step_visible_row(&self.row_view, current_row, delta, self.display_hidden_rows())
     }
 
-    /// Check if a view row is visible (not hidden by filter)
+    /// Both sources of hiding address canonical data rows.
     fn is_row_visible(&self, view_row: usize) -> bool {
         self.row_view.is_view_row_visible(view_row)
+            && !self.is_row_hidden(self.row_view.view_to_data(view_row))
     }
 
     // =========================================================================
@@ -236,68 +268,14 @@ impl Spreadsheet {
             self.sheet(cx).get_cell(data_row, c).value.raw_display().is_empty()
         };
 
-        let current_empty = is_cell_empty(row, col);
-
-        // For vertical movement with filtering, use visible rows
-        if dr != 0 && self.row_view.is_filtered() {
-            let visible = self.row_view.visible_rows();
-
-            // Find current position in visible_rows
-            let current_idx = match visible.binary_search(&row) {
-                Ok(idx) => idx,
-                Err(idx) => idx.min(visible.len().saturating_sub(1)),
-            };
-
-            // Peek at next visible row
-            let peek_idx = if dr > 0 {
-                (current_idx + 1).min(visible.len().saturating_sub(1))
-            } else {
-                current_idx.saturating_sub(1)
-            };
-            let peek_row = visible.get(peek_idx).copied().unwrap_or(row);
-            let next_empty = if peek_row == row {
-                true // At edge
-            } else {
-                is_cell_empty(peek_row, col)
-            };
-
-            let looking_for_nonempty = current_empty || next_empty;
-
-            // Scan through visible rows only
-            let mut idx = current_idx;
-            loop {
-                let next_idx = if dr > 0 {
-                    idx + 1
-                } else {
-                    if idx == 0 { break; }
-                    idx - 1
-                };
-
-                if next_idx >= visible.len() {
-                    break;
-                }
-
-                let next_row = visible[next_idx];
-                let cell_empty = is_cell_empty(next_row, col);
-
-                if looking_for_nonempty {
-                    row = next_row;
-                    idx = next_idx;
-                    if !cell_empty {
-                        break;
-                    }
-                } else {
-                    if cell_empty {
-                        break;
-                    }
-                    row = next_row;
-                    idx = next_idx;
-                }
-            }
-
+        // Keep manual visibility independent of worksheet/Table filter ownership.
+        if dr != 0 && (self.row_view.is_filtered() || self.has_hidden_rows()) {
+            let row = visible_data_boundary(&self.row_view, row, dr, self.display_hidden_rows(),
+                |slot| is_cell_empty(slot, col));
             return (row, col);
         }
 
+        let current_empty = is_cell_empty(row, col);
         // Horizontal movement or no filtering - original logic
         let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
         let peek_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
@@ -1017,4 +995,93 @@ pub(crate) fn scroll_target(
     let col = if is_full_row { current_scroll.1 } else { sel_col };
 
     (row, col)
+}
+
+#[cfg(test)]
+mod manual_visibility_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn arrows_enter_and_page_steps_skip_manual_hides_without_a_filter() {
+        let rows = RowView::new(10);
+        let manual = [2, 3, 6].into();
+        assert!(!rows.is_filtered());
+        for (from, delta, expected) in [(1, 1, 4), (4, -1, 1), (0, 3, 5), (8, -3, 4),
+            (2, 1, 4), (3, -1, 1), (0, -1, 0), (9, 1, 9), (1, 0, 1), (7, 99, 9), (7, i32::MIN, 0)] {
+            assert_eq!(step_visible_row(&rows, from, delta, Some(&manual)), expected, "from {from}, delta {delta}");
+        }
+        assert!(!rows.is_filtered(), "navigation must not claim filter ownership");
+        let all: BTreeSet<_> = (0..10).collect();
+        assert_eq!(step_visible_row(&rows, 4, 1, Some(&all)), 4);
+        assert_eq!(step_visible_row(&rows, 4, -1, Some(&all)), 4);
+        assert_eq!(step_visible_row(&RowView::new(0), 0, 1, None), 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn hidden_start_uses_the_nearest_visible_step_without_skipping_twice() {
+        let mut rows = RowView::new(8);
+        rows.apply_filter(vec![true, true, false, false, true, true, false, true]);
+        assert_eq!(step_visible_row(&rows, 2, 1, None), 4);
+        assert_eq!(step_visible_row(&rows, 3, -1, None), 1);
+        assert_eq!(step_visible_row(&rows, 2, 2, None), 5);
+        assert_eq!(step_visible_row(&rows, 3, -2, None), 0);
+        assert_eq!(step_visible_row(&rows, 7, 99, None), 7);
+        assert_eq!(step_visible_row(&rows, 7, i32::MIN, None), 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn control_arrows_ignore_hidden_gaps_and_hidden_data_in_both_directions() {
+        let rows = RowView::new(9);
+        let manual = [1, 5, 8].into();
+        let filled = [0, 2, 3, 5, 6, 8];
+        let empty = |r| !filled.contains(&r);
+        assert_eq!(visible_data_boundary(&rows, 0, 1, Some(&manual), empty), 3);
+        assert_eq!(visible_data_boundary(&rows, 3, 1, Some(&manual), empty), 6);
+        assert_eq!(visible_data_boundary(&rows, 6, -1, Some(&manual), empty), 3);
+        assert_eq!(visible_data_boundary(&rows, 3, -1, Some(&manual), empty), 0);
+        assert_eq!(visible_data_boundary(&rows, 6, 1, Some(&manual), empty), 7);
+        assert_eq!(visible_data_boundary(&rows, 7, 1, Some(&manual), empty), 7);
+        assert_eq!(visible_data_boundary(&rows, 1, 1, Some(&manual), empty), 2);
+        let all: BTreeSet<_> = (0..9).collect();
+        assert_eq!(visible_data_boundary(&rows, 4, 1, Some(&all), |_| panic!("hidden cells must not be inspected")), 4);
+    }
+
+    #[::core::prelude::v1::test]
+    fn manual_hides_use_canonical_rows_with_worksheet_sort_and_filter() {
+        let mut rows = RowView::new(8);
+        rows.apply_sort(vec![0, 4, 2, 1, 3, 5, 6, 7]);
+        rows.apply_filter(vec![true, true, true, true, false, true, true, true]);
+        let manual = [2].into();
+        assert_eq!(step_visible_row(&rows, 0, 1, Some(&manual)), 3);
+        assert_eq!(step_visible_row(&rows, 3, -1, Some(&manual)), 0);
+        assert_eq!(step_visible_row(&rows, 2, 1, Some(&manual)), 3);
+        let picked = step_visible_row(&rows, 0, 1, Some(&manual));
+        assert_eq!(crate::table_edit::table_formula_reference(&rows, (picked, 2), None), "C2");
+        assert_eq!(crate::table_edit::table_formula_reference(&rows, (picked, 2), Some((4, 2))), "C2:C4");
+        let filled = [0, 1, 3, 4];
+        assert_eq!(visible_data_boundary(&rows, 0, 1, Some(&manual), |slot| !filled.contains(&rows.view_to_data(slot))), 4);
+        assert_eq!(visible_data_boundary(&rows, 4, -1, Some(&manual), |slot| !filled.contains(&rows.view_to_data(slot))), 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn clearing_table_criteria_keeps_manual_navigation_and_unhide_restores_rows() {
+        let before = crate::table_edit::tests::fixture(true);
+        let id = before.active_sheet_id();
+        let (mut hidden, _) = before.prepare_table_row_visibility(id, [3].into()).unwrap();
+        let manual = hidden.active_sheet().manual_hidden_rows();
+        let view = hidden.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        assert_eq!(step_visible_row(view.rows(), 4, 1, Some(&manual)), 6);
+        hidden.set_table_view_spec(id, None).unwrap();
+        assert!(hidden.active_sheet().build_saved_table_view(30).unwrap().is_none());
+        let plain = RowView::new(30);
+        assert_eq!(hidden.active_sheet().manual_hidden_rows(), manual);
+        assert_eq!(step_visible_row(&plain, 2, 1, Some(&manual)), 4);
+        assert_eq!(step_visible_row(&plain, 4, -1, Some(&manual)), 2);
+        // Clearing criteria reveals the former East filter failure, while row 3 stays hidden.
+        assert_eq!(visible_data_boundary(&plain, 2, 1, Some(&manual), |slot| hidden.active_sheet().get_raw(slot, 2).is_empty()), 6);
+        let (shown, unhide) = hidden.prepare_table_row_visibility(id, Default::default()).unwrap();
+        assert_eq!(step_visible_row(&plain, 2, 1, Some(&shown.active_sheet().manual_hidden_rows())), 3);
+        let restored = unhide.candidate(&shown, true).unwrap();
+        assert_eq!(step_visible_row(&plain, 2, 1, Some(&restored.active_sheet().manual_hidden_rows())), 4);
+    }
 }
