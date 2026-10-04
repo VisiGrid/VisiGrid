@@ -13,6 +13,12 @@ pub(crate) const TABLE_VIEW_EDIT_MESSAGE: &str =
     "This operation is unavailable while any Table in this workbook is sorted or filtered, including Tables on other sheets. Clear Table sorting and filters, then try again.";
 const VALUE_LIMIT: usize = 500;
 
+fn grid_table_view(sheet: &visigrid_engine::sheet::Sheet) -> Result<Option<visigrid_engine::table_view::TableView>, String> {
+    // Imports can have a smaller logical extent than the desktop grid. The
+    // engine requires the projection to fit inside that sheet's bounds.
+    sheet.build_saved_table_view(crate::app::NUM_ROWS.min(sheet.rows))
+}
+
 pub(crate) fn has_table_criteria(wb: &Workbook) -> bool {
     wb.sheets().iter().any(|s| {
         s.table_view_spec()
@@ -172,7 +178,7 @@ impl Spreadsheet {
                         self.table_layout_check(table)?;
                     }
                 }
-                sheet.build_saved_table_view(crate::app::NUM_ROWS)
+                grid_table_view(sheet)
             })();
             let row_count = crate::app::NUM_ROWS;
             match result {
@@ -576,6 +582,48 @@ mod tests {
             .unwrap()
             .table_id();
         (wb, TableViewSpec::new(id))
+    }
+
+    #[::core::prelude::v1::test]
+    fn imported_csv_grid_filters_records_and_keeps_moving_totals_visible() {
+        let imported = visigrid_io::csv::import_text(
+            "Region,Amount\nWest,10\nEast,20\nWest,30\nWest,40\n",
+            &Default::default(),
+        ).unwrap();
+        assert!(imported.sheet.rows < crate::app::NUM_ROWS);
+        let mut wb = Workbook::from_sheets(vec![imported.sheet], 0);
+        let sheet_id = wb.active_sheet_id();
+        let id = wb.create_table(sheet_id, TableRange {
+            start_row: 0, start_col: 0, end_row: 4, end_col: 1,
+        }, "Sales").unwrap().table_id();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let table = wb.table(id).unwrap().1;
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter {
+            column: table.columns[0].id,
+            criteria: ColumnFilter {
+                selected: Some([visigrid_engine::filter::FilterKey::Text("West".into()).normalized()].into()),
+                text_filter: None,
+            },
+        });
+        spec.sort = Some(TableSort { column: table.columns[1].id, direction: SortDirection::Descending });
+        wb.set_table_view_spec(sheet_id, Some(spec)).unwrap();
+        let view = grid_table_view(wb.active_sheet()).unwrap().unwrap();
+        assert_eq!(view.rows().view_to_data(1), 4);
+        assert!(!view.rows().is_data_row_visible(2));
+        assert!(view.rows().is_data_row_visible(5));
+        assert_eq!(wb.active_sheet().get_display(5, 1), "80");
+        let append = wb.append_table_rows(id, 1, &[]).unwrap();
+        let view = grid_table_view(wb.active_sheet()).unwrap().unwrap();
+        assert!(!view.rows().is_data_row_visible(2));
+        assert!(!view.rows().is_data_row_visible(5));
+        assert!(view.rows().is_data_row_visible(6));
+        assert_eq!(wb.active_sheet().get_display(6, 1), "80");
+        wb.apply_table_commit(&append, true).unwrap();
+        let view = grid_table_view(wb.active_sheet()).unwrap().unwrap();
+        assert!(!view.rows().is_data_row_visible(2));
+        assert!(view.rows().is_data_row_visible(5));
+        assert_eq!(wb.active_sheet().get_display(5, 1), "80");
     }
 
     #[::core::prelude::v1::test]

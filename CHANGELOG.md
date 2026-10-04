@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Table sorting and filtering now display correctly on smaller imported sheets, including CSV files. The desktop projection respects the sheet's row extent, keeping visible records and totals consistent.
+
 - Adding Table records and vertical resizing now move the totals footer safely, including its formulas, formatting and comments. Filtered bulk paste, calculated-column fill and undo/redo/rewind preserve hidden records and neighboring notes. Occupied footer destinations and unsafe fixed references refuse before any write; structured `#Totals` references follow the footer.
 
 - Author native Table totals from the Table bar: show/hide the footer and choose Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or a custom formula for each column. Aggregates follow Table filters; settings survive hiding, saving and XLSX round trips. Changes support undo/redo and history rewind with active criteria. Showing totals refuses occupied cells below the Table.
