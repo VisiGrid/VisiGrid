@@ -39,6 +39,16 @@ pub mod oneshot {
         pub fn blocking_recv_timeout(self, timeout: std::time::Duration) -> Result<T, RecvError> {
             self.0.recv_timeout(timeout).map_err(|_| RecvError)
         }
+
+        /// Like `blocking_recv_timeout`, but says whether the wait ran out
+        /// (`Ok(None)`) or the sender went away (`Err`).
+        pub fn recv_within(self, timeout: std::time::Duration) -> Result<Option<T>, RecvError> {
+            match self.0.recv_timeout(timeout) {
+                Ok(v) => Ok(Some(v)),
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(RecvError),
+            }
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -167,8 +177,9 @@ impl SessionBridgeHandle {
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
         reply_rx
-            .blocking_recv_timeout(timeout)
-            .map_err(|_| BridgeError::ChannelClosed)
+            .recv_within(timeout)
+            .map_err(|_| BridgeError::ChannelClosed)?
+            .ok_or(BridgeError::TimedOut)
     }
 
     /// Request undo/redo and wait for the host.
@@ -290,6 +301,8 @@ impl SessionBridgeHandle {
 pub enum BridgeError {
     /// The channel to the engine thread was closed.
     ChannelClosed,
+    /// The host didn't answer in time; the request may still complete.
+    TimedOut,
 }
 
 /// Requests from session server to engine.
@@ -621,5 +634,20 @@ mod tests {
             })),
         };
         assert_eq!(response.current_revision, 42);
+    }
+
+    #[test]
+    fn a_wait_that_runs_out_is_told_apart_from_a_host_that_went_away() {
+        use std::time::Duration;
+        // No answer yet: the request may still complete
+        let (_tx, rx) = super::oneshot::channel::<u32>();
+        assert!(matches!(rx.recv_within(Duration::from_millis(20)), Ok(None)));
+        // The host dropped the request: it never will
+        let (tx, rx) = super::oneshot::channel::<u32>();
+        drop(tx);
+        assert!(rx.recv_within(Duration::from_millis(20)).is_err());
+        let (tx, rx) = super::oneshot::channel::<u32>();
+        tx.send(7).unwrap();
+        assert!(matches!(rx.recv_within(Duration::from_millis(20)), Ok(Some(7))));
     }
 }
