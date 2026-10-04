@@ -887,15 +887,30 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             range_to_result(lookup, &sheet, new_row as usize, new_col as usize, height, width)
         }
         "INDIRECT" => {
-            // INDIRECT(ref_text, [a1]) — resolves an A1-style text reference on the current
-            // sheet. Cross-sheet ("Sheet!A1") and R1C1 style are not yet supported (#REF!).
+            // INDIRECT(ref_text, [a1]) — resolves an A1-style text reference, on the
+            // current sheet or on a named one ("Data!B5", "'My Sheet'!A1:B2"). R1C1
+            // style is not supported (#REF!).
             if args.is_empty() || args.len() > 2 {
                 return Some(EvalResult::Error("INDIRECT requires 1 or 2 arguments".to_string()));
             }
             let ref_text = evaluate(&args[0], lookup).to_text();
-            match parse_a1_ref(&ref_text) {
+            let (sheet_ref, address) = match ref_text.rsplit_once('!') {
+                Some((name, address)) => {
+                    let name = name.trim();
+                    let name = match name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')) {
+                        Some(quoted) => quoted.replace("''", "'"),
+                        None => name.to_string(),
+                    };
+                    match lookup.sheet_id_by_name(&name) {
+                        Some(id) => (SheetRef::Id(id), address),
+                        None => return Some(EvalResult::Error("#REF!".to_string())),
+                    }
+                }
+                None => (SheetRef::Current, ref_text.as_str()),
+            };
+            match parse_a1_ref(address) {
                 Some((sr, sc, er, ec)) => {
-                    range_to_result(lookup, &SheetRef::Current, sr, sc, er - sr + 1, ec - sc + 1)
+                    range_to_result(lookup, &sheet_ref, sr, sc, er - sr + 1, ec - sc + 1)
                 }
                 None => EvalResult::Error("#REF!".to_string()),
             }

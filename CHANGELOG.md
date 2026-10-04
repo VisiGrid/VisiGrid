@@ -1,12 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.47.0
 
 ### Import recipes
 
 - **Recipes read Parquet files and DuckDB tables.** Columns keep the types the file declares (numbers, dates, date-times, times, text), and the values come through exactly as when opening the file. The builder shows the settings each source has, with a Table setting for DuckDB. Start one with **New Import Recipe…** from an open Parquet file or by choosing a `.parquet` or `.duckdb` file. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
 - **Recipes read Excel sheets.** Choose the sheet (kept by name, so reordering sheets is safe) and the header row below any title rows, which VisiGrid guesses. A recipe reads the values Excel saved and never recalculates formulas; Excel date formats come through as dates. Start one with **New Import Recipe…** from an open `.xlsx`, `.xlsm` or `.xls` file. ([#98](https://github.com/VisiGrid/VisiGrid/pull/98))
 - Fixed a recipe named like a function (`db`, `sum`, `date`) failing to create its Table; the Table is named `db_table` instead. ([#93](https://github.com/VisiGrid/VisiGrid/pull/93))
+
+### Formulas
+
+- **INDIRECT and OFFSET results stay current.** A cell reading through `INDIRECT` or `OFFSET` used to keep its old value when the cell it pointed at changed; it now updates on every edit, as in Excel. `NOW`, `TODAY`, `RAND` and `RANDBETWEEN` also refresh on every recalculation instead of only on a full recompute. Workbooks that don't use these functions recalculate as fast as before. ([#88](https://github.com/VisiGrid/VisiGrid/issues/88), ([#99](https://github.com/VisiGrid/VisiGrid/pull/99)))
+- **INDIRECT can reach other sheets**, for example `=INDIRECT("Data!B5")` or `=INDIRECT("'My Data'!A1:A2")`; these returned `#REF!` before. ([#99](https://github.com/VisiGrid/VisiGrid/pull/99))
+- **Spills behave like Excel.** Typing into a cell a spilled formula covers turns the formula into `#SPILL!`, and clearing that value lets it spill again, including for formulas that were already blocked when the file opened. Rewriting or clearing a spilling formula empties every cell it filled. ([#91](https://github.com/VisiGrid/VisiGrid/issues/91), ([#99](https://github.com/VisiGrid/VisiGrid/pull/99)))
+- Fixed inserting or deleting rows or columns next to a spilled formula leaving stale values behind and blanking the rest of the spill. ([#99](https://github.com/VisiGrid/VisiGrid/pull/99))
 
 ## 0.46.1
 

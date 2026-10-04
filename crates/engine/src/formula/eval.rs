@@ -14,6 +14,9 @@ pub trait CellLookup {
     /// Exclusive data bounds on the requested sheet. Empty lookups default
     /// to no data; real sheet lookups include formulas and spill receivers.
     fn data_bounds(&self, _sheet: &SheetRef) -> (usize, usize) { (0, 0) }
+    /// Resolve a sheet name typed at run time (INDIRECT's "Sheet!A1").
+    /// Lookups without a workbook cannot, so cross-sheet INDIRECT is #REF!.
+    fn sheet_id_by_name(&self, _name: &str) -> Option<crate::sheet::SheetId> { None }
 
     /// Optional data-view offset for CLI header exclusion. Cell formulas use 0.
     fn whole_column_start(&self) -> usize { 0 }

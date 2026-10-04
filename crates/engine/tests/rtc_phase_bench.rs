@@ -418,3 +418,37 @@ fn single_cell_edit_on_a_resident_workbook() {
          over the dirty set (the defect fixed in dep_graph::topo_order_subset)."
     );
 }
+
+// #88: volatile formulas (NOW, TODAY, RAND, RANDBETWEEN, INDIRECT, OFFSET) are
+// recalculated on every edit, as in Excel. A workbook without any must keep
+// the one-dependent edit flat (the first test above); this one shows what a
+// workbook WITH them pays: every edit re-evaluates each volatile cell and
+// whatever reads it, however unrelated the edit.
+#[test]
+#[ignore = "measurement, not an assertion — run explicitly with --ignored --nocapture"]
+fn single_cell_edit_with_volatile_formulas() {
+    let n = 200_000;
+    let mut cells = fixture(n, Shape::Cheap);
+    // Far right of the fixture: one INDIRECT with a reader, and 100 NOWs.
+    let col = 2 * n.div_ceil(ROWS_PER_PAIR) + 1;
+    cells.push((0, col, "=INDIRECT(\"A2\")".into()));
+    cells.push((1, col, format!("={}1+1", col_name(col))));
+    for r in 0..100 {
+        cells.push((r + 2, col, "=NOW()".into()));
+    }
+    let mut wb = built(&cells);
+    assert_eq!(wb.volatile_cell_count(), 101);
+    let mut samples = Vec::new();
+    for i in 0..=11 {
+        let v = format!("{}", 1000 + i);
+        let t = Instant::now();
+        wb.set_cell_value_tracked(0, 0, 0, &v);
+        if i > 0 {
+            samples.push(ms(t.elapsed()));
+        }
+    }
+    println!(
+        "\nformulas={n} cheap + 1 INDIRECT (+1 reader) + 100 NOW: one-dependent edit median {:.3}ms",
+        median(samples)
+    );
+}
