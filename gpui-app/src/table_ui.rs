@@ -106,39 +106,24 @@ impl Spreadsheet {
     ) -> Option<bool> {
         let row = self.row_view.view_to_data(view_row);
         let sheet = self.sheet(cx).id;
-        let result = self.workbook.update(cx, |wb, _| {
-            wb.try_calculated_column(sheet, row, col, source)
-        });
+        let result = crate::table_calculated::prepare_inferred(self.wb(cx), sheet, row, col, source);
         match result {
             Ok(None) => None,
-            Ok(Some(commit)) => {
-                self.record_table_commit(commit, "Fill calculated column".into(), cx);
-                Some(true)
-            }
-            Err(error) => {
-                self.status_message = Some(error);
-                cx.notify();
-                Some(false)
-            }
+            Ok(Some((candidate, commit))) => Some(match self.publish_calculated(candidate, commit, "Fill calculated column", cx) {
+                Ok(()) => true,
+                Err(error) => { self.status_message = Some(error); cx.notify(); false }
+            }),
+            Err(error) => { self.status_message = Some(error); cx.notify(); Some(false) }
         }
     }
 
     pub(crate) fn restore_column_formula(&mut self, id: TableId, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) || self.mode.is_editing() {
-            return;
-        }
+        if self.block_if_previewing_only(cx) || self.mode.is_editing() { return; }
         let (row, col) = self.view_state.selected;
         let row = self.row_view.view_to_data(row);
-        match self
-            .workbook
-            .update(cx, |wb, _| wb.restore_calculated_cell(id, row, col))
-        {
-            Ok(commit) => self.record_table_commit(commit, "Restore column formula".into(), cx),
-            Err(error) => {
-                self.status_message = Some(error);
-                cx.notify();
-            }
-        }
+        let result = crate::table_calculated::prepare_restore(self.wb(cx), id, row, col)
+            .and_then(|(candidate, commit)| self.publish_calculated(candidate, commit, "Restore column formula", cx));
+        if let Err(error) = result { self.status_message = Some(error); cx.notify(); }
     }
 
     fn table_growth_blocked(&mut self, cx: &mut Context<Self>) -> bool {
@@ -483,7 +468,7 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Total(..)) && self.block_table_view_edit(cx) { return; }
+        if !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Total(..) | TableDialogKind::ColumnFormula(..)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
             TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
@@ -555,6 +540,17 @@ impl Spreadsheet {
         if let TableDialogKind::Total(id, col) = draft.kind {
             let result = crate::table_totals::total_setting(&draft.range, &draft.name)
                 .and_then(|total| self.change_table_totals(id, Some((col, total)), cx));
+            match result {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::ColumnFormula(id, col, replace) = draft.kind {
+            let result = draft.range.parse::<usize>()
+                .map_err(|_| "Invalid formula origin.".to_string())
+                .and_then(|row| self.submit_column_formula(id, col, row, &draft.name, replace, cx));
             match result {
                 Ok(()) => self.table_dialog = None,
                 Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
@@ -672,6 +668,9 @@ impl Spreadsheet {
     ) -> bool {
         if crate::table_create::is_creation(commit) {
             return self.replay_table_creation(commit, header_layout, undo, cx);
+        }
+        if commit.is_calculated_change() {
+            return self.replay_calculated(commit, undo, cx);
         }
         if commit.is_totals_change() {
             return self.replay_table_totals(commit, undo, cx);

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Edit calculated-column rules with visible or hidden Table totals. Preserve overrides or explicitly replace every record, including filtered-out records, with the scope shown in the dialog. The footer stays outside the fill and recalculates; saved criteria, undo/redo, history rewind and native/XLSX round trips retain the rules and totals.
+
 - Rename Tables and column headers with totals enabled or hidden. Structured cell formulas, calculated rules and custom totals settings follow the new names, including references from other Tables. Saved filters/sorting stay active, with undo/redo and history rewind.
 
 - Table sorting and filtering now display correctly on smaller imported sheets, including CSV files. The desktop projection respects the sheet's row extent, keeping visible records and totals consistent.
@@ -11,7 +13,7 @@
 - Author native Table totals from the Table bar: show/hide the footer and choose Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or a custom formula for each column. Aggregates follow Table filters; settings survive hiding, saving and XLSX round trips. Changes support undo/redo and history rewind with active criteria. Showing totals refuses occupied cells below the Table.
 
 - Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
-- Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes, column/name changes and affected worksheet structural operations remain guarded. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
+- Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes, column structure changes and affected worksheet structural operations remain guarded. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
 
 ## 0.45.0
 

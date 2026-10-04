@@ -9,6 +9,7 @@ mod table_ui;
 mod table_append;
 mod table_resize;
 mod table_totals;
+mod table_calculated;
 mod table_create;
 mod table_bulk_append;
 mod table_command_scope;

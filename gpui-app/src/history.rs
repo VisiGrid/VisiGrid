@@ -1820,6 +1820,10 @@ impl History {
                     if let (Some(layout), Some(view)) = (header_layout, view_state.per_sheet.get_mut(*sheet_index)) {
                         view.structure_layout = Some(layout.after.clone());
                     }
+                } else if commit.is_calculated_change() {
+                    let candidate = crate::table_calculated::prepare_replay(workbook, commit, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
                 } else if commit.is_totals_change() {
                     let candidate = crate::table_totals::prepare_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;

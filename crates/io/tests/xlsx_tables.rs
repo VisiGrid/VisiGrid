@@ -2403,3 +2403,33 @@ fn renamed_totals_keep_custom_settings_and_calculated_rules_through_native_and_x
         assert_eq!(loaded.sheet(0).unwrap().get_display(8, 2), "100");
     }
 }
+
+#[test]
+fn edited_calculated_rules_with_totals_roundtrip_and_fill_after_append() {
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.set_calculated_column(id, 3, 3, "=[@Qty]*[@Price]*2", false).unwrap();
+        let rule = wb.table(id).unwrap().1.columns[2].formula.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edited.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        assert_eq!(wb.table(id).unwrap().1.columns[2].formula, rule);
+        let path = dir.path().join("edited.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        assert_eq!(loaded.table(id).unwrap().1.columns[2].formula.as_deref(), Some("=[[#This Row],[Qty]]*[[#This Row],[Price]]*2"));
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(5, 3), "");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(6, 3), "=1+2");
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        let total = loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap();
+        loaded.append_table_rows(id, 1, &[(8, 1, "5".into()), (8, 2, "10".into())]).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3), "100");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(9, 3).parse::<f64>().unwrap(), total + 100.0);
+    }
+}

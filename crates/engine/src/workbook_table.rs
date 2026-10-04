@@ -52,11 +52,16 @@ pub struct TableCommit {
     rules: Vec<calculated::RuleChange>,
     totals_edit: bool,
     name_edit: bool,
+    calculated_edit: bool,
     totals_references: Vec<TotalsReferenceChange>,
     footer_move: Option<footer::FooterMove>,
 }
 
 impl TableCommit {
+    pub fn is_calculated_change(&self) -> bool {
+        self.calculated_edit
+    }
+
     /// A validated Table/column rename, including derived formula changes.
     pub fn is_name_change(&self) -> bool {
         self.name_edit
@@ -724,9 +729,18 @@ impl Workbook {
     ) -> Result<TableCommit, String> {
         let name_edit = before.as_ref().zip(after.as_ref())
             .is_some_and(|(a, b)| a != b && names_only(a, b));
-        if !name_edit && before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
+        let calculated_edit = before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)| {
+            if a.columns.len() != b.columns.len() || a == b { return false; }
+            let mut normalized = b.clone();
+            for (old, new) in a.columns.iter().zip(&mut normalized.columns) {
+                new.formula = old.formula.clone();
+                new.formula_origin = old.formula_origin;
+            }
+            normalized == *a
+        });
+        if !name_edit && !calculated_edit && before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
             && (a.range.start_row != b.range.start_row || a.range.start_col != b.range.start_col || a.range.end_col != b.range.end_col || a.name != b.name || a.columns != b.columns)) {
-            return Err("Changing column structure or calculated rules of a totals-row Table is not supported yet. Convert it to a range first.".into());
+            return Err("Changing column structure of a totals-row Table is not supported yet. Convert it to a range first.".into());
         }
         let sheet = self
             .sheet_by_id(sheet_id)
@@ -808,6 +822,7 @@ impl Workbook {
             formulas.retain(|change| change.cell.sheet != sheet_id || !movement.owns(change.cell.row, change.cell.col));
         }
         Ok(TableCommit {
+            calculated_edit,
             name_edit,
             totals_references,
             footer_move,
@@ -1038,7 +1053,7 @@ impl Workbook {
         }
         // A pivot can source a formula on another sheet that depends on this
         // footer. Recalculation alone doesn't advance that sheet's generation.
-        let totals_dependents: Vec<_> = if commit.is_totals_change() || commit.footer_move.is_some() || commit.name_edit {
+        let totals_dependents: Vec<_> = if commit.is_totals_change() || commit.footer_move.is_some() || commit.name_edit || commit.calculated_edit {
             self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
                 sheet.cells_iter().filter_map(move |((row, col), cell)| {
                     matches!(cell.value(), ValueRef::Formula { .. })

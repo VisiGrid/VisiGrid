@@ -91,7 +91,7 @@ pub(crate) fn render_table_controls(
             if view_only {
                 controls.push(div().text_color(app.token(TokenKey::TextMuted)).child("Editing visible records").into_any_element());
             }
-            if !view_only && table.totals_row() != Some(row) && column.formula.is_some() {
+            if table.totals_row() != Some(row) && column.formula.is_some() {
                 let exception = app.sheet(cx).is_calculated_exception(row, col);
                 controls.push(
                     div()
@@ -139,7 +139,7 @@ pub(crate) fn render_table_controls(
                     )
                     .into_any_element(),
                 );
-            } else if !view_only && table.totals_row() != Some(row) && row > table.range.start_row
+            } else if table.totals_row() != Some(row) && row > table.range.start_row
                 && app.sheet(cx).get_raw(row, col).starts_with('=')
             {
                 controls.push(
@@ -414,6 +414,16 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 preview = preview.child(format!("{} · {} · {} records",table.name,table.columns[col-table.range.start_col].name,table.range.data_rows()));
                 preview = preview.child(if replace {format!("Replace {populated} existing values/formulas and fill all {} records, including {exceptions} overrides. One undo step.",table.range.data_rows())}
                     else {format!("Update {} formula cells. Preserve {exceptions} overrides, including cleared cells.",table.range.data_rows()-exceptions)});
+                let hidden = sheet.build_saved_table_view(sheet.rows).ok().flatten().map_or(0, |view| {
+                    (table.range.start_row+1..=table.range.end_row)
+                        .filter(|r| !view.rows().is_data_row_visible(*r) && (replace || !sheet.is_calculated_exception(*r, col))).count()
+                });
+                if hidden > 0 {
+                    preview = preview.child(format!("Includes {hidden} records hidden by Table filters. Sorting and filters stay active."));
+                }
+                if table.totals.is_some() {
+                    preview = preview.child("The totals footer is excluded from filling and recalculates from the records.");
+                }
                 preview = preview.child(format!("Formula shown at row {}. New rows use this rule; cell edits remain overrides.", d.range.parse::<usize>().unwrap_or(0)+1));
             }
         }
