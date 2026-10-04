@@ -1037,7 +1037,7 @@ fn excel_string_escape_sequences_in_filter_values_are_decoded_once() {
 }
 
 #[test]
-fn imported_filter_warns_before_revealing_manually_hidden_matching_records() {
+fn imported_filter_preserves_manually_hidden_matching_records() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("base.xlsx");
     let changed = dir.path().join("manual-hidden.xlsx");
@@ -1059,15 +1059,15 @@ fn imported_filter_warns_before_revealing_manually_hidden_matching_records() {
         loaded.sheet(0).unwrap().table_view_spec(),
         wb.sheet(0).unwrap().table_view_spec()
     );
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains("manually hidden or stale hidden")),
-        "{:?}",
-        report.warnings
-    );
-    assert!(report.imported_layouts[0].hidden_rows.is_empty());
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(report.imported_layouts[0].hidden_rows.contains(&3));
+    let sheet = loaded.sheet(0).unwrap();
+    assert!(sheet.manual_hidden_rows().contains(&3));
+    assert!(!sheet.build_saved_table_view(sheet.rows).unwrap().unwrap().rows().is_data_row_visible(3));
+    let mut cleared = loaded.clone();
+    cleared.set_table_view_spec(sheet.id, None).unwrap();
+    assert!(cleared.sheet(0).unwrap().manual_hidden_rows().contains(&3));
+
 }
 
 #[test]
@@ -1427,20 +1427,14 @@ fn sort_only_import_refuses_unsafe_layouts_and_preserves_manual_hidden_rows() {
         });
         let (loaded, report) = xlsx::import(&changed).unwrap();
         assert_eq!(report.tables_imported, 1);
-        assert!(
-            loaded.sheet(0).unwrap().table_view_spec().is_none(),
-            "mode {mode}"
-        );
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains("saved sort/filter/button settings were not imported")),
-            "mode {mode}: {:?}",
-            report.warnings
-        );
         if mode == 0 {
+            let sheet = loaded.sheet(0).unwrap();
+            assert!(sheet.table_view_spec().unwrap().sort.is_some());
             assert!(report.imported_layouts[0].hidden_rows.contains(&3));
+            assert!(!sheet.build_saved_table_view(sheet.rows).unwrap().unwrap().rows().is_data_row_visible(3));
+        } else {
+            assert!(loaded.sheet(0).unwrap().table_view_spec().is_none(), "mode {mode}");
+            assert!(report.warnings.iter().any(|w| w.contains("saved sort/filter/button settings were not imported")), "mode {mode}: {:?}", report.warnings);
         }
         assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "6");
     }

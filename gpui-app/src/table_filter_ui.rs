@@ -43,15 +43,14 @@ pub(crate) struct TableFilterDropdown {
 pub(crate) fn desktop_layout_error(
     table: &DataTable,
     heights: Option<&std::collections::HashMap<usize, f32>>,
-    hidden: Option<&std::collections::BTreeSet<usize>>,
+    _hidden: Option<&std::collections::BTreeSet<usize>>,
     frozen_rows: usize,
 ) -> Option<String> {
     let body = table.range.start_row + 1..=table.range.end_row;
     if heights.is_some_and(|h| h.keys().any(|r| body.contains(r)))
-        || hidden.is_some_and(|h| h.iter().any(|r| body.contains(r)))
         || (frozen_rows > table.range.start_row + 1 && frozen_rows <= table.range.end_row)
     {
-        Some("Table views need uniform, visible body rows with no freeze boundary through the records. Reset row heights, unhide rows or unfreeze the body first.".into())
+        Some("Table views need uniform body row heights with no freeze boundary through the records. Reset row heights or unfreeze the body first.".into())
     } else {
         None
     }
@@ -87,8 +86,13 @@ impl Spreadsheet {
             .iter()
             .find(|t| t.id == spec.table)?;
         let total = table.range.data_rows();
+        // The mask also includes manual hides outside this Table. Exclude
+        // those from the badge without rescanning every record on each render.
+        let outside_hidden = self.sheet(cx).manual_hidden_rows().iter().filter(|&&row| {
+            row < self.row_view.row_count() && (row <= table.range.start_row || row > table.range.end_row)
+        }).count();
         let hidden = self.row_view.row_count() - self.row_view.visible_count();
-        Some((total.saturating_sub(hidden), total))
+        Some((total.saturating_sub(hidden.saturating_sub(outside_hidden)), total))
     }
 
     pub(crate) fn block_table_view_edit(&mut self, cx: &mut Context<Self>) -> bool {
@@ -188,7 +192,7 @@ impl Spreadsheet {
                             self.view_state
                                 .select_cell(focus.view_row, self.view_state.selected.1);
                             if focus.record_hidden {
-                                self.status_message = Some("The selected record is filtered out; moved to the nearest visible row.".into());
+                                self.status_message = Some("The selected record is hidden; moved to the nearest visible row.".into());
                             }
                         }
                     }
@@ -656,7 +660,7 @@ mod tests {
             desktop_layout_error(table, Some(&[(2, 32.0)].into()), Some(&[1].into()), 3).is_none()
         );
         assert!(desktop_layout_error(table, Some(&[(3, 32.0)].into()), None, 0).is_some());
-        assert!(desktop_layout_error(table, None, Some(&[5].into()), 0).is_some());
+        assert!(desktop_layout_error(table, None, Some(&[5].into()), 0).is_none());
         assert!(desktop_layout_error(table, None, None, 4).is_some());
         assert!(desktop_layout_error(table, None, None, 6).is_none());
     }

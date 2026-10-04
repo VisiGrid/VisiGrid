@@ -226,7 +226,7 @@ impl TableView {
             range,
             rows,
             filters,
-        })
+        }.with_manual_hidden_rows(&sheet.manual_hidden_rows()))
     }
 
     /// Compose host manual visibility with this immutable filter projection.

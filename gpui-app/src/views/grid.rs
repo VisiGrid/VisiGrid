@@ -2319,7 +2319,10 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
                 let (x, y, width, height) = formula_ref_rect(
                     key, projected_region,
                     |c| if app.is_col_hidden(c) { 0.0 } else { app.metrics.col_width(app.col_width(c)) },
-                    |r| if app.is_row_hidden(r) { 0.0 } else { app.metrics.row_height(app.row_height(r)) },
+                    |r| formula_overlay_row_height(r,
+                        (app.table_view_installed || app.filter_state.sort.is_some()).then_some(&app.row_view),
+                        |data| app.is_row_hidden(data),
+                        |data| app.metrics.row_height(app.row_height(data))),
                 )?;
                 if width <= 0.0 || height <= 0.0 { return None; }
                 let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
@@ -2348,6 +2351,19 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
         layers.push(overlay_region_container(region, header_width).child(borders));
     }
     div().absolute().inset_0().children(layers).into_any_element()
+}
+
+/// Overlay keys use projected slots; visibility and row sizes belong to
+/// canonical rows. Hidden slots have no height in the rendered grid.
+fn formula_overlay_row_height(
+    slot: usize, projection: Option<&visigrid_engine::filter::RowView>,
+    hidden: impl Fn(usize) -> bool, height: impl Fn(usize) -> f32,
+) -> f32 {
+    let row = if let Some(view) = projection {
+        if !view.is_view_row_visible(slot) { return 0.0; }
+        view.view_to_data(slot)
+    } else { slot };
+    if hidden(row) { 0.0 } else { height(row) }
 }
 
 /// Preserve offscreen origins: the containing pane clips the original outline
@@ -3494,6 +3510,26 @@ mod frozen_overlay_tests {
         // in each clipped pane instead of shifting its origin into that pane.
         let crossing = RefKey::Range { r1: 0, c1: 0, r2: 2, c2: 1 };
         assert_eq!(formula_ref_rect(&crossing, pane, widths, heights), Some((-210.0, -38.0, 378.0, 94.0)));
+    }
+
+    #[test]
+    fn formula_outline_skips_filtered_and_manually_hidden_sorted_slots() {
+        use super::{formula_overlay_row_height, formula_ref_rect, RefKey};
+        let before = crate::table_edit::tests::fixture(true);
+        let (hidden, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [3].into()).unwrap();
+        let projection = hidden.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        let rows = projection.rows();
+        let heights = |slot| formula_overlay_row_height(slot, Some(rows), |row| row == 3, |_| 20.0);
+        assert_eq!(heights(3), 0.0); // filter-hidden East record
+        assert_eq!(heights(5), 0.0); // manually hidden West record, sorted to slot 5
+        assert_eq!(heights(4), 20.0);
+        let mut state = WorkbookViewState::default();
+        state.scroll_row = 3;
+        let region = overlay_regions(&state, 20, 8, 0.0, 0.0)[0];
+        let runs = crate::table_formula_editor::projected_runs(rows, 3..7, rows.visible_rows().iter().copied());
+        assert_eq!(runs, [(4, 6)]);
+        assert_eq!(formula_ref_rect(&RefKey::new(4, 1, 6, 1), region, |_| 100.0, heights), Some((100.0, 0.0, 100.0, 40.0)));
+        assert_eq!(formula_ref_rect(&RefKey::Cell { row: 6, col: 1 }, region, |_| 100.0, heights), Some((100.0, 20.0, 100.0, 20.0)));
     }
 
     #[test]

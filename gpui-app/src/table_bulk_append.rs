@@ -233,7 +233,7 @@ impl Spreadsheet {
                 self.is_modified = true;
                 self.clipboard_visual_range = None;
                 self.status_message = Some(if hidden > 0 {
-                    format!("{description}; {hidden} new row(s) hidden by the current filter.")
+                    format!("{description}; {hidden} new row(s) hidden by the current view.")
                 } else {
                     description
                 });

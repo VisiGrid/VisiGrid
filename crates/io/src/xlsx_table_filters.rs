@@ -347,9 +347,9 @@ pub(super) fn finish_import(
                         .any(|r| *r > range.start_row && *r <= range.end_row)
                         || (layout.frozen_rows > range.start_row + 1
                             && layout.frozen_rows <= range.end_row)
-                }) || (!has_filters && !previously_hidden.is_empty())
+                })
                 {
-                    return Err("Table body has custom row heights, manually hidden rows or a freeze boundary".into());
+                    return Err("Table body has custom row heights or a freeze boundary".into());
                 }
             }
             let mut spec = TableViewSpec::new(p.table);
@@ -364,22 +364,19 @@ pub(super) fn finish_import(
                     },
                 });
             }
-            let reveals_manual_rows = !spec.filters.is_empty()
-                && previously_hidden.iter().any(|row| {
-                    spec.filters.iter().all(|filter| {
-                        let offset = table
-                            .columns
-                            .iter()
-                            .position(|c| c.id == filter.column)
-                            .unwrap();
-                        filter.criteria.passes(&FilterKey::from_value(
-                            &sheet.get_computed_value(*row, range.start_col + offset),
-                        ))
-                    })
-                });
+            // A hidden row that passes the saved filter cannot be explained
+            // by that filter: retain it as manually hidden. Standard XLSX does
+            // not distinguish manual hides on rows also excluded by a filter.
+            let manual_rows: Vec<_> = previously_hidden.iter().copied().filter(|row| {
+                !spec.filters.is_empty() && spec.filters.iter().all(|filter| {
+                    let offset = table.columns.iter().position(|c| c.id == filter.column).unwrap();
+                    filter.criteria.passes(&FilterKey::from_value(
+                        &sheet.get_computed_value(*row, range.start_col + offset)))
+                })
+            }).collect();
             wb.set_table_view_spec(sid, Some(spec))?;
-            if reveals_manual_rows {
-                result.warnings.push(format!("Table {name}: manually hidden or stale hidden body rows were made visible; saved filter criteria now control visibility."));
+            if let Some(layout) = result.imported_layouts.get_mut(p.sheet) {
+                layout.hidden_rows.extend(manual_rows);
             }
             Ok(())
         })();

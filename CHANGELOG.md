@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Manually hidden rows survive headless native, full-JSON and XLSX saves and affect `SUBTOTAL` consistently, including sheets without Table totals. Visibility and row-structure history preserve the flags; existing projected-Table body restrictions remain pending command integration.
+- Hide and unhide records inside sorted or filtered Tables without clearing criteria. Navigation, paste, fill, cut, append and structural edits use the same visible rows; undo/redo and rewind restore visibility and totals together. Formula-reference outlines stay aligned with visible sorted records.
+- Preserve manual hides when importing sorted XLSX Tables and hidden records that pass a supported saved filter. Custom body row heights and freeze boundaries remain restricted.
+
+- Manually hidden rows survive headless native, full-JSON and XLSX saves and affect `SUBTOTAL` consistently, including sheets without Table totals. Visibility and row-structure history preserve the flags; projected-Table manual hiding uses the shared visibility state.
 - Fix the single-sheet native loader dropping formula sources. It now restores formulas, recalculates after all cells and layout are loaded, and retains cached results for unavailable custom functions.
 
 - Preserve supported modern Excel formula errors, including `#SPILL!` and `#CALC!`, through rich-value metadata and values-only import. Older readers receive a conventional error fallback; malformed metadata keeps fallback cells with a warning.

@@ -91,8 +91,7 @@ fn projection_composes_manual_and_filter_visibility_without_changing_sort_or_cri
         .active_sheet()
         .build_saved_table_view(20)
         .unwrap()
-        .unwrap()
-        .with_manual_hidden_rows(&hidden.active_sheet().manual_hidden_rows());
+        .unwrap();
     assert_eq!(view.spec(), &spec);
     assert_eq!(view.visible_body_rows(1, 1).unwrap(), vec![2]);
     assert!(view.visible_body_rows(1, 2).is_err());
@@ -113,8 +112,7 @@ fn projection_composes_manual_and_filter_visibility_without_changing_sort_or_cri
         .active_sheet()
         .build_saved_table_view(20)
         .unwrap()
-        .unwrap()
-        .with_manual_hidden_rows(&shown.active_sheet().manual_hidden_rows());
+        .unwrap();
     assert_eq!(view.visible_body_rows(1, 2).unwrap(), vec![2, 1]);
     assert!(!view.rows().is_data_row_visible(3));
 }

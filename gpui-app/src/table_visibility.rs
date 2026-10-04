@@ -15,7 +15,7 @@ fn prepare(
         if crate::table_filter_ui::desktop_layout_error(
             table, Some(&before.heights), Some(&before.hidden_rows), sheet.frozen_panes.0,
         ).is_some() {
-            return Err("Clear this Table's sorting and filters before changing its manual row visibility.".into());
+            return Err("Reset body row heights or unfreeze the Table body before changing row visibility.".into());
         }
     }
     let view = sheet.build_saved_table_view(sheet.rows)?;
@@ -33,7 +33,7 @@ fn prepare(
         .and_then(|spec| sheet.tables().iter().find(|t| t.id == spec.table)) {
         if crate::table_filter_ui::desktop_layout_error(
             table, Some(&after.heights), Some(&after.hidden_rows), sheet.frozen_panes.0,
-        ).is_some() { return Err("Clear this Table's sorting and filters before manually hiding its records.".into()); }
+        ).is_some() { return Err("Reset body row heights or unfreeze the Table body before changing row visibility.".into()); }
     }
     let (candidate, commit) = wb.prepare_table_row_visibility(id, after.hidden_rows.clone())?;
     Ok(Some((candidate, TableStructureHistory { commit, source_frozen: None, before: before.clone(), after }, count)))
@@ -141,17 +141,23 @@ mod tests {
     }
 
     #[test]
-    fn criteria_keep_body_layout_guard_but_allow_safe_rows_and_other_sheets() {
+    fn criteria_allow_manual_hides_but_keep_height_and_freeze_guards() {
         let mut wb = fixture(true);
         let id = wb.active_sheet_id();
         let table = wb.active_sheet().tables()[0].id;
         wb.set_table_totals_visible(table, true, Default::default()).unwrap();
-        let before = wb.saved_tables();
-        assert!(prepare(&wb, id, &Default::default(), 3, 6, true).is_err());
-        assert_eq!(serde_json::to_value(wb.saved_tables()).unwrap(), serde_json::to_value(before).unwrap());
+        let (hidden, history, count) = prepare(&wb, id, &Default::default(), 3, 6, true).unwrap().unwrap();
+        assert_eq!(count, 3); // the East record is already filter-hidden
+        assert_eq!(history.after.hidden_rows, [3, 5, 6].into());
+        assert_eq!(hidden.active_sheet().get_display(7, 3), "0");
+        assert_eq!(hidden.active_sheet().table_view_spec(), wb.active_sheet().table_view_spec());
+        let (shown, _, count) = prepare(&hidden, id, &history.after, 3, 6, false).unwrap().unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(shown.active_sheet().get_display(7, 3), "180");
+        assert!(!shown.active_sheet().build_saved_table_view(30).unwrap().unwrap().rows().is_data_row_visible(4));
         let mut invalid_layout = StructureLayout::default();
-        invalid_layout.hidden_rows.insert(4);
-        assert!(prepare(&wb, id, &invalid_layout, 3, 6, false).unwrap_err().contains("Clear this Table"));
+        invalid_layout.heights.insert(4, 42.0);
+        assert!(prepare(&wb, id, &invalid_layout, 3, 6, false).unwrap_err().contains("row heights"));
         let (outside, history, _) = prepare(&wb, id, &Default::default(), 12, 13, true).unwrap().unwrap();
         assert_eq!(outside.active_sheet().get_display(7, 3), "180");
         assert_eq!(outside.active_sheet().table_view_spec(), wb.active_sheet().table_view_spec());
@@ -207,4 +213,69 @@ mod tests {
         assert_eq!(wb.revision(), revision);
         assert_eq!(wb.active_sheet().get_display(7, 3), "200");
     }
+    #[test]
+    fn manually_hidden_sorted_records_are_excluded_from_paste_fill_cut_and_row_deletion() {
+        use crate::table_edit::{prepare_table_writes, view_safe_paste_targets, view_safe_selection_rows, TableCellWrite};
+        let mut wb = fixture(true);
+        let id = wb.active_sheet_id();
+        let table = wb.active_sheet().tables()[0].id;
+        wb.set_table_totals_visible(table, true, Default::default()).unwrap();
+        // Display slot 5 is canonical row 3 (West, 30), not row 5 (West, 20).
+        let (hidden, history, count) = prepare(&wb, id, &Default::default(), 5, 5, true).unwrap().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(hidden.active_sheet().manual_hidden_rows(), [3].into());
+        let sheet = hidden.active_sheet();
+        let view = sheet.build_saved_table_view(30).unwrap().unwrap();
+        let rows = view.rows();
+        assert_eq!(rows.visible_rows().iter().copied().filter(|r| (3..=6).contains(r)).collect::<Vec<_>>(), [4, 6]);
+        assert_eq!(view.focus_record(3).unwrap().view_row, 6);
+        assert_eq!(view_safe_selection_rows(sheet, rows, ((4, 2), (6, 2))).unwrap(), [5, 6]);
+        let targets = view_safe_paste_targets(sheet, rows, (4, 2), 2, 1).unwrap();
+        assert_eq!(targets.iter().map(|p| p.0).collect::<Vec<_>>(), [5, 6]);
+        assert!(view_safe_paste_targets(sheet, rows, (4, 2), 3, 1).is_err());
+        let writes: Vec<_> = targets.iter().map(|p| TableCellWrite::value(p.0, p.1, "99".into())).collect();
+        let pasted = prepare_table_writes(&hidden, 0, &writes).unwrap();
+        assert_eq!(pasted.active_sheet().get_raw(3, 2), "30");
+        assert_eq!(pasted.active_sheet().get_raw(4, 2), "10");
+        assert!(prepare_table_writes(&hidden, 0, &[TableCellWrite::value(3, 2, "99".into())]).is_err());
+        let (clipboard, cut) = crate::table_cut::plan_cut(sheet, rows, ((4, 2), (6, 2))).unwrap();
+        assert_eq!(clipboard.source_rows, [5, 6]);
+        assert_eq!(clipboard.raw_tsv, "20\n40");
+        let cut = prepare_table_writes(&hidden, 0, &cut).unwrap();
+        assert_eq!(cut.active_sheet().get_raw(3, 2), "30");
+        assert_eq!(cut.active_sheet().get_raw(4, 2), "10");
+        let fill = crate::table_fill::plan_direction(sheet, rows, ((4, 2), (6, 2)), true).unwrap();
+        assert_eq!(fill.iter().map(|w| w.row).collect::<Vec<_>>(), [6]);
+        assert_eq!(fill[0].value.as_deref(), Some("20"));
+        let append = crate::table_bulk_append::plan_bulk_append(sheet, rows, (4, 2), 3, 1).unwrap().unwrap();
+        assert_eq!(append.count, 1);
+        assert_eq!(append.targets.iter().map(|p| p.0).collect::<Vec<_>>(), [5, 6, 7]);
+        let writes: Vec<_> = append.targets.iter().map(|p| TableCellWrite::value(p.0, p.1, "99".into())).collect();
+        let (appended, append_history) = crate::table_bulk_append::prepare_append_writes(&hidden, table, append.count, &writes).unwrap();
+        assert_eq!(appended.active_sheet().manual_hidden_rows(), [3].into());
+        assert_eq!(appended.active_sheet().get_raw(3, 2), "30");
+        assert_eq!(appended.active_sheet().get_raw(4, 2), "10");
+        assert_eq!(appended.table(table).unwrap().1.totals_row(), Some(8));
+        let undone = append_history.replay(&appended, true).unwrap();
+        assert_eq!(undone.table(table).unwrap().1.totals_row(), Some(7));
+        assert_eq!(undone.active_sheet().manual_hidden_rows(), [3].into());
+        let steps = crate::table_structure::selected_row_steps(rows, 3, 6, true).unwrap();
+        let (deleted, deletion) = hidden.prepare_guarded_structure(0, steps.clone()).unwrap();
+        assert_eq!(deleted.active_sheet().get_raw(3, 2), "30");
+        assert_eq!(deleted.active_sheet().get_raw(4, 2), "10");
+        assert_eq!(deleted.active_sheet().manual_hidden_rows(), [3].into());
+        assert_eq!(history.after.shifted(sheet, &steps).unwrap().hidden_rows, [3].into());
+        assert_eq!(deletion.candidate(&deleted, true).unwrap().active_sheet().manual_hidden_rows(), [3].into());
+        let mut stack = History::new();
+        stack.record_action_with_provenance(UndoAction::TableStructureChanged {
+            sheet_index: 0, history: Box::new(history), description: "Hide sorted record".into(),
+        }, None);
+        let preview = stack.build_workbook_before(1, Some(&wb), 100, 10_000).unwrap();
+        assert!(!preview.view_state.per_sheet[0].table_rows.as_ref().unwrap().is_data_row_visible(3));
+        assert!(!preview.view_state.per_sheet[0].table_rows.as_ref().unwrap().is_data_row_visible(4));
+        let preview = stack.build_workbook_before(0, Some(&wb), 100, 10_000).unwrap();
+        assert!(preview.view_state.per_sheet[0].table_rows.as_ref().unwrap().is_data_row_visible(3));
+        assert!(!preview.view_state.per_sheet[0].table_rows.as_ref().unwrap().is_data_row_visible(4));
+    }
+
 }

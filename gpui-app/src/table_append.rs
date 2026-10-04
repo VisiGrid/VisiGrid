@@ -255,7 +255,7 @@ impl Spreadsheet {
                 self.is_modified = true;
                 self.clipboard_visual_range = None;
                 self.status_message = Some(if hidden {
-                    "Added 1 Table row, hidden by the current filter. Clear filters to see it."
+                    "Added 1 Table row, hidden by the current view. Unhide rows or clear filters to see it."
                         .into()
                 } else {
                     "Added 1 Table row.".into()
@@ -327,7 +327,7 @@ impl Spreadsheet {
                 self.maybe_show_cycle_banner(cx);
                 self.surface_incremental_recalc_problems(cx);
                 self.status_message = Some(if hidden {
-                    "Added 1 Table row, hidden by the current filter. Clear filters to enter its values.".into()
+                    "Added 1 Table row, hidden by the current view. Unhide rows or clear filters to enter its values.".into()
                 } else {
                     "Added 1 Table row.".into()
                 });
@@ -759,7 +759,7 @@ mod tests {
             crate::table_filter_ui::desktop_layout_error(new, Some(&heights), None, 0).is_some()
         );
         assert!(
-            crate::table_filter_ui::desktop_layout_error(new, None, Some(&hidden), 0).is_some()
+            crate::table_filter_ui::desktop_layout_error(new, None, Some(&hidden), 0).is_none()
         );
         assert!(crate::table_filter_ui::desktop_layout_error(new, None, None, 7).is_some());
     }
