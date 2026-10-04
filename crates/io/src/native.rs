@@ -944,11 +944,11 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
     workbook.ensure_writable()?;
     workbook.validate_table_view_specs()?;
-    write_fresh_db(path, |conn| write_workbook(conn, workbook))
+    write_fresh_db(path, |conn| write_workbook(conn, workbook, path.parent()))
 }
 
 /// Populate a fresh database with the workbook. See [`save_workbook`].
-fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+fn write_workbook(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) -> Result<(), String> {
     // Create schema (includes named_ranges table)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
@@ -1084,7 +1084,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
 
     save_cond_formats(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
-    save_tables(&conn, workbook)?;
+    save_tables(&conn, workbook, dir)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1104,7 +1104,7 @@ pub fn save_workbook_with_metadata(
 ) -> Result<(), String> {
     workbook.ensure_writable()?;
     workbook.validate_table_view_specs()?;
-    write_fresh_db(path, |conn| write_workbook_with_metadata(conn, workbook, metadata))
+    write_fresh_db(path, |conn| write_workbook_with_metadata(conn, workbook, metadata, path.parent()))
 }
 
 /// Populate a fresh database with the workbook and its semantic metadata.
@@ -1112,6 +1112,7 @@ fn write_workbook_with_metadata(
     conn: &Connection,
     workbook: &Workbook,
     metadata: &CellMetadata,
+    dir: Option<&Path>,
 ) -> Result<(), String> {
     // Create schema (includes cell_metadata table)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
@@ -1259,7 +1260,7 @@ fn write_workbook_with_metadata(
 
     save_cond_formats(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
-    save_tables(&conn, workbook)?;
+    save_tables(&conn, workbook, dir)?;
     save_tab_colors(&conn, workbook)?;
     save_sheet_defaults(&conn, workbook)?;
 
@@ -1745,14 +1746,40 @@ fn load_tab_colors(conn: &Connection, workbook: &mut Workbook) {
     }
 }
 
-fn save_tables(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+fn save_tables(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) -> Result<(), String> {
     conn.execute("DELETE FROM meta WHERE key = 'tables'", []).map_err(|e| e.to_string())?;
     if workbook.has_table_history() {
-        let json = serde_json::to_string(&workbook.saved_tables()).map_err(|e| e.to_string())?;
+        let mut catalog = workbook.saved_tables();
+        // A recipe beside the workbook (or below it) is stored relative to it,
+        // so the two can move together; the app resolves it against the
+        // workbook's folder. Anywhere else stays absolute.
+        if let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+            for sheet in &mut catalog.sheets {
+                for table in &mut sheet.tables {
+                    if let Some(source) = &mut table.source {
+                        source.recipe = relative_recipe_path(&source.recipe, &dir);
+                    }
+                }
+            }
+        }
+        let json = serde_json::to_string(&catalog).map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO meta (key, value) VALUES ('tables', ?1)", params![json])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// `recipe` relative to `dir` when it lies inside it; otherwise unchanged.
+fn relative_recipe_path(recipe: &str, dir: &Path) -> String {
+    let path = Path::new(recipe);
+    match path.strip_prefix(dir) {
+        Ok(rest) if path.is_absolute() && !rest.as_os_str().is_empty() => {
+            // Forward slashes, so the file reads the same on every platform
+            rest.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+        }
+        _ => recipe.to_string(),
+    }
 }
 
 fn load_tables(conn: &Connection, workbook: &mut Workbook) -> Result<(), crate::table_recovery::TableLoadIssue> {
@@ -2662,7 +2689,7 @@ pub fn save_workbook_full(
 ) -> Result<(), String> {
     workbook.ensure_writable()?;
     workbook.validate_table_view_specs()?;
-    write_fresh_db(path, |conn| write_workbook_full(conn, workbook, metadata, scripts, run_records))
+    write_fresh_db(path, |conn| write_workbook_full(conn, workbook, metadata, scripts, run_records, path.parent()))
 }
 
 /// Populate a fresh database with workbook, metadata, scripts and run records.
@@ -2672,6 +2699,7 @@ fn write_workbook_full(
     metadata: &CellMetadata,
     scripts: &[ScriptMeta],
     run_records: &[RunRecord],
+    dir: Option<&Path>,
 ) -> Result<(), String> {
     // Create schema (includes scripts + run_records tables)
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
@@ -2801,7 +2829,7 @@ fn write_workbook_full(
 
     save_cond_formats(conn, workbook)?;
     save_pivots(conn, workbook)?;
-    save_tables(conn, workbook)?;
+    save_tables(conn, workbook, dir)?;
 
     // Save scripts
     save_scripts(&conn, scripts).map_err(|e| e.to_string())?;

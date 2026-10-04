@@ -157,6 +157,17 @@ impl Spreadsheet {
         self.start_recipe_run(RecipeTarget::NewWorkbook, path, None, None, cx);
     }
 
+    /// The recipe a Table links to, as a path: a relative link (how a saved
+    /// workbook stores a recipe beside it) resolves against the workbook's
+    /// folder.
+    pub(crate) fn recipe_link_path(&self, recipe: &str) -> PathBuf {
+        let path = Path::new(recipe);
+        match self.current_file.as_ref().and_then(|f| f.parent()) {
+            Some(dir) if path.is_relative() => dir.join(path),
+            _ => path.to_path_buf(),
+        }
+    }
+
     /// Alt+F5 on a recipe-backed Table, the strip's Refresh button, and the
     /// palette command. Returns false when there is no linked Table here.
     pub fn refresh_recipe_table(&mut self, cx: &mut Context<Self>) -> bool {
@@ -165,7 +176,8 @@ impl Spreadsheet {
             return true;
         }
         let source = table.source.clone().unwrap();
-        self.start_recipe_run(RecipeTarget::Table(table.id), PathBuf::from(&source.recipe), None, None, cx);
+        let recipe_path = self.recipe_link_path(&source.recipe);
+        self.start_recipe_run(RecipeTarget::Table(table.id), recipe_path, None, None, cx);
         true
     }
 

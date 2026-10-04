@@ -586,6 +586,24 @@ impl Recipe {
         toml::to_string(self).expect("a recipe always serializes")
     }
 
+    /// This recipe as `existing` (the file's current text) rewritten with
+    /// only what changed: comments, key order, inline tables and spacing
+    /// survive wherever the structure is the same. A step added or removed
+    /// rewrites the step list. Falls back to a plain rewrite if the result
+    /// would read back as anything other than this recipe.
+    pub fn to_toml_preserving(&self, existing: &str) -> String {
+        let fresh = self.to_toml();
+        let (Ok(mut old), Ok(new)) = (existing.parse::<toml_edit::DocumentMut>(), fresh.parse::<toml_edit::DocumentMut>()) else {
+            return fresh;
+        };
+        merge_toml_table(old.as_table_mut(), new.as_table());
+        let merged = old.to_string();
+        match Recipe::from_toml(&merged) {
+            Ok(r) if r == *self => merged,
+            _ => fresh,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Recipe, String> {
         let bytes = read_regular_file(path, MAX_RECIPE_BYTES, "recipe")?;
         let text = String::from_utf8(bytes).map_err(|_| format!("{}: not UTF-8 text", path.display()))?;
@@ -687,7 +705,13 @@ impl Recipe {
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("recipe.toml");
         let tmp = dir.join(format!(".{name}.{}.partial", std::process::id()));
-        std::fs::write(&tmp, self.to_toml()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        // An existing recipe keeps its comments and layout: only what changed
+        // is rewritten
+        let text = match read_regular_file(path, MAX_RECIPE_BYTES, "recipe").ok().and_then(|b| String::from_utf8(b).ok()) {
+            Some(existing) => self.to_toml_preserving(&existing),
+            None => self.to_toml(),
+        };
+        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             format!("{}: {e}", path.display())
@@ -858,6 +882,99 @@ pub fn suggest_pattern(file_name: &str) -> Option<String> {
         }
     }
     any.then_some(out)
+}
+
+// ============================================================================
+// Rewriting a recipe file without losing its comments
+// ============================================================================
+
+fn merge_toml_table(old: &mut toml_edit::Table, new: &toml_edit::Table) {
+    let gone: Vec<String> = old.iter().map(|(k, _)| k.to_string()).filter(|k| !new.contains_key(k)).collect();
+    for k in gone {
+        old.remove(&k);
+    }
+    for (k, item) in new.iter() {
+        match old.get_mut(k) {
+            Some(existing) => merge_toml_item(existing, item),
+            None => {
+                old.insert(k, item.clone());
+            }
+        }
+    }
+}
+
+fn merge_toml_item(old: &mut toml_edit::Item, new: &toml_edit::Item) {
+    use toml_edit::{Item, Value};
+    match new {
+        Item::Table(nt) => {
+            if let Item::Table(ot) = old {
+                return merge_toml_table(ot, nt);
+            }
+            // The file wrote it inline ({ a = "b" }): keep it inline
+            if let Item::Value(ov @ Value::InlineTable(_)) = old {
+                return merge_toml_value(ov, &Value::InlineTable(nt.clone().into_inline_table()));
+            }
+        }
+        Item::ArrayOfTables(na) => {
+            if let Item::ArrayOfTables(oa) = old {
+                if oa.len() == na.len() {
+                    for (o, n) in oa.iter_mut().zip(na.iter()) {
+                        merge_toml_table(o, n);
+                    }
+                    return;
+                }
+            }
+        }
+        Item::Value(nv) => {
+            if let Item::Value(ov) = old {
+                return merge_toml_value(ov, nv);
+            }
+        }
+        Item::None => {}
+    }
+    *old = new.clone();
+}
+
+fn merge_toml_value(old: &mut toml_edit::Value, new: &toml_edit::Value) {
+    use toml_edit::Value;
+    if same_toml_value(old, new) {
+        return;
+    }
+    if let (Value::InlineTable(oi), Value::InlineTable(ni)) = (&mut *old, new) {
+        let gone: Vec<String> = oi.iter().map(|(k, _)| k.to_string()).filter(|k| !ni.contains_key(k)).collect();
+        let reshaped = !gone.is_empty() || ni.iter().any(|(k, _)| !oi.contains_key(k));
+        for k in gone {
+            oi.remove(&k);
+        }
+        for (k, v) in ni.iter() {
+            match oi.get_mut(k) {
+                Some(existing) => merge_toml_value(existing, v),
+                None => {
+                    oi.insert(k, v.clone());
+                }
+            }
+        }
+        // Keys came or went: tidy the separators (an inline table can't
+        // hold comments, so nothing of the user's is lost)
+        if reshaped {
+            oi.fmt();
+        }
+        return;
+    }
+    // A changed value keeps the comments and spacing around it
+    let decor = old.decor().clone();
+    *old = new.clone();
+    *old.decor_mut() = decor;
+}
+
+/// Equal as TOML values, however they are written ("a" and 'a').
+fn same_toml_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    let plain = |v: &toml_edit::Value| {
+        let mut v = v.clone();
+        v.decor_mut().clear();
+        toml::from_str::<toml::Table>(&format!("v = {v}")).ok().and_then(|mut t| t.remove("v"))
+    };
+    plain(a).is_some() && plain(a) == plain(b)
 }
 
 /// `text`, `number`, `auto`, `date:ymd|dmy|mdy` (or `date`, meaning YMD).
@@ -3283,5 +3400,69 @@ values_to = "Sales"
         // Without combine the same pattern reads only the newest file
         let one = Recipe::from_toml(&text.replace("combine = true\n", "")).unwrap();
         assert_eq!(one.resolve_sources(dir.path(), None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fixes_keep_the_recipe_files_comments_and_layout() {
+        let text = r#"# Monthly orders, from the vendor portal
+version = 1
+
+[source]
+kind = "csv"
+path = "export-*-*.csv"   # newest export
+header_row = 3
+columns = ["Order ID", "Customer", "Amount"]
+
+# Keep only what accounting needs
+[[step]]
+op = "select"
+columns = ["Order ID", "Customer", "Amount"]
+
+[[step]]
+op = "rename"
+columns = { "Order ID" = "order_id" }   # our key
+
+[[step]]
+op = "types"
+columns = { Amount = "number" }
+"#;
+        let mut r = Recipe::from_toml(text).unwrap();
+        assert!(r.rename_source_column("Order ID", "Order Number"));
+        r.set_on_error(3, OnError::KeepText).unwrap();
+        let out = r.to_toml_preserving(text);
+        assert_eq!(Recipe::from_toml(&out).unwrap(), r);
+        for kept in ["# Monthly orders, from the vendor portal", "# newest export", "# Keep only what accounting needs", "# our key"] {
+            assert!(out.contains(kept), "lost {kept:?}:\n{out}");
+        }
+        // Inline tables stay inline, and only the changed values changed
+        assert!(out.contains(r#"columns = { "Order Number" = "order_id" }"#), "{out}");
+        assert!(!out.contains(" ,"), "{out}");
+        assert!(out.contains("on_error = \"keep_text\""), "{out}");
+        assert!(out.contains(r#"columns = ["Order Number", "Customer", "Amount"]"#), "{out}");
+
+        // A key renamed inside a multi-key inline table: tidy separators
+        let two = "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"types\"\ncolumns = { ID = \"text\", Amount = \"number\" }   # keep zeros\n";
+        let mut r2 = Recipe::from_toml(two).unwrap();
+        r2.rename_source_column("ID", "Order ID");
+        let out2 = r2.to_toml_preserving(two);
+        assert!(out2.contains("# keep zeros") && !out2.contains(" ,"), "{out2}");
+
+        // Unchanged: byte for byte
+        let same = Recipe::from_toml(text).unwrap();
+        assert_eq!(same.to_toml_preserving(text), text);
+
+        // A removed step rewrites the step list, but the header comment stays
+        let mut fewer = Recipe::from_toml(text).unwrap();
+        fewer.steps.pop();
+        let out = fewer.to_toml_preserving(text);
+        assert_eq!(Recipe::from_toml(&out).unwrap(), fewer);
+        assert!(out.contains("# Monthly orders"));
+
+        // And save() uses it
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orders.recipe.toml");
+        std::fs::write(&path, text).unwrap();
+        r.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# our key"));
     }
 }

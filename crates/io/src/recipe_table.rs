@@ -299,6 +299,27 @@ columns = { Amount = "number" }
     }
 
     #[test]
+    fn a_recipe_beside_the_workbook_is_saved_relative_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, report) = result("ID,Amount\n1,10\n");
+        let recipe = dir.path().join("recipes").join("orders.recipe.toml");
+        let link = TableSource { recipe: recipe.display().to_string(), refreshed: Some(stamp(&report, Path::new("orders.csv"))) };
+        let wb = new_workbook(&out, "orders", link).unwrap();
+        let path = dir.path().join("book.sheet");
+        crate::native::save_workbook(&wb, &path).unwrap();
+        let back = crate::native::load_workbook(&path).unwrap();
+        assert_eq!(table(&back).1.source.unwrap().recipe, "recipes/orders.recipe.toml");
+        // The workbook in memory keeps its absolute link
+        assert_eq!(table(&wb).1.source.unwrap().recipe, recipe.display().to_string());
+        // A recipe elsewhere stays absolute
+        let far = tempfile::tempdir().unwrap();
+        let path = far.path().join("book.sheet");
+        crate::native::save_workbook(&wb, &path).unwrap();
+        let back = crate::native::load_workbook(&path).unwrap();
+        assert_eq!(table(&back).1.source.unwrap().recipe, recipe.display().to_string());
+    }
+
+    #[test]
     fn recipe_link_survives_native_save_as_catalog_v4() {
         let (out, report) = result("ID,Amount\n1,10\n");
         let wb = new_workbook(&out, "orders", link(&report)).unwrap();

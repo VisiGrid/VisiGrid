@@ -4,7 +4,6 @@
 //! State and actions live in `recipe_ui.rs`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -102,7 +101,7 @@ pub(crate) fn render_recipe_strip(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .recipe_blocked
         .as_ref()
         .is_some_and(|b| b.target == RecipeTarget::Table(table.id));
-    let recipe_path = PathBuf::from(&source.recipe);
+    let recipe_path = app.recipe_link_path(&source.recipe);
     let detail = match &source.refreshed {
         Some(s) if blocked_here => format!(
             "last good refresh {} from {} · {} rows · the latest refresh didn't publish",
