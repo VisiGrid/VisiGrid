@@ -240,11 +240,11 @@ impl Spreadsheet {
     pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         self.workbook.update(cx, |wb, _| {
-            let sheet_id = wb.active_sheet_id();
-            wb.active_sheet_mut().set_value(row, col, value);
-            wb.update_cell_deps(sheet_id, row, col);
-            let cell_id = visigrid_engine::cell_id::CellId::new(sheet_id, row, col);
-            wb.note_cell_changed(cell_id);
+            // The tracked write also re-evaluates spills the edit blocks or
+            // unblocks (typing into a spilled cell gives its anchor #SPILL!,
+            // clearing the obstruction lets it spill again).
+            let index = wb.active_sheet_index();
+            wb.set_cell_value_tracked(index, row, col, value);
         });
         cx.notify(); // Ensure view re-renders with updated cross-sheet values
     }
@@ -254,11 +254,8 @@ impl Spreadsheet {
     pub fn clear_cell_value(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         self.workbook.update(cx, |wb, _| {
-            let sheet_id = wb.active_sheet_id();
-            wb.active_sheet_mut().clear_cell(row, col);
-            wb.update_cell_deps(sheet_id, row, col);
-            let cell_id = visigrid_engine::cell_id::CellId::new(sheet_id, row, col);
-            wb.note_cell_changed(cell_id);
+            let index = wb.active_sheet_index();
+            wb.clear_cell_tracked(index, row, col);
         });
         cx.notify(); // Ensure view re-renders with updated cross-sheet values
     }

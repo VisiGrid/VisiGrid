@@ -134,6 +134,25 @@ const DYNAMIC_REF_FUNCTIONS: &[&str] = &[
 ///
 /// Formulas with dynamic deps must be conservatively recomputed in
 /// full ordered mode since their dependencies are incomplete.
+/// Functions Excel treats as volatile: their result can change without any
+/// cell they reference changing — the clock, the random generator, and
+/// references resolved at evaluation time (INDIRECT and OFFSET read cells the
+/// dependency graph cannot see). A formula using any of them is recalculated
+/// on every recalculation, not only when its static inputs change.
+const VOLATILE_FUNCTIONS: &[&str] = &["NOW", "TODAY", "RAND", "RANDBETWEEN", "INDIRECT", "OFFSET"];
+
+/// Whether a formula calls a volatile function anywhere (see
+/// `VOLATILE_FUNCTIONS`).
+pub fn is_volatile<S>(expr: &Expr<S>) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |name| {
+        if !found && VOLATILE_FUNCTIONS.contains(&name) {
+            found = true;
+        }
+    });
+    found
+}
+
 pub fn has_dynamic_deps<S>(expr: &Expr<S>) -> bool {
     let mut found = false;
     walk_expr(expr, &mut |name| {
