@@ -50,11 +50,13 @@ impl Workbook {
     ) -> Result<(Workbook, super::super::GuardedStructureCommit), String> {
         self.ensure_writable()?;
         let sheet = self.sheet_by_id(sheet_id).ok_or("Visibility sheet no longer exists.")?;
-        if hidden.iter().any(|row| *row >= sheet.rows.min(crate::sheet::NUM_ROWS)) {
+        if hidden.iter().any(|row| *row >= crate::sheet::NUM_ROWS) {
             return Err("Hidden rows exceed the worksheet boundary.".into());
         }
         let mut candidate = self.clone();
-        let changed = sheet.tables().iter().any(|t| t.totals.as_ref().is_some_and(|totals| totals.hidden_rows != hidden));
+        let legacy: BTreeSet<_> = hidden.iter().copied().filter(|row| *row < sheet.rows).collect();
+        let changed = sheet.manual_hidden_rows != hidden || sheet.tables().iter()
+            .any(|t| t.totals.as_ref().is_some_and(|t| t.hidden_rows != legacy));
         if changed {
             let values: Vec<_> = self.sheets().iter().flat_map(|sheet| {
                 sheet.cells_iter().filter_map(move |((row, col), cell)| {
@@ -63,10 +65,7 @@ impl Workbook {
                 })
             }).collect();
             let sheet = candidate.sheet_by_id_mut(sheet_id).unwrap();
-            for table in &mut sheet.data_tables {
-                if let Some(totals) = &mut table.totals { totals.hidden_rows = hidden.clone(); }
-            }
-            sheet.mark_table_changed();
+            sheet.set_manual_hidden_rows(hidden)?;
             candidate.rebuild_dep_graph();
             candidate.recompute_full_ordered();
             let changed: std::collections::HashSet<_> = values.into_iter().filter_map(|(id, row, col, before)| {

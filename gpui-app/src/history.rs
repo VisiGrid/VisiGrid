@@ -1939,6 +1939,12 @@ impl History {
                 }
             }
             UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                let sheet = workbook.sheet_by_id_mut(*sheet_id).ok_or_else(|| PreviewBuildError::InvariantViolation("Missing visibility sheet".into()))?;
+                let mut canonical = sheet.manual_hidden_rows();
+                for row in rows {
+                    if *hidden { canonical.insert(*row); } else { canonical.remove(row); }
+                }
+                sheet.set_manual_hidden_rows(canonical).map_err(PreviewBuildError::InvariantViolation)?;
                 if let Some(layout) = workbook.sheet_index_by_id(*sheet_id)
                     .and_then(|i| view_state.per_sheet.get_mut(i))
                     .and_then(|v| v.structure_layout.as_mut()) {

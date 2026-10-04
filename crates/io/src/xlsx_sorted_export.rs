@@ -378,6 +378,9 @@ pub(super) fn prepare_inner<'a>(
         if wb.tables().any(|(_, t)| t.totals.is_some()) {
             return Err("Tables with totals metadata currently require stored-order export".into());
         }
+        if sheet.manual_hidden_rows().iter().any(|row| *row > table.range.start_row && *row <= table.range.end_row) {
+            return Err(format!("Table {} has manual row visibility that requires stored-order export", table.name));
+        }
         if let Some(layout) = layouts.and_then(|l| l.get(sid)) {
             if layout
                 .row_heights

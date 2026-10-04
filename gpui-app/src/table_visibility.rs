@@ -40,6 +40,28 @@ fn prepare(
 }
 
 impl Spreadsheet {
+    /// Keep the engine's calculation/serialization state aligned with the host
+    /// layout after ordinary visibility history or an imported layout install.
+    pub(crate) fn sync_manual_row_visibility(&mut self, id: SheetId, cx: &mut Context<Self>) -> bool {
+        let hidden = self.hidden_rows.get(&id).cloned().unwrap_or_default();
+        let Some(sheet) = self.wb(cx).sheet_by_id(id) else { return false; };
+        let old = sheet.manual_hidden_rows();
+        if old == hidden { return true; }
+        let result = self.wb(cx).prepare_table_row_visibility(id, hidden);
+        let candidate = match result {
+            Ok((candidate, _)) => candidate,
+            Err(error) => {
+                self.hidden_rows.insert(id, old);
+                self.status_message = Some(error);
+                return false;
+            }
+        };
+        self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+        self.table_view_sync_key = None;
+        self.bump_cells_rev();
+        true
+    }
+
     pub(crate) fn change_table_row_visibility(&mut self, hidden: bool, cx: &mut Context<Self>) {
         self.sync_table_view(cx);
         if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered()) {

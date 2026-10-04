@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -374,6 +374,10 @@ pub struct Sheet {
     /// storing this does not install a display mapping or mutation guard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) table_view_spec: Option<crate::table_view::TableViewSpec>,
+    /// Canonical worksheet rows hidden manually, independent of filter masks.
+    /// Native/full-JSON use their existing layout fields for persistence.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) manual_hidden_rows: BTreeSet<usize>,
     /// Cells recovered without their Table definitions. Never save this view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
@@ -587,6 +591,7 @@ impl Sheet {
             pivots: Vec::new(),
             data_tables: Vec::new(),
             table_view_spec: None,
+            manual_hidden_rows: BTreeSet::new(),
             read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
@@ -625,6 +630,7 @@ impl Sheet {
             pivots: Vec::new(),
             data_tables: Vec::new(),
             table_view_spec: None,
+            manual_hidden_rows: BTreeSet::new(),
             read_only_reason: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
@@ -699,10 +705,37 @@ impl Sheet {
 
     pub fn tables(&self) -> &[crate::table::DataTable] { &self.data_tables }
 
+    /// Includes the legacy copy retained in totals metadata for old files.
+    pub fn manual_hidden_rows(&self) -> BTreeSet<usize> {
+        self.manual_hidden_rows.iter().copied().chain(self.tables().iter()
+            .filter_map(|t| t.totals.as_ref()).flat_map(|t| t.hidden_rows.iter().copied())).collect()
+    }
+
+    /// Import/host synchronization. Callers recalculate the workbook after a
+    /// change; live edits use Workbook::prepare_table_row_visibility for history.
+    pub fn set_manual_hidden_rows(&mut self, hidden: BTreeSet<usize>) -> Result<(), String> {
+        if let Some(reason) = &self.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
+        if hidden.iter().any(|row| *row >= NUM_ROWS) {
+            return Err("Hidden rows exceed the worksheet boundary.".into());
+        }
+        let legacy: BTreeSet<_> = hidden.iter().copied().filter(|row| *row < self.rows).collect();
+        if self.manual_hidden_rows == hidden && self.tables().iter().all(|t| t.totals.as_ref().is_none_or(|t| t.hidden_rows == legacy)) {
+            return Ok(());
+        }
+        let values_changed = self.manual_hidden_rows() != hidden;
+        for table in &mut self.data_tables {
+            if let Some(totals) = &mut table.totals { totals.hidden_rows = legacy.clone(); }
+        }
+        self.manual_hidden_rows = hidden;
+        self.mark_table_changed();
+        if values_changed { self.clear_computed_cache(); }
+        Ok(())
+    }
+
     pub fn has_table_history(&self) -> bool { self.table_id_high_water > 0 || !self.data_tables.is_empty() }
 
     pub(crate) fn subtotal_excluded(&self, row: usize, col: usize, ignore_hidden: bool) -> bool {
-        if ignore_hidden && self.tables().iter().any(|t| t.totals.as_ref().is_some_and(|t| t.hidden_rows.contains(&row))) { return true; }
+        if ignore_hidden && (self.manual_hidden_rows.contains(&row) || self.tables().iter().any(|t| t.totals.as_ref().is_some_and(|t| t.hidden_rows.contains(&row)))) { return true; }
         if self.get_cell_opt(row, col).is_some_and(|cell| {
             matches!(cell.value(), crate::cell::ValueRef::Formula { ast: Some(ast), .. }
                 if crate::formula::eval_subtotal::contains_subtotal(ast))
@@ -751,6 +784,9 @@ impl Sheet {
     pub fn table_structural_error(&self, is_row: bool, at: usize, count: usize, delete: bool) -> Option<String> {
         if count == 0 { return None; }
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
+        if is_row && !delete && self.manual_hidden_rows.last().is_some_and(|row| *row >= at && row.checked_add(count).is_none_or(|r| r >= NUM_ROWS)) {
+            return Some("This would push manually hidden rows past the worksheet boundary.".into());
+        }
         for t in self.tables() {
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };
@@ -2191,6 +2227,10 @@ impl Sheet {
         let Ok(tables) = self.tables_after_row_edit(at_row, count, false) else { return; };
         self.install_column_tables(tables);
         self.print_setup.adjust(true, at_row, count, false);
+        self.manual_hidden_rows = self.manual_hidden_rows.iter().filter_map(|row| {
+            crate::structural::shift_span(*row, *row, at_row, count, false)
+                .map(|(row, _)| row).filter(|row| *row < NUM_ROWS)
+        }).collect();
         self.cells.insert_rows(at_row, count, self.rows);
 
         // Adjust merged regions (grid-line semantics)
@@ -2216,6 +2256,10 @@ impl Sheet {
         let Ok(tables) = self.tables_after_row_edit(start_row, count, true) else { return; };
         self.install_column_tables(tables);
         self.print_setup.adjust(true, start_row, count, true);
+        self.manual_hidden_rows = self.manual_hidden_rows.iter().filter_map(|row| {
+            crate::structural::shift_span(*row, *row, start_row, count, true)
+                .map(|(row, _)| row).filter(|row| *row < NUM_ROWS)
+        }).collect();
         let end_row = start_row + count; // exclusive
 
         // Remove cells in the deleted rows; those below move up

@@ -1971,6 +1971,11 @@ pub fn workbook_fingerprint(workbook: &Workbook) -> String {
         hasher.update(sheet.name.as_bytes());
         hasher.update((sheet.rows as u64).to_le_bytes());
         hasher.update((sheet.cols as u64).to_le_bytes());
+        let hidden = sheet.manual_hidden_rows();
+        if !hidden.is_empty() {
+            hasher.update(b"manual-hidden-rows:");
+            hasher.update(serde_json::to_vec(&hidden).expect("row indices serialize"));
+        }
         let validation_rules: Vec<_> = sheet.validations.iter().collect();
         let validation_exclusions: Vec<_> = sheet.validations.exclusions_iter().collect();
         for encoded in [

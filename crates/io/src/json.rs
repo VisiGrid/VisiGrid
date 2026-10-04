@@ -780,7 +780,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         merges,
         col_widths: keys_to_string(&layout.col_widths),
         row_heights: keys_to_string(&layout.row_heights),
-        hidden_rows: layout.hidden_rows.iter().copied().collect(),
+        hidden_rows: layout.hidden_rows.union(&sheet.manual_hidden_rows()).copied().collect(),
         hidden_cols: layout.hidden_cols.iter().copied().collect(),
         frozen_rows: layout.frozen_rows,
         frozen_cols: layout.frozen_cols,
@@ -1124,6 +1124,7 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         sheet.validations.set(v.range, v.rule.clone());
     }
 
+    sheet.set_manual_hidden_rows(body.hidden_rows.iter().copied().collect())?;
     let layout = SheetLayout {
         col_widths: keys_to_usize(&body.col_widths),
         row_heights: keys_to_usize(&body.row_heights),

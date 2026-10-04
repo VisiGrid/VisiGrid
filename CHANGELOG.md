@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Manually hidden rows survive headless native, full-JSON and XLSX saves and affect `SUBTOTAL` consistently, including sheets without Table totals. Visibility and row-structure history preserve the flags; existing projected-Table body restrictions remain pending command integration.
+- Fix the single-sheet native loader dropping formula sources. It now restores formulas, recalculates after all cells and layout are loaded, and retains cached results for unavailable custom functions.
+
 - Preserve supported modern Excel formula errors, including `#SPILL!` and `#CALC!`, through rich-value metadata and values-only import. Older readers receive a conventional error fallback; malformed metadata keeps fallback cells with a warning.
 - Clearing a spill obstruction retries the array and its dependents. Restoring an obstruction through ordinary value undo removes generated receivers and recalculates their readers.
 

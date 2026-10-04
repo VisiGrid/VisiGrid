@@ -508,6 +508,7 @@ impl Spreadsheet {
             set.insert(r);
         }
 
+        if !self.sync_manual_row_visibility(sheet_id, cx) { return; }
         self.history.record_action_with_provenance(
             crate::history::UndoAction::RowVisibilityChanged {
                 sheet_id,
@@ -551,6 +552,7 @@ impl Spreadsheet {
             set.remove(&r);
         }
 
+        if !self.sync_manual_row_visibility(sheet_id, cx) { return; }
         self.history.record_action_with_provenance(
             crate::history::UndoAction::RowVisibilityChanged {
                 sheet_id,

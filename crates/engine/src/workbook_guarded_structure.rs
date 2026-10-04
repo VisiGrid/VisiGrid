@@ -28,6 +28,8 @@ pub struct StructureStep {
 #[derive(Clone, Debug, Serialize)]
 struct Metadata {
     tables: Vec<DataTable>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    manual_hidden_rows: BTreeSet<usize>,
     view: Option<TableViewSpec>,
     #[serde(skip)]
     validations: ValidationStore,
@@ -43,6 +45,7 @@ impl Metadata {
     fn capture(s: &Sheet) -> Self {
         Self {
             tables: s.tables().to_vec(),
+            manual_hidden_rows: s.manual_hidden_rows.clone(),
             view: s.table_view_spec().cloned(),
             validations: s.validations.clone(),
             cond_formats: s.cond_formats.clone(),
@@ -74,6 +77,7 @@ impl Metadata {
     fn install(&self, s: &mut Sheet) {
         s.install_column_tables(self.tables.clone()); // preserves allocation high-water marks
         s.table_view_spec = self.view.clone();
+        s.manual_hidden_rows = self.manual_hidden_rows.clone();
         s.validations = self.validations.clone();
         s.cond_formats = self.cond_formats.clone();
         s.merged_regions = self.merges.clone();

@@ -953,19 +953,18 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 
     crate::xlsx_table_filters::finish_import(table_views, &mut workbook, &mut result);
     // Remaining hidden rows are manual (filter masks were consumed above).
-    if workbook.tables().any(|(_, t)| t.totals.is_some()) {
-        let mut catalog = workbook.saved_tables();
-        for entry in &mut catalog.sheets {
-            if let Some(layout) = result.imported_layouts.get(entry.sheet) {
-                for table in &mut entry.tables {
-                    if let Some(totals) = &mut table.totals {
-                        totals.hidden_rows = layout.hidden_rows.iter().copied().collect();
-                    }
-                }
-            }
-        }
-        workbook.restore_tables(catalog)?;
-        if !options.values_only { workbook.rebuild_dep_graph(); workbook.recompute_full_ordered(); }
+    // Keep them in the engine even when no Table has a totals definition.
+    let mut visibility_changed = false;
+    for index in 0..workbook.sheet_count() {
+        let hidden = result.imported_layouts.get(index)
+            .map(|layout| layout.hidden_rows.iter().copied().collect()).unwrap_or_default();
+        let sheet = workbook.sheet_mut(index).unwrap();
+        visibility_changed |= sheet.manual_hidden_rows() != hidden;
+        sheet.set_manual_hidden_rows(hidden)?;
+    }
+    if visibility_changed && !options.values_only {
+        workbook.rebuild_dep_graph();
+        workbook.recompute_full_ordered();
     }
     Ok((workbook, result))
 }
@@ -1674,12 +1673,11 @@ fn build_export(
             result.hidden_rows_exported += layout.hidden_rows.len();
         }
 
-        // Imported totals retain manual visibility even for headless exports
-        // without a host layout. Filter-hidden rows remain a separate mask.
-        for row in sheet.tables().iter().filter_map(|t| t.totals.as_ref())
-            .flat_map(|t| t.hidden_rows.iter()).collect::<std::collections::BTreeSet<_>>() {
-            worksheet.set_row_hidden(*row as u32).map_err(|e| e.to_string())?;
-            if !layout.is_some_and(|l| l.hidden_rows.contains(row)) {
+        // Canonical manual visibility survives headless export without a host
+        // layout. Filter-hidden rows remain a separate mask.
+        for row in sheet.manual_hidden_rows() {
+            worksheet.set_row_hidden(row as u32).map_err(|e| e.to_string())?;
+            if !layout.is_some_and(|l| l.hidden_rows.contains(&row)) {
                 result.hidden_rows_exported += 1;
             }
         }

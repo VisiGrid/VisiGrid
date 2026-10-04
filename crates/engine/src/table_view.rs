@@ -229,6 +229,17 @@ impl TableView {
         })
     }
 
+    /// Compose host manual visibility with this immutable filter projection.
+    /// Row identities/order and the saved filter criteria are unchanged.
+    pub fn with_manual_hidden_rows(mut self, hidden: &std::collections::BTreeSet<usize>) -> Self {
+        let mut visible = self.rows.visible_mask().to_vec();
+        for &row in hidden {
+            if let Some(show) = visible.get_mut(row) { *show = false; }
+        }
+        self.rows.apply_filter(visible);
+        self
+    }
+
     pub fn spec(&self) -> &TableViewSpec {
         &self.spec
     }

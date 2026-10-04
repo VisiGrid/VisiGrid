@@ -523,6 +523,7 @@ impl Spreadsheet {
                             set.insert(*row); // Was unhidden → re-hide
                         }
                     }
+                    self.sync_manual_row_visibility(sheet_id, cx);
                     let action = if hidden { "hide" } else { "unhide" };
                     self.status_message = Some(format!("Undo: {} {} row(s)", action, rows.len()));
                 }
@@ -882,6 +883,7 @@ impl Spreadsheet {
                 for row in &rows {
                     if hidden { set.remove(row); } else { set.insert(*row); }
                 }
+                self.sync_manual_row_visibility(sheet_id, cx);
             }
             UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
                 let set = self.hidden_cols.entry(sheet_id).or_default();
@@ -1224,6 +1226,7 @@ impl Spreadsheet {
                 for row in &rows {
                     if hidden { set.insert(*row); } else { set.remove(row); }
                 }
+                self.sync_manual_row_visibility(sheet_id, cx);
             }
             UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
                 // Redo: re-apply the visibility change
@@ -1553,6 +1556,7 @@ impl Spreadsheet {
                     for row in &rows {
                         if hidden { set.insert(*row); } else { set.remove(row); }
                     }
+                    self.sync_manual_row_visibility(sheet_id, cx);
                     let action = if hidden { "hide" } else { "unhide" };
                     self.status_message = Some(format!("Redo: {} {} row(s)", action, rows.len()));
                 }
