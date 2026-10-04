@@ -113,6 +113,10 @@ pub trait CellLookup {
         None
     }
 
+    /// Workbook names retain their target sheet. Legacy single-sheet lookups
+    /// may continue implementing only resolve_named_range.
+    fn resolve_named_reference(&self, _name: &str) -> Option<BoundExpr> { None }
+
     fn is_table_name(&self, _name: &str) -> bool { false }
 
     fn resolve_table_reference(&self, _reference: &super::structured::StructuredReference, _cell: Option<(usize, usize)>) -> BoundExpr {
@@ -322,6 +326,10 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         self.inner.resolve_named_range(name)
+    }
+
+    fn resolve_named_reference(&self, name: &str) -> Option<BoundExpr> {
+        self.inner.resolve_named_reference(name)
     }
 
     fn is_table_name(&self, name: &str) -> bool { self.inner.is_table_name(name) }
@@ -725,6 +733,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         }
         Expr::NamedRange(name) => {
             if lookup.is_table_name(name) { return evaluate_table_reference(expr, lookup); }
+            if let Some(reference) = lookup.resolve_named_reference(name) { return evaluate(&reference, lookup); }
             // Resolve the named range and evaluate
             match lookup.resolve_named_range(name) {
                 None => EvalResult::Error(format!("#NAME? '{}'", name)),
@@ -800,11 +809,14 @@ fn operand<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
             }
             operand(&bounded, lookup)
         }
-        Expr::NamedRange(name) => match lookup.resolve_named_range(name) {
+        Expr::NamedRange(name) => {
+            if let Some(reference) = lookup.resolve_named_reference(name) { return operand(&reference, lookup); }
+            match lookup.resolve_named_range(name) {
             Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
                 range_array(lookup, &SheetRef::Current, start_row, start_col, end_row, end_col)
             }
             _ => evaluate(expr, lookup),
+            }
         },
         _ => evaluate(expr, lookup),
     }
@@ -1052,7 +1064,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
     // Keep open ranges in the stored AST. Only the arguments being consumed
     // are bounded, so nested/lazy functions still evaluate through this path.
     let table_args;
-    let args = if args.iter().any(|arg| matches!(arg, Expr::StructuredRef(_)) || matches!(arg, Expr::NamedRange(n) if lookup.is_table_name(n))) {
+    let args = if args.iter().any(|arg| matches!(arg, Expr::StructuredRef(_) | Expr::NamedRange(_))) {
         table_args = args.iter().map(|arg| super::structured::resolve(arg, lookup)).collect::<Vec<_>>();
         table_args.as_slice()
     } else { args };

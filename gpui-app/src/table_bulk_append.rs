@@ -287,6 +287,24 @@ mod tests {
     }
 
     #[test]
+    fn linked_footer_and_overflow_paste_replay_in_one_history_entry() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=D8");
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=D10");
+        assert_eq!(after.active_sheet().get_display(0, 0), "100");
+        let undone = entry.replay(&after, true).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(0, 0), "=D8");
+        assert_eq!(undone.active_sheet().get_raw(4, 3), "999");
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(0, 0), "100");
+    }
+
+    #[test]
     fn filtered_overflow_paste_moves_footer_and_replays_all_values() {
         let (mut before, id) = book();
         before.set_table_totals_visible(id, true, Default::default()).unwrap();

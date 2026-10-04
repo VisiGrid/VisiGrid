@@ -220,31 +220,30 @@ fn footer_collision_and_stale_presentation_replay_fail_before_any_writes() {
 }
 
 #[test]
-fn fixed_footer_references_refuse_movement_but_structured_references_follow() {
+fn fixed_and_structured_footer_references_follow_and_stale_replay_refuses() {
     let (mut wb, id) = native_book();
     wb.set_table_totals_visible(id, true, Default::default())
         .unwrap();
     let summary = wb.add_sheet_named("Summary").unwrap();
     let name = wb.sheet(0).unwrap().name.clone();
     wb.set_cell_value_tracked(summary, 0, 0, &format!("='{name}'!$B$5"));
-    assert!(wb
-        .append_table_rows(id, 1, &[])
-        .unwrap_err()
-        .contains("#Totals"));
-    wb.set_cell_value_tracked(summary, 0, 0, "=SUM(Sales[[#Totals],[Amount]])");
+    wb.set_cell_value_tracked(summary, 0, 1, "=SUM(Sales[[#Totals],[Amount]])");
     let append = wb.append_table_rows(id, 1, &[(4, 1, "10".into())]).unwrap();
     assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "70");
+    assert!(wb.sheet(summary).unwrap().get_raw(0, 0).ends_with("!$B$6"));
+    assert_eq!(wb.sheet(summary).unwrap().get_display(0, 1), "70");
+    let saved = wb.clone();
     // A later fixed reference to the old footer now means a body record.
     // Undo must not silently turn that reference into a link to totals.
     wb.set_cell_value_tracked(summary, 1, 0, &format!("='{name}'!$B$5"));
     let revision = wb.revision();
-    assert!(wb.apply_table_commit(&append, true).unwrap_err().contains("#Totals"));
+    assert!(wb.apply_table_commit(&append, true).is_err());
     assert_eq!(wb.revision(), revision);
     assert_eq!(wb.sheet(summary).unwrap().get_display(1, 0), "10");
-    wb.clear_cell_tracked(summary, 1, 0);
+    wb.restore_snapshot_monotonic(&saved);
     wb.apply_table_commit(&append, true).unwrap();
     assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "60");
-    for source in ["=INDIRECT(\"B5\")", "=OFFSET(B1,4,0)", "=SUM(B6:B4)"] {
+    for source in ["=INDIRECT(\"B5\")", "=OFFSET(B1,4,0)", "=SUM((("] {
         wb.set_cell_value_tracked(0, 0, 4, source);
         let revision = wb.revision();
         assert!(wb.append_table_rows(id, 1, &[]).is_err(), "{source}");

@@ -3058,6 +3058,21 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
         })
     }
 
+    fn resolve_named_reference(&self, name: &str) -> Option<crate::formula::parser::BoundExpr> {
+        use crate::{formula::parser::Expr, named_range::NamedRangeTarget};
+        let target = &self.workbook.named_ranges.get(name)?.target;
+        let index = match target { NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => *sheet };
+        let Some(id) = self.workbook.sheet_id_at_idx(index) else { return Some(Expr::RefError); };
+        let sheet = crate::sheet::SheetRef::Id(id);
+        Some(match *target {
+            NamedRangeTarget::Cell { row, col, .. } => Expr::CellRef { sheet, row, col, row_abs: true, col_abs: true },
+            NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => Expr::Range {
+                sheet, start_row, start_col, end_row, end_col,
+                start_row_abs: true, start_col_abs: true, end_row_abs: true, end_col_abs: true,
+            },
+        })
+    }
+
     fn is_table_name(&self, name: &str) -> bool { self.workbook.table_by_name(name).is_some() }
 
     fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {

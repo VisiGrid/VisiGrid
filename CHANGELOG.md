@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed references to Table totals follow the footer when rows are appended or the Table is resized. Formula cells, named targets, calculated rules, custom totals and rule formulas update together with undo/redo and rewind. Larger ranges retain their worksheet bounds; dynamic references still require explicit or structured references before moving totals.
+- Workbook named ranges now evaluate on their defined sheets, including references used in arithmetic, aggregates, lookup arguments, arrays and custom functions.
+
 - Reduce temporary memory used by guarded Table history. Workbook fingerprints now process one cell at a time while preserving the same stale-edit protection for undo/redo, structural changes and automation batches.
 
 - Manually hide/unhide rows on sheets with Table totals. Totals and dependents recalculate, and undo/redo and history rewind restore visibility and totals together. Safe rows outside an active Table view and rows on other sheets no longer require clearing workbook-wide criteria. Hiding records inside a sorted/filtered Table still requires clearing that Table's criteria first.

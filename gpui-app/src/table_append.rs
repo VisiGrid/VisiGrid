@@ -391,6 +391,29 @@ mod tests {
     }
 
     #[test]
+    fn footer_fixed_references_follow_tab_append_undo_and_rewind() {
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=D8");
+        let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=D9");
+        assert_eq!(after.active_sheet().get_raw(6, 3), "15");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        let undone = entry.replay(&after, true).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(0, 0), "=D8");
+        assert_eq!(undone.active_sheet().get_raw(6, 3), before.active_sheet().get_raw(6, 3));
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().get_raw(0, 0), "=D9");
+        let mut history = History::new();
+        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with linked totals".into() }, None);
+        for (end, reference) in [(0, "=D8"), (1, "=D9")] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            assert_eq!(preview.workbook.active_sheet().get_raw(0, 0), reference);
+            assert_eq!(preview.workbook.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        }
+    }
+
+    #[test]
     fn filtered_append_moves_footer_and_rewinds_without_touching_hidden_overrides() {
         let (mut before, id) = book(true);
         before.set_table_totals_visible(id, true, Default::default()).unwrap();

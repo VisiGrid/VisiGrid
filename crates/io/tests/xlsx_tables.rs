@@ -2742,3 +2742,37 @@ fn changed_manual_visibility_recalculates_and_roundtrips_native_and_excel() {
     let (shown, _) = loaded.prepare_table_row_visibility(loaded.sheet(0).unwrap().id, Default::default()).unwrap();
     assert_eq!(shown.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
 }
+
+#[test]
+fn relocated_footer_links_roundtrip_with_native_names_and_stored_excel_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let name = wb.sheet(0).unwrap().name.clone();
+    wb.set_cell_value_tracked(1, 1, 0, &format!("='{name}'!$D$9"));
+    wb.define_name_for_cell("SalesTotal", 0, 8, 3).unwrap();
+    wb.set_cell_value_tracked(1, 2, 0, "=SalesTotal");
+    wb.append_table_rows(id, 1, &[(8, 1, "2".into()), (8, 2, "10".into())]).unwrap();
+    let expected = wb.sheet(0).unwrap().get_display(9, 3);
+    assert_eq!(wb.sheet(1).unwrap().get_display(1, 0), expected);
+    assert_eq!(wb.sheet(1).unwrap().get_display(2, 0), expected);
+    let path = dir.path().join("footer-links.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let mut wb = native::load_workbook(&path).unwrap();
+    assert_eq!(wb.named_ranges().get("SalesTotal").unwrap().reference_string(), "D10");
+    assert_eq!(wb.sheet(1).unwrap().get_display(2, 0), expected);
+    // Defined-name XLSX interchange is not implemented. Keep the XLSX half
+    // scoped to direct references; the native half above verifies names.
+    wb.clear_cell_tracked(1, 2, 0);
+    wb.delete_named_range("SalesTotal");
+    let path = dir.path().join("footer-links.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (mut loaded, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(loaded.sheet(1).unwrap().get_raw(1, 0).ends_with("!$D$10"));
+    assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
+    let id = loaded.sheet(0).unwrap().tables()[0].id;
+    loaded.append_table_rows(id, 1, &[]).unwrap();
+    assert!(loaded.sheet(1).unwrap().get_raw(1, 0).ends_with("!$D$11"));
+    assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
+}

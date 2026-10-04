@@ -13,6 +13,8 @@ mod create;
 mod totals;
 #[path = "workbook_table_footer.rs"]
 mod footer;
+#[path = "workbook_table_footer_refs.rs"]
+mod footer_refs;
 
 use super::table_refs::{names_only, TableFormulaChange, TotalsReferenceChange};
 use super::Workbook;
@@ -55,7 +57,7 @@ pub struct TableCommit {
     name_edit: bool,
     calculated_edit: bool,
     totals_schema_edit: bool,
-    resize_guarded: Option<Box<super::GuardedStructureCommit>>,
+    guarded: Option<Box<super::GuardedStructureCommit>>,
     totals_references: Vec<TotalsReferenceChange>,
     footer_move: Option<footer::FooterMove>,
 }
@@ -486,32 +488,42 @@ impl Workbook {
     /// dependent formula sources follow schema changes.
     pub fn resize_table(&mut self, id: TableId, range: TableRange) -> Result<TableCommit, String> {
         let (_, old) = self.table(id).ok_or("Table no longer exists.")?;
-        if old.totals.is_none() || old.range.end_col == range.end_col {
+        if !(old.totals.is_some() && old.range.end_col != range.end_col
+            || old.totals_row().is_some() && old.range.end_row != range.end_row) {
             return self.resize_table_inner(id, range);
         }
         self.ensure_writable()?;
         let before = old.clone();
+        let width_changed = before.range.end_col != range.end_col;
+        let mut reference_guarded = false;
         let mut candidate = self.clone();
         // Grow height before admitting new columns, so existing records in the
         // added columns never become a temporary footer. Shrink width first so
         // released footer cells stay in place when surviving columns move.
         if range.end_col > before.range.end_col && range.end_row != before.range.end_row {
-            candidate.resize_table_inner(id, TableRange { end_col: before.range.end_col, ..range })?;
+            candidate.resize_table_stage(id, &mut reference_guarded, TableRange { end_col: before.range.end_col, ..range })?;
         }
         let current = candidate.table(id).unwrap().1.range;
-        let mut commit = candidate.resize_table_inner(id, TableRange { end_row: current.end_row, ..range })?;
+        let mut commit = candidate.resize_table_stage(id, &mut reference_guarded, TableRange { end_row: current.end_row, ..range })?;
         if candidate.table(id).unwrap().1.range != range {
-            candidate.resize_table_inner(id, range)?;
+            commit = candidate.resize_table_stage(id, &mut reference_guarded, range)?;
         }
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Could not recalculate the resized Table: {error:?}"));
         }
-        let guarded = self.capture_guarded_batch(&candidate)?;
+        let guarded = if width_changed || reference_guarded { Some(Box::new(self.capture_guarded_batch(&candidate)?)) } else { None };
         commit.before.table = Some(before);
         commit.after.table = Some(candidate.table(id).unwrap().1.clone());
-        commit.resize_guarded = Some(Box::new(guarded));
+        commit.guarded = guarded;
         self.restore_snapshot_monotonic(&candidate);
         Ok(commit)
+    }
+
+    // Only called on a private candidate. Rewrite existing references before
+    // filling/applying authored append cells, so new input keeps its coordinates.
+    fn resize_table_stage(&mut self, id: TableId, guarded: &mut bool, range: TableRange) -> Result<TableCommit, String> {
+        *guarded |= self.relocate_footer_references(id, range.end_row, None)?;
+        self.resize_table_inner(id, range)
     }
 
     fn resize_table_inner(&mut self, id: TableId, range: TableRange) -> Result<TableCommit, String> {
@@ -626,6 +638,29 @@ impl Workbook {
         count: usize,
         writes: &[(usize, usize, String)],
         infer_rule: bool,
+    ) -> Result<TableCommit, String> {
+        self.ensure_writable()?;
+        let (_, old) = self.table(id).ok_or("Table no longer exists.")?;
+        if old.totals_row().is_none() {
+            return self.append_table_rows_inner(id, count, writes, infer_rule);
+        }
+        let before = old.clone();
+        let end = old.range.end_row.checked_add(count).ok_or("Append exceeds the sheet boundary.")?;
+        let mut candidate = self.clone();
+        let guarded = candidate.relocate_footer_references(id, end, None)?;
+        let mut commit = candidate.append_table_rows_inner(id, count, writes, infer_rule)?;
+        if let Some(error) = candidate.take_incremental_errors().first() {
+            return Err(format!("Could not recalculate the appended Table: {error:?}"));
+        }
+        if guarded { commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?)); }
+        commit.before.table = Some(before);
+        commit.after.table = Some(candidate.table(id).unwrap().1.clone());
+        self.restore_snapshot_monotonic(&candidate);
+        Ok(commit)
+    }
+
+    fn append_table_rows_inner(
+        &mut self, id: TableId, count: usize, writes: &[(usize, usize, String)], infer_rule: bool,
     ) -> Result<TableCommit, String> {
         if count == 0 {
             return Err("Append at least one row.".into());
@@ -895,7 +930,7 @@ impl Workbook {
         }
         let mut commit = TableCommit {
             absent_cells: Vec::new(),
-            resize_guarded: None,
+            guarded: None,
             totals_schema_edit,
             calculated_edit,
             name_edit,
@@ -938,7 +973,7 @@ impl Workbook {
     /// state. A stale commit fails atomically instead of overwriting edits.
     pub fn apply_table_commit(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
         self.ensure_writable()?;
-        if let Some(guarded) = &commit.resize_guarded { return guarded.replay(self, undo); }
+        if let Some(guarded) = &commit.guarded { return guarded.replay(self, undo); }
         if commit.header_insertion.is_some() {
             return self.apply_headerless_table_commit(commit, undo);
         }

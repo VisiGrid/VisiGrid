@@ -222,6 +222,7 @@ pub fn resolve<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> BoundExpr {
             &StructuredReference::body(name.clone()),
             lookup.current_cell(),
         ),
+        Expr::NamedRange(name) => lookup.resolve_named_reference(name).unwrap_or_else(|| expr.clone()),
         _ => expr.clone(),
     }
 }
