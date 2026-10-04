@@ -1,7 +1,7 @@
 // Logical functions: IF, AND, OR, NOT, IFERROR, IFNA, ISBLANK, ISNUMBER, ISTEXT,
-// ISERROR, ISNA, IFS, SWITCH, CHOOSE
+// ISERROR, ISNA, IFS, SWITCH, CHOOSE, XOR, NA
 
-use super::eval::{evaluate, CellLookup, EvalResult};
+use super::eval::{evaluate, CellLookup, EvalResult, Value};
 use super::parser::BoundExpr;
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -174,6 +174,53 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#VALUE!".to_string()));
             }
             evaluate(&args[index], lookup)
+        }
+        "XOR" => {
+            // XOR(logical1, [logical2], ...): TRUE when an odd number of the
+            // values are TRUE. Inside a reference or array, text and blanks
+            // are skipped; a value given directly must read as a logical.
+            // With no logical value anywhere the answer is #VALUE!, as in Excel.
+            if args.is_empty() {
+                return Some(EvalResult::Error("XOR requires at least one argument".to_string()));
+            }
+            let mut trues = 0usize;
+            let mut seen = false;
+            for arg in args {
+                let got = match super::eval_helpers::arg_values(arg, lookup) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                for value in &got.values {
+                    let truth = match value {
+                        Value::Error(e) => return Some(EvalResult::Error(e.clone())),
+                        Value::Boolean(b) => *b,
+                        Value::Number(n) => *n != 0.0,
+                        Value::Empty if got.bulk => continue,
+                        Value::Empty => false,
+                        // A typed TRUE/FALSE is stored as text, so it counts
+                        // as a logical even inside a reference.
+                        Value::Text(t) if t.eq_ignore_ascii_case("TRUE") => true,
+                        Value::Text(t) if t.eq_ignore_ascii_case("FALSE") => false,
+                        Value::Text(_) if got.bulk => continue,
+                        Value::Text(_) => return Some(EvalResult::Error("#VALUE!".to_string())),
+                    };
+                    seen = true;
+                    if truth {
+                        trues += 1;
+                    }
+                }
+            }
+            if !seen {
+                return Some(EvalResult::Error("#VALUE!".to_string()));
+            }
+            EvalResult::Boolean(trues % 2 == 1)
+        }
+        "NA" => {
+            // NA(): the #N/A error value, taking no arguments.
+            if !args.is_empty() {
+                return Some(EvalResult::Error("NA takes no arguments".to_string()));
+            }
+            EvalResult::Error("#N/A".to_string())
         }
         _ => return None,
     };

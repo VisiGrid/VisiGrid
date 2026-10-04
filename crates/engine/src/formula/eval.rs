@@ -1044,6 +1044,11 @@ fn eval_function_args<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<Eval
 }
 
 fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
+    // LET and LAMBDA bind names and must see their arguments unprocessed:
+    // a LET name is not a table to resolve or a value to lift.
+    if let Some(result) = super::eval_let::try_evaluate(name, args, lookup) {
+        return result;
+    }
     // Keep open ranges in the stored AST. Only the arguments being consumed
     // are bounded, so nested/lazy functions still evaluate through this path.
     let table_args;
