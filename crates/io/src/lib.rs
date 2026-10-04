@@ -1,24 +1,42 @@
 // File I/O operations
 
+#[cfg(feature = "native")]
 pub mod csv;
+#[cfg(feature = "native")]
 pub mod csv_import;
+#[cfg(feature = "native")]
 pub mod duckdb;
 pub mod json;
+#[cfg(feature = "native")]
 pub mod native;
+#[cfg(feature = "native")]
 pub mod parquet;
+#[cfg(feature = "native")]
 pub mod parquet_export;
+#[cfg(feature = "native")]
 pub mod recipe;
+#[cfg(feature = "native")]
 pub mod recipe_table;
+#[cfg(feature = "native")]
 pub mod scripting;
 pub mod table_recovery;
+#[cfg(feature = "native")]
 pub mod truth;
+#[cfg(feature = "native")]
 pub mod xlsx;
+#[cfg(feature = "native")]
 mod xlsx_comments;
+#[cfg(feature = "native")]
 mod xlsx_tables;
+#[cfg(feature = "native")]
 mod xlsx_table_filters;
+#[cfg(feature = "native")]
 mod xlsx_table_sorts;
+#[cfg(feature = "native")]
 mod xlsx_sorted_export;
+#[cfg(feature = "native")]
 pub mod xlsx_styles;
+#[cfg(feature = "native")]
 pub mod xlsx_validation;
 
 /// Native .sheet format version
