@@ -532,3 +532,64 @@ fn all_new_types_survive_public_workbook_import_and_export() {
         );
     }
 }
+
+#[test]
+fn imported_date_time_and_custom_formulas_are_evaluated_after_xlsx_roundtrip() {
+    use visigrid_engine::{
+        cell::{DateStyle, NumberFormat},
+        workbook::Workbook,
+    };
+    let xml = r#"<worksheet><dataValidations>
+      <dataValidation type="date" operator="lessThanOrEqual" sqref="B2:B3"><formula1>DATE(2026,10,5)</formula1></dataValidation>
+      <dataValidation type="time" operator="lessThanOrEqual" sqref="C2:C3"><formula1>TIME(13,0,0)</formula1></dataValidation>
+      <dataValidation type="custom" sqref="D2:D3"><formula1>AND(D2&lt;$A2,ROW()=ROW(D2))</formula1></dataValidation>
+      <dataValidation type="decimal" operator="lessThanOrEqual" sqref="E2:E3"><formula1>$A2/100</formula1></dataValidation>
+    </dataValidations></worksheet>"#;
+    let mut wb = Workbook::new();
+    for (r, row) in [
+        ["5", "=DATE(2026,10,4)", "=TIME(12,0,0)", "4", "0.049"],
+        ["10", "=DATE(2026,10,6)", "=TIME(14,0,0)", "11", "0.101"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (c, value) in row.iter().enumerate() {
+            wb.set_cell_value_tracked(0, r + 1, c, value);
+        }
+        let s = wb.sheet_mut(0).unwrap();
+        s.set_number_format(
+            r + 1,
+            1,
+            NumberFormat::Date {
+                style: DateStyle::Iso,
+            },
+        );
+        s.set_number_format(r + 1, 2, NumberFormat::Time);
+        s.set_number_format(r + 1, 4, NumberFormat::Percent { decimals: 0 });
+    }
+    for entry in parse_validations_from_xml(xml).unwrap() {
+        wb.sheet_mut(0)
+            .unwrap()
+            .validations
+            .set(entry.range, entry.rule);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evaluated-validation.xlsx");
+    let report = crate::xlsx::export(&wb, &path, None).unwrap();
+    assert_eq!(
+        (report.validations_exported, report.validations_skipped),
+        (4, 0)
+    );
+    let (loaded, _) = crate::xlsx::import(&path).unwrap();
+    for book in [&wb, &loaded] {
+        for c in 1..=4 {
+            assert!(book.validate_cell(0, 1, c).is_valid(), "column {c}");
+            assert!(book.validate_cell(0, 2, c).is_invalid(), "column {c}");
+        }
+        assert_eq!(book.validate_range(0, 1, 1, 2, 4).count, 4);
+        assert!(book.validate_cell_input(0, 2, 3, "9").is_valid());
+        assert!(book.validate_cell_input(0, 2, 3, "10").is_invalid());
+        assert!(book.validate_cell_input(0, 2, 4, "0.099").is_valid());
+        assert!(book.validate_cell_input(0, 2, 4, "0.101").is_invalid());
+    }
+}

@@ -1657,7 +1657,7 @@ impl Spreadsheet {
                 if display_value.is_empty() {
                     continue;
                 }
-                let result = self.wb(cx).validate_cell_input(sheet_index, row, col, &display_value);
+                let result = self.wb(cx).validate_cell(sheet_index, row, col);
                 if let ValidationResult::Invalid { reason, .. } = result {
                     let failure_reason = Workbook::classify_failure_reason(&reason);
                     self.invalid_cells.insert((row, col), failure_reason);

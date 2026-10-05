@@ -2,11 +2,14 @@
 
 ## Unreleased
 
+- Evaluate date/time validation, custom formulas and formula-based numeric/text-length bounds with target-cell, named-range, cross-sheet and structured-reference context. Formula errors and non-scalar results are reported instead of silently passing.
+- Check existing cells and bounds using typed values, fixing validation of formatted percentages, dates and rounded numbers. Proposed-input checks privately recalculate dependent formulas and spills; desktop marker refresh avoids per-cell workbook copies. Validation remains advisory, and host custom functions are not executed by these checks.
+
 - XLSX export preserves effective validation coverage through exclusions and overlapping rules. Relative Excel rules retain their reference origin across filtered edits, save/reopen and undo; each exported fragment receives the correct formula. Existing native fixed references export as absolute addresses.
 - Imported formula-backed validation origins use native validation metadata v2 and full JSON v4. Version-aware older readers reject unsupported metadata; releases predating native validation persistence can still drop rules on re-save. Numeric bounds and dropdown sources resolve per target; workbook list checks now share the dropdown's named/cross-sheet source, and text-length rules count Unicode characters.
 - Report unsupported/malformed XLSX validation definitions and sheet-level parsing failures. Invalid range lists are omitted as a whole rather than changing their reference origin.
 
-- XLSX import/export now preserves date, time, text-length and custom validation metadata alongside list and numeric rules. Preserve dropdown visibility, disabled messages and alert styles, large numeric bounds, Unicode and XML-escaped formula text. Empty inline lists and items containing commas are reported as skipped on export instead of becoming a different list. This does not add evaluation support for previously unsupported constraints.
+- XLSX import/export now preserves date, time, text-length and custom validation metadata alongside list and numeric rules. Preserve dropdown visibility, disabled messages and alert styles, large numeric bounds, Unicode and XML-escaped formula text. Empty inline lists and items containing commas are reported as skipped on export instead of becoming a different list. Evaluation support is described above.
 
 - Edit data-validation rules and exclusions through sorted/filtered Tables. Changes target visible stored records, preserve hidden rules and use sparse undo/redo and history rewind. Stale dialogs and unsafe adjacent ranges refuse before mutation.
 - Preserve imported rule types, messages, alerts and unchanged inline-list sources in the validation editor. Fix existing-rule dialogs losing their target range, sorted validation dropdowns reading/writing the wrong row, and F8 jumping to hidden validation failures.

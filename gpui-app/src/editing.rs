@@ -323,8 +323,7 @@ impl Spreadsheet {
         // Auto-clear invalid marker if cell is now valid (Phase 6C)
         if self.invalid_cells.contains_key(&(row, col)) {
             use visigrid_engine::validation::ValidationResult;
-            let display_value = self.sheet(cx).get_display(row, col);
-            let result = self.wb(cx).validate_cell_input(self.sheet_index(cx), row, col, &display_value);
+            let result = self.wb(cx).validate_cell(self.sheet_index(cx), row, col);
             if matches!(result, ValidationResult::Valid) {
                 self.clear_cell_invalid(row, col);
             }

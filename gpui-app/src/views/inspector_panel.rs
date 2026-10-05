@@ -764,7 +764,7 @@ fn render_inspector_tab(
                 ValidationFailureReason::ConstraintBlank => "Constraint cell is empty",
                 ValidationFailureReason::ConstraintNotNumeric => "Constraint cell is not numeric",
                 ValidationFailureReason::InvalidReference => "Invalid reference",
-                ValidationFailureReason::FormulaNotSupported => "Formula constraints not supported",
+                ValidationFailureReason::FormulaNotSupported => "Validation formula could not be evaluated",
                 ValidationFailureReason::ListEmpty => "List is empty",
                 ValidationFailureReason::NotInList => "Value not in allowed list",
             };

@@ -2469,203 +2469,40 @@ impl Sheet {
         self.validations.has_validation(row, col)
     }
 
-    /// Validate a value against the cell's validation rule.
-    ///
-    /// Returns `ValidationResult::Valid` if no rule exists or validation passes.
+    /// Validate a proposed value without changing this sheet. Workbook callers
+    /// should use Workbook::validate_cell_input for cross-sheet/name resolution.
     pub fn validate_cell_input(&self, row: usize, col: usize, value: &str) -> super::validation::ValidationResult {
-        use super::validation::{ValidationResult, ValidationType};
-
-        let rule = match self.validations.get(row, col) {
-            Some(r) => r,
-            None => return ValidationResult::Valid,
+        use crate::validation::evaluation::{input_value, validate_rule};
+        use crate::validation::ValidationResult;
+        let Some(rule) = self.validations.get(row, col) else { return ValidationResult::Valid; };
+        let rule = rule.at(row, col);
+        if rule.ignore_blank && value.trim().is_empty() { return ValidationResult::Valid; }
+        let typed = match input_value(&rule, value) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let resolved_rule = rule.at(row, col);
-        let rule = resolved_rule.as_ref();
-
-        // Check ignore_blank
-        if rule.ignore_blank && value.trim().is_empty() {
-            return ValidationResult::Valid;
+        if rule.has_reference_sources() || value.trim_start().starts_with('=') {
+            let workbook = crate::workbook::Workbook::from_sheets(vec![self.clone()], 0);
+            return workbook.validate_cell_input(0, row, col, value);
         }
-
-        // Validate based on type
-        // NOTE: No AnyValue case - rule absence handles "any value" semantics
-        match &rule.rule_type {
-            ValidationType::List(source) => {
-                let resolved = self.resolve_list_source(source);
-                let trimmed_value = value.trim();
-
-                // Case-sensitive matching (per spec)
-                if resolved.contains(trimmed_value) {
-                    ValidationResult::Valid
-                } else if resolved.items.is_empty() {
-                    // Empty list source (e.g., invalid range) - accept any value
-                    ValidationResult::Valid
-                } else {
-                    let display_items: Vec<&str> = resolved.items.iter()
-                        .take(5)
-                        .map(|s| s.as_str())
-                        .collect();
-                    let suffix = if resolved.items.len() > 5 { ", ..." } else { "" };
-                    ValidationResult::Invalid {
-                        rule: rule.clone(),
-                        reason: format!("Value must be one of: {}{}", display_items.join(", "), suffix),
-                    }
-                }
-            }
-
-            ValidationType::WholeNumber(constraint) => {
-                use super::validation::{parse_numeric_input, NumericParseError};
-
-                // Use strict parsing: no decimal point allowed
-                let num = match parse_numeric_input(value, false) {
-                    Ok(n) => n,
-                    Err(NumericParseError::FractionalNotAllowed) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a whole number (no decimals)".to_string(),
-                        };
-                    }
-                    Err(_) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a whole number".to_string(),
-                        };
-                    }
-                };
-
-                self.validate_numeric_constraint(num, constraint, rule, "whole number")
-            }
-
-            ValidationType::Decimal(constraint) => {
-                use super::validation::parse_numeric_input;
-
-                // Allow decimal input
-                let num = match parse_numeric_input(value, true) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a number".to_string(),
-                        };
-                    }
-                };
-
-                self.validate_numeric_constraint(num, constraint, rule, "number")
-            }
-
-            ValidationType::TextLength(constraint) => {
-                let len = value.chars().count() as f64;
-                self.validate_numeric_constraint(len, constraint, rule, "text length")
-            }
-
-            ValidationType::Date(_) | ValidationType::Time(_) => {
-                // TODO: Implement date/time parsing and validation
-                ValidationResult::Valid
-            }
-
-            ValidationType::Custom(_formula) => {
-                // TODO: Evaluate custom formula
-                ValidationResult::Valid
-            }
-        }
+        validate_rule(&rule, &typed, value, |source| self.validation_formula(row, col, source),
+            |source| self.resolve_list_source(source))
     }
 
-    /// Helper to validate a numeric value against a constraint.
-    fn validate_numeric_constraint(
-        &self,
-        value: f64,
-        constraint: &super::validation::NumericConstraint,
-        rule: &super::validation::ValidationRule,
-        type_name: &str,
-    ) -> super::validation::ValidationResult {
-        use super::validation::{ValidationResult, eval_numeric_constraint};
-
-        // Resolve constraint values - fail validation if constraint can't be resolved
-        let v1 = match self.resolve_constraint_value(&constraint.value1) {
-            Ok(n) => n,
-            Err(e) => {
-                return ValidationResult::Invalid {
-                    rule: rule.clone(),
-                    reason: format!("Validation constraint error: {}", e),
-                };
-            }
-        };
-
-        let v2 = match &constraint.value2 {
-            Some(cv) => match self.resolve_constraint_value(cv) {
-                Ok(n) => Some(n),
-                Err(e) => {
-                    return ValidationResult::Invalid {
-                        rule: rule.clone(),
-                        reason: format!("Validation constraint error: {}", e),
-                    };
-                }
-            },
-            None => None,
-        };
-
-        // Use the shared evaluation helper
-        let valid = eval_numeric_constraint(value, constraint.operator, v1, v2);
-
-        if valid {
-            ValidationResult::Valid
-        } else {
-            let reason = match constraint.operator {
-                super::validation::ComparisonOperator::Between => {
-                    format!("{} must be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
-                }
-                super::validation::ComparisonOperator::NotBetween => {
-                    format!("{} must not be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
-                }
-                super::validation::ComparisonOperator::EqualTo => format!("{} must equal {}", type_name, v1),
-                super::validation::ComparisonOperator::NotEqualTo => format!("{} must not equal {}", type_name, v1),
-                super::validation::ComparisonOperator::GreaterThan => format!("{} must be greater than {}", type_name, v1),
-                super::validation::ComparisonOperator::LessThan => format!("{} must be less than {}", type_name, v1),
-                super::validation::ComparisonOperator::GreaterThanOrEqual => format!("{} must be at least {}", type_name, v1),
-                super::validation::ComparisonOperator::LessThanOrEqual => format!("{} must be at most {}", type_name, v1),
-            };
-
-            ValidationResult::Invalid {
-                rule: rule.clone(),
-                reason,
-            }
-        }
+    /// Validate the current typed value, without copying or mutating the sheet.
+    pub fn validate_cell(&self, row: usize, col: usize) -> super::validation::ValidationResult {
+        let Some(rule) = self.validations.get(row, col) else { return super::validation::ValidationResult::Valid; };
+        crate::validation::evaluation::validate_rule(&rule.at(row, col), &self.get_computed_value(row, col),
+            &self.get_display(row, col), |source| self.validation_formula(row, col, source),
+            |source| self.resolve_list_source(source))
     }
 
-    /// Resolve a constraint value to a number.
-    ///
-    /// Returns Err if:
-    /// - Cell reference is invalid
-    /// - Referenced cell is blank
-    /// - Referenced cell value is not numeric
-    /// - Formula evaluation fails or returns non-numeric
-    fn resolve_constraint_value(
-        &self,
-        value: &super::validation::ConstraintValue,
-    ) -> Result<f64, super::validation::ConstraintResolveError> {
-        use super::validation::{ConstraintValue, ConstraintResolveError};
-
-        match value {
-            ConstraintValue::Number(n) => Ok(*n),
-            ConstraintValue::CellRef(ref_str) => {
-                // Parse cell reference and get value
-                let (row, col) = self.parse_cell_ref(ref_str)
-                    .ok_or_else(|| ConstraintResolveError::InvalidReference(ref_str.clone()))?;
-
-                let display = self.get_display(row, col);
-                if display.is_empty() {
-                    return Err(ConstraintResolveError::BlankConstraint);
-                }
-
-                // Try to parse as number
-                display.parse::<f64>()
-                    .map_err(|_| ConstraintResolveError::NotNumeric)
-            }
-            ConstraintValue::Formula(_formula) => {
-                // TODO: Evaluate formula and require numeric result
-                // For now, return error since formula eval not implemented
-                Err(ConstraintResolveError::FormulaError("Formula constraints not yet implemented".to_string()))
-            }
+    fn validation_formula(&self, row: usize, col: usize, source: &str) -> crate::formula::eval::EvalResult {
+        use crate::formula::{eval::{evaluate, EvalResult, LookupWithContext}, parser::{parse, bind_expr_same_sheet}};
+        let formula = format!("={}", source.trim().trim_start_matches('='));
+        match parse(&formula) {
+            Ok(expr) => evaluate(&bind_expr_same_sheet(&expr), &LookupWithContext::new(self, row, col)),
+            Err(error) => EvalResult::Error(error),
         }
     }
 

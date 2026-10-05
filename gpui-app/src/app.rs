@@ -2056,7 +2056,7 @@ impl Spreadsheet {
             ValidationFailureReason::ConstraintBlank => "Constraint cell is blank".to_string(),
             ValidationFailureReason::ConstraintNotNumeric => "Constraint is not numeric".to_string(),
             ValidationFailureReason::InvalidReference => "Invalid reference".to_string(),
-            ValidationFailureReason::FormulaNotSupported => "Formula constraint not supported".to_string(),
+            ValidationFailureReason::FormulaNotSupported => "Validation formula could not be evaluated".to_string(),
             ValidationFailureReason::ListEmpty => "List is empty".to_string(),
             ValidationFailureReason::NotInList => "Not in list".to_string(),
         }

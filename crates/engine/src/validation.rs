@@ -17,6 +17,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 mod edit;
+pub(crate) mod evaluation;
 mod references;
 pub(crate) use references::parse_list_range;
 pub use edit::{ValidationEdit, ValidationPatch};
@@ -335,7 +336,7 @@ pub enum ValidationFailureReason {
     ConstraintNotNumeric,
     /// Constraint reference could not be resolved.
     InvalidReference,
-    /// Formula constraint not supported.
+    /// Formula evaluation failed (including unsupported functions).
     FormulaNotSupported,
     /// List is empty (no valid options).
     ListEmpty,
@@ -392,7 +393,11 @@ pub fn parse_numeric_input(value: &str, allow_decimal: bool) -> Result<f64, Nume
     }
 
     // Parse the number
-    normalized.parse::<f64>().map_err(|_| NumericParseError::InvalidFormat)
+    let number = crate::cell::parse_finite(normalized).ok_or(NumericParseError::InvalidFormat)?;
+    if !allow_decimal && number.fract() != 0.0 {
+        return Err(NumericParseError::FractionalNotAllowed);
+    }
+    Ok(number)
 }
 
 /// Evaluate a numeric constraint.

@@ -205,7 +205,7 @@ impl Spreadsheet {
                 continue;
             }
             if let ValidationResult::Invalid { reason, .. } =
-                self.wb(cx).validate_cell_input(index, r, c, &display)
+                self.wb(cx).validate_cell(index, r, c)
             {
                 self.invalid_cells.insert(
                     (r, c),
