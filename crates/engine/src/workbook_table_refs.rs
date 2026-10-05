@@ -105,7 +105,7 @@ impl Workbook {
                 if let Some(totals) = table.totals.as_ref().filter(|_| !allow_totals) {
                     for (offset, total) in totals.columns.iter().enumerate() {
                         if let Some(source) = &total.formula {
-                            if self.rewrite_table_formula_source(owner_sheet, before, after, sheet.id,
+                            if self.rewrite_named_table_formula_source(owner_sheet, before, after, sheet.id,
                                 table.range.end_row + 1, table.range.start_col + offset, source)? != *source {
                                 return Err("This schema change would rewrite totals metadata. Totals reference rewriting is not supported yet.".into());
                             }
@@ -172,10 +172,17 @@ impl Workbook {
                         table.columns.iter().position(|c| c.id == after.columns[offset].id)
                             .ok_or("A new totals column cannot already have a custom formula.")?
                     } else { offset };
-                    *source = self.rewrite_table_formula_source(
-                        owner, &context, Some(&target), sheet,
-                        table.range.end_row + 1, table.range.start_col + old_offset, source,
-                    )?;
+                    *source = if table.id == before.id {
+                        self.rewrite_table_formula_source(
+                            owner, &context, Some(&target), sheet,
+                            table.range.end_row + 1, table.range.start_col + old_offset, source,
+                        )?
+                    } else {
+                        self.rewrite_named_table_formula_source(
+                            owner, &context, Some(&target), sheet,
+                            table.range.end_row + 1, table.range.start_col + old_offset, source,
+                        )?
+                    };
                 }
             }
             if rewritten != *totals {
@@ -185,6 +192,31 @@ impl Workbook {
             }
         }
         Ok(changes)
+    }
+
+    /// A foreign Table's retained totals formula has its own local context,
+    /// even when its dormant footer position lies inside the edited Table.
+    /// Only explicit references to the edited Table can bind here.
+    pub(crate) fn rewrite_named_table_formula_source(
+        &self,
+        owner_sheet: SheetId,
+        before: &DataTable,
+        after: Option<&DataTable>,
+        sheet: SheetId,
+        row: usize,
+        col: usize,
+        source: &str,
+    ) -> Result<String, String> {
+        let mut rewritten = source.to_owned();
+        for (start, end, reference) in structured::source_references(source).into_iter().rev() {
+            if reference.table.as_ref().is_some_and(|name| name.eq_ignore_ascii_case(&before.name)) {
+                let replacement = self.rewrite_table_formula_source(
+                    owner_sheet, before, after, sheet, row, col, &source[start..end],
+                )?;
+                rewritten.replace_range(start..end, &replacement);
+            }
+        }
+        Ok(rewritten)
     }
 
     pub(crate) fn rewrite_table_formula_source(

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Convert Tables referenced by another Table’s custom totals, including dormant settings and independently stored footer formulas. Preserve local reference ownership when a dormant footer overlaps another Table, including during column renaming.
+
 - Preserve conditional formatting and validation when converting Tables to ranges, including this-row references and dropdown sources. Evaluate conditional-format rules in their target cell context, and support standard error literals inside formulas so converted rules retain error handling.
 
 - Add or restore Table totals in a manually hidden row while preserving worksheet visibility. Report the hidden footer row in desktop status, retain totals settings and history, and keep existing collision checks.

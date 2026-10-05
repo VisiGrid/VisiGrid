@@ -94,3 +94,109 @@ fn converted_rule_context_survives_native_json_and_excel_without_a_table() {
         );
     }
 }
+
+#[test]
+fn converted_foreign_calculated_and_dormant_totals_rules_survive_reopening_and_append() {
+    use visigrid_engine::table::TableTotal;
+    let mut wb = Workbook::new();
+    for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, row, 0, value);
+    }
+    let source = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: 0,
+                end_row: 3,
+                start_col: 0,
+                end_col: 0,
+            },
+            "Sales",
+        )
+        .unwrap()
+        .table_id();
+    let other = wb.add_sheet_named("Other").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "Value");
+    wb.set_cell_value_tracked(other, 1, 0, "5");
+    let id = wb
+        .create_table(
+            wb.sheet(other).unwrap().id,
+            TableRange {
+                start_row: 0,
+                end_row: 1,
+                start_col: 0,
+                end_col: 0,
+            },
+            "Summary",
+        )
+        .unwrap()
+        .table_id();
+    wb.set_calculated_column(id, 0, 1, "=SUM(Sales[Amount])", true)
+        .unwrap();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    wb.set_table_total(
+        id,
+        0,
+        TableTotal {
+            function: Some("custom".into()),
+            formula: Some("=SUM(Sales[Amount])+SUM([Value])".into()),
+            label: None,
+        },
+    )
+    .unwrap();
+    wb.set_table_totals_visible(id, false, Default::default())
+        .unwrap();
+    wb.remove_table(source).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for mode in 0..3 {
+        let path = dir.path().join(if mode == 2 {
+            "totals.xlsx"
+        } else {
+            "totals.sheet"
+        });
+        let mut loaded = match mode {
+            0 => {
+                native::save_workbook_full(&wb, &Default::default(), &[], &[], &path).unwrap();
+                native::load_workbook(&path).unwrap()
+            }
+            1 => {
+                json::import_any(&json::export_workbook(&wb, &[], 0).unwrap())
+                    .unwrap()
+                    .0
+            }
+            _ => {
+                xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+                xlsx::import(&path).unwrap().0
+            }
+        };
+        let id = loaded
+            .tables()
+            .find(|(_, t)| t.name == "Summary")
+            .unwrap()
+            .1
+            .id;
+        assert!(loaded.sheet(0).unwrap().tables().is_empty());
+        assert!(!loaded.table(id).unwrap().1.totals.as_ref().unwrap().visible);
+        loaded
+            .set_table_totals_visible(id, true, Default::default())
+            .unwrap();
+        assert_eq!(
+            loaded.sheet(other).unwrap().get_display(2, 0),
+            "120",
+            "mode {mode}"
+        );
+        loaded.append_table_rows(id, 1, &[]).unwrap();
+        assert_eq!(
+            loaded.sheet(other).unwrap().get_display(3, 0),
+            "180",
+            "mode {mode}"
+        );
+        loaded.set_cell_value_tracked(0, 1, 0, "100");
+        assert_eq!(
+            loaded.sheet(other).unwrap().get_display(3, 0),
+            "450",
+            "mode {mode}"
+        );
+    }
+}

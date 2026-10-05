@@ -1042,7 +1042,14 @@ mod tests {
             visigrid_engine::validation::CellRange::single(7, 0),
             visigrid_engine::validation::ValidationRule::list_range("ConvertMe[Amount]"),
         );
-        let (before, _) = before.prepare_table_row_visibility(sid, [2, 4].into()).unwrap();
+        let (mut before, _) = before.prepare_table_row_visibility(sid, [2, 4].into()).unwrap();
+        let dependent = spec.as_ref().unwrap().table;
+        before.set_table_totals_visible(dependent, true, Default::default()).unwrap();
+        before.set_table_total(dependent, 2, visigrid_engine::table::TableTotal {
+            function: Some("custom".into()),
+            formula: Some("=SUM(ConvertMe[[#Totals],[Amount]])+SUBTOTAL(109,[Amount])".into()),
+            label: None,
+        }).unwrap();
         let mut after = before.clone();
         let commit = after.remove_table(id).unwrap();
         assert!(commit.is_conversion());
@@ -1062,6 +1069,7 @@ mod tests {
             assert!(preview.workbook.sheet(other).unwrap().has_cond_format(2, 0));
             assert_eq!(preview.workbook.get_list_items(other, 7, 0).unwrap().items, ["10", "20", "30"]);
             assert_eq!(preview.workbook.active_sheet().table_view_spec(), spec.as_ref());
+            assert_eq!(preview.workbook.active_sheet().get_display(7, 2), "130");
         }
     }
 
