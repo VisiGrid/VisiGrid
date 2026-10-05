@@ -76,6 +76,20 @@ pub fn engine_commit() -> String {
     env!("VISIGRID_ENGINE_COMMIT").to_string()
 }
 
+/// Bytes of linear memory the engine has grown to (WASM pages never shrink,
+/// so this is the high-water mark), for the large-sheet measurements.
+#[wasm_bindgen]
+pub fn wasm_memory_bytes() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (core::arch::wasm32::memory_size(0) * 65536) as f64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0.0
+    }
+}
+
 /// Every built-in function name, sorted — the engine's own FUNCTION_NAMES.
 ///
 /// Callers that state how many functions the engine has (the website says it

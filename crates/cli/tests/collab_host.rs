@@ -317,3 +317,34 @@ fn hello_engine_commit_matches_the_wasm_engine() {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
+
+#[test]
+fn large_sheets_snapshot_as_bands_and_load_back() {
+    // 125,000 rows x 2 = 250,000 cells: over the band threshold.
+    let cells: Vec<Value> = (0..125_000)
+        .flat_map(|r| [json!({"row": r, "col": 0, "value": r % 89}), json!({"row": r, "col": 1, "value": format!("r{r}")})])
+        .chain([json!({"row": 0, "col": 2, "formula": "=SUM(A1:A125000)"})])
+        .collect();
+    let doc = json!({"format": "visigrid-json", "version": 2, "sheets": [{"name": "Big", "cells": cells}], "active_sheet": 0});
+    let mut a = Host::spawn();
+    let loaded = a.call(json!({"cmd": "load", "document": doc, "seq": 3}));
+    assert_eq!(loaded["ok"], json!(true), "{loaded}");
+    let snap = a.call(json!({"cmd": "snapshot"}));
+    let bands = snap["bands"].as_array().expect("bands listed").clone();
+    assert_eq!(bands.len(), 2, "{bands:?}");
+    assert!(snap["document"]["sheets"][0]["cells"].is_null(), "the manifest carries no cells");
+    assert!(snap["document"].to_string().len() < 4096);
+
+    let mut b = Host::spawn();
+    assert_eq!(b.call(json!({"cmd": "load", "document": snap["document"], "seq": 3}))["ok"], json!(true));
+    for band in &bands {
+        let got = a.call(json!({"cmd": "band", "key": band["key"]}));
+        let put = b.call(json!({"cmd": "load_band", "key": band["key"], "data": got["data"]}));
+        assert_eq!(put["ok"], json!(true), "{put}");
+    }
+    let done = b.call(json!({"cmd": "finish_load"}));
+    assert_eq!(done["checksum"], snap["checksum"], "the banded load is the same workbook");
+    assert_eq!(b.call(json!({"cmd": "band", "key": "nope"}))["ok"], json!(false));
+    let bad = b.call(json!({"cmd": "load_band", "key": bands[0]["key"], "data": "AAAA"}));
+    assert_eq!(bad["ok"], json!(false), "a band is checked against its key");
+}

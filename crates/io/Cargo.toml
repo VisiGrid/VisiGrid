@@ -13,7 +13,7 @@ description = "File I/O - native format, CSV, Excel"
 default = ["native"]
 native = [
     "dep:rusqlite", "dep:csv", "dep:calamine", "dep:rust_xlsxwriter", "dep:encoding_rs",
-    "dep:quick-xml", "dep:zip", "dep:regex", "dep:blake3", "dep:sha2", "dep:uuid",
+    "dep:quick-xml", "dep:zip", "dep:regex", "dep:blake3", "dep:uuid",
     "dep:chrono", "dep:dirs", "dep:toml", "dep:tempfile", "dep:parquet", "dep:libduckdb-sys",
 ]
 
@@ -30,7 +30,9 @@ quick-xml = { version = "0.38", optional = true }
 zip = { version = "4", optional = true }
 regex = { version = "1", optional = true }
 blake3 = { version = "1", optional = true }
-sha2 = { workspace = true, optional = true }
+sha2 = { workspace = true }
+# Large-sheet bands (json::bands): raw deflate, pure Rust so the WASM engine reads them too.
+miniz_oxide = "0.8"
 uuid = { version = "1", features = ["v4"], optional = true }
 chrono = { version = "0.4", features = ["serde"], optional = true }
 dirs = { workspace = true, optional = true }

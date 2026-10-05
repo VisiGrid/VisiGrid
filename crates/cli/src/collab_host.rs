@@ -70,6 +70,9 @@ pub struct Host {
     /// Accepted and stored. TODO(#99): pass to the engine's recalc clock
     /// once VisiGrid#99 (deterministic NOW/TODAY/RAND) is merged.
     pub clock: Clock,
+    /// The bands of the last `snapshot`, by key, until the next one: the
+    /// sequencer fetches each with `band` (one per line, never one huge line).
+    bands: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl Default for Host {
@@ -90,6 +93,7 @@ impl Host {
             barrier: 0,
             poisoned: false,
             clock: Clock::default(),
+            bands: std::collections::HashMap::new(),
         }
     }
 
@@ -144,6 +148,9 @@ impl Host {
             "replay" => self.replay(req),
             "submit" => self.submit(req),
             "snapshot" => self.snapshot(),
+            "band" => self.band(req),
+            "load_band" => self.load_band(req),
+            "finish_load" => self.finish_load(),
             "replace_document" => self.replace_document(req),
             "set_clock" => self.set_clock(req),
             "" => Err("missing cmd".into()),
@@ -261,10 +268,44 @@ impl Host {
         })))
     }
 
+    /// The document at the current seq. A large sheet's cells come back as
+    /// bands (`visigrid_io::json::bands`): `document` is then the manifest,
+    /// `bands` lists them (key, bytes, sheet, r0, r1), and `band` returns each.
     fn snapshot(&mut self) -> Reply {
         let wb = self.wb()?;
-        let document = export_document(wb, &self.layouts, self.active_sheet)?;
-        Ok(fields(json!({"document": document, "seq": self.seq, "checksum": checksum(wb)})))
+        let (document, bands) = export_banded_document(wb, &self.layouts, self.active_sheet)?;
+        let list: Vec<Value> = bands
+            .iter()
+            .map(|b| json!({"key": b.reference.key, "bytes": b.reference.bytes, "sheet": b.sheet, "r0": b.reference.r0, "r1": b.reference.r1}))
+            .collect();
+        let reply = json!({"document": document, "bands": list, "seq": self.seq, "checksum": checksum(wb)});
+        self.bands = bands.into_iter().map(|b| (b.reference.key, b.data)).collect();
+        Ok(fields(reply))
+    }
+
+    /// One band of the last snapshot, base64.
+    fn band(&mut self, req: &Map<String, Value>) -> Reply {
+        use base64::Engine as _;
+        let key = req.get("key").and_then(Value::as_str).ok_or("band needs key")?;
+        let data = self.bands.get(key).ok_or_else(|| format!("no band {key} in the last snapshot"))?;
+        Ok(fields(json!({"key": key, "data": base64::engine::general_purpose::STANDARD.encode(data)})))
+    }
+
+    /// Write one band (base64 `data`, checked against `key`) into the loaded
+    /// manifest; `finish_load` after the last.
+    fn load_band(&mut self, req: &Map<String, Value>) -> Reply {
+        use base64::Engine as _;
+        let data = req.get("data").and_then(Value::as_str).ok_or("load_band needs data")?;
+        let key = req.get("key").and_then(Value::as_str);
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| format!("band data is not base64: {e}"))?;
+        let (sheet, cells) = visigrid_io::json::bands::apply(self.wb_mut()?, &bytes, key)?;
+        Ok(fields(json!({"sheet": sheet, "cells": cells})))
+    }
+
+    fn finish_load(&mut self) -> Reply {
+        let wb = self.wb_mut()?;
+        visigrid_io::json::bands::finish(wb);
+        Ok(fields(json!({"checksum": checksum(self.wb()?)})))
     }
 
     fn replace_document(&mut self, req: &Map<String, Value>) -> Reply {
@@ -382,6 +423,30 @@ pub fn export_document(wb: &Workbook, layouts: &std::collections::HashMap<u64, S
         .ok_or("export produced a non-object document")?
         .insert("collab_sheet_ids".into(), json!(ids));
     Ok(doc)
+}
+
+/// `export_document`, with large sheets' cells moved into bands.
+pub fn export_banded_document(
+    wb: &Workbook,
+    layouts: &std::collections::HashMap<u64, SheetLayout>,
+    active: usize,
+) -> Result<(Value, Vec<visigrid_io::json::bands::Band>), String> {
+    let layouts: Vec<SheetLayout> = wb
+        .sheets()
+        .iter()
+        .map(|s| {
+            let mut l = layouts.get(&s.id.0).cloned().unwrap_or_default();
+            l.set_line_layout(&s.layout);
+            l
+        })
+        .collect();
+    let (text, bands) = visigrid_io::json::bands::export_banded(wb, &layouts, active.min(wb.sheets().len().saturating_sub(1)))?;
+    let mut doc: Value = serde_json::from_str(&text).map_err(|e| format!("export produced invalid JSON: {e}"))?;
+    let ids: Vec<u64> = wb.sheets().iter().map(|s| s.id.0).collect();
+    doc.as_object_mut()
+        .ok_or("export produced a non-object document")?
+        .insert("collab_sheet_ids".into(), json!(ids));
+    Ok((doc, bands))
 }
 
 /// Read one line of at most `max` bytes (newline excluded). Returns

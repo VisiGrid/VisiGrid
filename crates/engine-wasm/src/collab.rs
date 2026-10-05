@@ -123,6 +123,9 @@ pub(crate) struct CollabCore {
     /// `LEAN_CELLS` cells, reports `full` with no cell list, so a large paste
     /// or a recalculation never ships every cell across.
     lean: bool,
+    /// The client keeps a confirmed copy (a live session): bands loaded into
+    /// the optimistic workbook are copied there when the load finishes.
+    confirmed_copy: bool,
 }
 
 const LEAN_CELLS: usize = 2_000;
@@ -154,6 +157,7 @@ impl CollabCore {
             need_snapshot: None,
             reconnect: false,
             lean: false,
+            confirmed_copy: confirmed,
         }
     }
 
@@ -278,6 +282,44 @@ impl CollabCore {
         self.layouts = layouts;
         self.active = active;
         self.client.replace_document(wb, seq);
+        self.need_snapshot = None;
+        if let Some(frame) = self.waiting_welcome.take() {
+            self.finish_welcome(&frame)?;
+        }
+        Ok(self.effects())
+    }
+
+    /// One band of a large sheet (see `visigrid_io::json::bands`), written
+    /// unevaluated; `finish_load` evaluates once every band is in. Effects
+    /// report a full repaint so a viewport reader shows the new rows.
+    pub(crate) fn load_band(&mut self, data: &[u8], key: Option<&str>) -> Result<Value, String> {
+        visigrid_io::json::bands::apply(&mut self.client.wb, data, key)?;
+        if let Some(ch) = self.client.changes.as_mut() {
+            ch.full = true;
+        }
+        Ok(self.effects())
+    }
+
+    /// After the last band: dependencies, one ordered recompute, and the
+    /// confirmed copy brought level.
+    pub(crate) fn finish_load(&mut self) -> Value {
+        visigrid_io::json::bands::finish(&mut self.client.wb);
+        if self.confirmed_copy {
+            self.client.confirmed = self.client.wb.clone();
+        }
+        if let Some(ch) = self.client.changes.as_mut() {
+            ch.full = true;
+        }
+        self.effects()
+    }
+
+    /// `load_snapshot` from a workbook assembled elsewhere (a banded
+    /// snapshot loaded into a scratch client), so pending edits rebase onto
+    /// the whole sheet, never a half-loaded one.
+    pub(crate) fn load_snapshot_from(&mut self, other: &CollabCore, seq: u64) -> Result<Value, String> {
+        self.layouts = other.layouts.clone();
+        self.active = other.active;
+        self.client.replace_document(other.client.wb.clone(), seq);
         self.need_snapshot = None;
         if let Some(frame) = self.waiting_welcome.take() {
             self.finish_welcome(&frame)?;
@@ -697,6 +739,23 @@ impl CollabClient {
         to_js(&self.core.load_snapshot(&doc, seq as u64).map_err(js_err)?)
     }
 
+    /// Write one band of a large sheet (bytes as stored; `key`, when given,
+    /// is checked against them). Call `finish_load` after the last one.
+    pub fn load_band(&mut self, data: &[u8], key: Option<String>) -> Result<JsValue, JsValue> {
+        to_js(&self.core.load_band(data, key.as_deref()).map_err(js_err)?)
+    }
+
+    /// Evaluate the workbook once every band is in (full-repaint Effects).
+    pub fn finish_load(&mut self) -> Result<JsValue, JsValue> {
+        to_js(&self.core.finish_load())
+    }
+
+    /// `load_snapshot` taking the workbook of another client (a banded
+    /// snapshot assembled in a scratch client).
+    pub fn load_snapshot_from(&mut self, other: &CollabClient, seq: f64) -> Result<JsValue, JsValue> {
+        to_js(&self.core.load_snapshot_from(&other.core, seq as u64).map_err(js_err)?)
+    }
+
     /// The socket dropped and is reconnecting: send `hello` with
     /// `last_seen()` next; pending envelopes are resent after the welcome.
     pub fn reconnect(&mut self) {
@@ -807,6 +866,38 @@ fn cell_json(idx: usize, sheet: &visigrid_engine::sheet::Sheet, row: usize, col:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_banded_document_loads_band_by_band_to_the_same_workbook() {
+        use visigrid_engine::sheet::{Sheet, SheetId, NUM_COLS, NUM_ROWS};
+        let mut sheet = Sheet::new(SheetId(1), NUM_ROWS, NUM_COLS);
+        sheet.set_name("Sheet1");
+        for r in 0..140_000 {
+            sheet.set_value_deferred(r, 0, &(r % 101).to_string());
+            sheet.set_value_deferred(r, 1, &format!("row {r}"));
+        }
+        sheet.set_value_deferred(0, 2, "=SUM(A1:A140000)");
+        let mut wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet], 0);
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+        let layouts = vec![SheetLayout::default()];
+        let inline: Value = serde_json::from_str(&visigrid_io::json::export_workbook(&wb, &layouts, 0).unwrap()).unwrap();
+        let (manifest, bands) = visigrid_io::json::bands::export_banded(&wb, &layouts, 0).unwrap();
+        assert_eq!(bands.len(), 3);
+        let whole = CollabCore::new(&inline, 4).unwrap();
+        let mut banded = CollabCore::new(&serde_json::from_str(&manifest).unwrap(), 4).unwrap();
+        banded.lean = true;
+        for b in &bands {
+            let fx = banded.load_band(&b.data, Some(&b.reference.key)).unwrap();
+            assert_eq!(fx["full"], json!(true), "each band repaints");
+        }
+        // Readable mid-load (values; formulas evaluate at the end).
+        assert_eq!(banded.display(1, 139_999, 1).as_deref(), Some("row 139999"));
+        banded.finish_load();
+        assert_eq!(banded.display(1, 0, 2), whole.display(1, 0, 2));
+        assert_eq!(banded.checksum(), whole.checksum(), "the confirmed copy matches the whole document");
+        assert!(banded.load_band(&bands[0].data, Some(&bands[1].reference.key)).is_err());
+    }
+
     #[test]
     fn lean_effects_report_large_changes_as_full_and_formulas_recalculate() {
         let mut c = CollabCore::synthetic_with(3000, 20, true);
