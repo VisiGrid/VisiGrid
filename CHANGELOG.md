@@ -9,6 +9,12 @@
 - **"Convert Merged Cells to Center Across" fits in the Format menu**; the menus are a little wider.
 - **Print and PDF export no longer warn "Clipped text" for a large title that prints whole.** A 16pt title in a default-height row was flagged because the check counted line spacing as text.
 
+### Grid drawing
+
+- **Borders on merged cells keep their colour.** A merged cell drew its borders in the theme colour, so a grey header rule came out black under a merged header and grey beside it.
+- **Lines next to merged cells line up.** A merged block drew its bottom and right edges inside itself while the cells beside it drew theirs on the shared line, so a header rule stepped by a pixel or two at a merged cell, and the gridline at a merge's right edge was doubled. Merged cells now share edges with their neighbours the same way ordinary cells do.
+- **Borders stay where they belong after sorting or filtering.** A cell's top edge was taken from the row above it in storage rather than the row shown above it, so a header's bottom rule could reappear above whichever row had been under it before sorting. Merged cells (a merged title or total) are also placed where their rows are displayed under a filter.
+
 ## 0.49.1
 
 ### Formulas
