@@ -118,7 +118,14 @@ pub(crate) struct CollabCore {
     checksum_mismatch: bool,
     need_snapshot: Option<(String, u64)>,
     reconnect: bool,
+    /// Effects for a page that reads cells through `viewport()` (the custom
+    /// grid in a worker): a full repaint, or a change touching more than
+    /// `LEAN_CELLS` cells, reports `full` with no cell list, so a large paste
+    /// or a recalculation never ships every cell across.
+    lean: bool,
 }
+
+const LEAN_CELLS: usize = 2_000;
 
 impl CollabCore {
     pub(crate) fn new(document: &Value, seq: u64) -> Result<CollabCore, String> {
@@ -146,6 +153,7 @@ impl CollabCore {
             checksum_mismatch: false,
             need_snapshot: None,
             reconnect: false,
+            lean: false,
         }
     }
 
@@ -469,6 +477,13 @@ impl CollabCore {
     /// percentages, a bold header row and some coloured cells. Values are
     /// written without recalculation (there are no formulas).
     pub(crate) fn synthetic(rows: usize, cols: usize) -> CollabCore {
+        Self::synthetic_with(rows, cols, false)
+    }
+
+    /// `synthetic`, and with `formulas` every tenth column (J, T, …) is a
+    /// formula over two number columns of its row, so a full recalculation
+    /// has real work (100,000 x 50: 500,000 formulas).
+    pub(crate) fn synthetic_with(rows: usize, cols: usize, formulas: bool) -> CollabCore {
         use visigrid_engine::cell::{CellFormat, NumberFormat};
         let mut wb = Workbook::new();
         let key = wb.sheets()[0].id.0;
@@ -483,6 +498,11 @@ impl CollabCore {
             }
             for r in 1..rows {
                 for c in 0..cols {
+                    if formulas && c % 10 == 9 {
+                        s.set_value(r, c, &format!("={}{}*2+{}{}", col_letters(c - 8), r + 1, col_letters(c - 7), r + 1));
+                        s.set_format(r, c, money.clone());
+                        continue;
+                    }
                     match c % 5 {
                         0 => s.set_value(r, c, &format!("Item {r}-{c}")),
                         1 => s.set_value(r, c, &((r * 37 + c * 11) % 100_000).to_string()),
@@ -507,6 +527,10 @@ impl CollabCore {
         if let Some(s) = wb.sheet_mut(0) {
             s.layout.frozen_rows = 1;
         }
+        if formulas {
+            wb.rebuild_dep_graph();
+            wb.recompute_full_ordered();
+        }
         let layouts = HashMap::from([(key, SheetLayout { frozen_rows: 1, ..Default::default() })]);
         Self::from_loaded(Loaded { wb, layouts, active: 0 }, 0, false)
     }
@@ -516,7 +540,10 @@ impl CollabCore {
         let ch: Changes = self.client.take_changes();
         let wb = &self.client.wb;
         let mut cells = Vec::new();
-        if ch.full {
+        let full = ch.full || (self.lean && ch.cells.len() > LEAN_CELLS);
+        if full && self.lean {
+            // The page re-reads what it shows.
+        } else if ch.full {
             // A full repaint (join, resync, refusal rebuild) must carry the
             // engine's display for every cell, or the page shows raw values.
             // The store is sparse, so this is proportional to populated cells.
@@ -547,7 +574,7 @@ impl CollabCore {
                 cells.push(cell_json(idx, &wb.sheets()[idx], *row, *col));
             }
         }
-        let sheets: Vec<Value> = if ch.full || ch.sheets {
+        let sheets: Vec<Value> = if full || ch.sheets {
             wb.sheets()
                 .iter()
                 .enumerate()
@@ -568,7 +595,7 @@ impl CollabCore {
             .map(|(sheet, rect, props)| json!({"sheet": sheet, "rect": rect, "props": props}))
             .collect();
         let out = json!({
-            "full": ch.full,
+            "full": full,
             "cells": cells,
             "formats": formats,
             "sheets": sheets,
@@ -587,6 +614,18 @@ impl CollabCore {
         self.reconnect = false;
         out
     }
+}
+
+/// Column letters: 0 → A, 26 → AA.
+fn col_letters(c: usize) -> String {
+    let mut s = String::new();
+    let mut n = c + 1;
+    while n > 0 {
+        let m = (n - 1) % 26;
+        s.insert(0, (b'A' + m as u8) as char);
+        n = (n - 1) / 26;
+    }
+    s
 }
 
 fn js_err(e: String) -> JsValue {
@@ -727,6 +766,19 @@ impl CollabClient {
         CollabClient { core: CollabCore::synthetic(rows, cols) }
     }
 
+    /// `synthetic` with a formula in every tenth column (see
+    /// `CollabCore::synthetic_with`).
+    pub fn synthetic_formulas(rows: usize, cols: usize) -> CollabClient {
+        console_error_panic_hook::set_once();
+        CollabClient { core: CollabCore::synthetic_with(rows, cols, true) }
+    }
+
+    /// Lean Effects for a page that reads through `viewport()`: a full
+    /// repaint or a change over 2,000 cells reports `full` and no cells.
+    pub fn set_lean(&mut self, lean: bool) {
+        self.core.lean = lean;
+    }
+
     /// Fingerprint of the confirmed state, as the server's checksum frames.
     pub fn checksum(&self) -> String {
         self.core.checksum()
@@ -755,6 +807,45 @@ fn cell_json(idx: usize, sheet: &visigrid_engine::sheet::Sheet, row: usize, col:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lean_effects_report_large_changes_as_full_and_formulas_recalculate() {
+        let mut c = CollabCore::synthetic_with(3000, 20, true);
+        let key = c.client.wb.sheets()[0].id.0;
+        // J2 = B2*2 + C2.
+        let shown = c.display(key, 1, 9).unwrap();
+        let b: f64 = c.display(key, 1, 1).unwrap().replace(',', "").parse().unwrap();
+        let cc: f64 = c.display(key, 1, 2).unwrap().replace(',', "").parse().unwrap();
+        assert_eq!(shown.replace(',', "").parse::<f64>().unwrap(), b * 2.0 + cc);
+        c.lean = true;
+        let paste: Vec<Value> = (0..3000).map(|r| json!({"SetCell": {"sheet": key, "sheet_name": "Sheet1", "row": r, "col": 1, "content": {"Value": "1"}}})).collect();
+        let fx = c.local(&Value::Array(paste)).unwrap();
+        assert_eq!((fx["full"].clone(), fx["cells"].as_array().unwrap().len()), (json!(true), 0));
+        assert_eq!(c.display(key, 1, 9).unwrap().replace(',', "").parse::<f64>().unwrap(), 2.0 + cc, "the dependent recalculated");
+        let fx = c.recalc_all();
+        assert_eq!((fx["full"].clone(), fx["cells"].as_array().unwrap().len()), (json!(true), 0));
+        let one = json!([{"SetCell": {"sheet": key, "sheet_name": "Sheet1", "row": 5, "col": 0, "content": {"Value": "x"}}}]);
+        let fx = c.local(&one).unwrap();
+        assert_eq!(fx["full"], json!(false), "a small edit still lists its cells");
+        assert!(!fx["cells"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn timing_probe() {
+        let t = std::time::Instant::now();
+        let mut c = CollabCore::synthetic_with(100_000, 50, true);
+        c.lean = true;
+        eprintln!("build {:?}", t.elapsed());
+        let key = c.client.wb.sheets()[0].id.0;
+        let ops: Vec<Value> = (0..2000).flat_map(|r| (0..50).map(move |cc| json!({"SetCell": {"sheet": key, "sheet_name": "Sheet1", "row": r, "col": cc, "content": {"Value": format!("{}", r * 50 + cc)}}}))).collect();
+        let t = std::time::Instant::now();
+        let fx = c.local(&Value::Array(ops)).unwrap();
+        eprintln!("paste {:?} cells {}", t.elapsed(), fx["cells"].as_array().map(|a| a.len()).unwrap_or(0));
+        let t = std::time::Instant::now();
+        let fx = c.recalc_all();
+        eprintln!("recalc {:?} cells {}", t.elapsed(), fx["cells"].as_array().map(|a| a.len()).unwrap_or(0));
+    }
+
     use super::*;
     use visigrid_collab::op::Envelope;
     use visigrid_collab::server::{Server, Submitted};
