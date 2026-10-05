@@ -2038,16 +2038,94 @@ pub mod bands {
             }
         }
         let json = miniz_oxide::inflate::decompress_to_vec_with_limit(data, 1 << 30).map_err(|e| format!("band does not inflate: {e:?}"))?;
-        let doc: BandDoc = serde_json::from_slice(&json).map_err(|e| format!("invalid band: {e}"))?;
-        if doc.format != BAND_FORMAT || doc.version != 1 {
-            return Err(format!("not a version-1 band ({:?} v{})", doc.format, doc.version));
+        // Streamed: each cell is written as it is read, so a band never
+        // exists as a list of decoded cells (512 bytes each, 1.3 million in
+        // a 20-column band).
+        let mut de = serde_json::Deserializer::from_slice(&json);
+        let out = serde::de::DeserializeSeed::deserialize(BandSeed { wb }, &mut de).map_err(|e| format!("invalid band: {e}"))?;
+        de.end().map_err(|e| format!("invalid band: {e}"))?;
+        Ok(out)
+    }
+
+    /// Reads a band's header, then streams its `cells` into the sheet it
+    /// names. Writers put `cells` last; a band whose header comes after its
+    /// cells is refused rather than buffered.
+    struct BandSeed<'a> {
+        wb: &'a mut visigrid_engine::workbook::Workbook,
+    }
+
+    impl<'de, 'a> serde::de::DeserializeSeed<'de> for BandSeed<'a> {
+        type Value = (usize, usize);
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_map(self)
         }
-        if doc.cells.iter().any(|c| c.row < doc.r0 || c.row >= doc.r1) {
-            return Err("band holds a cell outside its rows".into());
+    }
+
+    impl<'de, 'a> serde::de::Visitor<'de> for BandSeed<'a> {
+        type Value = (usize, usize);
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a visigrid-band object")
         }
-        let sheet = wb.sheet_mut(doc.sheet).ok_or_else(|| format!("band names sheet {} the workbook lacks", doc.sheet))?;
-        apply_cells(sheet, &doc.cells);
-        Ok((doc.sheet, doc.cells.len()))
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            use serde::de::Error;
+            let (mut format, mut version, mut sheet, mut r0, mut r1) = (None::<String>, None::<u32>, None::<usize>, None::<usize>, None::<usize>);
+            let mut written = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "format" => format = Some(map.next_value()?),
+                    "version" => version = Some(map.next_value()?),
+                    "sheet" => sheet = Some(map.next_value()?),
+                    "r0" => r0 = Some(map.next_value()?),
+                    "r1" => r1 = Some(map.next_value()?),
+                    "cells" => {
+                        if format.as_deref() != Some(BAND_FORMAT) || version != Some(1) {
+                            return Err(A::Error::custom(format!("not a version-1 band ({format:?} v{version:?})")));
+                        }
+                        let (Some(index), Some(r0), Some(r1)) = (sheet, r0, r1) else {
+                            return Err(A::Error::custom("band header must precede its cells"));
+                        };
+                        let target = self.wb.sheet_mut(index).ok_or_else(|| A::Error::custom(format!("band names sheet {index} the workbook lacks")))?;
+                        let n = map.next_value_seed(CellsSeed { sheet: target, r0, r1 })?;
+                        written = Some((index, n));
+                    }
+                    _ => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+            }
+            written.ok_or_else(|| A::Error::custom("band has no cells"))
+        }
+    }
+
+    struct CellsSeed<'a> {
+        sheet: &'a mut Sheet,
+        r0: usize,
+        r1: usize,
+    }
+
+    impl<'de, 'a> serde::de::DeserializeSeed<'de> for CellsSeed<'a> {
+        type Value = usize;
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<usize, D::Error> {
+            d.deserialize_seq(self)
+        }
+    }
+
+    impl<'de, 'a> serde::de::Visitor<'de> for CellsSeed<'a> {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of cells")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<usize, A::Error> {
+            let mut n = 0;
+            while let Some(cell) = seq.next_element::<FullCell>()? {
+                if cell.row < self.r0 || cell.row >= self.r1 {
+                    return Err(serde::de::Error::custom("band holds a cell outside its rows"));
+                }
+                apply_cells(self.sheet, std::slice::from_ref(&cell));
+                n += 1;
+            }
+            Ok(n)
+        }
     }
 
     /// After the last band: dependencies and one ordered recompute.
@@ -2056,3 +2134,4 @@ pub mod bands {
         wb.recompute_full_ordered();
     }
 }
+

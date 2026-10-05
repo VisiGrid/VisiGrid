@@ -327,6 +327,17 @@ impl CollabCore {
         Ok(self.effects())
     }
 
+    /// A client built from a document fetched before the welcome learns the
+    /// seq that document includes. Only before it has sent or received
+    /// anything.
+    pub(crate) fn set_snapshot_seq(&mut self, seq: u64) -> Result<(), String> {
+        if self.client.pending_count() > 0 || self.client.last_seen != 0 {
+            return Err("the snapshot seq is set once, before any operation".into());
+        }
+        self.client.last_seen = seq;
+        Ok(())
+    }
+
     pub(crate) fn reconnect(&mut self) {
         self.client.disconnect();
         let _ = self.client.reconnect();
@@ -754,6 +765,12 @@ impl CollabClient {
     /// snapshot assembled in a scratch client).
     pub fn load_snapshot_from(&mut self, other: &CollabClient, seq: f64) -> Result<JsValue, JsValue> {
         to_js(&self.core.load_snapshot_from(&other.core, seq as u64).map_err(js_err)?)
+    }
+
+    /// The seq of the document this client was built from, when it was
+    /// fetched before the welcome said (see `CollabCore::set_snapshot_seq`).
+    pub fn set_snapshot_seq(&mut self, seq: f64) -> Result<(), JsValue> {
+        self.core.set_snapshot_seq(seq as u64).map_err(js_err)
     }
 
     /// The socket dropped and is reconnecting: send `hello` with
