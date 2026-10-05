@@ -246,7 +246,13 @@ impl Spreadsheet {
                 self.clipboard_visual_range = None;
                 self.maybe_show_cycle_banner(cx);
                 self.surface_incremental_recalc_problems(cx);
-                self.view_state.selected = (range.end_row, range.start_col);
+                let (row, hidden) = crate::table_append::append_focus(
+                    &self.row_view, range, &self.sheet(cx).manual_hidden_rows(),
+                );
+                self.view_state.selected = (row, range.start_col);
+                if hidden {
+                    self.status_message = Some("Added 1 Table row, hidden by the current view. Unhide rows or clear filters to enter its values.".into());
+                }
                 self.view_state.selection_end = None;
                 self.view_state.additional_selections.clear();
                 self.tab_chain_origin_col = Some(range.start_col);
@@ -271,7 +277,7 @@ impl Spreadsheet {
         };
         let (r, c) = self.view_state.selected;
         if table.range.data_rows() == 0
-            || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c))
+            || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c), &self.sheet(cx).manual_hidden_rows())
         {
             return false;
         }

@@ -132,29 +132,30 @@ impl TableAppendHistory {
     }
 }
 
-fn last_visible_body_row(rows: &RowView, range: TableRange) -> Option<usize> {
+fn last_visible_body_row(rows: &RowView, range: TableRange, manual: &std::collections::BTreeSet<usize>) -> Option<usize> {
     let visible = rows.visible_rows();
     let end = visible.partition_point(|r| *r <= range.end_row);
-    end.checked_sub(1)
-        .map(|i| visible[i])
-        .filter(|r| *r > range.start_row)
+    visible[..end].iter().rev().copied()
+        .take_while(|r| *r > range.start_row)
+        .find(|r| !manual.contains(&rows.view_to_data(*r)))
 }
 
 pub(crate) fn is_last_visible_cell(
     rows: &RowView,
     range: TableRange,
     cell: (usize, usize),
+    manual: &std::collections::BTreeSet<usize>,
 ) -> bool {
-    cell.1 == range.end_col && last_visible_body_row(rows, range) == Some(cell.0)
+    cell.1 == range.end_col && last_visible_body_row(rows, range, manual) == Some(cell.0)
 }
 
 /// Stay inside the Table when the new record is filtered out, including when
 /// all records are hidden. Never select a hidden slot or neighboring notes.
-fn append_focus(rows: &RowView, range: TableRange) -> (usize, bool) {
-    match rows.data_to_view(range.end_row) {
+pub(crate) fn append_focus(rows: &RowView, range: TableRange, manual: &std::collections::BTreeSet<usize>) -> (usize, bool) {
+    match rows.data_to_view(range.end_row).filter(|_| !manual.contains(&range.end_row)) {
         Some(row) => (row, false),
         None => (
-            last_visible_body_row(rows, range).unwrap_or(range.start_row),
+            last_visible_body_row(rows, range, manual).unwrap_or(range.start_row),
             true,
         ),
     }
@@ -239,7 +240,7 @@ impl Spreadsheet {
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.table_filter_dropdown = None;
                 self.sync_table_view(cx);
-                let (row, hidden) = append_focus(&self.row_view, range);
+                let (row, hidden) = append_focus(&self.row_view, range, &self.sheet(cx).manual_hidden_rows());
                 self.view_state.select_cell(row, write.col);
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
@@ -308,7 +309,7 @@ impl Spreadsheet {
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.table_filter_dropdown = None;
                 self.sync_table_view(cx);
-                let (row, hidden) = append_focus(&self.row_view, range);
+                let (row, hidden) = append_focus(&self.row_view, range, &self.sheet(cx).manual_hidden_rows());
                 self.view_state.select_cell(row, range.start_col);
                 self.view_state.additional_selections.clear();
                 self.tab_chain_origin_col = Some(range.start_col);
@@ -388,6 +389,52 @@ mod tests {
         wb.set_cell_value_tracked(0, 4, 3, "999"); // Hidden explicit override.
         wb.set_cell_value_tracked(0, 12, 1, "Notes stay put");
         (wb, id)
+    }
+
+    #[test]
+    fn manually_hidden_footers_append_with_visible_focus_and_history_rewind() {
+        for criteria in [false, true] {
+            let (mut before, id) = book(criteria);
+            if !criteria { before.set_table_view_spec(before.active_sheet_id(), None).unwrap(); }
+            before.set_table_totals_visible(id, true, Default::default()).unwrap();
+            let (before, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [7, 8].into()).unwrap();
+            let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+            assert_eq!(after.table(id).unwrap().1.totals_row(), Some(8));
+            assert_eq!(after.active_sheet().manual_hidden_rows(), [7, 8].into());
+            assert_eq!(after.active_sheet().get_raw(7, 3), "=[@Amount]*2");
+            assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+            let projection = after.active_sheet().build_saved_table_view(30).unwrap();
+            let plain = RowView::new(30);
+            let rows = projection.as_ref().map_or(&plain, |p| p.rows());
+            let range = after.table(id).unwrap().1.range;
+            let (focus, hidden) = append_focus(rows, range, &after.active_sheet().manual_hidden_rows());
+            assert!(hidden);
+            assert!(rows.is_view_row_visible(focus));
+            assert!(!after.active_sheet().manual_hidden_rows().contains(&rows.view_to_data(focus)));
+            assert!(is_last_visible_cell(rows, range, (focus, range.end_col), &after.active_sheet().manual_hidden_rows()));
+            let undone = entry.replay(&after, true).unwrap();
+            assert_eq!(undone.active_sheet().get_raw(6, 3), before.active_sheet().get_raw(6, 3));
+            assert_eq!(entry.replay(&undone, false).unwrap().active_sheet().manual_hidden_rows(), [7, 8].into());
+            let mut history = History::new();
+            history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with hidden footer".into() }, None);
+            for (end, footer) in [(0, 7), (1, 8)] {
+                let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+                assert_eq!(preview.workbook.table(id).unwrap().1.totals_row(), Some(footer));
+                assert_eq!(preview.workbook.active_sheet().manual_hidden_rows(), [7, 8].into());
+                assert_eq!(preview.workbook.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+            }
+        }
+    }
+
+    #[test]
+    fn plain_table_tab_and_append_focus_skip_canonical_manual_hides() {
+        let rows = RowView::new(20);
+        let range = TableRange { start_row: 2, end_row: 6, start_col: 1, end_col: 3 };
+        let hidden = [5, 6].into();
+        assert!(is_last_visible_cell(&rows, range, (4, 3), &hidden));
+        assert!(!is_last_visible_cell(&rows, range, (6, 3), &hidden));
+        assert_eq!(append_focus(&rows, range, &hidden), (4, true));
+        assert_eq!(append_focus(&rows, range, &[3, 4, 5, 6].into()), (2, true));
     }
 
     #[test]
@@ -509,7 +556,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(view.rows().data_to_view(7).is_none());
-        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range);
+        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows());
         assert!(hidden);
         assert_eq!(view.rows().view_to_data(focus), 6);
         let undo = commit.replay(&after, true).unwrap();
@@ -532,10 +579,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let range = before.table(id).unwrap().1.range;
-        assert!(is_last_visible_cell(view.rows(), range, (6, 3)));
+        assert!(is_last_visible_cell(view.rows(), range, (6, 3), &before.active_sheet().manual_hidden_rows()));
         assert_eq!(view.rows().view_to_data(6), 4); // Last displayed != last stored.
-        assert!(!is_last_visible_cell(view.rows(), range, (5, 3)));
-        assert!(!is_last_visible_cell(view.rows(), range, (6, 2)));
+        assert!(!is_last_visible_cell(view.rows(), range, (5, 3), &before.active_sheet().manual_hidden_rows()));
+        assert!(!is_last_visible_cell(view.rows(), range, (6, 2), &before.active_sheet().manual_hidden_rows()));
         let mut edit = TableCellWrite::value(4, 3, "25%".into());
         let mut format = before.active_sheet().get_format(4, 3);
         format.number_format = NumberFormat::Percent { decimals: 0 };
@@ -556,7 +603,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (7, false)
         );
         let undo = commit.replay(&after, true).unwrap();
@@ -586,7 +633,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (3, false)
         );
         assert_eq!(view.rows().view_to_data(3), 7);
@@ -605,13 +652,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (2, true)
         );
         assert!(!is_last_visible_cell(
             view.rows(),
             after.table(id).unwrap().1.range,
-            (2, 3)
+            (2, 3),
+            &after.active_sheet().manual_hidden_rows()
         ));
         // Remove records entirely, keeping the saved criterion.
         for row in 3..=6 {
@@ -630,7 +678,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (2, true)
         );
     }
@@ -906,7 +954,7 @@ mod tests {
             .build_saved_table_view(30)
             .unwrap()
             .unwrap();
-        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range);
+        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows());
         assert!(!hidden);
         assert_eq!(view.rows().view_to_data(focus), 7);
         let undo = history.replay(&after, true).unwrap();
@@ -941,7 +989,7 @@ mod tests {
             .build_saved_table_view(30)
             .unwrap()
             .unwrap();
-        assert!(append_focus(view.rows(), after.table(id).unwrap().1.range).1);
+        assert!(append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()).1);
         let undo = history.replay(&after, true).unwrap();
         assert_eq!(
             undo.active_sheet().get_format(7, 2),

@@ -72,15 +72,9 @@ impl Workbook {
                 },
                 Some(table.id),
             )?;
-            if table
-                .totals
-                .as_ref()
-                .is_some_and(|t| t.hidden_rows.contains(&row))
-            {
-                return Err(
-                    "The totals row cannot move from or into a manually hidden row.".into(),
-                );
-            }
+            // Moving footer cells does not insert or move worksheet rows.
+            // Manual visibility stays at its canonical row positions, including
+            // an old footer becoming a hidden record or a hidden destination.
         }
         Ok(())
     }

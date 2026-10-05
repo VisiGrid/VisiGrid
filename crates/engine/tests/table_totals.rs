@@ -314,18 +314,14 @@ fn fixed_and_structured_footer_references_follow_and_stale_replay_refuses() {
 }
 
 #[test]
-fn footer_destination_ownership_visibility_and_bounds_are_preflighted() {
+fn footer_destination_ownership_and_bounds_are_preflighted() {
     use visigrid_engine::sheet::MergedRegion;
-    for case in 0..4 {
+    for case in 0..3 {
         let (mut wb, id) = native_book();
         wb.set_table_totals_visible(
             id,
             true,
-            if case == 2 {
-                [5].into_iter().collect()
-            } else {
-                Default::default()
-            },
+            Default::default(),
         )
         .unwrap();
         match case {
@@ -348,7 +344,6 @@ fn footer_destination_ownership_visibility_and_bounds_are_preflighted() {
                 )
                 .unwrap();
             }
-            2 => {}
             _ => wb.sheet_mut(0).unwrap().rows = 5,
         }
         let revision = wb.revision();
@@ -988,7 +983,10 @@ fn manual_visibility_keeps_dormant_settings_and_can_hide_or_unhide_footer() {
     hidden.set_table_totals_visible(id, true, [2].into_iter().collect()).unwrap();
     assert_eq!(hidden.active_sheet().get_display(4, 1), "40");
     let (mut hidden, _) = hidden.prepare_table_row_visibility(hidden.active_sheet_id(), [2, 4].into_iter().collect()).unwrap();
-    assert!(hidden.append_table_rows(id, 1, &[]).is_err());
+    let append = hidden.append_table_rows(id, 1, &[]).unwrap();
+    assert_eq!(hidden.active_sheet().manual_hidden_rows(), [2, 4].into());
+    assert_eq!(hidden.active_sheet().get_display(5, 1), "40");
+    hidden.apply_table_commit(&append, true).unwrap();
     let (mut shown, _) = hidden.prepare_table_row_visibility(hidden.active_sheet_id(), Default::default()).unwrap();
     assert_eq!(shown.active_sheet().get_display(4, 1), "60");
     shown.append_table_rows(id, 1, &[]).unwrap();

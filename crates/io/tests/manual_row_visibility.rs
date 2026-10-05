@@ -23,6 +23,92 @@ fn check(wb: &Workbook) {
 }
 
 #[test]
+fn moved_hidden_totals_and_row_flags_survive_native_json_and_stored_excel() {
+    let mut wb = Workbook::new();
+    for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, row, 0, value);
+    }
+    let id = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: 0,
+                end_row: 3,
+                start_col: 0,
+                end_col: 0,
+            },
+            "Data",
+        )
+        .unwrap()
+        .table_id();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    let mut spec = TableViewSpec::new(id);
+    spec.sort = Some(TableSort {
+        column: wb.table(id).unwrap().1.columns[0].id,
+        direction: SortDirection::Descending,
+    });
+    wb.set_table_view_spec(wb.active_sheet_id(), Some(spec))
+        .unwrap();
+    let (mut wb, _) = wb
+        .prepare_table_row_visibility(wb.active_sheet_id(), [4, 5, 6].into())
+        .unwrap();
+    wb.append_table_rows(id, 1, &[(4, 0, "7".into())]).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for mode in 0..3 {
+        let path = dir.path().join(if mode == 2 {
+            "hidden.xlsx"
+        } else {
+            "hidden.sheet"
+        });
+        let mut loaded = match mode {
+            0 => {
+                native::save_workbook_full(&wb, &Default::default(), &[], &[], &path).unwrap();
+                native::load_workbook(&path).unwrap()
+            }
+            1 => {
+                json::import_any(&json::export_workbook(&wb, &[], 0).unwrap())
+                    .unwrap()
+                    .0
+            }
+            _ => {
+                xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+                xlsx::import(&path).unwrap().0
+            }
+        };
+        let id = loaded.active_sheet().tables()[0].id;
+        assert_eq!(
+            loaded.active_sheet().manual_hidden_rows(),
+            [4, 5, 6].into(),
+            "mode {mode}"
+        );
+        assert_eq!(loaded.table(id).unwrap().1.totals_row(), Some(5));
+        assert_eq!(loaded.active_sheet().get_raw(4, 0), "7");
+        assert_eq!(loaded.active_sheet().get_display(5, 0), "60");
+        assert!(loaded
+            .active_sheet()
+            .build_saved_table_view(30)
+            .unwrap()
+            .unwrap()
+            .rows()
+            .data_to_view(4)
+            .is_none());
+        let next = loaded
+            .append_table_rows(id, 1, &[(5, 0, "11".into())])
+            .unwrap();
+        assert_eq!(loaded.active_sheet().get_display(6, 0), "60");
+        loaded.apply_table_commit(&next, true).unwrap();
+        assert_eq!(loaded.active_sheet().get_display(5, 0), "60");
+        loaded.apply_table_commit(&next, false).unwrap();
+        assert_eq!(loaded.active_sheet().manual_hidden_rows(), [4, 5, 6].into());
+        let (shown, _) = loaded
+            .prepare_table_row_visibility(loaded.active_sheet_id(), Default::default())
+            .unwrap();
+        assert_eq!(shown.active_sheet().get_display(6, 0), "78");
+    }
+}
+
+#[test]
 fn every_native_workbook_writer_and_full_json_preserve_manual_hides_without_totals() {
     let wb = book();
     let fingerprint = native::compute_semantic_fingerprint(&wb);

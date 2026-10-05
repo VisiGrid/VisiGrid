@@ -193,6 +193,7 @@ mod tests {
         before.set_table_totals_visible(id, true, Default::default()).unwrap();
         before.set_cell_value_tracked(0, 8, 1, "West");
         before.set_cell_value_tracked(0, 8, 3, "25");
+        let (before, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [7, 9].into()).unwrap();
         let (after, commit) = resize(&before, 8, 3).unwrap();
         assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
         assert_eq!(after.active_sheet().get_display(9, 3), "205");
@@ -203,6 +204,8 @@ mod tests {
         assert_eq!(restored.active_sheet().get_raw(8, 3), "25");
         let redone = prepare_resize_replay(&restored, &commit, false).unwrap();
         assert_eq!(redone.active_sheet().get_display(9, 3), "205");
+        assert_eq!(restored.active_sheet().manual_hidden_rows(), [7, 9].into());
+        assert_eq!(redone.active_sheet().manual_hidden_rows(), [7, 9].into());
     }
 
     #[test]

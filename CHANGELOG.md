@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Append and resize Tables whose totals row is manually hidden, or whose new footer position is hidden. Keep worksheet visibility flags in place, preserve totals and undo/redo, and keep Add row/Tab focus on visible records when the appended row stays hidden.
+
 - Export formula-based conditional formatting to XLSX, including stored-order Table exports. Preserve rule precedence, per-range anchors, supported font/fill/border/number overrides and moved totals-row rules; report unsupported properties and omitted inert rules in export review.
 - Improve conditional-format import: rebase Excel’s shared range anchors, retain borders and number formats, and preserve explicit font-off settings. Report unmapped differential-style properties.
 

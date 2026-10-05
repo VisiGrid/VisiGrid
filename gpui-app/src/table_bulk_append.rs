@@ -280,6 +280,34 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn bulk_append_moves_hidden_footer_without_writing_existing_hidden_records() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let (before, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [7, 9].into()).unwrap();
+        let append = plan(&before, (6, 1), 3, 2);
+        assert_eq!(append.count, 2);
+        let writes = table_paste_writes(
+            &grid(&[&["West", "5"], &["West", "7"], &["West", "11"]]),
+            None, TablePasteKind::Contents, append.targets,
+        );
+        let (after, history) = prepare_append_writes(&before, id, 2, &writes).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
+        assert_eq!(after.active_sheet().manual_hidden_rows(), [7, 9].into());
+        assert_eq!(after.active_sheet().get_display(7, 3), "14");
+        assert_eq!(after.active_sheet().get_display(8, 3), "22");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        let view = after.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        assert!(view.rows().data_to_view(7).is_none());
+        assert!(view.rows().data_to_view(8).is_some());
+        assert!(prepare_append_writes(&before, id, 2, &[TableCellWrite::value(4, 2, "99".into())]).is_err());
+        let undone = history.replay(&after, true).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(6, 2), before.active_sheet().get_raw(6, 2));
+        let redone = history.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().manual_hidden_rows(), [7, 9].into());
+        assert_eq!(redone.active_sheet().get_display(9, 3), after.active_sheet().get_display(9, 3));
+    }
+
     fn grid(rows: &[&[&str]]) -> Vec<Vec<String>> {
         rows.iter()
             .map(|r| r.iter().map(|s| s.to_string()).collect())
