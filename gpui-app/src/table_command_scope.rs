@@ -46,6 +46,7 @@ pub(crate) fn metadata_history_allowed(wb: &Workbook, action: &UndoAction) -> bo
         UndoAction::CondFormatAdded { sheet_index, .. }
         | UndoAction::CondFormatsCleared { sheet_index, .. } => wb.sheet(*sheet_index).is_some(),
         UndoAction::Format { sheet_index, .. } | UndoAction::Comments { sheet_index, .. } => wb.sheet(*sheet_index).is_some(),
+        UndoAction::ValidationChanged { commit, .. } => wb.sheet_by_id(commit.sheet_id).is_some(),
         UndoAction::FreezePanesChanged { sheet_id, .. } => wb
             .sheet_index_by_id(*sheet_id)
             .is_some(),

@@ -21,6 +21,7 @@ mod ai_cli;
 mod ai_dialog_state;
 mod rewind_state;
 mod validation_state;
+mod validation_ui;
 mod ai_metrics;
 mod repeat;
 mod rewind;

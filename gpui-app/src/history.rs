@@ -384,6 +384,12 @@ pub enum UndoAction {
         /// Previous sort state (column, is_ascending)
         previous_sort_state: (usize, bool),
     },
+    /// Exact canonical metadata edit; legacy variants below retain their old semantics.
+    ValidationChanged {
+        sheet_index: usize,
+        commit: Box<crate::validation_ui::plan::Commit>,
+        description: String,
+    },
     /// Validation rule set (for undo: restore previous rules)
     ValidationSet {
         sheet_index: usize,
@@ -468,7 +474,7 @@ impl UndoAction {
     /// Generate a human-readable label for this action.
     pub fn label(&self) -> String {
         match self {
-            UndoAction::Comments { description, .. } => description.clone(),
+            UndoAction::Comments { description, .. } | UndoAction::ValidationChanged { description, .. } => description.clone(),
             UndoAction::CondFormatAdded { .. } => "Add conditional format".to_string(),
             UndoAction::CondFormatsCleared { rules, .. } => {
                 format!("Clear {} conditional format{}", rules.len(), if rules.len() == 1 { "" } else { "s" })
@@ -613,6 +619,7 @@ impl UndoAction {
     /// Returns None for simple actions where label is sufficient.
     pub fn summary(&self) -> Option<String> {
         match self {
+            UndoAction::ValidationChanged { commit, .. } => Some(crate::validation_ui::plan::range_summary(&commit.ranges)),
             UndoAction::ValidationSet { range, new_rule, .. } => {
                 let range_str = format_range(range.start_row, range.start_col, range.end_row, range.end_col);
                 let rule_desc = format_validation_rule(new_rule);
@@ -1216,6 +1223,7 @@ impl History {
     /// Extract sheet index, affected cells, and bounding range from an action.
     fn extract_action_details(action: &UndoAction) -> (Option<usize>, Vec<(usize, usize, String, String)>, Option<(usize, usize, usize, usize)>) {
         match action {
+            UndoAction::ValidationChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::TableCellsChanged { sheet_index, commit, .. } => {
                 let cells = commit.changes();
                 let range = Self::bounding_box(&cells);
@@ -1685,6 +1693,8 @@ impl History {
         view_state: &mut crate::app::PreviewViewState,
         action: &UndoAction,
     ) -> Result<(), PreviewBuildError> {
+        crate::validation_ui::plan::validate_history(workbook, action, true)
+            .map_err(PreviewBuildError::InvariantViolation)?;
         if view_state.per_sheet.iter().any(|v| v.structure_layout.is_some())
             && matches!(action, UndoAction::RowsInserted { .. } | UndoAction::RowsDeleted { .. }
                 | UndoAction::ColsInserted { .. } | UndoAction::ColsDeleted { .. }
@@ -1694,6 +1704,9 @@ impl History {
                 "Cannot reconstruct layout across older structural history.".into()));
         }
         match action {
+            UndoAction::ValidationChanged { commit, .. } => {
+                commit.apply(workbook, true).map_err(PreviewBuildError::InvariantViolation)?;
+            }
             UndoAction::Comments { sheet_index, patches, .. } => {
                 crate::comments::plan::validate_history(workbook, action, true)
                     .map_err(PreviewBuildError::InvariantViolation)?;
@@ -2059,6 +2072,7 @@ impl History {
 /// Classification of undo action types for replay support checking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoActionKind {
+    ValidationChanged,
     PrintSetupChanged,
     Comments,
     CondFormatAdded,
@@ -2106,6 +2120,7 @@ impl UndoActionKind {
     pub fn is_replay_supported(&self) -> bool {
         match self {
             // Fully supported
+            UndoActionKind::ValidationChanged => true,
             UndoActionKind::Values => true,
             UndoActionKind::CondFormatAdded => true,
             UndoActionKind::CondFormatsCleared => true,
@@ -2160,6 +2175,7 @@ impl UndoActionKind {
     /// Human-readable name for error messages
     pub fn display_name(&self) -> &'static str {
         match self {
+            UndoActionKind::ValidationChanged => "Validation",
             UndoActionKind::Values => "Edit",
             UndoActionKind::CondFormatAdded => "Add conditional format",
             UndoActionKind::CondFormatsCleared => "Clear conditional formats",
@@ -2208,6 +2224,7 @@ impl UndoActionKind {
         match self {
             UndoActionKind::CondFormatAdded => 0x18,
             UndoActionKind::CondFormatsCleared => 0x19,
+            UndoActionKind::ValidationChanged => 0x29,
             UndoActionKind::Values => 0x01,
             UndoActionKind::Format => 0x02,
             UndoActionKind::NamedRangeCreated => 0x03,
@@ -2254,6 +2271,7 @@ impl UndoAction {
         match self {
             UndoAction::CondFormatAdded { .. } => UndoActionKind::CondFormatAdded,
             UndoAction::CondFormatsCleared { .. } => UndoActionKind::CondFormatsCleared,
+            UndoAction::ValidationChanged { .. } => UndoActionKind::ValidationChanged,
             UndoAction::Values { .. } => UndoActionKind::Values,
             UndoAction::Format { .. } => UndoActionKind::Format,
             UndoAction::NamedRangeCreated { .. } => UndoActionKind::NamedRangeCreated,
@@ -2858,6 +2876,7 @@ mod tests {
             UndoActionKind::ColsDeleted,
             UndoActionKind::SortApplied,
             UndoActionKind::SortCleared,
+            UndoActionKind::ValidationChanged,
             UndoActionKind::ValidationSet,
             UndoActionKind::ValidationCleared,
             UndoActionKind::ValidationExcluded,

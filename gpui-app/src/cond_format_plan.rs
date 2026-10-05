@@ -23,12 +23,23 @@ pub(crate) fn targets(
     hidden_cols: Option<&BTreeSet<usize>>,
     ranges: &[Range],
 ) -> Result<(Vec<CellRange>, (usize, usize)), String> {
+    metadata_targets(sheet, rows, hidden_rows, hidden_cols, ranges, "conditional-format")
+}
+
+pub(crate) fn metadata_targets(
+    sheet: &Sheet,
+    rows: &RowView,
+    hidden_rows: Option<&BTreeSet<usize>>,
+    hidden_cols: Option<&BTreeSet<usize>>,
+    ranges: &[Range],
+    purpose: &str,
+) -> Result<(Vec<CellRange>, (usize, usize)), String> {
     let mut cells = BTreeMap::<usize, BTreeSet<usize>>::new();
     let mut anchor = None;
     let mut count = 0;
     for &((r1, c1), (r2, c2)) in ranges {
         if r1 > r2 || c1 > c2 || r2 >= sheet.rows || c2 >= sheet.cols {
-            return Err("The conditional-format selection is outside the worksheet.".into());
+            return Err(format!("The {purpose} selection is outside the worksheet."));
         }
         for (_, row) in visible_rows(rows, hidden_rows, r1, r2) {
             for col in c1..=c2 {
@@ -40,7 +51,7 @@ pub(crate) fn targets(
                     count += 1;
                 }
                 if count > MAX_CELLS {
-                    return Err("Select at most 100,000 visible cells for conditional formatting through a Table view.".into());
+                    return Err(format!("Select at most 100,000 visible cells for {purpose} editing through a Table view."));
                 }
             }
         }
@@ -74,7 +85,7 @@ pub(crate) fn targets(
                     end_col,
                 });
                 if result.len() > MAX_FRAGMENTS {
-                    return Err(fragment_error());
+                    return Err(format!("This selection would create too many {purpose} ranges. Select a smaller range."));
                 }
                 result.len() - 1
             };

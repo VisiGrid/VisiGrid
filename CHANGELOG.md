@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Edit data-validation rules and exclusions through sorted/filtered Tables. Changes target visible stored records, preserve hidden rules and use sparse undo/redo and history rewind. Stale dialogs and unsafe adjacent ranges refuse before mutation.
+- Preserve imported rule types, messages, alerts and unchanged inline-list sources in the validation editor. Fix existing-rule dialogs losing their target range, sorted validation dropdowns reading/writing the wrong row, and F8 jumping to hidden validation failures.
+
 - Full-fidelity JSON now retains data-validation exclusions, including on sheets with no current rules. Invalid validation ranges, duplicate rule ranges and excessive range counts are refused on import. Older readers may drop exclusions on re-save.
 
 - Create, rename, delete and describe named ranges while Table sorting/filtering is active, with atomic recalculation and undo/redo/rewind. Rename updates references on every sheet, including hidden records, calculated-column rules, dormant totals, conditional formatting and validation. Formula strings and unrelated tokens retain their original text.

@@ -1802,11 +1802,14 @@ impl Spreadsheet {
     pub fn open_validation_dropdown(&mut self, cx: &mut Context<Self>) {
         use crate::validation_dropdown::ValidationDropdownState;
 
+        self.sync_table_view(cx);
         let (row, col) = self.view_state.selected;
+        let target = crate::validation_ui::plan::DropdownTarget::capture(self.wb(cx), &self.row_view, (row,col));
+        if !target.is_current(self.wb(cx), &self.row_view, (row,col)) || self.is_row_hidden(target.cell.0) || self.is_col_hidden(col) { return; }
         let sheet_index = self.sheet_index(cx);
 
         // Priority 1: Check for list validation
-        let resolved = self.wb(cx).get_list_items(sheet_index, row, col);
+        let resolved = self.wb(cx).get_list_items(sheet_index, target.cell.0, col);
         match resolved {
             Some(list) if !list.items.is_empty() => {
                 // Open validation dropdown
@@ -1814,6 +1817,7 @@ impl Spreadsheet {
                     (row, col),
                     std::sync::Arc::new(list),
                 );
+                self.validation_dropdown.as_open_mut().unwrap().target = Some(target);
                 cx.notify();
                 return;
             }
@@ -1854,7 +1858,13 @@ impl Spreadsheet {
             None => return,
         };
 
-        let (row, col) = open_state.cell;
+        let Some(target) = &open_state.target else {
+            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
+        };
+        if !target.is_current(self.wb(cx), &self.row_view, self.view_state.selected) || self.is_col_hidden(target.cell.1) {
+            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
+        }
+        let (row, col) = target.cell;
         let stored_fingerprint = open_state.source_fingerprint;
         let sheet_index = self.sheet_index(cx);
 
@@ -1941,24 +1951,29 @@ impl Spreadsheet {
     /// - Dependency graph is updated
     /// - Dirty state is tracked via history
     pub fn commit_validation_value(&mut self, value: &str, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
         use crate::validation_dropdown::DropdownCloseReason;
-
-        // Close dropdown first
+        self.sync_table_view(cx);
+        self.check_dropdown_staleness(cx);
+        let Some(state) = self.validation_dropdown.as_open() else { return; };
+        let Some(target) = state.target.clone() else { return; };
+        if !state.resolved_list.items.iter().any(|item| item == value) {
+            self.status_message = Some("Choose a value from the current validation list.".into());
+            cx.notify(); return;
+        }
+        let (row, col) = target.cell;
         self.close_validation_dropdown(DropdownCloseReason::Committed, cx);
-
-        // Commit value using the same path as normal cell editing
-        let (row, col) = self.view_state.selected;
-        let old_value = self.sheet(cx).get_raw(row, col);
-
-        // Record for undo (same as confirm_edit)
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, value.to_string());
-
-        // Set value and update dependency graph (same as confirm_edit)
-        self.set_cell_value(row, col, value, cx);
-
-        // Bump revision for render cache invalidation
-        self.cells_rev = self.cells_rev.wrapping_add(1);
+        if self.wb(cx).has_table_criteria() {
+            self.apply_table_cell_writes(vec![crate::table_edit::TableCellWrite::value(row, col, value.into())], "Choose validation value", cx);
+        } else {
+            let old_value = self.sheet(cx).get_raw(row, col);
+            if old_value != value {
+                self.history.record_change(self.sheet_index(cx), row, col, old_value, value.to_string());
+                self.set_cell_value(row, col, value, cx);
+                self.bump_cells_rev();
+            }
+        }
+        self.revalidate_validation_ranges(&[visigrid_engine::validation::CellRange::single(row,col)], cx);
         cx.notify();
     }
 
@@ -1994,42 +2009,9 @@ impl Spreadsheet {
 
     /// Circle Invalid Data: validate all cells with validation rules and mark invalid ones.
     pub fn circle_invalid_data(&mut self, cx: &mut Context<Self>) {
-        use visigrid_engine::validation::ValidationResult;
-        use visigrid_engine::workbook::Workbook;
-
-        // Clear existing markers
         self.invalid_cells.clear();
-        self.validation_failures.clear();
-        self.validation_failure_index = 0;
-
-        // Collect validation ranges first (to avoid borrow conflict)
-        let ranges: Vec<_> = self.sheet(cx).validations.iter()
-            .map(|(range, _)| range.clone())
-            .collect();
-
-        // Validate each cell with a rule
-        let sheet_idx = self.sheet_index(cx);
-        for target in ranges {
-            for row in target.start_row..=target.end_row {
-                for col in target.start_col..=target.end_col {
-                    let display_value = self.sheet(cx).get_display(row, col);
-                    // Skip empty cells
-                    if display_value.is_empty() {
-                        continue;
-                    }
-                    let result = self.wb(cx).validate_cell_input(sheet_idx, row, col, &display_value);
-                    if let ValidationResult::Invalid { reason, .. } = result {
-                        // Classify the failure reason
-                        let failure_reason = Workbook::classify_failure_reason(&reason);
-                        self.invalid_cells.insert((row, col), failure_reason);
-                        self.validation_failures.push((row, col));
-                    }
-                }
-            }
-        }
-
-        // Sort failures in row-major order for predictable navigation
-        self.validation_failures.sort_by_key(|&(r, c)| (r, c));
+        let ranges: Vec<_> = self.sheet(cx).validations.iter().map(|(range, _)| *range).collect();
+        self.revalidate_validation_ranges(&ranges, cx);
 
         let count = self.invalid_cells.len();
         if count == 0 {
@@ -2063,37 +2045,11 @@ impl Spreadsheet {
 
     /// Jump to the next invalid cell (F8).
     pub fn next_invalid_cell(&mut self, cx: &mut Context<Self>) {
-        if self.validation_failures.is_empty() {
-            self.status_message = Some("No validation failures to navigate".to_string());
-            cx.notify();
-            return;
-        }
-
-        // Move to next failure (with wrap-around)
-        self.validation_failure_index = (self.validation_failure_index + 1) % self.validation_failures.len();
-        let (row, col) = self.validation_failures[self.validation_failure_index];
-
-        // Select the cell and scroll into view
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
-        self.ensure_visible(cx);
-
-        // Get failure reason for status message
-        let reason_str = self.invalid_cells.get(&(row, col))
-            .map(|r| Self::failure_reason_short(*r))
-            .unwrap_or_default();
-
-        self.status_message = Some(format!(
-            "Invalid {} of {}: {} — F8 next, Shift+F8 prev",
-            self.validation_failure_index + 1,
-            self.validation_failures.len(),
-            reason_str
-        ));
-        cx.notify();
+        self.navigate_validation_failure(false, cx);
     }
 
     /// Short human-readable description of validation failure reason.
-    fn failure_reason_short(reason: visigrid_engine::validation::ValidationFailureReason) -> String {
+    pub(crate) fn failure_reason_short(reason: visigrid_engine::validation::ValidationFailureReason) -> String {
         use visigrid_engine::validation::ValidationFailureReason;
         match reason {
             ValidationFailureReason::InvalidValue => "Value doesn't match rule".to_string(),
@@ -2108,37 +2064,7 @@ impl Spreadsheet {
 
     /// Jump to the previous invalid cell (Shift+F8).
     pub fn prev_invalid_cell(&mut self, cx: &mut Context<Self>) {
-        if self.validation_failures.is_empty() {
-            self.status_message = Some("No validation failures to navigate".to_string());
-            cx.notify();
-            return;
-        }
-
-        // Move to previous failure (with wrap-around)
-        if self.validation_failure_index == 0 {
-            self.validation_failure_index = self.validation_failures.len() - 1;
-        } else {
-            self.validation_failure_index -= 1;
-        }
-        let (row, col) = self.validation_failures[self.validation_failure_index];
-
-        // Select the cell and scroll into view
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
-        self.ensure_visible(cx);
-
-        // Get failure reason for status message
-        let reason_str = self.invalid_cells.get(&(row, col))
-            .map(|r| Self::failure_reason_short(*r))
-            .unwrap_or_default();
-
-        self.status_message = Some(format!(
-            "Invalid {} of {}: {} — F8 next, Shift+F8 prev",
-            self.validation_failure_index + 1,
-            self.validation_failures.len(),
-            reason_str
-        ));
-        cx.notify();
+        self.navigate_validation_failure(true, cx);
     }
 
     // ========================================================================

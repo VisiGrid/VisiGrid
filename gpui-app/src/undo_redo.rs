@@ -36,6 +36,9 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
+            if let Err(error) = crate::validation_ui::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action, false) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
@@ -77,6 +80,7 @@ impl Spreadsheet {
                 }
             }
             match entry.action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, false, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
                 self.bump_cells_rev();
@@ -570,6 +574,7 @@ impl Spreadsheet {
     /// Apply a single undo action (helper for Group handling)
     fn apply_undo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, false, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
                 self.bump_cells_rev();
@@ -968,6 +973,7 @@ impl Spreadsheet {
     /// Apply a single redo action (helper for Group handling)
     fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) -> bool {
         match action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, true, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
                 self.bump_cells_rev();
@@ -1284,6 +1290,9 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
+            if let Err(error) = crate::validation_ui::plan::validate_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action, true) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
@@ -1325,6 +1334,7 @@ impl Spreadsheet {
                 }
             }
             match entry.action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, true, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
                 self.bump_cells_rev();

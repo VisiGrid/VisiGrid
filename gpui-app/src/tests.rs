@@ -3017,7 +3017,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "exclude_from_validation",
         "clear_validation_exclusions",
     ] {
-        assert_guarded(validations, function);
+        assert_contains_near(validations, function, "block_if_previewing_only(cx)");
     }
 
     let sheets = include_str!("sheet_ops.rs");
@@ -3037,7 +3037,7 @@ fn review_mode_workbook_mutators_are_guarded() {
     }
 
     assert_guarded(include_str!("editing.rs"), "recalculate");
-    assert_guarded(include_str!("app.rs"), "commit_validation_value");
+    assert_contains_near(include_str!("app.rs"), "commit_validation_value", "block_if_previewing_only(cx)");
     let find_replace = include_str!("find_replace.rs");
     assert_contains_near(find_replace, "replace_next", "block_if_previewing_only(cx)");
     assert_contains_near(find_replace, "replace_all", "block_if_previewing_only(cx)");

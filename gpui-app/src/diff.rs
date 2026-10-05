@@ -176,6 +176,7 @@ impl NamedRangeChange {
 /// Validation change
 #[derive(Debug, Clone)]
 pub enum ValidationChange {
+    Edited { description: String },
     Set { sheet_index: usize, range: String, rule_desc: String },
     Cleared { sheet_index: usize, range: String },
     Excluded { sheet_index: usize, range: String },
@@ -185,6 +186,7 @@ pub enum ValidationChange {
 impl ValidationChange {
     pub fn description(&self) -> String {
         match self {
+            ValidationChange::Edited { description } => description.clone(),
             ValidationChange::Set { range, rule_desc, .. } => {
                 format!("Set {} on {}", rule_desc, range)
             }
@@ -332,6 +334,9 @@ fn process_action(
     format_change_count: &mut usize,
 ) {
     match action {
+        UndoAction::ValidationChanged { description, commit, .. } => validation_changes.push(ValidationChange::Edited {
+            description: format!("{description}: {}", crate::validation_ui::plan::range_summary(&commit.ranges)),
+        }),
         UndoAction::Comments { .. } => {} // Comment metadata does not change calculated values.
         UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => {
             *format_change_count += 1;

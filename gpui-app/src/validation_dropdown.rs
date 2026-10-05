@@ -26,6 +26,8 @@ pub enum ValidationDropdownState {
 pub struct DropdownOpenState {
     /// Anchor cell (row, col)
     pub cell: (usize, usize),
+    /// Stable worksheet identity and stored cell; `cell` remains the UI anchor.
+    pub(crate) target: Option<crate::validation_ui::plan::DropdownTarget>,
 
     /// The resolved list (held in Arc for cheap cloning)
     pub resolved_list: Arc<ResolvedList>,
@@ -90,6 +92,7 @@ impl ValidationDropdownState {
         let filtered_indices: Vec<usize> = (0..resolved_list.items.len()).collect();
 
         Self::Open(DropdownOpenState {
+            target: None,
             cell,
             resolved_list,
             source_fingerprint,
