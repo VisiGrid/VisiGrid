@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Convert Tables with manually hidden rows to ordinary ranges without losing visibility or changing which rows their totals include. Preserve frozen formula sources, add guarded atomic undo/redo/rewind, and allow conversion while unrelated Tables have active criteria. Referenced conditional-format/validation rules now refuse conversion explicitly instead of losing their Table binding.
+
 - Append and resize Tables whose totals row is manually hidden, or whose new footer position is hidden. Keep worksheet visibility flags in place, preserve totals and undo/redo, and keep Add row/Tab focus on visible records when the appended row stays hidden.
 
 - Export formula-based conditional formatting to XLSX, including stored-order Table exports. Preserve rule precedence, per-range anchors, supported font/fill/border/number overrides and moved totals-row rules; report unsupported properties and omitted inert rules in export review.

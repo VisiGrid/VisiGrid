@@ -427,7 +427,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 .child("Choose a function with the arrow keys. Tab moves to label or formula text. Enter applies; Esc cancels.");
         }
         TableDialogKind::Rename(_)=>preview=preview.child("Formulas that reference this Table will follow the new name."),
-        TableDialogKind::Resize(id)=>preview=preview.when(app.wb(cx).table(id).is_some_and(|(_, t)| t.totals.is_some()), |p| p.child("The range includes headers and records; totals stay below the body. New footer cells must be empty. Surviving totals follow their columns; released footer cells stay in place. Fixed A1 links to the footer must use #Totals before its row can move.")).child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Shrinking removes records from the Table by stored row position, not the displayed sort order. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),
+        TableDialogKind::Resize(id)=>preview=preview.when(app.wb(cx).table(id).is_some_and(|(_, t)| t.totals.is_some()), |p| p.child("The range includes headers and records; totals stay below the body. New footer cells must be empty. Surviving totals follow their columns; released footer cells stay in place. Footer cells and supported references move together; worksheet row visibility stays in place.")).child("Use worksheet addresses, including hidden records. Keep the top-left cell fixed. Shrinking removes records from the Table by stored row position, not the displayed sort order. Sorting and filters stay active; clear a criterion before removing its column. Released cells stay in place; references to removed columns become #REF!."),
         TableDialogKind::ColumnFormula(id,col,replace) => {
             if let Some((sheet,table)) = app.wb(cx).table(id) {
                 let sheet = app.wb(cx).sheet_by_id(sheet).unwrap();
@@ -449,7 +449,7 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 preview = preview.child(format!("Formula shown at row {}. New rows use this rule; cell edits remain overrides.", d.range.parse::<usize>().unwrap_or(0)+1));
             }
         }
-        TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding and named saved views are removed; explicit formatting is kept. You can undo this change.",d.name,d.range)),
+        TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding and named saved views are removed; explicit formatting and manual row hiding are kept. You can undo this change.",d.name,d.range)),
     }
     let content = div()
         .w(px(if creating { 560.0 } else { 470.0 }))

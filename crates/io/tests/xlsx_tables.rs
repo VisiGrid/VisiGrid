@@ -2258,7 +2258,10 @@ fn totals_keep_manual_hidden_rows_and_refuse_unsafe_authoring() {
     let append = wb.append_table_rows(id, 1, &[]).unwrap();
     assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "10");
     wb.apply_table_commit(&append, true).unwrap();
-    assert!(wb.remove_table(id).is_err());
+    let converted = wb.remove_table(id).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    assert!(wb.sheet(0).unwrap().manual_hidden_rows().contains(&2));
+    wb.apply_table_commit(&converted, true).unwrap();
     assert!(wb
         .sheet(0)
         .unwrap()

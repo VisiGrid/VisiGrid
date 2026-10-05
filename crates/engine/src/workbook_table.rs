@@ -17,6 +17,8 @@ mod footer;
 mod footer_refs;
 #[path = "workbook_named_table_views.rs"]
 mod named_views;
+#[path = "workbook_table_conversion.rs"]
+mod conversion;
 
 use super::table_refs::{names_only, TableFormulaChange, TotalsReferenceChange};
 use super::Workbook;
@@ -66,6 +68,10 @@ pub struct TableCommit {
 }
 
 impl TableCommit {
+    pub fn is_conversion(&self) -> bool {
+        self.before.table.is_some() && self.after.table.is_none()
+    }
+
     pub fn is_saved_view_change(&self) -> bool {
         self.saved_view_edit
     }
@@ -828,12 +834,23 @@ impl Workbook {
     /// Convert to a range: remove metadata and rewrite dependent structured
     /// formulas to absolute A1 references, preserving explicit formatting.
     pub fn remove_table(&mut self, id: TableId) -> Result<TableCommit, String> {
+        self.ensure_writable()?;
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
-        if old.totals.as_ref().is_some_and(|t| !t.hidden_rows.is_empty()) {
-            return Err("Converting this Table would discard the manual row visibility used by its totals. Keep it as a Table to preserve those calculations.".into());
+        let mut candidate = self.clone();
+        // Older files may retain visibility only in the totals definition.
+        // Preserve its effective worksheet flags before removing that owner,
+        // without normalizing unrelated Tables' retained metadata.
+        candidate.sheet_by_id_mut(sheet_id).unwrap().manual_hidden_rows =
+            self.sheet_by_id(sheet_id).unwrap().manual_hidden_rows();
+        candidate.prepare_conversion_metadata(sheet_id, old)?;
+        let mut commit = candidate.table_commit(sheet_id, id, Some(old.clone()), None)?;
+        candidate.apply_table_commit(&commit, false)?;
+        let report = candidate.recompute_full_ordered();
+        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+            return Err("Converting this Table would leave a cycle or unsettled calculation. Nothing was changed.".into());
         }
-        let commit = self.table_commit(sheet_id, id, Some(old.clone()), None)?;
-        self.apply_table_commit(&commit, false)?;
+        commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?));
+        self.restore_snapshot_monotonic(&candidate);
         Ok(commit)
     }
 
@@ -1195,7 +1212,7 @@ impl Workbook {
         }
         // A pivot can source a formula on another sheet that depends on this
         // footer. Recalculation alone doesn't advance that sheet's generation.
-        let totals_dependents: Vec<_> = if commit.is_totals_change() || commit.footer_move.is_some() || commit.totals_schema_edit || commit.calculated_edit {
+        let totals_dependents: Vec<_> = if commit.is_conversion() || commit.is_totals_change() || commit.footer_move.is_some() || commit.totals_schema_edit || commit.calculated_edit {
             self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
                 sheet.cells_iter().filter_map(move |((row, col), cell)| {
                     matches!(cell.value(), ValueRef::Formula { .. })

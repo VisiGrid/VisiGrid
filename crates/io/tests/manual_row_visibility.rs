@@ -23,6 +23,74 @@ fn check(wb: &Workbook) {
 }
 
 #[test]
+fn converting_legacy_hidden_totals_keeps_visibility_in_every_file_format() {
+    let mut wb = Workbook::new();
+    for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, row, 0, value);
+    }
+    let id = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange {
+                start_row: 0,
+                end_row: 3,
+                start_col: 0,
+                end_col: 0,
+            },
+            "Data",
+        )
+        .unwrap()
+        .table_id();
+    wb.set_table_totals_visible(id, true, Default::default())
+        .unwrap();
+    let mut catalog = wb.saved_tables();
+    catalog.sheets[0].tables[0]
+        .totals
+        .as_mut()
+        .unwrap()
+        .hidden_rows = [2, 4].into();
+    wb.restore_tables(catalog).unwrap();
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+    wb.remove_table(id).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for mode in 0..3 {
+        let path = dir.path().join(if mode == 2 {
+            "range.xlsx"
+        } else {
+            "range.sheet"
+        });
+        let loaded = match mode {
+            0 => {
+                native::save_workbook_full(&wb, &Default::default(), &[], &[], &path).unwrap();
+                native::load_workbook(&path).unwrap()
+            }
+            1 => {
+                json::import_any(&json::export_workbook(&wb, &[], 0).unwrap())
+                    .unwrap()
+                    .0
+            }
+            _ => {
+                xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+                xlsx::import(&path).unwrap().0
+            }
+        };
+        assert!(loaded.active_sheet().tables().is_empty());
+        assert_eq!(
+            loaded.active_sheet().manual_hidden_rows(),
+            [2, 4].into(),
+            "mode {mode}"
+        );
+        assert_eq!(loaded.active_sheet().get_display(4, 0), "40");
+        assert!(loaded.active_sheet().get_raw(4, 0).contains("$A$2:$A$4"));
+        let (shown, _) = loaded
+            .prepare_table_row_visibility(loaded.active_sheet_id(), Default::default())
+            .unwrap();
+        assert_eq!(shown.active_sheet().get_display(4, 0), "60");
+    }
+}
+
+#[test]
 fn moved_hidden_totals_and_row_flags_survive_native_json_and_stored_excel() {
     let mut wb = Workbook::new();
     for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {

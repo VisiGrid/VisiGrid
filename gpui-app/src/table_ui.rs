@@ -485,7 +485,7 @@ impl Spreadsheet {
         if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if !kind.is_named_view() && !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Total(..) | TableDialogKind::ColumnFormula(..)) && self.block_table_view_edit(cx) { return; }
+        if !kind.is_named_view() && !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Convert(_) | TableDialogKind::Total(..) | TableDialogKind::ColumnFormula(..)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
             TableDialogKind::Views(id)
             | TableDialogKind::SaveView(id)
@@ -599,6 +599,23 @@ impl Spreadsheet {
         }
         if let TableDialogKind::Rename(id) = draft.kind {
             match self.submit_table_rename(id, draft.name.trim(), cx) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::Convert(id) = draft.kind {
+            let result = (|| {
+                self.validate_saved_view_layout(self.wb(cx))?;
+                let mut candidate = self.wb(cx).clone();
+                let commit = candidate.remove_table(id)?;
+                self.validate_saved_view_layout(&candidate)?;
+                self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                self.record_table_commit(commit, format!("Convert Table to range: {}", draft.name.trim()), cx);
+                Ok::<(), String>(())
+            })();
+            match result {
                 Ok(()) => self.table_dialog = None,
                 Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
             }
@@ -722,6 +739,30 @@ impl Spreadsheet {
         }
         if commit.is_name_change() {
             return self.replay_table_headers(commit, undo, cx);
+        }
+        if commit.is_conversion() {
+            let result = (|| {
+                self.validate_saved_view_layout(self.wb(cx))?;
+                let mut candidate = self.wb(cx).clone();
+                candidate.apply_table_commit(commit, undo)?;
+                self.validate_saved_view_layout(&candidate)?;
+                Ok::<_, String>(candidate)
+            })();
+            return match result {
+                Ok(candidate) => {
+                    self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                    self.sync_table_view(cx);
+                    self.bump_cells_rev();
+                    self.is_modified = true;
+                    cx.notify();
+                    true
+                }
+                Err(error) => {
+                    self.status_message = Some(format!("Cannot {} Table conversion: {error}", if undo { "undo" } else { "redo" }));
+                    cx.notify();
+                    false
+                }
+            };
         }
         match self
             .workbook
@@ -980,6 +1021,38 @@ impl Spreadsheet {
 #[cfg(test)]
 mod tests {
     use super::{header_in_view_rect, parse_range, range_label, TableRange};
+    #[test]
+    fn conversion_rewind_preserves_manual_hides_and_another_sheets_criteria() {
+        use crate::history::{History, UndoAction};
+        let mut before = crate::table_edit::tests::fixture(true);
+        let spec = before.active_sheet().table_view_spec().cloned();
+        let other = before.add_sheet_named("Convert").unwrap();
+        for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {
+            before.set_cell_value_tracked(other, row, 0, value);
+        }
+        let sid = before.sheet(other).unwrap().id;
+        let id = before.create_table(sid, TableRange { start_row: 0, end_row: 3, start_col: 0, end_col: 0 }, "ConvertMe").unwrap().table_id();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let (before, _) = before.prepare_table_row_visibility(sid, [2, 4].into()).unwrap();
+        let mut after = before.clone();
+        let commit = after.remove_table(id).unwrap();
+        assert!(commit.is_conversion());
+        after.apply_table_commit(&commit, true).unwrap();
+        after.apply_table_commit(&commit, false).unwrap();
+        let mut history = History::new();
+        history.record_action_with_provenance(UndoAction::TableCommit {
+            sheet_index: other, commit: Box::new(commit), header_layout: None,
+            description: "Convert hidden totals to range".into(),
+        }, None);
+        for end in [0, 1] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            assert_eq!(preview.workbook.sheet(other).unwrap().tables().is_empty(), end == 1);
+            assert_eq!(preview.workbook.sheet(other).unwrap().manual_hidden_rows(), [2, 4].into());
+            assert_eq!(preview.workbook.sheet(other).unwrap().get_display(4, 0), "40");
+            assert_eq!(preview.workbook.active_sheet().table_view_spec(), spec.as_ref());
+        }
+    }
+
     #[test]
     fn table_dialog_ranges_are_finite_local_and_ordered() {
         assert_eq!(range_label(parse_range("$B$2:D20").unwrap()), "B2:D20");
