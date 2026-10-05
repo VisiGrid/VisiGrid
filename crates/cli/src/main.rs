@@ -8,6 +8,7 @@ mod exit_codes;
 mod export;
 mod fetch;
 mod fill;
+mod grid;
 mod hub;
 mod convert;
 mod csv_args;
@@ -713,6 +714,12 @@ Workbook and Parquet previews have a 10M-cell guard. Parquet also respects sheet
         json: bool,
     },
 
+    /// Sign this computer into Grid for cloud sheets (separate from `login`)
+    Grid {
+        #[command(subcommand)]
+        command: GridCommands,
+    },
+
     /// Authenticate with VisiGrid Hub
     #[command(after_help = "\
 Examples:
@@ -1373,6 +1380,28 @@ Examples:
 }
 
 #[derive(Subcommand)]
+enum GridCommands {
+    /// Store a device code from Grid's authorize page
+    #[command(after_help = "\
+Examples:
+  vgrid grid login --api-base https://grid.example        # prompts for the code
+  VISIGRID_GRID_CODE=… vgrid grid login --api-base https://grid.example")]
+    Login {
+        /// Device code (non-interactive; also reads VISIGRID_GRID_CODE)
+        #[arg(long)]
+        code: Option<String>,
+
+        /// Grid address. Required: there is no default.
+        #[arg(long)]
+        api_base: String,
+    },
+    /// Revoke this computer in Grid and forget its code
+    Logout,
+    /// Show which Grid this computer is signed into
+    Status,
+}
+
+#[derive(Subcommand)]
 enum AiCommands {
     /// Check AI configuration and connectivity
     Doctor {
@@ -1950,6 +1979,11 @@ fn main() -> ExitCode {
             preview,
             json,
         }) => cmd_replay(script, verify, output, format, fingerprint, quiet, preview, json),
+        Some(Commands::Grid { command }) => match command {
+            GridCommands::Login { code, api_base } => grid::cmd_login(code, api_base),
+            GridCommands::Logout => grid::cmd_logout(),
+            GridCommands::Status => grid::cmd_status(),
+        },
         Some(Commands::Ai { command }) => match command {
             AiCommands::Doctor { json, test } => cmd_ai_doctor(json, test),
         },

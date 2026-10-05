@@ -7,6 +7,7 @@
 
 mod auth;
 mod client;
+pub mod grid;
 
 pub use auth::{AuthCredentials, auth_file_path, load_auth, save_auth, delete_auth};
 pub use client::{

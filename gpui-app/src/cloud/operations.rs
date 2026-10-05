@@ -5,7 +5,9 @@
 
 use crate::app::Spreadsheet;
 use crate::cloud::{CloudIdentity, CloudSyncState};
+use crate::cloud::grid;
 use crate::cloud::sheets_client::{is_unauthorized, SheetsClient};
+use visigrid_hub_client::grid::{GridClient, GridError, GridSheet, INLINE_SAVE_BYTES};
 use crate::hub::client::HubError;
 use visigrid_io::json::{self, CloudBlobKind};
 use visigrid_io::native;
@@ -56,6 +58,11 @@ impl Spreadsheet {
         self.status_message = Some("Moving to cloud...".to_string());
         cx.notify();
 
+        if grid::signed_in() {
+            self.cloud_move_to_grid(path, sheet_name, cx);
+            return;
+        }
+
         let name = sheet_name.clone();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
@@ -78,6 +85,7 @@ impl Spreadsheet {
                             last_synced_at: None,
                             // A new sheet: the first upload is expected to land on it.
                             last_synced_revision: Some(sheet_info.revision.unwrap_or(0)),
+                            grid_pid: None,
                         };
 
                         // Persist identity to the .sheet file
@@ -114,6 +122,62 @@ impl Spreadsheet {
         }).detach();
     }
 
+    /// Move to Cloud on Grid: the sheet is created holding this workbook, so
+    /// it starts out synced. Grid takes the visigrid-json document, never the
+    /// .sheet file.
+    fn cloud_move_to_grid(&mut self, path: std::path::PathBuf, name: String, cx: &mut gpui::Context<Self>) {
+        self.workbook.update(cx, |wb, _| wb.update_pivot_staleness());
+        let wb = self.wb(cx).clone();
+        let layouts = self.build_json_sheet_layouts(cx);
+        let active = wb.active_sheet_index();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || -> Result<(GridSheet, String, String), GridError> {
+                let document = json::export_workbook(&wb, &layouts, active).map_err(GridError::Parse)?;
+                let hash = crate::hub::client::hash_bytes(document.as_bytes());
+                let client = GridClient::from_saved()?;
+                let sheet = if document.len() <= INLINE_SAVE_BYTES {
+                    let parsed = serde_json::from_str(&document).map_err(|e| GridError::Parse(e.to_string()))?;
+                    client.create(&name, &parsed)?
+                } else {
+                    // Too big to send with the create: start empty, then upload.
+                    let empty = json::export_workbook(&visigrid_engine::workbook::Workbook::new(), &[], 0)
+                        .map_err(GridError::Parse)?;
+                    let parsed = serde_json::from_str(&empty).map_err(|e| GridError::Parse(e.to_string()))?;
+                    let created = client.create(&name, &parsed)?;
+                    client.save(&created.pid, created.revision, document.as_bytes())?
+                };
+                Ok((sheet, client.api_base().to_string(), hash))
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok((sheet, api_base, hash)) => {
+                        let identity = CloudIdentity {
+                            sheet_id: sheet.id,
+                            public_id: sheet.pid.clone(),
+                            sheet_name: sheet.name.clone(),
+                            api_base,
+                            last_synced_hash: Some(hash),
+                            last_synced_at: None,
+                            last_synced_revision: Some(sheet.revision),
+                            grid_pid: Some(sheet.pid),
+                        };
+                        if let Err(e) = crate::cloud::save_cloud_identity(&path, &identity) {
+                            eprintln!("Warning: failed to persist cloud identity: {}", e);
+                        }
+                        this.cloud_identity = Some(identity);
+                        this.cloud_sync_state = CloudSyncState::Synced;
+                        this.status_message = Some(format!("Moved to Grid as {}", sheet.name));
+                    }
+                    Err(GridError::SignedOut) => this.grid_sign_in_expired(cx),
+                    Err(e) => this.status_message = Some(format!("Failed to move to Grid: {e}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Open the cloud sheet picker: fetches sheet list, stores it, and shows the dialog.
     pub fn cloud_open(&mut self, cx: &mut gpui::Context<Self>) {
         if self.cloud_sheets_loading {
@@ -125,8 +189,16 @@ impl Spreadsheet {
         self.cloud_selected_sheet = None;
         cx.notify();
 
+        let use_grid = grid::signed_in();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(|| {
+            let result = smol::unblock(move || {
+                if use_grid {
+                    let client = GridClient::from_saved().map_err(grid::hub_error)?;
+                    return client
+                        .list()
+                        .map(|sheets| sheets.into_iter().map(grid::sheet_info).collect())
+                        .map_err(grid::hub_error);
+                }
                 let client = SheetsClient::from_saved_auth()?;
                 client.list_sheets()
             }).await;
@@ -143,6 +215,9 @@ impl Spreadsheet {
                     }
                     Err(HubError::NotAuthenticated) => {
                         this.status_message = Some("Sign in first to open cloud sheets.".to_string());
+                    }
+                    Err(ref e) if is_unauthorized(e) && use_grid => {
+                        this.grid_sign_in_expired(cx);
                     }
                     Err(ref e) if is_unauthorized(e) => {
                         this.cloud_sign_in_expired(true, cx);
@@ -203,9 +278,26 @@ impl Spreadsheet {
         let sheet_name = selected.name.clone();
         let sheet_name_for_status = selected.name.clone();
         let slug = selected.slug.clone();
+        let grid_pid = selected.grid_pid.clone();
+        let use_grid = grid_pid.is_some();
+        let api_base = if use_grid {
+            grid::configured_base().unwrap_or_default()
+        } else {
+            crate::hub::auth::load_auth()
+                .map(|a| a.api_base)
+                .unwrap_or_else(|| "https://api.visiapi.com".to_string())
+        };
 
         cx.spawn(async move |this, cx| {
+            let pid = grid_pid.clone();
             let result: Result<(Option<Vec<u8>>, Option<i64>), HubError> = smol::unblock(move || {
+                if let Some(pid) = pid {
+                    // Revision before the document, for the same reason as below.
+                    let client = GridClient::from_saved().map_err(grid::hub_error)?;
+                    let revision = client.get(&pid).map_err(grid::hub_error)?.revision;
+                    let document = client.data(&pid).map_err(grid::hub_error)?;
+                    return Ok((Some(document), Some(revision)));
+                }
                 let client = SheetsClient::from_saved_auth()?;
                 // Read the revision BEFORE the bytes. If a save lands in
                 // between, we hold newer bytes under an older revision and the
@@ -274,12 +366,11 @@ impl Spreadsheet {
                             sheet_id,
                             public_id,
                             sheet_name,
-                            api_base: crate::hub::auth::load_auth()
-                                .map(|a| a.api_base)
-                                .unwrap_or_else(|| "https://api.visiapi.com".to_string()),
+                            api_base,
                             last_synced_hash: None,
                             last_synced_at: None,
                             last_synced_revision: revision,
+                            grid_pid,
                         };
 
                         if let Err(e) = crate::cloud::save_cloud_identity(&file_path, &identity) {
@@ -297,6 +388,9 @@ impl Spreadsheet {
                         });
                         cx.notify();
                     });
+                }
+                Err(ref e) if is_unauthorized(e) && use_grid => {
+                    let _ = this.update(cx, |this, cx| this.grid_sign_in_expired(cx));
                 }
                 Err(ref e) if is_unauthorized(e) => {
                     let _ = this.update(cx, |this, cx| this.cloud_sign_in_expired(true, cx));
