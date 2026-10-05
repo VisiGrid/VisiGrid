@@ -147,7 +147,7 @@ pub const FULL_JSON_TABLE_VERSION: u32 = 3;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
 /// the web mapper own it). BTreeMap for deterministic serialization.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SheetLayout {
     pub col_widths: BTreeMap<usize, f32>,
     pub row_heights: BTreeMap<usize, f32>,
@@ -568,7 +568,10 @@ pub fn export_full(sheet: &Sheet) -> Result<String, String> {
 
 /// Export a sheet as visigrid-json v1 with presentation state.
 pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<String, String> {
-    if sheet.canonical_content_protection.is_some() {
+    if let Some(protection) = &sheet.canonical_content_protection {
+        if serde_json::to_string(layout).map_err(|e| e.to_string())? != protection.layout {
+            return Err("Cannot change protected workbook layout.".into());
+        }
         let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
         return crate::content_protection::original_source(&wb)?.map(str::to_owned)
             .ok_or_else(|| "Protected source is unavailable.".into());
@@ -599,6 +602,12 @@ pub fn export_workbook(
     active_sheet: usize,
 ) -> Result<String, String> {
     if let Some(source) = crate::content_protection::original_source(wb)? {
+        for (sheet, layout) in wb.sheets().iter().zip(layouts) {
+            let protection = sheet.canonical_content_protection.as_ref().unwrap();
+            if serde_json::to_string(layout).map_err(|e| e.to_string())? != protection.layout {
+                return Err("Cannot change protected workbook layout.".into());
+            }
+        }
         return Ok(source.to_owned());
     }
     wb.ensure_writable()?;
@@ -923,7 +932,7 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
         let cached = cached_formula_values(&doc, &wb);
         let reason = format!("visigrid-json version {} is newer than supported ({}). Opened read-only; original content is retained.", doc.version, FULL_JSON_TABLE_VERSION);
         crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
-        retain_protected_source(&mut wb, content)?;
+        retain_protected_source(&mut wb, content, &layouts)?;
         return Ok((wb, layouts, active));
     }
 
@@ -953,7 +962,7 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
         if !recovery { return Err(issue.to_string()); }
         let cached = cached_formula_values(&doc, &wb);
         crate::table_recovery::finish_recovery(&mut wb, &issue, &cached);
-        retain_protected_source(&mut wb, content)?;
+        retain_protected_source(&mut wb, content, &layouts)?;
         return Ok((wb, layouts, active));
     }
     wb.rebuild_dep_graph();
@@ -970,13 +979,13 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     if let Some(path) = crate::content_protection::first_loss(&source, &projected) {
         let reason = format!("This VisiGrid cannot preserve content at {path}. Opened read-only; original content is retained. Upgrade VisiGrid to edit.");
         crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
-        retain_protected_source(&mut wb, content)?;
+        retain_protected_source(&mut wb, content, &layouts)?;
     }
     Ok((wb, layouts, active))
 }
 
 
-fn retain_protected_source(wb: &mut visigrid_engine::workbook::Workbook, content: &str) -> Result<(), String> {
+fn retain_protected_source(wb: &mut visigrid_engine::workbook::Workbook, content: &str, layouts: &[SheetLayout]) -> Result<(), String> {
     let source = std::sync::Arc::new(content.to_owned());
     let sheet_ids = wb.sheets().iter().map(|s| s.id).collect::<Vec<_>>();
     for index in 0..wb.sheet_count() {
@@ -984,6 +993,7 @@ fn retain_protected_source(wb: &mut visigrid_engine::workbook::Workbook, content
         wb.sheet_mut(index).unwrap().canonical_content_protection = Some(
             visigrid_engine::sheet::CanonicalContentProtection {
                 source: source.clone(), sheet_ids: sheet_ids.clone(), fingerprint,
+                layout: serde_json::to_string(&layouts[index]).map_err(|e| e.to_string())?,
             },
         );
     }

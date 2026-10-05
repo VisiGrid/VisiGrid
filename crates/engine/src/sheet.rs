@@ -294,6 +294,7 @@ pub struct CanonicalContentProtection {
     pub source: std::sync::Arc<String>,
     pub sheet_ids: Vec<SheetId>,
     pub fingerprint: [u8; 32],
+    pub layout: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -76,3 +76,11 @@ fn recognizable_future_version_keeps_original_without_recalculation() {
         source
     );
 }
+
+#[test]
+fn layout_edits_cannot_masquerade_as_original_copies() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let (workbook, mut layouts, active) = import_any(source).unwrap();
+    layouts[0].hidden_rows.insert(42);
+    assert!(export_workbook(&workbook, &layouts, active).is_err());
+}
