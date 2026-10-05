@@ -1234,6 +1234,29 @@ mod tests {
     // =========================================================================
 
     #[test]
+    fn sums_of_many_decimals_do_not_drift() {
+        // 0.1 × 10 and 0.1 + 0.2 + 0.3: a plain running sum gives
+        // 0.9999999999999999 and 0.6000000000000001
+        let mut lookup = TestLookup::new();
+        for r in 0..10 {
+            lookup.set(r, 0, "0.1");
+            lookup.set(r, 1, "x");
+        }
+        for (r, v) in ["0.1", "0.2", "0.3"].iter().enumerate() {
+            lookup.set(r, 2, v);
+        }
+        for (formula, want) in [
+            ("=SUM(A1:A10)", 1.0),
+            ("=SUM(C1:C3)", 0.6),
+            ("=AVERAGE(A1:A10)", 0.1),
+            (r#"=SUMIF(B1:B10, "x", A1:A10)"#, 1.0),
+            (r#"=SUMIFS(A1:A10, B1:B10, "x")"#, 1.0),
+        ] {
+            assert_eq!(evaluate(&parse_and_bind(formula), &lookup), EvalResult::Number(want), "{formula}");
+        }
+    }
+
+    #[test]
     fn test_sumifs_single_criteria() {
         let mut lookup = TestLookup::new();
         // Sum range: A1:A5 = [100, 200, 150, 300, 50]

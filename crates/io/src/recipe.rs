@@ -2309,7 +2309,7 @@ fn group(by: &[String], totals: &[Total], frame: &mut Frame, report: &mut RunRep
                 TotalFn::First => values.first().map_or(String::new(), |(_, v)| v.to_string()),
                 TotalFn::Last => values.last().map_or(String::new(), |(_, v)| v.to_string()),
                 TotalFn::Sum | TotalFn::Average => {
-                    let mut sum = 0.0;
+                    let mut sum = visigrid_engine::numeric::Sum::default();
                     let mut n = 0usize;
                     for (r, v) in filled() {
                         match parse_number(v, dc) {
@@ -2335,8 +2335,8 @@ fn group(by: &[String], totals: &[Total], frame: &mut Frame, report: &mut RunRep
                     }
                     match (t.func, n) {
                         (TotalFn::Average, 0) => String::new(),
-                        (TotalFn::Average, n) => number_text(round_total(sum / n as f64)),
-                        _ => number_text(round_total(sum)),
+                        (TotalFn::Average, n) => number_text(round_total(sum.value() / n as f64)),
+                        _ => number_text(round_total(sum.value())),
                     }
                 }
                 TotalFn::Min | TotalFn::Max => {
@@ -2401,8 +2401,16 @@ fn group(by: &[String], totals: &[Total], frame: &mut Frame, report: &mut RunRep
 
 /// Sums of decimals pick up binary noise (0.1 + 0.2): round to 9 places,
 /// past anything a currency or quantity export carries.
+/// A total as people write it: 15 significant digits, as many as a number
+/// holds reliably (and as the sheet shows), so 0.1 + 0.2 is 0.3. The digits
+/// beyond are rounding noise, whatever the column's precision; the sum
+/// itself is compensated (see `visigrid_engine::numeric::Sum`), so noise
+/// doesn't grow with the row count.
 fn round_total(x: f64) -> f64 {
-    let r = (x * 1e9).round() / 1e9;
+    if !x.is_finite() {
+        return x;
+    }
+    let r: f64 = format!("{x:.14e}").parse().unwrap_or(x);
     if r == 0.0 { 0.0 } else { r }
 }
 
@@ -3673,6 +3681,32 @@ totals = [
         assert!(!bad.report.ok);
         assert_eq!(bad.report.errors[0].line, 2);
         assert!(bad.report.errors[0].reason.contains("sum"), "{:?}", bad.report.errors);
+    }
+
+    #[test]
+    fn group_totals_of_many_amounts_have_no_float_noise() {
+        // 300,000 varied two-decimal amounts: a plain sum ends in …0899984
+        let mut seed = 7u64;
+        let mut csv = String::from("Region,Amount\n");
+        let mut cents = [0i64; 2];
+        for i in 0..300_000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let c = (seed >> 33) as i64 % 500_000;
+            cents[i % 2] += c;
+            csv.push_str(&format!("{},{}.{:02}\n", ["West", "East"][i % 2], c / 100, c % 100));
+        }
+        let r = Recipe::from_toml(
+            "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"group\"\nby = [\"Region\"]\ntotals = [{ fn = \"sum\", column = \"Amount\", as = \"Total\" }, { fn = \"average\", column = \"Amount\", as = \"Avg\" }]\n",
+        )
+        .unwrap();
+        let res = run(&r, &snap(&csv));
+        assert!(res.report.ok, "{}", res.report.summary());
+        let exact = |c: i64| format!("{}.{:02}", c / 100, c % 100).trim_end_matches('0').trim_end_matches('.').to_string();
+        assert_eq!(res.output.rows[0][1], exact(cents[0]));
+        assert_eq!(res.output.rows[1][1], exact(cents[1]));
+        // Short sums stay as written too
+        let small = run(&r, &snap("Region,Amount\nW,0.1\nW,0.2\n"));
+        assert_eq!(small.output.rows[0][1..], ["0.3", "0.15"]);
     }
 
     #[test]

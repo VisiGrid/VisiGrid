@@ -18,7 +18,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.len() < 2 {
                         return Some(EvalResult::Error("#DIV/0!".to_string()));
                     }
-                    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                    let mean = crate::numeric::sum(&vals) / vals.len() as f64;
                     let variance = vals.iter()
                         .map(|x| (x - mean).powi(2))
                         .sum::<f64>() / (vals.len() - 1) as f64;
@@ -35,7 +35,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.is_empty() {
                         return Some(EvalResult::Error("#DIV/0!".to_string()));
                     }
-                    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                    let mean = crate::numeric::sum(&vals) / vals.len() as f64;
                     let variance = vals.iter()
                         .map(|x| (x - mean).powi(2))
                         .sum::<f64>() / vals.len() as f64;
@@ -52,7 +52,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.len() < 2 {
                         return Some(EvalResult::Error("#DIV/0!".to_string()));
                     }
-                    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                    let mean = crate::numeric::sum(&vals) / vals.len() as f64;
                     let variance = vals.iter()
                         .map(|x| (x - mean).powi(2))
                         .sum::<f64>() / (vals.len() - 1) as f64;
@@ -69,7 +69,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     if vals.is_empty() {
                         return Some(EvalResult::Error("#DIV/0!".to_string()));
                     }
-                    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                    let mean = crate::numeric::sum(&vals) / vals.len() as f64;
                     let variance = vals.iter()
                         .map(|x| (x - mean).powi(2))
                         .sum::<f64>() / vals.len() as f64;
