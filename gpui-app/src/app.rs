@@ -3480,6 +3480,30 @@ impl Spreadsheet {
 
     /// Get the nth visible row composing RowView filtering with user-hidden rows.
     /// Returns (view_row, data_row) or None if out of bounds.
+    /// The displayed rows at display positions `start..start + count`, as
+    /// (view_row, data_row), in one pass: the renderer needs each row's
+    /// neighbours too, and `nth_visible_row_with_hidden` walks from the top
+    /// when rows are hidden. Shorter than `count` at the end of the sheet.
+    pub fn displayed_rows(&self, start: usize, count: usize, cx: &gpui::App) -> Vec<(usize, usize)> {
+        if !self.has_hidden_rows() {
+            return (start..start + count).map_while(|i| self.nth_visible_row(i, cx)).collect();
+        }
+        let mut out = Vec::with_capacity(count);
+        let mut shown = 0;
+        let mut idx = 0;
+        while out.len() < count {
+            let Some((view_row, data_row)) = self.nth_visible_row(idx, cx) else { break };
+            if !self.is_row_hidden(data_row) {
+                if shown >= start {
+                    out.push((view_row, data_row));
+                }
+                shown += 1;
+            }
+            idx += 1;
+        }
+        out
+    }
+
     pub fn nth_visible_row_with_hidden(&self, visible_index: usize, cx: &gpui::App) -> Option<(usize, usize)> {
         if !self.has_hidden_rows() {
             return self.nth_visible_row(visible_index, cx);

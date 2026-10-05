@@ -1486,8 +1486,14 @@ impl Spreadsheet {
     /// - Own right and bottom: always draw if set
     /// - Own top: only draw if cell above has no bottom border
     /// - Own left: only draw if cell to left has no right border
+    /// `above`/`below` are the data rows shown directly above and below this
+    /// one, which differ from the next row in storage under a sort or filter: a cell's top
+    /// edge meets whatever row is displayed above it, not its storage
+    /// neighbour (a header's bottom rule used to reappear above the row that
+    /// had been under it before sorting).
     pub fn cell_user_borders(
         &self, row: usize, col: usize, cx: &App,
+        above: Option<usize>, below: Option<usize>,
         boundary_bottom: bool, boundary_right: bool,
     ) -> (CellBorder, CellBorder, CellBorder, CellBorder) {
         #[cfg(debug_assertions)]
@@ -1558,11 +1564,7 @@ impl Spreadsheet {
         // Resolve TOP edge: max(my_top, above_neighbor_bottom)
         let top = {
             let my_top = effective_side(row, col, 0);
-            let above_bottom = if row > 0 {
-                effective_side(row - 1, col, 2)
-            } else {
-                none
-            };
+            let above_bottom = above.map_or(none, |r| effective_side(r, col, 2));
             max_border(my_top, above_bottom)
         };
 
@@ -1580,11 +1582,7 @@ impl Spreadsheet {
         // Resolve BOTTOM edge: only at viewport boundary (last visible row)
         let bottom = if boundary_bottom {
             let my_bottom = effective_side(row, col, 2);
-            let below_top = if row + 1 < NUM_ROWS {
-                effective_side(row + 1, col, 0)
-            } else {
-                none
-            };
+            let below_top = below.map_or(none, |r| effective_side(r, col, 0));
             max_border(my_bottom, below_top)
         } else {
             none
