@@ -342,8 +342,12 @@ fn large_sheets_snapshot_as_bands_and_load_back() {
         let put = b.call(json!({"cmd": "load_band", "key": band["key"], "data": got["data"]}));
         assert_eq!(put["ok"], json!(true), "{put}");
     }
-    let done = b.call(json!({"cmd": "finish_load"}));
-    assert_eq!(done["checksum"], snap["checksum"], "the banded load is the same workbook");
+    assert_eq!(b.call(json!({"cmd": "finish_load"}))["ok"], json!(true));
+    // Too large to checksum (empty); content-addressed bands compare instead.
+    assert_eq!(snap["checksum"], json!(""));
+    let again = b.call(json!({"cmd": "snapshot"}));
+    assert_eq!(again["bands"], snap["bands"], "the banded load is the same workbook");
+    assert_eq!(again["document"], snap["document"]);
     assert_eq!(b.call(json!({"cmd": "band", "key": "nope"}))["ok"], json!(false));
     let bad = b.call(json!({"cmd": "load_band", "key": bands[0]["key"], "data": "AAAA"}));
     assert_eq!(bad["ok"], json!(false), "a band is checked against its key");

@@ -537,6 +537,35 @@ pub fn checksum(wb: &Workbook) -> String {
     checksum_of(&fingerprint(wb))
 }
 
+/// Workbooks over this many cells are not checksummed in collaboration: the
+/// fingerprint costs O(cells) per call (5 s and 900 MB of WASM memory at
+/// 300,000 x 20), and the host computes one per operation. The same as the
+/// size at which sheets are stored as bands, whose content-addressed keys
+/// compare snapshots instead. An incremental checksum is follow-up work.
+pub const CHECKSUM_CELL_LIMIT: usize = 200_000;
+
+/// Whether `wb` is over [`CHECKSUM_CELL_LIMIT`] (counts at most limit + 1 cells).
+pub fn too_large_to_checksum(wb: &Workbook) -> bool {
+    let mut n = 0usize;
+    for s in wb.sheets() {
+        n += s.cells_iter().take(CHECKSUM_CELL_LIMIT + 1 - n).count();
+        if n > CHECKSUM_CELL_LIMIT {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`checksum`], or empty for a workbook over [`CHECKSUM_CELL_LIMIT`]: what
+/// the host reports and clients compare (an empty checksum is not compared).
+pub fn collab_checksum(wb: &Workbook) -> String {
+    if too_large_to_checksum(wb) {
+        String::new()
+    } else {
+        checksum(wb)
+    }
+}
+
 pub fn checksum_of(print: &Fingerprint) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(print).expect("fingerprint serializes");

@@ -24,7 +24,7 @@ use std::io::{BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde_json::{json, Map, Value};
-use visigrid_collab::apply::{apply_ops, checksum, filter_unappliable};
+use visigrid_collab::apply::{apply_ops, checksum, collab_checksum, filter_unappliable};
 use visigrid_collab::op::{ops_from_json, ops_to_json, CollabOp};
 use visigrid_collab::transform::{transform_lists, Order};
 use visigrid_engine::sheet::SheetId;
@@ -179,7 +179,7 @@ impl Host {
         self.seq = seq;
         self.barrier = seq;
         self.poisoned = false;
-        Ok(fields(json!({"checksum": checksum(self.wb()?)})))
+        Ok(fields(json!({"checksum": collab_checksum(self.wb()?)})))
     }
 
     fn replay(&mut self, req: &Map<String, Value>) -> Reply {
@@ -202,7 +202,7 @@ impl Host {
             apply_ops(wb, ops);
         }
         self.seq += parsed.len() as u64;
-        Ok(fields(json!({"seq": self.seq, "checksum": checksum(self.wb()?)})))
+        Ok(fields(json!({"seq": self.seq, "checksum": collab_checksum(self.wb()?)})))
     }
 
     fn submit(&mut self, req: &Map<String, Value>) -> Reply {
@@ -264,7 +264,7 @@ impl Host {
             "result": "op",
             "op": ops_to_json(&ops),
             "seq": self.seq,
-            "checksum": checksum(self.wb()?),
+            "checksum": collab_checksum(self.wb()?),
         })))
     }
 
@@ -278,7 +278,7 @@ impl Host {
             .iter()
             .map(|b| json!({"key": b.reference.key, "bytes": b.reference.bytes, "sheet": b.sheet, "r0": b.reference.r0, "r1": b.reference.r1}))
             .collect();
-        let reply = json!({"document": document, "bands": list, "seq": self.seq, "checksum": checksum(wb)});
+        let reply = json!({"document": document, "bands": list, "seq": self.seq, "checksum": collab_checksum(wb)});
         self.bands = bands.into_iter().map(|b| (b.reference.key, b.data)).collect();
         Ok(fields(reply))
     }
@@ -305,7 +305,7 @@ impl Host {
     fn finish_load(&mut self) -> Reply {
         let wb = self.wb_mut()?;
         visigrid_io::json::bands::finish(wb);
-        Ok(fields(json!({"checksum": checksum(self.wb()?)})))
+        Ok(fields(json!({"checksum": collab_checksum(self.wb()?)})))
     }
 
     fn replace_document(&mut self, req: &Map<String, Value>) -> Reply {
@@ -329,7 +329,7 @@ impl Host {
             self.seq = s;
         }
         self.barrier = self.seq;
-        Ok(fields(json!({"seq": self.seq, "checksum": checksum(self.wb()?)})))
+        Ok(fields(json!({"seq": self.seq, "checksum": collab_checksum(self.wb()?)})))
     }
 
     fn set_clock(&mut self, req: &Map<String, Value>) -> Reply {

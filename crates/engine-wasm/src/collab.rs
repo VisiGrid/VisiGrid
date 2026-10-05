@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use uuid::Uuid;
-use visigrid_collab::apply::{checksum, Changes};
+use visigrid_collab::apply::{checksum, collab_checksum, Changes};
 use visigrid_collab::client::{Client, ToClient, ToServer};
 use visigrid_collab::op::{ops_from_json, ops_to_json, SheetKey};
 use visigrid_collab::server::Committed;
@@ -242,7 +242,8 @@ impl CollabCore {
                 let sum = frame.get("checksum").and_then(Value::as_str).ok_or("checksum without value")?;
                 // Frames are FIFO and a checksum follows the op it covers, so
                 // at that moment our confirmed state is exactly at `seq`.
-                if seq == self.client.last_seen && checksum(&self.client.confirmed) != sum {
+                // An empty checksum is a workbook too large to checksum.
+                if !sum.is_empty() && seq == self.client.last_seen && collab_checksum(&self.client.confirmed) != sum {
                     self.checksum_mismatch = true;
                 }
             }
@@ -369,7 +370,7 @@ impl CollabCore {
     }
 
     pub(crate) fn checksum(&self) -> String {
-        checksum(&self.client.confirmed)
+        collab_checksum(&self.client.confirmed)
     }
 
     pub(crate) fn set_clock(&mut self, now_ms: Option<f64>, utc_offset_minutes: Option<i32>, seed: Option<f64>) {
@@ -911,7 +912,8 @@ mod tests {
         assert_eq!(banded.display(1, 139_999, 1).as_deref(), Some("row 139999"));
         banded.finish_load();
         assert_eq!(banded.display(1, 0, 2), whole.display(1, 0, 2));
-        assert_eq!(banded.checksum(), whole.checksum(), "the confirmed copy matches the whole document");
+        assert_eq!(checksum(&banded.client.confirmed), checksum(&whole.client.confirmed), "the confirmed copy matches the whole document");
+        assert_eq!(banded.checksum(), "", "too large to checksum in collaboration");
         assert!(banded.load_band(&bands[0].data, Some(&bands[1].reference.key)).is_err());
     }
 
