@@ -614,7 +614,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
         version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
         table_catalog: sheet.has_table_history().then(||
             serde_json::to_value(visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()).unwrap()),
-        body: sheet_body(sheet, layout),
+        body: sheet_body(sheet, layout, true),
         sheets: Vec::new(),
         active_sheet: None,
     };
@@ -629,6 +629,18 @@ pub fn export_workbook(
     layouts: &[SheetLayout],
     active_sheet: usize,
 ) -> Result<String, String> {
+    let doc = workbook_doc(wb, layouts, active_sheet, &|_| true)?;
+    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+}
+
+/// The document for `wb`, with each sheet's cells written inline only when
+/// `inline(index)` (a banded sheet's cells are never built here).
+fn workbook_doc(
+    wb: &visigrid_engine::workbook::Workbook,
+    layouts: &[SheetLayout],
+    active_sheet: usize,
+    inline: &dyn Fn(usize) -> bool,
+) -> Result<FullDoc, String> {
     wb.ensure_writable()?;
     wb.validate_table_view_specs()?;
     if wb.sheets().iter().zip(layouts).any(|(sheet, layout)| sheet.table_view_spec().is_some() && layout.filter.is_some()) {
@@ -640,7 +652,7 @@ pub fn export_workbook(
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout));
+            let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout), inline(i));
             let saved = wb.saved_pivots(i);
             if !saved.is_empty() {
                 body.pivots = serde_json::to_value(&saved).ok();
@@ -656,7 +668,7 @@ pub fn export_workbook(
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
     };
-    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+    Ok(doc)
 }
 
 /// The cells of `sheet` as written to a document, in row-major order, for
@@ -665,7 +677,12 @@ fn sheet_cells(sheet: &Sheet, rows: Option<std::ops::Range<usize>>) -> Vec<FullC
     let mut cells: Vec<FullCell> = Vec::new();
     let in_rows = |r: usize| rows.as_ref().map_or(true, |range| range.contains(&r));
 
-    let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).filter(|&(r, _)| in_rows(r)).collect();
+    // A band reads only the store chunks its rows overlap, not the sheet.
+    let mut coords: Vec<(usize, usize)> = match &rows {
+        Some(range) if range.start < range.end => sheet.cells_in_range(range.start, range.end - 1, 0, usize::MAX - 1),
+        Some(_) => Vec::new(),
+        None => sheet.cells_iter().map(|(rc, _)| rc).collect(),
+    };
     coords.sort_unstable();
 
     for (row, col) in coords {
@@ -793,8 +810,8 @@ fn sheet_cells(sheet: &Sheet, rows: Option<std::ops::Range<usize>>) -> Vec<FullC
     cells
 }
 
-fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
-    let cells = sheet_cells(sheet, None);
+fn sheet_body(sheet: &Sheet, layout: &SheetLayout, with_cells: bool) -> SheetBody {
+    let cells = if with_cells { sheet_cells(sheet, None) } else { Vec::new() };
     let merges = sheet
         .merged_regions
         .iter()
@@ -1996,16 +2013,15 @@ pub mod bands {
         layouts: &[SheetLayout],
         active_sheet: usize,
     ) -> Result<(String, Vec<Band>), String> {
-        let manifest = export_workbook(wb, layouts, active_sheet)?;
-        let mut doc: FullDoc = serde_json::from_str(&manifest).map_err(|e| e.to_string())?;
+        let banded_sheets: Vec<bool> = (0..wb.sheets().len()).map(|i| banded(wb, i)).collect();
+        let mut doc = workbook_doc(wb, layouts, active_sheet, &|i| !banded_sheets[i])?;
         let mut out = Vec::new();
         for (i, body) in doc.sheets.iter_mut().enumerate() {
-            if !banded(wb, i) {
+            if !banded_sheets[i] {
                 continue;
             }
             let sheet = &wb.sheets()[i];
             let last = sheet.cells_iter().map(|((r, _), _)| r).chain(sheet.spill_receiver_coords().map(|(r, _)| r)).max().unwrap_or(0);
-            body.cells.clear();
             let mut r0 = 0;
             while r0 <= last {
                 let r1 = r0 + BAND_ROWS;
