@@ -330,6 +330,15 @@ impl CollabCore {
         Some(wb.sheets()[idx].get_formatted_display(row, col))
     }
 
+    /// Recalculate every formula in the optimistic workbook.
+    pub(crate) fn recalc_all(&mut self) -> Value {
+        self.client.wb.recompute_full_ordered();
+        if let Some(ch) = self.client.changes.as_mut() {
+            ch.full = true;
+        }
+        self.effects()
+    }
+
     /// What the user typed into a cell (formula text with `=`, or the
     /// literal input), for an editor to start from.
     pub(crate) fn raw(&self, sheet: SheetKey, row: usize, col: usize) -> Option<String> {
@@ -409,8 +418,8 @@ impl CollabCore {
         coords.extend(s.spill_receiver_coords().filter(|&(r, c)| r >= r0 && r <= r1 && c >= c0 && c <= c1));
         coords.sort_unstable();
         coords.dedup();
-        let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num, mut raw) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (r, c) in coords {
             let shown = s.get_formatted_display(r, c);
             let f = format_index(&s.get_format(r, c));
@@ -429,6 +438,7 @@ impl CollabCore {
             kind.push(k);
             fmt.push(f);
             num.push(n.filter(|n| n.is_finite()));
+            raw.push(s.get_raw(r, c));
         }
         let mut row_formats = serde_json::Map::new();
         for (r, f) in &s.row_formats {
@@ -449,7 +459,7 @@ impl CollabCore {
             }
         }
         Some(json!({
-            "rows": rows, "cols": cols, "text": text, "kind": kind, "fmt": fmt, "num": num,
+            "rows": rows, "cols": cols, "text": text, "kind": kind, "fmt": fmt, "num": num, "raw": raw,
             "formats": formats, "row_formats": row_formats, "col_formats": col_formats,
         }))
     }
@@ -671,6 +681,12 @@ impl CollabClient {
     /// `undefined` for an unknown sheet key.
     pub fn display(&self, sheet: f64, row: usize, col: usize) -> Option<String> {
         self.core.display(sheet as SheetKey, row, col)
+    }
+
+    /// Recalculate every formula (the benchmark's "full recalculation"):
+    /// Effects with `full`.
+    pub fn recalc_all(&mut self) -> Result<JsValue, JsValue> {
+        to_js(&self.core.recalc_all())
     }
 
     /// A cell's raw input (formula text or literal), or `undefined` for an
@@ -1060,6 +1076,8 @@ mod tests {
         }
         assert!(c.viewport(99, 0, 0, 1, 1).is_none());
         assert_eq!(c.raw(1, 1, 0).as_deref(), Some("=1/0"));
+        let r = v["raw"].as_array().unwrap();
+        assert!(r.iter().any(|x| x == "=1/0"), "viewport carries raw input");
         assert_eq!(c.raw(1, 0, 1).as_deref(), Some("0.25"));
     }
 
