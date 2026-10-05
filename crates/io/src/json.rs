@@ -192,6 +192,28 @@ pub struct SheetLayout {
 }
 
 impl SheetLayout {
+    /// This file layout's lines (sizes, hidden, frozen) as the engine holds them.
+    pub fn line_layout(&self) -> visigrid_engine::layout::LineLayout {
+        visigrid_engine::layout::LineLayout {
+            col_widths: self.col_widths.clone(),
+            row_heights: self.row_heights.clone(),
+            hidden_rows: self.hidden_rows.clone(),
+            hidden_cols: self.hidden_cols.clone(),
+            frozen_rows: self.frozen_rows,
+            frozen_cols: self.frozen_cols,
+        }
+    }
+
+    /// Replace this layout's lines with the engine's.
+    pub fn set_line_layout(&mut self, l: &visigrid_engine::layout::LineLayout) {
+        self.col_widths = l.col_widths.clone();
+        self.row_heights = l.row_heights.clone();
+        self.hidden_rows = l.hidden_rows.clone();
+        self.hidden_cols = l.hidden_cols.clone();
+        self.frozen_rows = l.frozen_rows;
+        self.frozen_cols = l.frozen_cols;
+    }
+
     /// Move presentation state to follow a structural edit on this sheet.
     ///
     /// The engine adjusts cells, formulas, validations, and named ranges;

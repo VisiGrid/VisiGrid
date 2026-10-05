@@ -142,7 +142,9 @@ fn simulator_converges() {
     let (mut local, mut own, mut collateral, mut no_inverse) = (0u64, 0u64, 0u64, 0u64);
     let mut stale = Vec::new();
     let mut cycle = Vec::new();
-    for seed in 0..n {
+    // COLLAB_SIM_SEED replays one seed.
+    let only: Option<u64> = std::env::var("COLLAB_SIM_SEED").ok().and_then(|s| s.parse().ok());
+    for seed in only.map_or(0..n, |s| s..s + 1) {
         let cfg = &configs[(seed % configs.len() as u64) as usize];
         let r = run(seed, cfg, false);
         committed += r.committed;

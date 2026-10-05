@@ -606,7 +606,11 @@ pub fn positional_inverse(ops: &[CollabOp], before: &Workbook) -> Vec<CollabOp> 
             CollabOp::SetCell { .. }
             | CollabOp::SetBold { .. }
             | CollabOp::SetFormat { .. }
-            | CollabOp::ReplaceRange { .. } => {}
+            | CollabOp::ReplaceRange { .. }
+            | CollabOp::SetLines { .. }
+            | CollabOp::SetFreeze { .. }
+            | CollabOp::Merge { .. }
+            | CollabOp::Unmerge { .. } => {}
             CollabOp::Structural { sheet, sheet_name, axis, at, count, delete } => {
                 inverse.push(CollabOp::Structural {
                     sheet: *sheet,

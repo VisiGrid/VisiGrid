@@ -362,6 +362,65 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
         }
         (MoveSheet { .. }, _) => one(a),
 
+        // ---- line layout ----
+        (
+            SetLines { sheet, axis, lo, hi, props },
+            SetLines { sheet: bs, axis: bx, lo: bl, hi: bh, props: bp },
+        ) if sheet == bs && axis == bx && !later && lo <= bh && bl <= hi => {
+            // As formats: the later op wins every property it sets on the
+            // overlap; the earlier keeps the rest of its span and the rest
+            // of its properties.
+            let mut out: Vec<CollabOp> = Vec::new();
+            if lo < bl {
+                out.push(SetLines { sheet: *sheet, axis: *axis, lo: *lo, hi: bl - 1, props: props.clone() });
+            }
+            if hi > bh {
+                out.push(SetLines { sheet: *sheet, axis: *axis, lo: bh + 1, hi: *hi, props: props.clone() });
+            }
+            let kept = props.without(bp);
+            if !kept.is_empty() {
+                out.push(SetLines { sheet: *sheet, axis: *axis, lo: (*lo).max(*bl), hi: (*hi).min(*bh), props: kept });
+            }
+            if out.is_empty() {
+                Transformed::Dropped("a later change to the same lines won")
+            } else {
+                Transformed::Ops(out)
+            }
+        }
+        (
+            SetLines { sheet, axis, lo, hi, props },
+            Structural { sheet: bs, axis: bx, at, count, delete, .. },
+        ) if sheet == bs && axis == bx => {
+            let pieces = map_lines(*lo, *hi, *at, *count, *delete);
+            if pieces.is_empty() {
+                Transformed::Dropped("its lines were deleted")
+            } else {
+                Transformed::Ops(
+                    pieces.into_iter().map(|(l, h)| SetLines { sheet: *sheet, axis: *axis, lo: l, hi: h, props: props.clone() }).collect(),
+                )
+            }
+        }
+        (SetLines { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => Transformed::Dropped("its sheet was deleted"),
+        (SetLines { .. }, _) => one(a),
+
+        (SetFreeze { sheet, .. }, SetFreeze { sheet: bs, .. }) if sheet == bs && !later => {
+            Transformed::Dropped("a later freeze of the same sheet won")
+        }
+        (SetFreeze { sheet, rows, cols }, Structural { sheet: bs, axis, at, count, delete, .. }) if sheet == bs => {
+            let (mut r, mut c) = (*rows, *cols);
+            let n = if *axis == Axis::Row { &mut r } else { &mut c };
+            *n = frozen_after(*n, *at, *count, *delete);
+            one(&SetFreeze { sheet: *sheet, rows: r, cols: c })
+        }
+        (SetFreeze { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => Transformed::Dropped("its sheet was deleted"),
+        (SetFreeze { .. }, _) => one(a),
+
+        // ---- merges (serialized against what they touch; see `conflict`) ----
+        (Merge { sheet, .. } | Unmerge { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
+            Transformed::Dropped("its sheet was deleted")
+        }
+        (Merge { .. } | Unmerge { .. }, _) => one(a),
+
         // ---- atomic range ----
         (
             ReplaceRange {
@@ -562,6 +621,28 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
     if (matches!(a, MoveSheet { .. }) && reorders(b)) || (matches!(b, MoveSheet { .. }) && reorders(a)) {
         return Some("the sheet tabs were reordered at the same time".into());
     }
+    // Merging or unmerging concurrent with a row/column edit on the same
+    // sheet, with a write into the rectangle (a write to a merged cell lands
+    // on its origin, so order matters), or with another merge change that
+    // overlaps it, is serialized.
+    let merge_of = |x: &CollabOp| match x {
+        Merge { sheet, rect } | Unmerge { sheet, rect } => Some((*sheet, *rect)),
+        _ => None,
+    };
+    for (m, other) in [(a, b), (b, a)] {
+        if let Some((s, rect)) = merge_of(m) {
+            let hit = match other {
+                Structural { sheet, .. } => *sheet == s,
+                SetCell { sheet, row, col, .. } => *sheet == s && rect.contains(*row, *col),
+                ReplaceRange { .. } => other.sheet() == s && rect.intersects(&other.replace_rect().unwrap()),
+                Merge { sheet, rect: r } | Unmerge { sheet, rect: r } => *sheet == s && rect.intersects(r),
+                _ => false,
+            };
+            if hit {
+                return Some("cells were merged or unmerged at the same time".into());
+            }
+        }
+    }
     // Concurrent deletes of different sheets are serialized, so two clients
     // can never together delete the last sheet.
     if let (DeleteSheet { sheet: sa, .. }, DeleteSheet { sheet: sb, .. }) = (a, b) {
@@ -647,5 +728,44 @@ fn outcome(t: Transformed) -> Result<Vec<CollabOp>, Refusal> {
         Transformed::Ops(v) => Ok(v),
         Transformed::Dropped(_) => Ok(Vec::new()),
         Transformed::Refused(reason) => Err(Refusal { reason }),
+    }
+}
+
+/// A run of lines `lo..=hi` through a row/column insert or delete: inserted
+/// lines are not part of it (they take the default), deleted ones leave it.
+/// The same rule as the engine's `LineLayout::shift_for_structural`.
+fn map_lines(lo: usize, hi: usize, at: usize, count: usize, delete: bool) -> Vec<(usize, usize)> {
+    if !delete {
+        return if at <= lo {
+            vec![(lo + count, hi + count)]
+        } else if at <= hi {
+            vec![(lo, at - 1), (at + count, hi + count)]
+        } else {
+            vec![(lo, hi)]
+        };
+    }
+    let end = at + count;
+    let mut out = Vec::new();
+    if lo < at {
+        out.push((lo, hi.min(at - 1)));
+    }
+    if hi >= end {
+        out.push((lo.max(end) - count, hi - count));
+    }
+    // A delete inside the run joins its two sides back into one.
+    if out.len() == 2 && out[0].1 + 1 == out[1].0 {
+        return vec![(out[0].0, out[1].1)];
+    }
+    out
+}
+
+/// A frozen line count through a row/column insert or delete (the engine's rule).
+fn frozen_after(n: usize, at: usize, count: usize, delete: bool) -> usize {
+    if at >= n {
+        n
+    } else if delete {
+        n.saturating_sub(count.min(n - at))
+    } else {
+        n + count
     }
 }

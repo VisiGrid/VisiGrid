@@ -54,6 +54,11 @@ fn load(document: &Value) -> Result<Loaded, String> {
         let next = ids.iter().copied().max().unwrap_or(0) + 1;
         wb.set_next_sheet_id(next.max(wb.next_sheet_id()));
     }
+    for (i, l) in layouts.iter().enumerate() {
+        if let Some(s) = wb.sheet_mut(i) {
+            s.layout = l.line_layout();
+        }
+    }
     let layouts = wb.sheets().iter().map(|s| s.id.0).zip(layouts).collect();
     Ok(Loaded { wb, layouts, active })
 }
@@ -290,7 +295,11 @@ impl CollabCore {
         let layouts: Vec<SheetLayout> = wb
             .sheets()
             .iter()
-            .map(|s| self.layouts.get(&s.id.0).cloned().unwrap_or_default())
+            .map(|s| {
+                let mut l = self.layouts.get(&s.id.0).cloned().unwrap_or_default();
+                l.set_line_layout(&s.layout);
+                l
+            })
             .collect();
         let text = visigrid_io::json::export_workbook(wb, &layouts, self.active.min(wb.sheets().len().saturating_sub(1)))?;
         let mut doc: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -344,9 +353,15 @@ impl CollabCore {
     pub(crate) fn layout(&self, sheet: SheetKey) -> Option<Value> {
         let wb = &self.client.wb;
         let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
-        let (max_row, max_col) = wb.sheets()[idx].data_extent();
-        let used = !wb.sheets()[idx].get_raw(max_row, max_col).is_empty() || max_row > 0 || max_col > 0;
-        let l = self.layouts.get(&sheet).cloned().unwrap_or_default();
+        let s = &wb.sheets()[idx];
+        let (max_row, max_col) = s.data_extent();
+        let used = !s.get_raw(max_row, max_col).is_empty() || max_row > 0 || max_col > 0;
+        let l = &s.layout;
+        let merges: Vec<Value> = s
+            .merged_regions
+            .iter()
+            .map(|m| json!({"r0": m.start.0, "c0": m.start.1, "r1": m.end.0, "c1": m.end.1}))
+            .collect();
         Some(json!({
             "col_widths": l.col_widths,
             "row_heights": l.row_heights,
@@ -354,6 +369,7 @@ impl CollabCore {
             "frozen_cols": l.frozen_cols,
             "hidden_rows": l.hidden_rows,
             "hidden_cols": l.hidden_cols,
+            "merges": merges,
             "rows": if used { max_row + 1 } else { 0 },
             "cols": if used { max_col + 1 } else { 0 },
         }))
@@ -478,6 +494,9 @@ impl CollabCore {
                 }
             }
         }
+        if let Some(s) = wb.sheet_mut(0) {
+            s.layout.frozen_rows = 1;
+        }
         let layouts = HashMap::from([(key, SheetLayout { frozen_rows: 1, ..Default::default() })]);
         Self::from_loaded(Loaded { wb, layouts, active: 0 }, 0, false)
     }
@@ -550,6 +569,7 @@ impl CollabCore {
             "snapshot_url": snapshot_url,
             "snapshot_seq": snapshot_seq,
             "reconnect": self.reconnect,
+            "layout": ch.layout,
             "can_undo": !self.client.undo_stack.is_empty(),
             "can_redo": !self.client.redo_stack.is_empty(),
         });

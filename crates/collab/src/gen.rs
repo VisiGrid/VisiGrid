@@ -11,7 +11,7 @@ use rand::Rng;
 use visigrid_engine::formula::parser::{format_parsed_expr, parse};
 use visigrid_engine::workbook::Workbook;
 
-use crate::op::{Axis, CellContent, CollabOp, FormatProps, HAlign, Rect, VAlign};
+use crate::op::{Axis, CellContent, CollabOp, FormatProps, HAlign, Rect, VAlign, BorderLine, BorderSpec, LineProps};
 
 /// Rows and columns most edits land in.
 pub const HOT_ROWS: usize = 10;
@@ -95,7 +95,7 @@ fn format_props(rng: &mut StdRng) -> FormatProps {
                 if clear { Some(None) } else { Some(Some($v)) }
             };
         }
-        match rng.gen_range(0..12) {
+        match rng.gen_range(0..14) {
             0 => p.bold = pick!(rng.gen_bool(0.7)),
             1 => p.italic = pick!(rng.gen_bool(0.7)),
             2 => p.underline = pick!(rng.gen_bool(0.5)),
@@ -108,10 +108,49 @@ fn format_props(rng: &mut StdRng) -> FormatProps {
             8 => p.number_format = pick!(["General", "0.00", "#,##0", "0%"][rng.gen_range(0..4)].to_string()),
             9 => p.h_align = pick!([HAlign::General, HAlign::Left, HAlign::Center, HAlign::Right][rng.gen_range(0..4)]),
             10 => p.v_align = pick!([VAlign::Top, VAlign::Middle, VAlign::Bottom][rng.gen_range(0..3)]),
-            _ => p.wrap = pick!(rng.gen_bool(0.5)),
+            11 => p.wrap = pick!(rng.gen_bool(0.5)),
+            12 => p.border_bottom = pick!(border(rng)),
+            _ => {
+                p.border_left = pick!(border(rng));
+                p.border_top = pick!(border(rng));
+            }
         }
     }
     p
+}
+
+fn border(rng: &mut StdRng) -> BorderSpec {
+    BorderSpec {
+        style: [BorderLine::Thin, BorderLine::Medium, BorderLine::Thick][rng.gen_range(0..3)],
+        color: rng.gen_bool(0.3).then(|| "#3355FF".to_string()),
+    }
+}
+
+/// Line layout, freeze or merge changes.
+fn layout_op(rng: &mut StdRng, sheet: u64) -> CollabOp {
+    let rect = |rng: &mut StdRng| {
+        let (r0, c0) = (rng.gen_range(0..HOT_ROWS), rng.gen_range(0..HOT_COLS));
+        Rect::new(r0, c0, (r0 + rng.gen_range(0..3)).min(HOT_ROWS), (c0 + rng.gen_range(0..2)).min(HOT_COLS))
+    };
+    match rng.gen_range(0..100) {
+        0..=49 => {
+            let axis = if rng.gen_bool(0.6) { Axis::Row } else { Axis::Col };
+            let limit = if axis == Axis::Row { HOT_ROWS } else { HOT_COLS };
+            let lo = rng.gen_range(0..limit);
+            let hi = (lo + rng.gen_range(0..3)).min(limit);
+            let mut props = LineProps::default();
+            if rng.gen_bool(0.6) {
+                props.size = Some(if rng.gen_bool(0.2) { None } else { Some([18.0, 40.0, 120.0][rng.gen_range(0..3)]) });
+            }
+            if props.size.is_none() || rng.gen_bool(0.3) {
+                props.hidden = Some(rng.gen_bool(0.6));
+            }
+            CollabOp::SetLines { sheet, axis, lo, hi, props }
+        }
+        50..=64 => CollabOp::SetFreeze { sheet, rows: rng.gen_range(0..4), cols: rng.gen_range(0..3) },
+        65..=84 => CollabOp::Merge { sheet, rect: rect(rng) },
+        _ => CollabOp::Unmerge { sheet, rect: rect(rng) },
+    }
 }
 
 /// One user action against `wb`, as an envelope's op list. `sheet_key`
@@ -150,7 +189,9 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
         } else {
             CollabOp::SetFormat { sheet, rect, props: format_props(rng) }
         }
-    } else if roll < 77 {
+    } else if roll < 63 {
+        layout_op(rng, sheet)
+    } else if roll < 80 {
         let axis = if rng.gen_bool(0.75) {
             Axis::Row
         } else {
@@ -169,7 +210,7 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
             count: rng.gen_range(1..=3),
             delete: rng.gen_bool(0.45),
         }
-    } else if roll < 83 {
+    } else if roll < 85 {
         match fresh_name(rng, wb) {
             Some(name) => CollabOp::AddSheet {
                 sheet: sheet_key,
@@ -178,7 +219,7 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
             },
             None => return Vec::new(),
         }
-    } else if roll < 89 {
+    } else if roll < 90 {
         match fresh_name(rng, wb) {
             Some(name) => CollabOp::RenameSheet { sheet, name },
             None => return Vec::new(),

@@ -132,6 +132,24 @@ pub enum VAlign {
     Bottom,
 }
 
+/// A border edge's line style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BorderLine {
+    Thin,
+    Medium,
+    Thick,
+}
+
+/// One border edge: a line style and an optional `#RRGGBB` colour (black when absent).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BorderSpec {
+    pub style: BorderLine,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 /// The format properties one op sets or clears. Every field is
 /// `None` = unchanged, `Some(None)` = clear to the default, `Some(Some(v))` =
 /// set. Colors are `#RRGGBB`. `number_format` is an Excel format code
@@ -163,6 +181,52 @@ pub struct FormatProps {
     pub v_align: Option<Option<VAlign>>,
     #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
     pub wrap: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub border_top: Option<Option<BorderSpec>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub border_right: Option<Option<BorderSpec>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub border_bottom: Option<Option<BorderSpec>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub border_left: Option<Option<BorderSpec>>,
+}
+
+/// What a `SetLines` op sets on a run of rows or columns. `size`: `None`
+/// unchanged, `Some(None)` back to the default, `Some(Some(points))` set.
+/// `hidden`: `None` unchanged, else hide or show.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineProps {
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub size: Option<Option<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+}
+
+/// Sizes are validated finite, so equality is reflexive.
+impl Eq for LineProps {}
+
+impl LineProps {
+    pub fn is_empty(&self) -> bool {
+        self.size.is_none() && self.hidden.is_none()
+    }
+
+    /// `self` without the properties `other` sets.
+    pub fn without(&self, other: &LineProps) -> LineProps {
+        LineProps {
+            size: if other.size.is_some() { None } else { self.size },
+            hidden: if other.hidden.is_some() { None } else { self.hidden },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(Some(s)) = self.size {
+            if !s.is_finite() || s < 0.0 || s > 2000.0 {
+                return Err(format!("line size {s} out of range"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `font_size` is the only float. Ops are compared exactly (tests, dedupe);
@@ -183,6 +247,10 @@ macro_rules! each_prop {
         $m!(h_align);
         $m!(v_align);
         $m!(wrap);
+        $m!(border_top);
+        $m!(border_right);
+        $m!(border_bottom);
+        $m!(border_left);
     };
 }
 
@@ -229,6 +297,13 @@ impl FormatProps {
             if let Some(Some(c)) = c {
                 if parse_hex_color(c).is_none() {
                     return Err(format!("{name} must be #RRGGBB"));
+                }
+            }
+        }
+        for b in [&self.border_top, &self.border_right, &self.border_bottom, &self.border_left] {
+            if let Some(Some(BorderSpec { color: Some(c), .. })) = b {
+                if parse_hex_color(c).is_none() {
+                    return Err("border colour must be #RRGGBB".into());
                 }
             }
         }
@@ -301,6 +376,33 @@ pub enum CollabOp {
         sheet: SheetKey,
         index: usize,
     },
+    /// Set the size and/or visibility of rows or columns `lo..=hi`. Merges
+    /// per property with concurrent ones, like `SetFormat`.
+    SetLines {
+        sheet: SheetKey,
+        axis: Axis,
+        lo: usize,
+        hi: usize,
+        props: LineProps,
+    },
+    /// Freeze the first `rows` rows and `cols` columns (0 = none). The later
+    /// of two concurrent freezes wins.
+    SetFreeze {
+        sheet: SheetKey,
+        rows: usize,
+        cols: usize,
+    },
+    /// Merge `rect` into one cell. V1 serializes it against concurrent edits
+    /// that touch the rectangle and against structural edits on the sheet.
+    Merge {
+        sheet: SheetKey,
+        rect: Rect,
+    },
+    /// Remove every merge that intersects `rect`. Serialized like `Merge`.
+    Unmerge {
+        sheet: SheetKey,
+        rect: Rect,
+    },
     /// V1 atomic range op standing in for sort / move / large paste: it
     /// replaces a block of values. Concurrent overlapping ops are refused.
     ReplaceRange {
@@ -322,6 +424,10 @@ impl CollabOp {
             | CollabOp::RenameSheet { sheet, .. }
             | CollabOp::DeleteSheet { sheet, .. }
             | CollabOp::MoveSheet { sheet, .. }
+            | CollabOp::SetLines { sheet, .. }
+            | CollabOp::SetFreeze { sheet, .. }
+            | CollabOp::Merge { sheet, .. }
+            | CollabOp::Unmerge { sheet, .. }
             | CollabOp::ReplaceRange { sheet, .. } => *sheet,
         }
     }
@@ -354,6 +460,18 @@ impl CollabOp {
                     return Err("format rect is inverted".into());
                 }
                 props.validate()
+            }
+            CollabOp::SetLines { lo, hi, props, .. } => {
+                if lo > hi {
+                    return Err("line span is inverted".into());
+                }
+                props.validate()
+            }
+            CollabOp::Merge { rect, .. } | CollabOp::Unmerge { rect, .. } => {
+                if rect.r0 > rect.r1 || rect.c0 > rect.c1 {
+                    return Err("merge rect is inverted".into());
+                }
+                Ok(())
             }
             _ => Ok(()),
         }

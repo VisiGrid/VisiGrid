@@ -28,7 +28,8 @@ use visigrid_engine::cell::{Alignment, CellFormat, DateStyle, NumberFormat, Text
 use visigrid_engine::workbook::Workbook;
 
 use crate::apply::{apply_ops, apply_props};
-use crate::op::{CellContent, CollabOp, FormatProps, HAlign, Rect, SheetKey, VAlign};
+use crate::apply::border_spec;
+use crate::op::{Axis, CellContent, CollabOp, FormatProps, HAlign, LineProps, Rect, SheetKey, VAlign};
 
 /// Cells per format rectangle that undo inspects one by one. Larger
 /// rectangles restore their non-default cells sparsely and skip the guard.
@@ -174,7 +175,64 @@ pub fn props_of(fmt: &CellFormat, mask: Option<&FormatProps>) -> FormatProps {
             TextOverflow::Overflow => None,
         });
     }
+    if want(|m| m.border_top.is_some()) {
+        p.border_top = Some(border_spec(&fmt.border_top));
+    }
+    if want(|m| m.border_right.is_some()) {
+        p.border_right = Some(border_spec(&fmt.border_right));
+    }
+    if want(|m| m.border_bottom.is_some()) {
+        p.border_bottom = Some(border_spec(&fmt.border_bottom));
+    }
+    if want(|m| m.border_left.is_some()) {
+        p.border_left = Some(border_spec(&fmt.border_left));
+    }
     p
+}
+
+/// The inverse of `SetLines` against `wb`: clear what it sets over the run,
+/// then put back each line that had its own size or was hidden.
+fn invert_lines(wb: &Workbook, sheet: SheetKey, axis: Axis, lo: usize, hi: usize, props: &LineProps) -> Vec<CollabOp> {
+    let Some(idx) = index_of(wb, sheet) else { return Vec::new() };
+    let l = &wb.sheets()[idx].layout;
+    let (sizes, hidden) = match axis {
+        Axis::Row => (&l.row_heights, &l.hidden_rows),
+        Axis::Col => (&l.col_widths, &l.hidden_cols),
+    };
+    let cleared = LineProps {
+        size: props.size.map(|_| None),
+        hidden: props.hidden.map(|_| false),
+    };
+    let mut out = vec![CollabOp::SetLines { sheet, axis, lo, hi, props: cleared }];
+    let mut lines: Vec<usize> = Vec::new();
+    if props.size.is_some() {
+        lines.extend(sizes.range(lo..=hi).map(|(k, _)| *k));
+    }
+    if props.hidden.is_some() {
+        lines.extend(hidden.range(lo..=hi).copied());
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    let mut run: Option<(usize, usize, LineProps)> = None;
+    for i in lines {
+        let p = LineProps {
+            size: props.size.map(|_| sizes.get(&i).map(|v| *v as f64)),
+            hidden: props.hidden.map(|_| hidden.contains(&i)),
+        };
+        match &mut run {
+            Some((_, h, rp)) if *h + 1 == i && *rp == p => *h = i,
+            _ => {
+                if let Some((a, b, rp)) = run.take() {
+                    out.push(CollabOp::SetLines { sheet, axis, lo: a, hi: b, props: rp });
+                }
+                run = Some((i, i, p));
+            }
+        }
+    }
+    if let Some((a, b, rp)) = run {
+        out.push(CollabOp::SetLines { sheet, axis, lo: a, hi: b, props: rp });
+    }
+    out
 }
 
 /// Each property `props` sets, as its own single-property props.
@@ -199,6 +257,10 @@ fn single_props(props: &FormatProps) -> Vec<(&'static str, FormatProps)> {
     one!(h_align);
     one!(v_align);
     one!(wrap);
+    one!(border_top);
+    one!(border_right);
+    one!(border_bottom);
+    one!(border_left);
     out
 }
 
@@ -234,6 +296,10 @@ fn merge(a: &FormatProps, b: &FormatProps) -> FormatProps {
     take!(h_align);
     take!(v_align);
     take!(wrap);
+    take!(border_top);
+    take!(border_right);
+    take!(border_bottom);
+    take!(border_left);
     out
 }
 
@@ -394,6 +460,28 @@ pub fn apply_recording(
             CollabOp::MoveSheet { sheet, .. } => {
                 if let Some(idx) = index_of(scratch, *sheet) {
                     inv.push(CollabOp::MoveSheet { sheet: *sheet, index: idx });
+                }
+            }
+            CollabOp::SetLines { sheet, axis, lo, hi, props } => {
+                inv = invert_lines(scratch, *sheet, *axis, *lo, *hi, props);
+            }
+            CollabOp::SetFreeze { sheet, .. } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    let l = &scratch.sheets()[idx].layout;
+                    inv.push(CollabOp::SetFreeze { sheet: *sheet, rows: l.frozen_rows, cols: l.frozen_cols });
+                }
+            }
+            CollabOp::Merge { sheet, rect } => {
+                inv.push(CollabOp::Unmerge { sheet: *sheet, rect: *rect });
+            }
+            CollabOp::Unmerge { sheet, rect } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    for m in &scratch.sheets()[idx].merged_regions {
+                        let r = Rect::new(m.start.0, m.start.1, m.end.0, m.end.1);
+                        if rect.intersects(&r) {
+                            inv.push(CollabOp::Merge { sheet: *sheet, rect: r });
+                        }
+                    }
                 }
             }
             CollabOp::RenameSheet { sheet, .. } => {

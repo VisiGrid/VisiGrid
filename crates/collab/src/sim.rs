@@ -408,6 +408,17 @@ pub fn run(seed: u64, cfg: &SimConfig, record: bool) -> SimReport {
     for (i, c) in sim.clients.iter().enumerate() {
         let (opt, conf) = (fingerprint(&c.wb), fingerprint(&c.confirmed));
         if let Some(d) = first_difference(&opt, &conf) {
+            // The same inputs with a stale cached value on one side: the
+            // engine's incremental recalc, not convergence (as for replicas
+            // against the server below).
+            let (mut a, mut b) = (c.wb.clone(), c.confirmed.clone());
+            a.recompute_full_ordered();
+            b.recompute_full_ordered();
+            if first_difference(&fingerprint(&a), &fingerprint(&b)).is_none() {
+                let mut r = report(seed, &sim, None);
+                r.engine_stale = Some(format!("c{i} optimistic vs confirmed: {d}"));
+                return r;
+            }
             // Engine bug VisiGrid#95 (fixed by #97, not on this branch): the
             // full recompute replaces a cycle's formula text with "#CYCLE!",
             // so a rebased formula that closes a cycle diverges by order.

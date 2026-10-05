@@ -4,8 +4,9 @@
 //! exactly this code, so this is where determinism lives. An op whose target
 //! no longer exists (its sheet is gone) is a no-op on every replica alike.
 
-use crate::op::{parse_hex_color, CollabOp, FormatProps, HAlign, Rect, SheetKey, VAlign};
-use visigrid_engine::cell::{Alignment, CellFormat, NumberFormat, TextOverflow, VerticalAlignment};
+use crate::op::{parse_hex_color, Axis, BorderLine, BorderSpec, CollabOp, FormatProps, HAlign, Rect, SheetKey, VAlign};
+use visigrid_engine::cell::{Alignment, BorderStyle, CellBorder, CellFormat, NumberFormat, TextOverflow, VerticalAlignment};
+use visigrid_engine::sheet::MergedRegion;
 use visigrid_engine::cell_id::CellId;
 use visigrid_engine::sheet::{Sheet, SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::workbook::Workbook;
@@ -49,11 +50,14 @@ pub struct Changes {
     /// Format ops applied, in order: the rectangle and the properties set or
     /// cleared (for a mirror to restyle incrementally).
     pub formats: Vec<(SheetKey, Rect, FormatProps)>,
+    /// Line layout (sizes, hidden, frozen) or merges changed: the mirror
+    /// re-reads the layout.
+    pub layout: bool,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty() && !self.full && !self.sheets && self.structural.is_empty() && self.formats.is_empty()
+        self.cells.is_empty() && !self.full && !self.sheets && self.structural.is_empty() && self.formats.is_empty() && !self.layout
     }
 
     fn recalculated(&mut self, r: visigrid_engine::workbook::Recalculated) {
@@ -85,11 +89,13 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             ..
         } => {
             let idx = index_of(wb, *sheet)?;
+            // Writes land on exactly this cell, even one hidden by a merge:
+            // where merges are must not change what a positional op means.
             // Clear is "clear contents" (Excel's Delete key): the value
             // goes, the cell's format stays. The engine's clear_cell removes
             // the whole cell including its format, which would not commute
             // with a concurrent format change.
-            let r = wb.set_cell_value_tracked(idx, *row, *col, content.raw());
+            let r = wb.set_cell_value_tracked_at(idx, *row, *col, content.raw());
             if let Some(ch) = changes.as_deref_mut() {
                 ch.cells.push((*sheet, *row, *col));
                 ch.recalculated(r);
@@ -188,6 +194,73 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             sheet_changed(changes.as_deref_mut());
             Ok(())
         }
+        CollabOp::SetLines { sheet, axis, lo, hi, props } => {
+            let idx = index_of(wb, *sheet)?;
+            let limit = if *axis == Axis::Row { NUM_ROWS } else { NUM_COLS };
+            if let Some(s) = wb.sheet_mut(idx) {
+                let l = &mut s.layout;
+                let (sizes, hidden) = match axis {
+                    Axis::Row => (&mut l.row_heights, &mut l.hidden_rows),
+                    Axis::Col => (&mut l.col_widths, &mut l.hidden_cols),
+                };
+                for i in *lo..=(*hi).min(limit - 1) {
+                    match props.size {
+                        Some(Some(v)) => {
+                            sizes.insert(i, v as f32);
+                        }
+                        Some(None) => {
+                            sizes.remove(&i);
+                        }
+                        None => {}
+                    }
+                    match props.hidden {
+                        Some(true) => {
+                            hidden.insert(i);
+                        }
+                        Some(false) => {
+                            hidden.remove(&i);
+                        }
+                        None => {}
+                    }
+                }
+            }
+            layout_changed(changes.as_deref_mut(), false);
+            Ok(())
+        }
+        CollabOp::SetFreeze { sheet, rows, cols } => {
+            let idx = index_of(wb, *sheet)?;
+            if let Some(s) = wb.sheet_mut(idx) {
+                s.layout.frozen_rows = *rows;
+                s.layout.frozen_cols = *cols;
+            }
+            layout_changed(changes.as_deref_mut(), false);
+            Ok(())
+        }
+        CollabOp::Merge { sheet, rect } => {
+            let idx = index_of(wb, *sheet)?;
+            let region = MergedRegion::new(rect.r0, rect.c0, rect.r1, rect.c1);
+            let done = wb.sheet_mut(idx).map_or(Ok(()), |s| s.add_merge(region)).map_err(Skipped::Refused);
+            if done.is_ok() {
+                layout_changed(changes.as_deref_mut(), true);
+            }
+            done
+        }
+        CollabOp::Unmerge { sheet, rect } => {
+            let idx = index_of(wb, *sheet)?;
+            if let Some(s) = wb.sheet_mut(idx) {
+                let starts: Vec<(usize, usize)> = s
+                    .merged_regions
+                    .iter()
+                    .filter(|m| rect.intersects(&Rect::new(m.start.0, m.start.1, m.end.0, m.end.1)))
+                    .map(|m| m.start)
+                    .collect();
+                for st in starts {
+                    s.remove_merge(st);
+                }
+            }
+            layout_changed(changes.as_deref_mut(), true);
+            Ok(())
+        }
         CollabOp::ReplaceRange {
             sheet,
             row,
@@ -197,7 +270,7 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             let idx = index_of(wb, *sheet)?;
             for (dr, line) in values.iter().enumerate() {
                 for (dc, content) in line.iter().enumerate() {
-                    let r = wb.set_cell_value_tracked(idx, row + dr, col + dc, content.raw());
+                    let r = wb.set_cell_value_tracked_at(idx, row + dr, col + dc, content.raw());
                     if let Some(ch) = changes.as_deref_mut() {
                         ch.cells.push((*sheet, row + dr, col + dc));
                         ch.recalculated(r);
@@ -266,6 +339,48 @@ pub fn apply_props(fmt: &mut CellFormat, props: &FormatProps) {
             Some(false) => TextOverflow::Clip,
             None => d.text_overflow,
         };
+    }
+    for (prop, edge) in [
+        (&props.border_top, &mut fmt.border_top),
+        (&props.border_right, &mut fmt.border_right),
+        (&props.border_bottom, &mut fmt.border_bottom),
+        (&props.border_left, &mut fmt.border_left),
+    ] {
+        if let Some(v) = prop {
+            *edge = v.as_ref().map(cell_border).unwrap_or_default();
+        }
+    }
+}
+
+/// A border edge as the engine stores it.
+pub fn cell_border(b: &BorderSpec) -> CellBorder {
+    CellBorder {
+        style: match b.style {
+            BorderLine::Thin => BorderStyle::Thin,
+            BorderLine::Medium => BorderStyle::Medium,
+            BorderLine::Thick => BorderStyle::Thick,
+        },
+        color: b.color.as_deref().and_then(parse_hex_color),
+    }
+}
+
+/// An engine border edge as op properties (None when the edge has no line).
+pub fn border_spec(b: &CellBorder) -> Option<BorderSpec> {
+    let style = match b.style {
+        BorderStyle::None => return None,
+        BorderStyle::Thin => BorderLine::Thin,
+        BorderStyle::Medium => BorderLine::Medium,
+        BorderStyle::Thick => BorderLine::Thick,
+    };
+    Some(BorderSpec { style, color: b.color.map(|c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])) })
+}
+
+fn layout_changed(changes: Option<&mut Changes>, cells: bool) {
+    if let Some(ch) = changes {
+        ch.layout = true;
+        if cells {
+            ch.full = true;
+        }
     }
 }
 
@@ -370,6 +485,9 @@ pub struct SheetPrint {
     pub name: String,
     /// (row, col, raw, computed, format), sorted by position.
     pub cells: Vec<(usize, usize, String, String, String)>,
+    /// Line layout as JSON (empty when default) and merges, sorted.
+    pub layout: String,
+    pub merges: Vec<(usize, usize, usize, usize)>,
 }
 
 pub fn fingerprint(wb: &Workbook) -> Fingerprint {
@@ -392,10 +510,20 @@ pub fn fingerprint(wb: &Workbook) -> Fingerprint {
                 .filter(|(_, _, raw, shown, fmt)| !raw.is_empty() || !shown.is_empty() || !fmt.is_empty())
                 .collect();
             cells.sort_by_key(|(r, c, ..)| (*r, *c));
+            let layout = if s.layout.is_default() {
+                String::new()
+            } else {
+                serde_json::to_string(&s.layout).expect("layout serializes")
+            };
+            let mut merges: Vec<(usize, usize, usize, usize)> =
+                s.merged_regions.iter().map(|m| (m.start.0, m.start.1, m.end.0, m.end.1)).collect();
+            merges.sort_unstable();
             SheetPrint {
                 id: s.id.0,
                 name: s.name.clone(),
                 cells,
+                layout,
+                merges,
             }
         })
         .collect();
@@ -427,6 +555,9 @@ pub fn first_difference(a: &Fingerprint, b: &Fingerprint) -> Option<String> {
         ));
     }
     for (sa, sb) in a.sheets.iter().zip(&b.sheets) {
+        if sa.layout != sb.layout || sa.merges != sb.merges {
+            return Some(format!("sheet {}: layout {} vs {}, merges {:?} vs {:?}", sa.name, sa.layout, sb.layout, sa.merges, sb.merges));
+        }
         if sa.id != sb.id || sa.name != sb.name {
             return Some(format!(
                 "sheet ({}, {}) vs ({}, {})",

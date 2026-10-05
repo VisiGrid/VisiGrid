@@ -56,7 +56,8 @@ pub struct Clock {
 
 pub struct Host {
     wb: Option<Workbook>,
-    layouts: Vec<SheetLayout>,
+    /// File layouts by stable sheet id (filters, charts; lines live in the sheets).
+    layouts: std::collections::HashMap<u64, SheetLayout>,
     active_sheet: usize,
     /// The last sequence number this replica includes.
     seq: u64,
@@ -83,7 +84,7 @@ impl Host {
     pub fn new() -> Self {
         Host {
             wb: None,
-            layouts: Vec::new(),
+            layouts: std::collections::HashMap::new(),
             active_sheet: 0,
             seq: 0,
             barrier: 0,
@@ -165,8 +166,8 @@ impl Host {
             .and_then(Value::as_u64)
             .ok_or("load needs a non-negative integer seq")?;
         let (wb, layouts, active) = import_document(doc)?;
+        self.layouts = wb.sheets().iter().map(|s| s.id.0).zip(layouts).collect();
         self.wb = Some(wb);
-        self.layouts = layouts;
         self.active_sheet = active;
         self.seq = seq;
         self.barrier = seq;
@@ -280,8 +281,8 @@ impl Host {
             }
         }
         let (wb, layouts, active) = import_document(doc)?;
+        self.layouts = wb.sheets().iter().map(|s| s.id.0).zip(layouts).collect();
         self.wb = Some(wb);
-        self.layouts = layouts;
         self.active_sheet = active;
         if let Some(s) = seq {
             self.seq = s;
@@ -331,6 +332,13 @@ pub fn import_document(doc: &Value) -> Result<(Workbook, Vec<SheetLayout>, usize
     }
     let text = doc.to_string();
     let (mut wb, layouts, active) = visigrid_io::json::import_any(&text)?;
+    // Lines (sizes, hidden, frozen) live in the engine sheets, where
+    // collaboration ops change them and checksums cover them.
+    for (i, l) in layouts.iter().enumerate() {
+        if let Some(s) = wb.sheet_mut(i) {
+            s.layout = l.line_layout();
+        }
+    }
     if let Some(ids) = doc.get("collab_sheet_ids") {
         let ids: Vec<u64> = serde_json::from_value(ids.clone())
             .map_err(|_| "collab_sheet_ids must be an array of non-negative integers")?;
@@ -355,9 +363,18 @@ pub fn import_document(doc: &Value) -> Result<(Workbook, Vec<SheetLayout>, usize
 }
 
 /// A workbook to visigrid-json v2 plus `collab_sheet_ids`.
-pub fn export_document(wb: &Workbook, layouts: &[SheetLayout], active: usize) -> Result<Value, String> {
-    let mut layouts = layouts.to_vec();
-    layouts.resize_with(wb.sheets().len(), SheetLayout::default);
+/// `layouts` are the file layouts by stable sheet id (their filters and
+/// charts); each sheet's lines come from the engine.
+pub fn export_document(wb: &Workbook, layouts: &std::collections::HashMap<u64, SheetLayout>, active: usize) -> Result<Value, String> {
+    let layouts: Vec<SheetLayout> = wb
+        .sheets()
+        .iter()
+        .map(|s| {
+            let mut l = layouts.get(&s.id.0).cloned().unwrap_or_default();
+            l.set_line_layout(&s.layout);
+            l
+        })
+        .collect();
     let text = visigrid_io::json::export_workbook(wb, &layouts, active.min(wb.sheets().len().saturating_sub(1)))?;
     let mut doc: Value = serde_json::from_str(&text).map_err(|e| format!("export produced invalid JSON: {e}"))?;
     let ids: Vec<u64> = wb.sheets().iter().map(|s| s.id.0).collect();

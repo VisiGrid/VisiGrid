@@ -8,6 +8,7 @@ pub mod dep_graph;
 pub mod events;
 pub mod filter;
 pub mod formula;
+pub mod layout;
 pub mod named_range;
 pub mod operation_plan;
 pub mod pivot;
