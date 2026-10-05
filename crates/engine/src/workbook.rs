@@ -636,6 +636,8 @@ impl Workbook {
 
         let sheet = self.sheets.get(sheet_index)?;
         let rule = sheet.validations.get(row, col)?;
+        let resolved_rule = rule.at(row, col);
+        let rule = resolved_rule.as_ref();
 
         match &rule.rule_type {
             ValidationType::List(source) => {
@@ -662,27 +664,12 @@ impl Workbook {
     /// Resolve a range string (possibly with sheet reference) to list items.
     fn resolve_range_to_list(&self, current_sheet: usize, range_str: &str) -> crate::validation::ResolvedList {
         use crate::validation::ResolvedList;
-
-        // Check for sheet reference: "Sheet1!A1:A10"
-        let (sheet_idx, cell_range) = if let Some(bang_pos) = range_str.find('!') {
-            let sheet_name = &range_str[..bang_pos].trim_matches('\'');
-            let cell_range = &range_str[bang_pos + 1..];
-
-            // Find sheet by name
-            match self.sheets.iter().position(|s| s.name == *sheet_name) {
-                Some(idx) => (idx, cell_range),
-                None => return ResolvedList::empty(), // Sheet not found
-            }
-        } else {
-            (current_sheet, range_str)
+        let Some((target, range)) = crate::validation::parse_list_range(range_str) else { return ResolvedList::empty(); };
+        let index = match target {
+            crate::sheet::UnboundSheetRef::Current => Some(current_sheet),
+            crate::sheet::UnboundSheetRef::Named(name) => self.sheets.iter().position(|s| s.name.eq_ignore_ascii_case(&name)),
         };
-
-        // Use the sheet's resolve method
-        if let Some(sheet) = self.sheets.get(sheet_idx) {
-            sheet.resolve_range_to_list(cell_range)
-        } else {
-            ResolvedList::empty()
-        }
+        index.and_then(|i| self.sheets.get(i)).map(|s| s.resolve_list_cells(&range)).unwrap_or_else(ResolvedList::empty)
     }
 
     /// Resolve a named range to list items.
@@ -708,17 +695,7 @@ impl Workbook {
             }
             NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
                 if let Some(s) = self.sheets.get(*sheet) {
-                    // Collect values from range
-                    let mut items = Vec::new();
-                    for row in *start_row..=*end_row {
-                        for col in *start_col..=*end_col {
-                            let display = s.get_display(row, col);
-                            if !display.is_empty() {
-                                items.push(display);
-                            }
-                        }
-                    }
-                    return ResolvedList::from_items(items);
+                    return s.resolve_list_cells(&crate::validation::CellRange::new(*start_row,*start_col,*end_row,*end_col));
                 }
                 ResolvedList::empty()
             }
@@ -776,33 +753,18 @@ impl Workbook {
     ) -> Result<f64, crate::validation::ConstraintResolveError> {
         use crate::validation::ConstraintResolveError;
 
-        // Parse reference: check for sheet prefix
-        let (sheet_idx, cell_ref) = if let Some(bang_pos) = ref_str.find('!') {
-            let sheet_name = ref_str[..bang_pos].trim_matches('\'');
-            let cell_ref = &ref_str[bang_pos + 1..];
-
-            // Find sheet by name
-            let idx = self.sheets.iter()
-                .position(|s| s.name == sheet_name)
-                .ok_or_else(|| ConstraintResolveError::InvalidReference(
-                    format!("Sheet '{}' not found", sheet_name)
-                ))?;
-            (idx, cell_ref)
-        } else {
-            (current_sheet, ref_str)
+        let formula = format!("={}", ref_str.trim().trim_start_matches('='));
+        let (target, row, col) = match crate::formula::parser::parse(&formula) {
+            Ok(crate::formula::parser::Expr::CellRef { sheet, row, col, .. }) => (sheet, row, col),
+            _ => return Err(ConstraintResolveError::InvalidReference(ref_str.into())),
         };
-
-        // Get sheet
+        let sheet_idx = match target {
+            crate::sheet::UnboundSheetRef::Current => current_sheet,
+            crate::sheet::UnboundSheetRef::Named(name) => self.sheets.iter().position(|s| s.name.eq_ignore_ascii_case(&name))
+                .ok_or_else(|| ConstraintResolveError::InvalidReference(ref_str.into()))?,
+        };
         let sheet = self.sheets.get(sheet_idx)
-            .ok_or_else(|| ConstraintResolveError::InvalidReference(
-                format!("Sheet index {} out of range", sheet_idx)
-            ))?;
-
-        // Parse cell reference
-        let (row, col) = sheet.parse_cell_ref(cell_ref)
-            .ok_or_else(|| ConstraintResolveError::InvalidReference(
-                format!("Invalid cell reference: {}", cell_ref)
-            ))?;
+            .ok_or_else(|| ConstraintResolveError::InvalidReference(ref_str.into()))?;
 
         // Get computed value (display value, not raw formula)
         let display = sheet.get_display(row, col);
@@ -838,6 +800,8 @@ impl Workbook {
             Some(r) => r,
             None => return ValidationResult::Valid,
         };
+        let resolved_rule = rule.at(row, col);
+        let rule = resolved_rule.as_ref();
 
         // Check ignore_blank
         if rule.ignore_blank && value.trim().is_empty() {
@@ -846,6 +810,22 @@ impl Workbook {
 
         // Handle numeric types with workbook-level constraint resolution
         match &rule.rule_type {
+            ValidationType::List(_) => {
+                let list = self.get_list_items(sheet_index, row, col).unwrap();
+                if list.items.is_empty() || list.contains(value.trim()) {
+                    ValidationResult::Valid
+                } else {
+                    let preview: Vec<_> = list.items.iter().take(5).map(String::as_str).collect();
+                    ValidationResult::Invalid {
+                        rule: rule.clone(),
+                        reason: format!("Value must be one of: {}{}", preview.join(", "),
+                            if list.items.len() > 5 { ", ..." } else { "" }),
+                    }
+                }
+            }
+            ValidationType::TextLength(constraint) => {
+                self.validate_numeric_constraint(sheet_index, value.chars().count() as f64, constraint, rule, "text length")
+            }
             ValidationType::WholeNumber(constraint) => {
                 use crate::validation::parse_numeric_input;
 
@@ -884,7 +864,7 @@ impl Workbook {
                 self.validate_numeric_constraint(sheet_index, num, constraint, rule, "number")
             }
 
-            // For other types, delegate to sheet (they don't need cross-sheet resolution)
+            // Date/time/custom evaluation retains the sheet's existing behavior.
             _ => sheet.validate_cell_input(row, col, value),
         }
     }
@@ -2377,6 +2357,15 @@ impl Workbook {
         // 4. Formulas on EVERY sheet: unqualified refs move only on the edited
         //    sheet, qualified refs move from anywhere.
         let edit = StructuralEdit { sheet_name, axis, at, count, delete };
+        for sheet in &mut self.sheets {
+            let rules: Vec<_> = sheet.validations.iter().filter(|(_, rule)| rule.reference_origin.is_some()).map(|(r, rule)| (*r, rule.clone())).collect();
+            for (range, mut rule) in rules {
+                if rule.reference_origin.is_some() {
+                    rule.adjust_relative_sources_for_structural(&edit, &sheet.name);
+                    sheet.validations.set(range, rule);
+                }
+            }
+        }
         let mut rewrites = Vec::new();
         // Positions here are POST-edit (cells have already moved). Record
         // PRE-edit positions instead: undo applies these after the inverse

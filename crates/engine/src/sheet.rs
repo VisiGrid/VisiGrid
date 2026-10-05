@@ -2479,6 +2479,8 @@ impl Sheet {
             Some(r) => r,
             None => return ValidationResult::Valid,
         };
+        let resolved_rule = rule.at(row, col);
+        let rule = resolved_rule.as_ref();
 
         // Check ignore_blank
         if rule.ignore_blank && value.trim().is_empty() {
@@ -2552,7 +2554,7 @@ impl Sheet {
             }
 
             ValidationType::TextLength(constraint) => {
-                let len = value.len() as f64;
+                let len = value.chars().count() as f64;
                 self.validate_numeric_constraint(len, constraint, rule, "text length")
             }
 
@@ -2695,42 +2697,27 @@ impl Sheet {
     /// Resolve a range string like "A1:A10" to a list of cell values.
     pub fn resolve_range_to_list(&self, range_str: &str) -> super::validation::ResolvedList {
         use super::validation::ResolvedList;
-
-        // Parse range: "A1:B10" or just "A1"
-        let parts: Vec<&str> = range_str.split(':').collect();
-        if parts.is_empty() || parts.len() > 2 {
-            return ResolvedList::empty();
+        match super::validation::parse_list_range(range_str) {
+            Some((UnboundSheetRef::Current, range)) => self.resolve_list_cells(&range),
+            _ => ResolvedList::empty(),
         }
+    }
 
-        let start = match self.parse_cell_ref(parts[0]) {
-            Some(pos) => pos,
-            None => return ResolvedList::empty(),
-        };
-
-        let end = if parts.len() == 2 {
-            match self.parse_cell_ref(parts[1]) {
-                Some(pos) => pos,
-                None => return ResolvedList::empty(),
-            }
-        } else {
-            start
-        };
-
-        // Collect values from range
+    pub(crate) fn resolve_list_cells(&self, range: &super::validation::CellRange) -> super::validation::ResolvedList {
+        use super::validation::{ResolvedList, MAX_LIST_ITEMS};
+        // Read occupied cells in worksheet order; never enumerate a whole grid
+        // for an imported whole-column or otherwise mostly-empty list source.
+        let mut positions = self.cells_in_range(range.start_row, range.end_row, range.start_col, range.end_col);
+        positions.sort_unstable();
         let mut items = Vec::new();
-        let (start_row, start_col) = start;
-        let (end_row, end_col) = end;
-
-        for row in start_row.min(end_row)..=start_row.max(end_row) {
-            for col in start_col.min(end_col)..=start_col.max(end_col) {
-                let display = self.get_display(row, col);
-                // Skip truly empty cells but include cells with whitespace (after trim)
-                if !display.is_empty() {
-                    items.push(display);
-                }
+        for (r,c) in positions {
+            let display = self.get_display(r,c);
+            if !display.is_empty() {
+                items.push(display);
+                // One extra item lets ResolvedList preserve its truncated flag.
+                if items.len() > MAX_LIST_ITEMS { break; }
             }
         }
-
         ResolvedList::from_items(items)
     }
 
@@ -2742,6 +2729,8 @@ impl Sheet {
         use super::validation::ValidationType;
 
         let rule = self.validations.get(row, col)?;
+        let resolved_rule = rule.at(row, col);
+        let rule = resolved_rule.as_ref();
 
         match &rule.rule_type {
             ValidationType::List(source) => {
@@ -2764,34 +2753,11 @@ impl Sheet {
 
     /// Parse a simple cell reference like "A1" or "B10".
     pub fn parse_cell_ref(&self, ref_str: &str) -> Option<(usize, usize)> {
-        let ref_str = ref_str.trim().to_uppercase();
-        let mut col_str = String::new();
-        let mut row_str = String::new();
-
-        for ch in ref_str.chars() {
-            if ch.is_ascii_alphabetic() {
-                col_str.push(ch);
-            } else if ch.is_ascii_digit() {
-                row_str.push(ch);
-            }
+        let formula = format!("={}", ref_str.trim().trim_start_matches('='));
+        match crate::formula::parser::parse(&formula) {
+            Ok(crate::formula::parser::Expr::CellRef { sheet: UnboundSheetRef::Current, row, col, .. }) => Some((row, col)),
+            _ => None,
         }
-
-        if col_str.is_empty() || row_str.is_empty() {
-            return None;
-        }
-
-        // Convert column letters to index (A=0, B=1, ..., Z=25, AA=26, ...)
-        let col = col_str.chars().fold(0usize, |acc, c| {
-            acc * 26 + (c as usize - 'A' as usize + 1)
-        }) - 1;
-
-        // Convert row to 0-indexed
-        let row: usize = row_str.parse().ok()?;
-        if row == 0 {
-            return None;
-        }
-
-        Some((row - 1, col))
     }
 }
 

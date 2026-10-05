@@ -86,7 +86,7 @@ pub struct ImportResult {
     pub import_duration_ms: u128,
     /// Total validations imported
     pub validations_imported: usize,
-    /// Total validations skipped (unsupported types)
+    /// Total validation definitions skipped (unsupported or malformed metadata)
     pub validations_skipped: usize,
     /// Total formula errors after recalc (Value::Error from evaluation)
     pub recalc_errors: usize,
@@ -442,7 +442,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             next_sheet_id += 1;
 
             // Import validations even for empty sheets
-            let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet);
+            let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet, &mut result.warnings);
             result.validations_imported += imported;
             result.validations_skipped += skipped;
 
@@ -745,7 +745,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         result.dates_imported += stats.dates_imported + stats.times_imported;
 
         // Import validation rules from worksheet XML
-        let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet);
+        let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet, &mut result.warnings);
         result.validations_imported += imported;
         result.validations_skipped += skipped;
 
@@ -1921,8 +1921,9 @@ fn export_validation_rules(
     let mut exported = 0;
     let mut skipped = 0;
 
-    for (range, rule) in sheet.validations.iter() {
-        match rule_to_xlsx(rule) {
+    for (range, rule) in sheet.validations.effective_ranges()? {
+        let rule = rule.for_xlsx_range(range.start_row, range.start_col);
+        match rule_to_xlsx(&rule) {
             Some(dv) => {
                 // rust_xlsxwriter uses 0-based row/col as u32/u16
                 worksheet
@@ -1954,21 +1955,25 @@ fn import_validation_rules(
     xlsx_path: &Path,
     sheet_name: &str,
     sheet: &mut Sheet,
+    warnings: &mut Vec<String>,
 ) -> (usize, usize) {
-    use crate::xlsx_validation::parse_sheet_validations;
-
-    match parse_sheet_validations(xlsx_path, sheet_name) {
-        Ok(validations) => {
-            let mut imported = 0;
-            for v in validations {
-                sheet.validations.set(v.range, v.rule);
-                imported += 1;
+    // This XML pass does not apply to the other calamine formats.
+    if xlsx_path.extension().and_then(|s| s.to_str()).is_some_and(|s|
+        matches!(s.to_ascii_lowercase().as_str(), "xls" | "xlsb" | "ods")) {
+        return (0, 0);
+    }
+    match crate::xlsx_validation::parse_sheet_validations_report(xlsx_path, sheet_name) {
+        Ok(report) => {
+            let imported = report.rules.len();
+            for v in report.rules { sheet.validations.set(v.range, v.rule); }
+            if report.skipped > 0 {
+                warnings.push(format!("Sheet {sheet_name:?}: {} unsupported or malformed validation rules were omitted.", report.skipped));
             }
-            (imported, 0) // Skipping is handled in parse_sheet_validations
+            (imported, report.skipped)
         }
-        Err(_) => {
-            // Validation parsing failed - not fatal, just skip
-            // This can happen if the sheet has no validations or XML structure differs
+        Err(error) => {
+            warnings.push(format!("Sheet {sheet_name:?}: validation rules could not be restored: {error}"));
+            // The failed XML pass cannot give a reliable per-rule skip count.
             (0, 0)
         }
     }

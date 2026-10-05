@@ -66,11 +66,57 @@ impl ValidationPatch {
 }
 
 impl ValidationStore {
+    /// Disjoint effective rules for interchange: exclusions and the store's
+    /// first-rule precedence are resolved without enumerating worksheet cells.
+    /// Sources/origins remain attached to their rules for destination rebasing.
+    pub fn effective_ranges(&self) -> Result<Vec<(CellRange, ValidationRule)>, String> {
+        const MAX_EXPORT_RANGES: usize = 100_000;
+        if self.rules.len().saturating_add(self.exclusions.len()) > MAX_EXPORT_RANGES {
+            return Err("Validation metadata exceeds the supported range limit.".into());
+        }
+        let mut budget = Budget(10_000_000);
+        let mut indexed: Vec<_> = self
+            .exclusions
+            .iter()
+            .map(|r| (*r, 0usize))
+            .chain(self.rules.keys().enumerate().map(|(i, r)| (*r, i + 1)))
+            .collect();
+        for (r, _) in &indexed {
+            if r.start_row > r.end_row
+                || r.start_col > r.end_col
+                || r.end_row >= crate::sheet::NUM_ROWS
+                || r.end_col >= crate::sheet::NUM_COLS
+            {
+                return Err("A validation range is outside the worksheet.".into());
+            }
+        }
+        indexed.sort_by_key(|(r, _)| *r);
+        let tree = RangeIndex::new(&indexed);
+        let mut result = Vec::new();
+        for (i, (&range, rule)) in self.rules.iter().enumerate() {
+            if rule
+                .reference_origin
+                .is_some_and(|(r, c)| r >= crate::sheet::NUM_ROWS || c >= crate::sheet::NUM_COLS)
+            {
+                return Err("A validation reference origin is outside the worksheet.".into());
+            }
+            let mut cuts = Vec::new();
+            tree.cuts(&range, i + 1, 0, indexed.len(), &mut budget, &mut cuts)?;
+            for piece in subtract_all(vec![range], &cuts, &mut budget)? {
+                result.push((piece, rule.clone()));
+                if result.len() > MAX_EXPORT_RANGES {
+                    return Err("Validation export exceeds the supported range limit.".into());
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Plan an atomic edit to exact stored cells. Partial edits split rectangles
     /// rather than deleting whole overlapping rules or exclusions. Only an
     /// affected overlap component is normalized: its effective first-rule
-    /// precedence is preserved outside the targets. Validation references keep
-    /// their existing fixed worksheet meaning (unlike relative CF predicates).
+    /// precedence is preserved outside the targets. Fixed references retain
+    /// their meaning, and relative rules retain their explicit source origin.
     ///
     /// Planning is bounded by rectangle count and intersection work, not by
     /// worksheet area. A full-column rule does not require per-cell expansion.
@@ -99,6 +145,17 @@ impl ValidationStore {
             }
         }
         let targets = disjoint(targets.iter().copied(), &mut budget)?;
+        for rule in self.rules.values().chain(match &edit {
+            ValidationEdit::Set(rule) => Some(rule),
+            _ => None,
+        }) {
+            if rule
+                .reference_origin
+                .is_some_and(|(r, c)| r >= rows || c >= cols)
+            {
+                return Err("A validation reference origin is outside the worksheet.".into());
+            }
+        }
         let mut next = self.clone();
         match edit {
             ValidationEdit::Set(rule) => {
@@ -242,6 +299,65 @@ impl ValidationStore {
             earlier.push(range);
         }
         Ok(result)
+    }
+}
+
+// Static bounding-box tree keeps ordinary, disjoint validation exports from
+// becoming quadratic. Only intersecting earlier rules or exclusions are cuts.
+struct RangeIndex<'a> {
+    entries: &'a [(CellRange, usize)],
+    bounds: Vec<CellRange>,
+}
+impl<'a> RangeIndex<'a> {
+    fn new(entries: &'a [(CellRange, usize)]) -> Self {
+        let mut tree = Self {
+            entries,
+            bounds: vec![CellRange::single(0, 0); entries.len()],
+        };
+        tree.build(0, entries.len());
+        tree
+    }
+    fn build(&mut self, lo: usize, hi: usize) -> Option<CellRange> {
+        if lo == hi {
+            return None;
+        }
+        let mid = lo + (hi - lo) / 2;
+        let mut bounds = self.entries[mid].0;
+        for child in [self.build(lo, mid), self.build(mid + 1, hi)]
+            .into_iter()
+            .flatten()
+        {
+            bounds.start_row = bounds.start_row.min(child.start_row);
+            bounds.start_col = bounds.start_col.min(child.start_col);
+            bounds.end_row = bounds.end_row.max(child.end_row);
+            bounds.end_col = bounds.end_col.max(child.end_col);
+        }
+        self.bounds[mid] = bounds;
+        Some(bounds)
+    }
+    fn cuts(
+        &self,
+        range: &CellRange,
+        priority: usize,
+        lo: usize,
+        hi: usize,
+        budget: &mut Budget,
+        out: &mut Vec<CellRange>,
+    ) -> Result<(), String> {
+        if lo == hi {
+            return Ok(());
+        }
+        budget.step()?;
+        let mid = lo + (hi - lo) / 2;
+        if !range.overlaps(&self.bounds[mid]) {
+            return Ok(());
+        }
+        let (candidate, order) = self.entries[mid];
+        if order < priority && range.overlaps(&candidate) {
+            out.push(candidate);
+        }
+        self.cuts(range, priority, lo, mid, budget, out)?;
+        self.cuts(range, priority, mid + 1, hi, budget, out)
     }
 }
 

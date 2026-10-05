@@ -1,6 +1,253 @@
 use super::*;
 use std::io::Cursor;
 
+#[test]
+fn invalid_targets_and_unsupported_rules_are_reported_without_reanchoring() {
+    let xml = r#"<worksheet><dataValidations>
+      <dataValidation type="custom" sqref="A0 B2:B3"><formula1>A1&gt;0</formula1></dataValidation>
+      <dataValidation type="future" sqref="C1"><formula1>1</formula1></dataValidation>
+      <dataValidation type="whole" sqref="D1" operator="greaterThan"><formula1>0</formula1></dataValidation>
+    </dataValidations></worksheet>"#;
+    let report = parse_validations_report(xml).unwrap();
+    assert_eq!(report.skipped, 2);
+    assert_eq!(report.rules.len(), 1);
+    assert_eq!(report.rules[0].range, CellRange::single(0, 3));
+}
+
+#[test]
+fn discontiguous_import_uses_one_origin_even_when_range_order_differs() {
+    let xml = r#"<worksheet><dataValidations><dataValidation type="whole" operator="greaterThan" sqref="C5:C6 B2:B3"><formula1>$A5</formula1></dataValidation></dataValidations></worksheet>"#;
+    let rules = parse_validations_from_xml(xml).unwrap();
+    assert_eq!(rules.len(), 2);
+    for entry in &rules {
+        assert_eq!(entry.rule.reference_origin, Some((4, 2)));
+    }
+    assert_eq!(
+        rules[1].rule.at(1, 1).rule_type,
+        ValidationType::WholeNumber(NumericConstraint::greater_than(ConstraintValue::CellRef(
+            "=$A2".into()
+        )))
+    );
+    assert!(
+        parse_validations_from_xml(&xml.replace("$A5", "$A$5")).unwrap()[0]
+            .rule
+            .reference_origin
+            .is_some()
+    );
+}
+
+#[test]
+fn excluded_origin_and_overlaps_export_only_effective_rules_with_rebased_formulas() {
+    use visigrid_engine::workbook::Workbook;
+    let mut wb = Workbook::new();
+    let s = wb.active_sheet_mut();
+    let mut rule = ValidationRule::whole_number(NumericConstraint::greater_than(
+        ConstraintValue::CellRef("$A2".into()),
+    ));
+    rule.reference_origin = Some((1, 1));
+    s.validations.set(CellRange::new(1, 1, 9, 1), rule);
+    s.validations.set(
+        CellRange::new(4, 1, 11, 1),
+        ValidationRule::whole_number(NumericConstraint::greater_than(100)),
+    );
+    s.validations.exclude(CellRange::new(1, 1, 2, 1));
+    s.validations.exclude(CellRange::single(5, 1));
+    for r in 0..12 {
+        s.set_value(r, 0, &((r + 1) * 10).to_string());
+    }
+    let before = s.validations.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("exclusions.xlsx");
+    let report = crate::xlsx::export(&wb, &path, None).unwrap();
+    assert_eq!(
+        (report.validations_exported, report.validations_skipped),
+        (3, 0)
+    );
+    let rules = parse_sheet_validations(&path, "Sheet1").unwrap();
+    let formulas: Vec<_> = rules
+        .iter()
+        .map(|v| (&v.range, &v.rule.rule_type))
+        .collect();
+    assert!(formulas
+        .iter()
+        .any(|(r, t)| **r == CellRange::new(3, 1, 4, 1)
+            && **t
+                == ValidationType::WholeNumber(NumericConstraint::greater_than(
+                    ConstraintValue::CellRef("=$A4".into())
+                ))));
+    let (loaded, _) = crate::xlsx::import(&path).unwrap();
+    for r in 0..12 {
+        assert_eq!(
+            loaded.active_sheet().validations.get(r, 1).is_some(),
+            before.get(r, 1).is_some(),
+            "row {r}"
+        );
+        for value in ["5", "55", "115"] {
+            assert_eq!(
+                loaded.validate_cell_input(0, r, 1, value).is_valid(),
+                wb.validate_cell_input(0, r, 1, value).is_valid(),
+                "row {r}, value {value}"
+            );
+        }
+    }
+    assert_eq!(
+        wb.active_sheet().validations,
+        before,
+        "export must not edit source metadata"
+    );
+}
+
+#[test]
+fn native_fixed_references_stay_fixed_after_excel_round_trip() {
+    use visigrid_engine::workbook::Workbook;
+    let mut wb = Workbook::new();
+    let s = wb.active_sheet_mut();
+    s.set_value(0, 0, "10");
+    s.set_value(1, 0, "100");
+    s.validations.set(
+        CellRange::new(0, 1, 9, 1),
+        ValidationRule::whole_number(NumericConstraint::greater_than(ConstraintValue::CellRef(
+            "A1".into(),
+        ))),
+    );
+    s.validations.exclude(CellRange::single(0, 1));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixed.xlsx");
+    crate::xlsx::export(&wb, &path, None).unwrap();
+    let (mut loaded, _) = crate::xlsx::import(&path).unwrap();
+    for r in 1..10 {
+        assert!(loaded.validate_cell_input(0, r, 1, "50").is_valid());
+        assert!(loaded
+            .active_sheet()
+            .validations
+            .get(r, 1)
+            .unwrap()
+            .reference_origin
+            .is_some());
+    }
+    loaded
+        .structural_edit(0, visigrid_engine::structural::Axis::Row, 0, 1, false)
+        .unwrap();
+    for r in 2..11 {
+        assert!(loaded.validate_cell_input(0, r, 1, "50").is_valid());
+    }
+}
+
+#[test]
+fn relative_origins_survive_native_json_and_exclusion_edit_replay() {
+    use visigrid_engine::{validation::ValidationEdit, workbook::Workbook};
+    let mut wb = Workbook::new();
+    let mut rule = ValidationRule::custom("=A2>0");
+    rule.reference_origin = Some((1, 1));
+    wb.active_sheet_mut()
+        .validations
+        .set(CellRange::new(1, 1, 9, 1), rule);
+    let patch = wb
+        .active_sheet()
+        .validations
+        .plan_edit(
+            &[CellRange::new(1, 1, 3, 1)],
+            ValidationEdit::Exclude,
+            1048576,
+            16384,
+        )
+        .unwrap();
+    patch
+        .apply(&mut wb.active_sheet_mut().validations, true)
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin.sheet");
+    crate::native::save_workbook(&wb, &path).unwrap();
+    let raw: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM meta WHERE key='validations_0'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["version"],
+        2
+    );
+    let native = crate::native::load_workbook(&path).unwrap();
+    assert!(native.read_only_reason().is_none());
+    assert_eq!(
+        native.active_sheet().validations,
+        wb.active_sheet().validations
+    );
+    for json in [
+        crate::json::export_full(wb.active_sheet()).unwrap(),
+        crate::json::export_workbook(&wb, &[], 0).unwrap(),
+    ] {
+        let mut doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(doc["version"], 4);
+        let mut loaded = crate::json::import_any(&json).unwrap().0;
+        assert_eq!(
+            loaded.active_sheet().validations,
+            wb.active_sheet().validations
+        );
+        patch
+            .apply(&mut loaded.active_sheet_mut().validations, false)
+            .unwrap();
+        assert!(loaded.active_sheet().validations.get(1, 1).is_some());
+        assert_eq!(
+            loaded
+                .active_sheet()
+                .validations
+                .get(7, 1)
+                .unwrap()
+                .at(7, 1)
+                .rule_type,
+            ValidationType::Custom("=A8>0".into())
+        );
+        doc["version"] = 2.into();
+        assert!(crate::json::import_any(&doc.to_string())
+            .unwrap_err()
+            .contains("v4"));
+    }
+}
+
+#[test]
+fn corrupt_origins_are_rejected_by_native_and_json_loaders() {
+    use visigrid_engine::workbook::Workbook;
+    let mut wb = Workbook::new();
+    let mut rule = ValidationRule::custom("=A2>0");
+    rule.reference_origin = Some((1, 1));
+    wb.active_sheet_mut()
+        .validations
+        .set(CellRange::new(1, 1, 9, 1), rule);
+    let json = crate::json::export_full(wb.active_sheet()).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+    doc["validations"][0]["rule"]["reference_origin"] = serde_json::json!([1048576, 0]);
+    assert!(crate::json::import_any(&doc.to_string())
+        .unwrap_err()
+        .contains("reference origin"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt.sheet");
+    crate::native::save_workbook(&wb, &path).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='validations_0'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    metadata["rules"][0][1]["reference_origin"] = serde_json::json!([0, 16384]);
+    conn.execute(
+        "UPDATE meta SET value=?1 WHERE key='validations_0'",
+        [metadata.to_string()],
+    )
+    .unwrap();
+    assert!(crate::native::load_workbook(&path)
+        .unwrap()
+        .read_only_reason()
+        .unwrap()
+        .contains("reference origin"));
+}
+
 fn xml_for(rule: &ValidationRule) -> String {
     let mut book = rust_xlsxwriter::Workbook::new();
     book.add_worksheet()
@@ -279,6 +526,9 @@ fn all_new_types_survive_public_workbook_import_and_export() {
         .zip(loaded.active_sheet().validations.iter())
     {
         assert_eq!(a, b);
-        assert_eq!(original.rule_type, imported.rule_type);
+        assert_eq!(
+            original.for_xlsx_range(a.start_row, a.start_col).rule_type,
+            imported.rule_type
+        );
     }
 }

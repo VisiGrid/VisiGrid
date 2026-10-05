@@ -215,6 +215,19 @@ pub fn parse_sheet_validations(
     xlsx_path: &Path,
     sheet_name: &str,
 ) -> Result<Vec<ImportedValidation>, String> {
+    Ok(parse_sheet_validations_report(xlsx_path, sheet_name)?.rules)
+}
+
+#[derive(Default)]
+pub(crate) struct ValidationImport {
+    pub rules: Vec<ImportedValidation>,
+    pub skipped: usize,
+}
+
+pub(crate) fn parse_sheet_validations_report(
+    xlsx_path: &Path,
+    sheet_name: &str,
+) -> Result<ValidationImport, String> {
     let file =
         std::fs::File::open(xlsx_path).map_err(|e| format!("Failed to open XLSX file: {}", e))?;
     let mut archive =
@@ -227,7 +240,7 @@ pub fn parse_sheet_validations(
     let xml_content = read_zip_file(&mut archive, &xml_path)?;
 
     // Step 3: Parse <dataValidation> elements
-    parse_validations_from_xml(&xml_content)
+    parse_validations_report(&xml_content)
 }
 
 /// Find the worksheet XML path for a given sheet name.
@@ -370,11 +383,16 @@ fn read_zip_file<R: Read + Seek>(
 }
 
 /// Parse <dataValidation> elements from worksheet XML
+#[cfg(test)]
 fn parse_validations_from_xml(xml: &str) -> Result<Vec<ImportedValidation>, String> {
+    Ok(parse_validations_report(xml)?.rules)
+}
+
+fn parse_validations_report(xml: &str) -> Result<ValidationImport, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
 
-    let mut validations = Vec::new();
+    let mut validations = ValidationImport::default();
     let mut buf = Vec::new();
     let mut in_data_validation = false;
     let mut current_attrs: HashMap<String, String> = HashMap::new();
@@ -415,17 +433,7 @@ fn parse_validations_from_xml(xml: &str) -> Result<Vec<ImportedValidation>, Stri
                     current_attrs.insert(key, value);
                 }
 
-                // Process this validation (no formulas since self-closing)
-                if let Some(sqref) = current_attrs.get("sqref") {
-                    if let Some(imported) = parse_single_validation(&current_attrs, None, None) {
-                        for range in parse_sqref(sqref) {
-                            validations.push(ImportedValidation {
-                                range,
-                                rule: imported.clone(),
-                            });
-                        }
-                    }
-                }
+                collect_validation(&current_attrs, None, None, &mut validations)?;
             }
             Ok(Event::Start(ref e))
                 if in_data_validation && e.local_name().as_ref() == b"formula1" =>
@@ -475,21 +483,15 @@ fn parse_validations_from_xml(xml: &str) -> Result<Vec<ImportedValidation>, Stri
             Ok(Event::End(ref e)) if e.local_name().as_ref() == b"dataValidation" => {
                 in_data_validation = false;
 
-                // Process the collected validation
-                if let Some(sqref) = current_attrs.get("sqref") {
-                    if let Some(imported) = parse_single_validation(
-                        &current_attrs,
-                        formula1.as_deref(),
-                        formula2.as_deref(),
-                    ) {
-                        for range in parse_sqref(sqref) {
-                            validations.push(ImportedValidation {
-                                range,
-                                rule: imported.clone(),
-                            });
-                        }
-                    }
-                }
+                collect_validation(
+                    &current_attrs,
+                    formula1.as_deref(),
+                    formula2.as_deref(),
+                    &mut validations,
+                )?;
+            }
+            Ok(Event::Eof) if in_data_validation => {
+                return Err("Unclosed data validation metadata.".into())
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("XML parse error: {}", e)),
@@ -499,6 +501,41 @@ fn parse_validations_from_xml(xml: &str) -> Result<Vec<ImportedValidation>, Stri
     }
 
     Ok(validations)
+}
+
+fn collect_validation(
+    attrs: &HashMap<String, String>,
+    formula1: Option<&str>,
+    formula2: Option<&str>,
+    result: &mut ValidationImport,
+) -> Result<(), String> {
+    let ranges = attrs
+        .get("sqref")
+        .and_then(|s| {
+            s.split_whitespace()
+                .map(parse_single_range)
+                .collect::<Option<Vec<_>>>()
+        })
+        .filter(|r| !r.is_empty());
+    let rule = parse_single_validation(attrs, formula1, formula2);
+    match (ranges, rule) {
+        (Some(ranges), Some(mut rule)) => {
+            if result.rules.len().saturating_add(ranges.len()) > 100_000 {
+                return Err("Validation metadata exceeds the supported range limit.".into());
+            }
+            if rule.has_reference_sources() {
+                rule.reference_origin = Some((ranges[0].start_row, ranges[0].start_col));
+            }
+            result
+                .rules
+                .extend(ranges.into_iter().map(|range| ImportedValidation {
+                    range,
+                    rule: rule.clone(),
+                }));
+        }
+        _ => result.skipped += 1,
+    }
+    Ok(())
 }
 
 /// Parse a single <dataValidation> element into a ValidationRule
@@ -617,7 +654,11 @@ fn parse_list_source(formula1: &str) -> Option<ListSource> {
 
     // Range reference: contains $ or : or !
     // e.g., $A$1:$A$10, Sheet2!$B$1:$B$20
-    if formula1.contains('$') || formula1.contains(':') || formula1.contains('!') {
+    if parse_cell_ref(formula1).is_some()
+        || formula1.contains('$')
+        || formula1.contains(':')
+        || formula1.contains('!')
+    {
         // Prepend = for VisiGrid's Range format
         return Some(ListSource::Range(format!("={}", formula1)));
     }
@@ -668,7 +709,7 @@ fn parse_operator(op: Option<&str>) -> Option<ComparisonOperator> {
 
 /// Parse a constraint value (number, cell reference, or formula)
 fn parse_constraint_value(value: &str) -> Option<ConstraintValue> {
-    let value = value.trim();
+    let value = value.trim().strip_prefix('=').unwrap_or(value.trim());
 
     if value.is_empty() {
         return None;
@@ -691,17 +732,10 @@ fn parse_constraint_value(value: &str) -> Option<ConstraintValue> {
 
 /// Check if a string looks like a cell reference (not a formula)
 fn is_cell_reference(s: &str) -> bool {
-    // Cell refs: A1, $A$1, Sheet1!A1, 'Sheet Name'!$A$1
-    // NOT formulas: TODAY(), MAX(A1:A10), A1+B1
-
-    // If it contains parentheses or operators, it's likely a formula
-    if s.contains('(') || s.contains('+') || s.contains('-') || s.contains('*') || s.contains('/') {
-        return false;
-    }
-
-    // Simple heuristic: cell refs match [Sheet!][$]Col[$]Row pattern
-    // This is a simplified check - just verify it's not obviously a formula
-    true
+    matches!(
+        visigrid_engine::formula::parser::parse(&format!("={}", s.trim_start_matches('='))),
+        Ok(visigrid_engine::formula::parser::Expr::CellRef { .. })
+    )
 }
 
 /// Parse Excel sqref into CellRange(s)
@@ -710,6 +744,7 @@ fn is_cell_reference(s: &str) -> bool {
 /// - Single cell: "A1" -> CellRange(0,0,0,0)
 /// - Single range: "A1:B10" -> CellRange(0,0,9,1)
 /// - Multiple: "A1:A10 C1:C10" -> two ranges
+#[cfg(test)]
 fn parse_sqref(sqref: &str) -> Vec<CellRange> {
     sqref
         .split_whitespace()

@@ -9,6 +9,77 @@ use visigrid_engine::validation::{ListSource, NumericConstraint, ValidationRule,
 fn rule() -> ValidationRule {
     ValidationRule::list_inline(vec!["30".into(), "40".into()])
 }
+
+#[test]
+fn imported_relative_rules_keep_their_origin_through_filtered_edit_and_rewind() {
+    let mut wb = fixture(true);
+    let mut relative = ValidationRule::whole_number(NumericConstraint::greater_than(
+        visigrid_engine::validation::ConstraintValue::CellRef("$C4".into()),
+    ));
+    relative.reference_origin = Some((3, 2));
+    wb.active_sheet_mut()
+        .validations
+        .set(CellRange::new(3, 2, 6, 2), relative.clone());
+    let base = wb.clone();
+    let draft = selected(&wb);
+    assert_eq!(draft.anchor, (5, 2));
+    let mut state = ValidationDialogState::default();
+    state.open_draft(draft.clone(), draft.anchor_rule().as_ref(), true);
+    assert_eq!(state.build_rule().unwrap().unwrap(), relative);
+    assert!(draft
+        .prepare(
+            &wb,
+            ValidationEdit::Set(state.build_rule().unwrap().unwrap())
+        )
+        .unwrap()
+        .is_none());
+    state.ignore_blank = false;
+    let commit = draft
+        .prepare(
+            &wb,
+            ValidationEdit::Set(state.build_rule().unwrap().unwrap()),
+        )
+        .unwrap()
+        .unwrap();
+    commit.apply(&mut wb, true).unwrap();
+    for row in 3..7 {
+        let rule = wb.active_sheet().validations.get(row, 2).unwrap();
+        assert_eq!(rule.reference_origin, Some((3, 2)));
+        assert_eq!(
+            rule.ignore_blank,
+            row == 4,
+            "hidden record keeps its settings"
+        );
+        assert_eq!(
+            rule.at(row, 2).rule_type,
+            ValidationType::WholeNumber(NumericConstraint::greater_than(
+                visigrid_engine::validation::ConstraintValue::CellRef(format!("$C{}", row + 1)),
+            ))
+        );
+    }
+    let mut history = History::new();
+    history.record_action_with_provenance(action(commit.clone()), None);
+    let replay = history
+        .build_workbook_before(1, Some(&base), 100, 10000)
+        .unwrap()
+        .workbook;
+    assert_eq!(
+        replay.active_sheet().validations,
+        wb.active_sheet().validations
+    );
+    let saved = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["version"], 4);
+    let reopened = visigrid_io::json::import_any(&saved).unwrap().0;
+    assert!(reopened.read_only_reason().is_none());
+    assert_eq!(reopened.active_sheet().validations, wb.active_sheet().validations);
+    assert_eq!(reopened.active_sheet().table_view_spec(), wb.active_sheet().table_view_spec());
+    assert_eq!(reopened.active_sheet().tables(), wb.active_sheet().tables());
+    commit.apply(&mut wb, false).unwrap();
+    assert_eq!(
+        wb.active_sheet().validations,
+        base.active_sheet().validations
+    );
+}
 fn selected(wb: &Workbook) -> Draft {
     let sheet = wb.active_sheet();
     let view = sheet.build_saved_table_view(sheet.rows).unwrap().unwrap();

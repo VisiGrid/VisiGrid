@@ -268,6 +268,8 @@ pub const FULL_JSON_VERSION: u32 = 1;
 pub const FULL_JSON_WORKBOOK_VERSION: u32 = 2;
 /// Table-bearing documents require v3; ordinary exports retain v1/v2.
 pub const FULL_JSON_TABLE_VERSION: u32 = 3;
+/// Relative validation origins require readers that preserve their semantics.
+pub const FULL_JSON_VALIDATION_VERSION: u32 = 4;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
 /// the web mapper own it). Frozen panes also live in the engine; an explicit
@@ -706,7 +708,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
     }
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
+        version: if sheet.validations.iter().any(|(_, r)| r.reference_origin.is_some()) { FULL_JSON_VALIDATION_VERSION } else if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
         table_catalog: sheet.has_table_history().then(||
             serde_json::to_value(visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()).unwrap()),
         body: sheet_body(sheet, layout),
@@ -746,7 +748,7 @@ pub fn export_workbook(
         .collect();
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
+        version: if wb.sheets().iter().any(|s| s.validations.iter().any(|(_, r)| r.reference_origin.is_some())) { FULL_JSON_VALIDATION_VERSION } else if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
         table_catalog: wb.has_table_history().then(|| serde_json::to_value(wb.saved_tables()).unwrap()),
         body: SheetBody::default(),
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
@@ -1013,10 +1015,10 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
-    if doc.version > FULL_JSON_TABLE_VERSION {
+    if doc.version > FULL_JSON_VALIDATION_VERSION {
         return Err(format!(
             "visigrid-json version {} is newer than supported ({})",
-            doc.version, FULL_JSON_TABLE_VERSION
+            doc.version, FULL_JSON_VALIDATION_VERSION
         ));
     }
 
@@ -1029,6 +1031,9 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     let mut sheets = Vec::with_capacity(bodies.len());
     let mut layouts = Vec::with_capacity(bodies.len());
     for (i, body) in bodies.iter().enumerate() {
+        if doc.version < FULL_JSON_VALIDATION_VERSION && body.validations.iter().any(|v| v.rule.reference_origin.is_some()) {
+            return Err("Relative validation rules require visigrid-json v4.".into());
+        }
         let (sheet, layout) = apply_body(body, SheetId(i as u64 + 1), i)?;
         sheets.push(sheet);
         layouts.push(layout);
@@ -1264,6 +1269,9 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     }
     let mut validation_ranges = BTreeSet::new();
     for v in &body.validations {
+        if v.rule.reference_origin.is_some_and(|(r, c)| r >= sheet.rows || c >= sheet.cols) {
+            return Err("A validation reference origin is outside the worksheet.".into());
+        }
         if !validation_ranges.insert(v.range) {
             return Err("Validation metadata contains duplicate rule ranges.".into());
         }

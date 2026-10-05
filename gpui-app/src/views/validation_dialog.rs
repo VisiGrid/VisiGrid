@@ -118,6 +118,11 @@ pub fn render_validation_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                         .gap_4()
                         .when(state.anchor_excluded, |el| el.child(div().text_xs().text_color(text_muted)
                             .whitespace_normal().child("The starting cell is excluded. Its exclusion stays in place.")))
+                        .when_some(state.original_rule.as_ref().filter(|r| r.has_relative_references()).and_then(|r| r.reference_origin), |el, (row, col)| {
+                            el.child(div().text_xs().text_color(text_muted).whitespace_normal()
+                                .child(format!("Relative references are written for {} and adjust for each cell.",
+                                    crate::validation_ui::plan::range_summary(&[visigrid_engine::validation::CellRange::single(row, col)]))))
+                        })
                         // Validation Type selector
                         .child(render_type_selector(app, text_primary, text_muted, accent, editor_bg, panel_border, cx))
                         // Type-specific fields

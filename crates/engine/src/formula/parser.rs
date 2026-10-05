@@ -621,8 +621,18 @@ fn parse_percent(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
 /// tokens preserves parentheses, strings, and sheet names, and recognizes the
 /// same whole-range endpoints as the parser. Also used for XLSX shared formulas.
 pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> String {
+    transform_formula_refs(formula, delta_row, delta_col, false)
+}
+
+/// Freeze A1 references while preserving strings, names and structured fields.
+/// Used when exporting native validation rules with fixed-reference semantics.
+pub fn absolutize_formula_refs(formula: &str) -> String {
+    transform_formula_refs(formula, 0, 0, true)
+}
+
+fn transform_formula_refs(formula: &str, delta_row: i32, delta_col: i32, absolute: bool) -> String {
     fn token_end(bytes: &[u8], mut i: usize) -> usize {
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || b"_$.".contains(&bytes[i])) {
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] >= 0x80 || b"_$.\\".contains(&bytes[i])) {
             i += 1;
         }
         i
@@ -707,7 +717,7 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
                     };
                     match (shift(first, first_abs, delta), shift(last, last_abs, delta)) {
                         (Some(first), Some(last)) if first < limit && last < limit => result
-                            .push_str(&format_whole_range(axis, first, last, first_abs, last_abs)),
+                            .push_str(&format_whole_range(axis, first, last, absolute || first_abs, absolute || last_abs)),
                         _ => result.push_str("#REF!"),
                     }
                     i = last_end;
@@ -727,7 +737,7 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
                 shift(row, row_abs, delta_row),
             ) {
                 (Some(col), Some(row)) if col < crate::sheet::NUM_COLS && row < crate::sheet::NUM_ROWS => {
-                    result.push_str(&format_cell_addr(col, row, col_abs, row_abs))
+                    result.push_str(&format_cell_addr(col, row, absolute || col_abs, absolute || row_abs))
                 }
                 _ => result.push_str("#REF!"),
             }

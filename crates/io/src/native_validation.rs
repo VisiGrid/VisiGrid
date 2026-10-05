@@ -19,7 +19,7 @@ struct Saved {
 
 impl Saved {
     fn validate(&self, sheet: &Sheet) -> Result<(), String> {
-        if self.version != 1 {
+        if !(1..=2).contains(&self.version) {
             return Err("Validation metadata has an invalid version.".into());
         }
         if self.rules.len().saturating_add(self.exclusions.len()) > MAX_RANGES {
@@ -34,6 +34,12 @@ impl Saved {
         if !self.rules.iter().all(|(r, _)| valid(r)) || !self.exclusions.iter().all(valid) {
             return Err("Validation metadata contains a corrupt worksheet range.".into());
         }
+        if self.rules.iter().any(|(_, rule)| {
+            rule.reference_origin
+                .is_some_and(|(r, c)| self.version < 2 || r >= sheet.rows || c >= sheet.cols)
+        }) {
+            return Err("Validation metadata contains an invalid reference origin.".into());
+        }
         let mut ranges = std::collections::HashSet::new();
         if self.rules.iter().any(|(r, _)| !ranges.insert(*r)) {
             return Err("Validation metadata contains duplicate rule ranges.".into());
@@ -47,7 +53,15 @@ pub(super) fn save(conn: &Connection, index: usize, sheet: &Sheet) -> Result<(),
         return Ok(());
     }
     let mut saved = Saved {
-        version: 1,
+        version: if sheet
+            .validations
+            .iter()
+            .any(|(_, r)| r.reference_origin.is_some())
+        {
+            2
+        } else {
+            1
+        },
         rules: sheet
             .validations
             .iter()
@@ -99,7 +113,7 @@ pub(super) fn load(conn: &Connection, index: usize, sheet: &mut Sheet) -> Option
         }
         let version: Version = serde_json::from_str(&raw)
             .map_err(|e| format!("Validation metadata is corrupt: {e}"))?;
-        if version.version > 1 {
+        if version.version > 2 {
             return Err(
                 "These validation rules need a newer VisiGrid. Upgrade to edit this file.".into(),
             );
@@ -187,7 +201,7 @@ mod tests {
             .is_none());
         for raw in [
             "{broken".to_string(),
-            r#"{"version":2,"rules":[],"exclusions":[],"future_field":true}"#.into(),
+            r#"{"version":3,"rules":[],"exclusions":[],"future_field":true}"#.into(),
             format!(
                 r#"{{"version":1,"rules":[],"exclusions":[{{"start_row":0,"start_col":0,"end_row":{},"end_col":0}}]}}"#,
                 wb.active_sheet().rows

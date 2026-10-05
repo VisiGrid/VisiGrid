@@ -17,6 +17,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 mod edit;
+mod references;
+pub(crate) use references::parse_list_range;
 pub use edit::{ValidationEdit, ValidationPatch};
 
 /// Maximum number of items in a resolved list. Prevents UI freeze on huge ranges.
@@ -39,6 +41,10 @@ pub struct ValidationRule {
     pub input_message: Option<InputMessage>,
     /// Optional error alert shown when validation fails.
     pub error_alert: Option<ErrorAlert>,
+    /// Imported relative references are expressed at this stored worksheet cell.
+    /// Absence retains the fixed-reference semantics of existing native rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_origin: Option<(usize, usize)>,
 }
 
 impl ValidationRule {
@@ -52,6 +58,7 @@ impl ValidationRule {
             show_dropdown,
             input_message: None,
             error_alert: None,
+            reference_origin: None,
         }
     }
 
@@ -776,7 +783,7 @@ impl ValidationStore {
     /// inside a deleted span is dropped.
     pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) {
         let mut shifted: BTreeMap<CellRange, ValidationRule> = BTreeMap::new();
-        for (range, rule) in std::mem::take(&mut self.rules) {
+        for (range, mut rule) in std::mem::take(&mut self.rules) {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
             let span = crate::structural::shift_span(s, e, at, count, delete);
             if let Some((ns, ne)) = span {
@@ -787,6 +794,14 @@ impl ValidationStore {
                 } else {
                     r.start_col = ns;
                     r.end_col = ne;
+                }
+                if rule.reference_origin.is_some() {
+                    // Rebase at the first surviving old cell. The workbook
+                    // subsequently adjusts its reference sources on all sheets.
+                    let first = if delete && s >= at { s.max(at.saturating_add(count)) } else { s };
+                    let (row, col) = if is_row { (first, range.start_col) } else { (range.start_row, first) };
+                    rule = rule.at(row, col).into_owned();
+                    rule.reference_origin = Some((r.start_row, r.start_col));
                 }
                 shifted.insert(r, rule);
             }
