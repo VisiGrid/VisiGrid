@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.49.1
+
+### Formulas
+
+- Fixed Group by totals showing float noise on large files (`186318331.08999842` instead of `186318331.09`; since 0.48.0). Group by, SUM, AVERAGE, SUMIF(S), AVERAGEIF(S), pivot totals and the status bar's Sum now add without drift and agree with each other, so `=SUM(...)` equals the exact total. Recipe totals keep 15 significant digits, as the sheet shows them and as Excel does, so a 16-digit integer total (an ID column summed by mistake) loses its last digit. ([#108](https://github.com/VisiGrid/VisiGrid/pull/108))
 
 ### Import recipes
 
 - Fixed the window freezing while an AI agent refreshed a large recipe-linked Table (MCP `refresh_table`): the recipe now runs in the background, as Alt+F5 does, and nothing is published if you open a plan to review before it finishes. ([#106](https://github.com/VisiGrid/VisiGrid/pull/106))
-- Fixed Group by totals showing float noise on large files (`186318331.08999842` instead of `186318331.09`; since 0.48.0). Group by, SUM, AVERAGE, SUMIF(S), AVERAGEIF(S), pivot totals and the status bar's Sum now add without drift and agree with each other, so `=SUM(...)` equals the exact total. Recipe totals keep 15 significant digits, as the sheet shows them and as Excel does, so a 16-digit integer total (an ID column summed by mistake) loses its last digit. ([#108](https://github.com/VisiGrid/VisiGrid/pull/108))
 - An AI agent's recipe refresh that runs past its 10-minute wait now reports that it may still finish (`still_running`) instead of a communication failure, since the refresh still updates the Table when it's done. ([#109](https://github.com/VisiGrid/VisiGrid/pull/109))
 
 ## 0.49.0
