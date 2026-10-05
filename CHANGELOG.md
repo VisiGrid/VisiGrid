@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Merged cells and Center Across
+
+- **"Press Ctrl+Alt+C" means what it says for as long as it's showing.** After a sort or filter is refused because of merged cells, Ctrl+Alt+C converts them while that message is on screen and the cursor hasn't moved. It used to stop working after 30 seconds, and pressing it later centered the selected cell instead.
+- **The refusal names the first merged cell in the way**, in sheet order (it could name A7:B7 when A6:B6 came first).
+- **"Convert Merged Cells to Center Across" fits in the Format menu**; the menus are a little wider.
+- **Print and PDF export no longer warn "Clipped text" for a large title that prints whole.** A 16pt title in a default-height row was flagged because the check counted line spacing as text.
+
 ## 0.49.1
 
 ### Formulas

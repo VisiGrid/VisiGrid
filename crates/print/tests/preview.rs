@@ -148,3 +148,28 @@ fn center_across_selection_centers_over_the_whole_span() {
     assert!(ink(300, 450), "text is drawn over column B, the middle of the span");
     assert!(!ink(80, 260), "nothing at the left of column A, so it is not centered in A alone");
 }
+
+#[test]
+fn a_16pt_title_in_a_default_row_is_not_reported_clipped() {
+    // Lines are laid out at 1.2x the font size; the extra is spacing, not ink.
+    // A 16pt bold title in a 21pt row prints whole and must not raise a
+    // "Clipped text" warning. Text that really doesn't fit still does.
+    use visigrid_engine::cell::Alignment;
+    let run = |row_pt: f64, size: f32| {
+        let mut sheet = Sheet::new(SheetId(1), 2, 4);
+        sheet.set_value(0, 0, "Q3 Sales by Rep");
+        for c in 0..4 {
+            sheet.set_alignment(0, c, Alignment::CenterAcrossSelection);
+            sheet.set_font_size(0, c, Some(size));
+            sheet.set_bold(0, c, true);
+        }
+        let view = SheetView {
+            rows: (0..2).map(|i| AxisItem { source_index: i, size_pt: if i == 0 { row_pt } else { 21.0 } }).collect(),
+            columns: (0..4).map(|i| AxisItem { source_index: i, size_pt: 70.0 }).collect(),
+        };
+        let snapshot = capture(&sheet, &view, None, "IBM Plex Sans", 11.0).unwrap();
+        pdf::render(&snapshot, &settings(false)).unwrap().clipped_cells
+    };
+    assert_eq!(run(21.0, 16.0), 0, "16pt fits a 21pt row");
+    assert_eq!(run(21.0, 28.0), 1, "28pt does not");
+}

@@ -6,7 +6,7 @@ use crate::mode::Menu;
 use crate::theme::TokenKey;
 
 pub const MENU_HEIGHT: f32 = crate::app::MENU_BAR_HEIGHT;
-const DROPDOWN_WIDTH: f32 = 260.0;
+const DROPDOWN_WIDTH: f32 = 290.0; // fits "Convert Merged Cells to Center Across" with its padding
 
 /// Render the modern menu bar - compact chrome, not content
 pub fn render_menu_bar(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
