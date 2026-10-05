@@ -2547,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn native_totals_rewind_with_active_filters_keeps_footer_and_criteria() {
+    fn native_totals_rewind_with_active_filters_keeps_hidden_footer_and_criteria() {
         use visigrid_engine::{table::TableRange, table_view::{TableViewSpec, TableFilter}, filter::{ColumnFilter, NormalizedFilterKey}};
         let mut wb = Workbook::new();
         for (row, value) in ["Amount", "10", "20"].iter().enumerate() { wb.set_cell_value_tracked(0, row, 0, value); }
@@ -2556,19 +2556,22 @@ mod tests {
         spec.filters.push(TableFilter { column: wb.table(id).unwrap().1.columns[0].id,
             criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Number(10.0.into())].into()), text_filter: None } });
         wb.set_table_view_spec(wb.active_sheet_id(), Some(spec.clone())).unwrap();
+        let (mut wb, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [2, 3].into()).unwrap();
         let mut replay = wb.clone();
-        let show = wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let show = wb.set_table_totals_visible(id, true, [2, 3].into()).unwrap();
         let edit = wb.set_table_total(id, 0, crate::table_totals::total_setting("countNums", "").unwrap()).unwrap();
-        let hide = wb.set_table_totals_visible(id, false, Default::default()).unwrap();
+        let hide = wb.set_table_totals_visible(id, false, [2, 3].into()).unwrap();
         let mut view = crate::app::PreviewViewState::default();
         for (commit, expected) in [(show, "10"), (edit, "1"), (hide, "")] {
             let action = UndoAction::TableCommit { sheet_index: 0, commit: Box::new(commit.clone()), header_layout: None, description: "Totals".into() };
             History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
             assert_eq!(replay.sheet(0).unwrap().get_display(3, 0), expected);
             assert_eq!(replay.sheet(0).unwrap().table_view_spec(), Some(&spec));
+            assert_eq!(replay.sheet(0).unwrap().manual_hidden_rows(), [2, 3].into());
             let before = crate::table_totals::prepare_replay(&replay, &commit, true).unwrap();
             let after = crate::table_totals::prepare_replay(&before, &commit, false).unwrap();
             assert_eq!(after.sheet(0).unwrap().get_display(3, 0), expected);
+            assert_eq!(after.sheet(0).unwrap().manual_hidden_rows(), [2, 3].into());
         }
     }
 

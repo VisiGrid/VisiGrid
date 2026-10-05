@@ -487,8 +487,57 @@ fn native_totals_aggregate_settings_follow_filters_and_manual_hides() {
 }
 
 #[test]
+fn creating_a_manually_hidden_footer_preserves_visibility_and_totals_history() {
+    for filtered in [false, true] {
+        let (mut wb, id) = native_book();
+        if filtered {
+            let mut spec = TableViewSpec::new(id);
+            spec.filters.push(TableFilter {
+                column: wb.table(id).unwrap().1.columns[0].id,
+                criteria: ColumnFilter {
+                    selected: Some([NormalizedFilterKey::Text("west".into())].into()),
+                    text_filter: None,
+                },
+            });
+            wb.set_table_view_spec(wb.active_sheet_id(), Some(spec)).unwrap();
+        }
+        let flags = [1, 4].into();
+        let (mut wb, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), flags).unwrap();
+        wb.set_cell_value_tracked(0, 0, 3, "=SUBTOTAL(9,Sales[Amount])");
+        wb.set_cell_value_tracked(0, 4, 3, "Keep neighboring cells");
+        let spec = wb.active_sheet().table_view_spec().cloned();
+        let show = wb.set_table_totals_visible(id, true, [1, 4].into()).unwrap();
+        let expected = if filtered { "30" } else { "50" };
+        assert_eq!(wb.active_sheet().get_display(4, 1), expected);
+        assert_eq!(wb.active_sheet().get_display(0, 3), if filtered { "40" } else { "60" });
+        assert_eq!(wb.active_sheet().manual_hidden_rows(), [1, 4].into());
+        let hide = wb.set_table_totals_visible(id, false, [1, 4].into()).unwrap();
+        assert_eq!(wb.active_sheet().get_raw(4, 1), "");
+        let reshow = wb.set_table_totals_visible(id, true, [1, 4].into()).unwrap();
+        assert_eq!(wb.active_sheet().get_display(4, 1), expected);
+        for commit in [&reshow, &hide, &show] {
+            wb.apply_table_commit(commit, true).unwrap();
+            assert_eq!(wb.active_sheet().manual_hidden_rows(), [1, 4].into());
+        }
+        assert!(wb.table(id).unwrap().1.totals.is_none());
+        for commit in [&show, &hide, &reshow] {
+            wb.apply_table_commit(commit, false).unwrap();
+            assert_eq!(wb.active_sheet().manual_hidden_rows(), [1, 4].into());
+        }
+        assert_eq!(wb.active_sheet().table_view_spec(), spec.as_ref());
+        assert_eq!(wb.active_sheet().get_raw(4, 3), "Keep neighboring cells");
+        assert_eq!(wb.active_sheet().get_display(4, 1), expected);
+        let (mut unhidden, visibility) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [1].into()).unwrap();
+        assert!(unhidden.apply_table_commit(&reshow, true).is_err());
+        visibility.replay(&mut unhidden, true).unwrap();
+        unhidden.apply_table_commit(&reshow, true).unwrap();
+    }
+}
+
+#[test]
 fn native_totals_refuse_collisions_bad_formulas_and_stale_replay_atomically() {
-    let (mut wb, id) = native_book();
+    let (wb, id) = native_book();
+    let (mut wb, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [4].into()).unwrap();
     wb.set_cell_value_tracked(0, 4, 1, "Notes below");
     assert!(wb
         .set_table_totals_visible(id, true, Default::default())
@@ -496,11 +545,8 @@ fn native_totals_refuse_collisions_bad_formulas_and_stale_replay_atomically() {
     assert!(wb.table(id).unwrap().1.totals.is_none());
     assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), "Notes below");
     wb.clear_cell_tracked(0, 4, 1);
-    assert!(wb
-        .set_table_totals_visible(id, true, [4].into_iter().collect())
-        .is_err());
     let show = wb
-        .set_table_totals_visible(id, true, Default::default())
+        .set_table_totals_visible(id, true, [4].into_iter().collect())
         .unwrap();
     let before = wb.sheet(0).unwrap().get_raw(4, 1);
     assert!(wb
@@ -528,7 +574,8 @@ fn native_footer_cannot_claim_merges_comments_other_tables_or_out_of_bounds_cell
         cell::CellComment,
         sheet::{MergedRegion, NUM_ROWS},
     };
-    let (mut wb, id) = native_book();
+    let (wb, id) = native_book();
+    let (mut wb, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [4].into()).unwrap();
     wb.sheet_mut(0)
         .unwrap()
         .add_merge(MergedRegion::new(4, 0, 4, 1))

@@ -23,6 +23,42 @@ fn check(wb: &Workbook) {
 }
 
 #[test]
+fn totals_created_in_a_hidden_row_survive_file_roundtrips_and_reshowing() {
+    let mut wb = Workbook::new();
+    for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, row, 0, value);
+    }
+    let id = wb.create_table(wb.active_sheet_id(), TableRange {
+        start_row: 0, end_row: 3, start_col: 0, end_col: 0,
+    }, "Sales").unwrap().table_id();
+    let (mut wb, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [1, 4].into()).unwrap();
+    wb.set_table_totals_visible(id, true, [1, 4].into()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for mode in 0..3 {
+        let path = dir.path().join(if mode == 2 { "hidden.xlsx" } else { "hidden.sheet" });
+        let mut loaded = match mode {
+            0 => {
+                native::save_workbook_full(&wb, &Default::default(), &[], &[], &path).unwrap();
+                native::load_workbook(&path).unwrap()
+            }
+            1 => json::import_any(&json::export_workbook(&wb, &[], 0).unwrap()).unwrap().0,
+            _ => {
+                xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+                xlsx::import(&path).unwrap().0
+            }
+        };
+        let id = loaded.tables().next().unwrap().1.id;
+        assert_eq!(loaded.table(id).unwrap().1.totals_row(), Some(4), "mode {mode}");
+        assert_eq!(loaded.active_sheet().manual_hidden_rows(), [1, 4].into());
+        assert_eq!(loaded.active_sheet().get_display(4, 0), "50");
+        loaded.set_table_totals_visible(id, false, [1, 4].into()).unwrap();
+        loaded.set_table_totals_visible(id, true, [1, 4].into()).unwrap();
+        assert_eq!(loaded.active_sheet().manual_hidden_rows(), [1, 4].into());
+        assert_eq!(loaded.active_sheet().get_display(4, 0), "50");
+    }
+}
+
+#[test]
 fn converting_legacy_hidden_totals_keeps_visibility_in_every_file_format() {
     let mut wb = Workbook::new();
     for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {

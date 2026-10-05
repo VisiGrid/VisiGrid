@@ -83,7 +83,8 @@ impl Workbook {
     }
 
     /// Show a footer only in empty cells. Hiding clears its values, retaining
-    /// settings for the next show and exact values in the undo commit.
+    /// settings for the next show and exact values in the undo commit. Manual
+    /// worksheet hiding is independent: creating a footer never unhides its row.
     /// `hidden_rows` is the host's manual visibility, never its filter mask.
     pub fn set_table_totals_visible(
         &mut self,
@@ -135,9 +136,6 @@ impl Workbook {
         totals.visible = visible;
         totals.shown = Some(visible);
         totals.hidden_rows = hidden_rows;
-        if visible && totals.hidden_rows.contains(&(old.range.end_row + 1)) {
-            return Err("Unhide the row below the Table before showing totals.".into());
-        }
         new.totals = Some(totals);
         self.commit_table_totals(sheet_id, old, new, None)
     }

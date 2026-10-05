@@ -80,6 +80,9 @@ impl Spreadsheet {
         let mut candidate = self.wb(cx).clone();
         let (sheet, table) = candidate.table(id).ok_or("Table no longer exists.")?;
         let showing = table.totals_row().is_none();
+        let hidden_footer = (column.is_none() && showing
+            && self.hidden_rows.get(&sheet).is_some_and(|rows| rows.contains(&(table.range.end_row + 1))))
+            .then_some(table.range.end_row + 1);
         let commit = if let Some((col, total)) = column {
             candidate.set_table_total(id, col, total)?
         } else {
@@ -93,6 +96,9 @@ impl Spreadsheet {
         self.table_filter_dropdown = None;
         self.sync_table_view(cx);
         self.record_table_commit(commit, "Change Table totals".into(), cx);
+        if let Some(row) = hidden_footer {
+            self.status_message = Some(format!("Totals added to hidden row {}. Unhide the row to see them.", row + 1));
+        }
         Ok(())
     }
 
