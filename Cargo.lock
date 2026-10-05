@@ -8019,7 +8019,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-collab"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "rand 0.8.7",
  "serde",
