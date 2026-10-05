@@ -1911,7 +1911,7 @@ fn export_sheet_cells(
 /// Export validation rules for a sheet
 ///
 /// Returns (exported_count, skipped_count).
-/// Skipped rules are those with unsupported types (Date, Time, TextLength, Custom).
+/// Skipped rules contain unrepresentable or malformed validation metadata.
 fn export_validation_rules(
     worksheet: &mut Worksheet,
     sheet: &Sheet,
@@ -1937,7 +1937,7 @@ fn export_validation_rules(
                 exported += 1;
             }
             None => {
-                // Unsupported validation type (Date, Time, TextLength, Custom)
+                // The rule cannot be represented by the XLSX writer.
                 skipped += 1;
             }
         }
@@ -1949,7 +1949,7 @@ fn export_validation_rules(
 /// Import validation rules for a sheet from XLSX
 ///
 /// Returns (imported_count, skipped_count).
-/// Skipped rules are those with unsupported types (Date, Time, TextLength, Custom).
+/// Skipped rules contain unrepresentable or malformed validation metadata.
 fn import_validation_rules(
     xlsx_path: &Path,
     sheet_name: &str,
@@ -3378,7 +3378,7 @@ mod tests {
     }
 
     #[test]
-    fn test_export_with_unsupported_validation() {
+    fn test_export_with_text_length_validation() {
         use visigrid_engine::validation::{CellRange, NumericConstraint, ValidationRule, ValidationType};
 
         let mut workbook = Workbook::new();
@@ -3387,7 +3387,7 @@ mod tests {
         sheet.set_value(0, 0, "Text");
         sheet.set_value(1, 0, "Hello");
 
-        // Add text length validation (not yet supported)
+        // Text-length metadata is retained.
         let rule = ValidationRule::new(ValidationType::TextLength(NumericConstraint::between(1, 50)));
         let range = CellRange::new(1, 0, 9, 0);
         sheet.validations.set(range, rule);
@@ -3397,9 +3397,8 @@ mod tests {
 
         let result = export(&workbook, &export_path, None).unwrap();
 
-        // TextLength is skipped in Phase 5A
-        assert_eq!(result.validations_exported, 0);
-        assert_eq!(result.validations_skipped, 1);
+        assert_eq!(result.validations_exported, 1);
+        assert_eq!(result.validations_skipped, 0);
     }
 
     #[test]
@@ -3419,7 +3418,7 @@ mod tests {
         let decimal_rule = ValidationRule::decimal(NumericConstraint::greater_than(0.0));
         sheet.validations.set(CellRange::new(0, 2, 4, 2), decimal_rule);
 
-        // Unsupported: Date, Time, TextLength, Custom
+        // Additional rule types.
         let date_rule = ValidationRule::new(ValidationType::Date(NumericConstraint::between(0, 100)));
         sheet.validations.set(CellRange::new(0, 3, 4, 3), date_rule);
 
@@ -3431,9 +3430,8 @@ mod tests {
 
         let result = export(&workbook, &export_path, None).unwrap();
 
-        // 3 supported (List, WholeNumber, Decimal), 2 skipped (Date, Custom)
-        assert_eq!(result.validations_exported, 3);
-        assert_eq!(result.validations_skipped, 2);
+        assert_eq!(result.validations_exported, 5);
+        assert_eq!(result.validations_skipped, 0);
     }
 
     // ========================================================================

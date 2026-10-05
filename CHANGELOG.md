@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- XLSX import/export now preserves date, time, text-length and custom validation metadata alongside list and numeric rules. Preserve dropdown visibility, disabled messages and alert styles, large numeric bounds, Unicode and XML-escaped formula text. Empty inline lists and items containing commas are reported as skipped on export instead of becoming a different list. This does not add evaluation support for previously unsupported constraints.
+
 - Edit data-validation rules and exclusions through sorted/filtered Tables. Changes target visible stored records, preserve hidden rules and use sparse undo/redo and history rewind. Stale dialogs and unsafe adjacent ranges refuse before mutation.
 - Preserve imported rule types, messages, alerts and unchanged inline-list sources in the validation editor. Fix existing-rule dialogs losing their target range, sorted validation dropdowns reading/writing the wrong row, and F8 jumping to hidden validation failures.
 
