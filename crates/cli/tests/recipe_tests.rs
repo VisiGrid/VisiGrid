@@ -218,3 +218,23 @@ by = [{ column = "Amount", descending = true }]
     assert!(stderr.contains("Fill down Region") && stderr.contains("filled 1 empty cell"), "{stderr}");
     assert!(stderr.contains("Sort by Amount (descending)"), "{stderr}");
 }
+
+#[test]
+fn recipe_run_merges_another_recipe_on_a_key() {
+    let d = dir("merge");
+    std::fs::write(d.join("tb.csv"), "Account,Balance\n4010,-2149\n5000,31909.26\n6100,12\n").unwrap();
+    std::fs::write(d.join("budget.csv"), "Acct,Budget\n4010,-2000\n5000,30000\n").unwrap();
+    std::fs::write(d.join("budget.recipe.toml"), "version = 1\n[source]\nkind = \"csv\"\npath = \"budget.csv\"\n[[step]]\nop = \"types\"\ncolumns = { Acct = \"text\" }\n").unwrap();
+    std::fs::write(
+        d.join("tb.recipe.toml"),
+        "version = 1\n[source]\nkind = \"csv\"\npath = \"tb.csv\"\n[[step]]\nop = \"types\"\ncolumns = { Account = \"text\" }\n[[step]]\nop = \"merge\"\nwith = \"budget.recipe.toml\"\non = [\"Account\"]\nright_on = [\"Acct\"]\n",
+    )
+    .unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("tb.recipe.toml"))]);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(),
+        ["Account,Balance,Budget", "4010,-2149,-2000", "5000,31909.26,30000", "6100,12,"]
+    );
+    assert!(String::from_utf8_lossy(&o.stderr).contains("matched 2; 1 only here; 0 only in budget"));
+}

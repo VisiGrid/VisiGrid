@@ -490,6 +490,73 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "is_default_missing")]
         missing: Missing,
     },
+    /// Join the rows so far with another recipe's result on key columns,
+    /// like Merge Queries or a VLOOKUP over a whole column. The other side
+    /// is a recipe (`with`, relative to this one), so it can be any source
+    /// with its own steps. Keys compare as their columns are typed.
+    Merge {
+        with: String,
+        /// Key columns of this table, in order.
+        on: Vec<String>,
+        /// The other table's key columns, when named differently; empty
+        /// means the same names as `on`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        right_on: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_default_how")]
+        how: JoinHow,
+        /// The other table's columns to bring over; empty means every
+        /// column but its keys.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        columns: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_default_duplicates")]
+        duplicates: OnDuplicate,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+}
+
+/// Which rows a Merge keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinHow {
+    /// Every row of this table, with the other's columns where a key matches.
+    #[default]
+    Left,
+    /// Only rows whose key is in both.
+    Inner,
+    /// Every row of both; rows only in the other table get their keys filled.
+    Full,
+    /// Only this table's rows with no match: what's missing.
+    Anti,
+}
+
+impl JoinHow {
+    pub const ALL: [JoinHow; 4] = [JoinHow::Left, JoinHow::Inner, JoinHow::Full, JoinHow::Anti];
+    pub fn label(self) -> &'static str {
+        match self {
+            JoinHow::Left => "keep every row here",
+            JoinHow::Inner => "only rows in both",
+            JoinHow::Full => "every row of both",
+            JoinHow::Anti => "only rows with no match",
+        }
+    }
+}
+fn is_default_how(h: &JoinHow) -> bool {
+    *h == JoinHow::Left
+}
+
+/// What a Merge does when the other table has a key more than once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnDuplicate {
+    /// Fail the run, naming the key: a match would multiply rows.
+    #[default]
+    Fail,
+    /// Use the first row with the key.
+    First,
+}
+fn is_default_duplicates(d: &OnDuplicate) -> bool {
+    *d == OnDuplicate::Fail
 }
 
 /// One column of a Sort step: `{ column = "Amount", descending = true }`.
@@ -650,6 +717,10 @@ impl Step {
                 format!("Replace {what} with {with:?} in {place}")
             }
             Step::Split { column, by, into, .. } => format!("Split {column} at {by:?} into {}", list(into)),
+            Step::Merge { with, on, how, .. } => {
+                let name = Path::new(with).file_name().and_then(|n| n.to_str()).unwrap_or(with.as_str());
+                format!("Merge {name} on {} ({})", list(on), how.label())
+            }
         }
     }
 
@@ -667,7 +738,8 @@ impl Step {
             | Step::Sort { missing, .. }
             | Step::FillDown { missing, .. }
             | Step::Replace { missing, .. }
-            | Step::Split { missing, .. } => *missing,
+            | Step::Split { missing, .. }
+            | Step::Merge { missing, .. } => *missing,
         }
     }
 
@@ -690,6 +762,7 @@ impl Step {
             Step::Unpivot { keep, .. } => keep.iter().map(String::as_str).collect(),
             Step::Sort { by, .. } => by.iter().map(|k| k.column.as_str()).collect(),
             Step::Split { column, .. } => vec![column.as_str()],
+            Step::Merge { on, .. } => on.iter().map(String::as_str).collect(),
         }
     }
 }
@@ -785,6 +858,8 @@ impl Recipe {
                         changed = true;
                     }
                 }
+                // Only this side's keys come from the source
+                Step::Merge { on, .. } => swap(on, &mut changed),
                 Step::Split { column, into, .. } => {
                     let created = into.iter().any(|n| same(n));
                     if same(column) {
@@ -913,16 +988,80 @@ impl Recipe {
 
     /// Read the run's source once: the file, or every file it appends.
     pub fn read_snapshot(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<Snapshot, String> {
-        if let Source::Visibooks(src) = &self.source {
+        let mut chain = Vec::new();
+        self.read_snapshot_in(recipe_dir, over, &mut chain)
+    }
+
+    /// The source alone (a VisiBooks report, or the file or files), then
+    /// the recipes its Merge steps name. `chain` is the merged recipes being
+    /// read, outermost first, so a loop is refused when it closes.
+    fn read_snapshot_in(&self, recipe_dir: &Path, over: Option<&Path>, chain: &mut Vec<PathBuf>) -> Result<Snapshot, String> {
+        let mut snapshot = if let Source::Visibooks(src) = &self.source {
             if over.is_some() {
                 return Err("a VisiBooks source can't be replaced by a file".into());
             }
             #[cfg(feature = "native")]
-            return visibooks::fetch(src, chrono::Local::now().date_naive());
+            let snap = visibooks::fetch(src, chrono::Local::now().date_naive())?;
             #[cfg(not(feature = "native"))]
-            return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
+            let snap = return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
+            snap
+        } else {
+            Snapshot::read_all(&self.resolve_sources(recipe_dir, over)?)?
+        };
+        self.attach_joined_in(recipe_dir, &mut snapshot, chain)?;
+        Ok(snapshot)
+    }
+
+    /// The recipes this one's Merge steps name, relative to `recipe_dir`.
+    pub fn merged_recipes(&self, recipe_dir: &Path) -> Vec<(String, PathBuf)> {
+        let mut out: Vec<(String, PathBuf)> = Vec::new();
+        for step in &self.steps {
+            if let Step::Merge { with, .. } = step {
+                if !out.iter().any(|(w, _)| w == with) {
+                    let p = Path::new(with);
+                    out.push((with.clone(), if p.is_absolute() { p.to_path_buf() } else { recipe_dir.join(p) }));
+                }
+            }
         }
-        Snapshot::read_all(&self.resolve_sources(recipe_dir, over)?)
+        out
+    }
+
+    /// Read every recipe the Merge steps name (and the ones they merge) into
+    /// `snapshot`, so the run and any retry use exactly what was read.
+    /// `_depth` is kept for callers; loops are found by path, not depth.
+    pub fn attach_joined(&self, recipe_dir: &Path, snapshot: &mut Snapshot, _depth: usize) -> Result<(), String> {
+        self.attach_joined_in(recipe_dir, snapshot, &mut Vec::new())
+    }
+
+    fn attach_joined_in(&self, recipe_dir: &Path, snapshot: &mut Snapshot, chain: &mut Vec<PathBuf>) -> Result<(), String> {
+        let merged = self.merged_recipes(recipe_dir);
+        if merged.is_empty() {
+            return Ok(());
+        }
+        if chain.len() >= MAX_MERGE_DEPTH {
+            return Err(format!("Merge steps nest more than {MAX_MERGE_DEPTH} recipes deep"));
+        }
+        let mut h = blake3::Hasher::new();
+        h.update(snapshot.hash.as_bytes());
+        for (with, path) in merged {
+            // A recipe already being read further out: a loop, refused before
+            // anything else is loaded (two branches merging the same recipe
+            // is fine; only the chain counts)
+            let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if chain.contains(&key) {
+                return Err(format!("Merge with {with} loops back to a recipe that is already merging it"));
+            }
+            let recipe = Recipe::load(&path).map_err(|e| format!("Merge with {with}: {e}"))?;
+            let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+            chain.push(key);
+            let sub = recipe.read_snapshot_in(&dir, None, chain).map_err(|e| format!("Merge with {with}: {e}"));
+            chain.pop();
+            let sub = sub?;
+            h.update(sub.hash.as_bytes());
+            snapshot.joined.push(Joined { with, recipe: Box::new(recipe), snapshot: sub });
+        }
+        snapshot.hash = h.finalize().to_hex()[..16].to_string();
+        Ok(())
     }
 
     /// Whether the source names a pattern (`export-*.csv`) rather than a file.
@@ -1173,7 +1312,22 @@ pub struct Snapshot {
     pub hash: String,
     /// The other files of an appended source, in name order after `path`.
     pub more: Vec<Snapshot>,
+    /// The recipes Merge steps read, with what they read, so a run never
+    /// reads the disk again.
+    pub joined: Vec<Joined>,
 }
+
+/// A recipe a Merge step joins with, and a snapshot of its source.
+#[derive(Debug, Clone)]
+pub struct Joined {
+    /// The step's `with`, as written.
+    pub with: String,
+    pub recipe: Box<Recipe>,
+    pub snapshot: Snapshot,
+}
+
+/// How deep Merge steps may nest (a recipe merging one that merges …).
+pub const MAX_MERGE_DEPTH: usize = 8;
 
 /// The largest source file a recipe reads. The whole file is held in memory
 /// (once as bytes, once parsed), so this also bounds what a run costs.
@@ -1244,7 +1398,7 @@ impl Snapshot {
 
     pub fn from_bytes(path: &Path, bytes: Vec<u8>) -> Snapshot {
         let hash = blake3::hash(&bytes).to_hex()[..16].to_string();
-        Snapshot { path: path.to_path_buf(), bytes: Arc::new(bytes), hash, more: Vec::new() }
+        Snapshot { path: path.to_path_buf(), bytes: Arc::new(bytes), hash, more: Vec::new(), joined: Vec::new() }
     }
 
     /// Several files read once, for an appended source. The first is the
@@ -1614,7 +1768,12 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         }
 
         if !skipped {
-            let step_note = apply(step, &mut frame, &mut report);
+            let step_note = match step {
+                Step::Merge { with, on, right_on, how, columns, duplicates, .. } => {
+                    merge(MergeSpec { with, on, right_on, how: *how, columns, duplicates: *duplicates }, snapshot, &mut frame, &mut report)
+                }
+                _ => apply(step, &mut frame, &mut report),
+            };
             if step_note.is_some() {
                 note = step_note;
             }
@@ -2278,6 +2437,8 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
         Step::FillDown { columns, .. } => fill_down(columns, frame),
         Step::Replace { columns, find, with, part, match_case, .. } => replace(columns, find, with, *part, *match_case, frame, report),
         Step::Split { column, by, into, .. } => split(column, by, into, frame, report),
+        // Needs the snapshot: run() handles it
+        Step::Merge { .. } => None,
     }
 }
 
@@ -2767,6 +2928,191 @@ fn split(column: &str, by: &str, into: &[String], frame: &mut Frame, report: &mu
     (short > 0).then(|| {
         format!("{short} value{} had fewer than {} pieces; the rest are empty", plural(short), into.len())
     })
+}
+
+struct MergeSpec<'a> {
+    with: &'a str,
+    on: &'a [String],
+    right_on: &'a [String],
+    how: JoinHow,
+    columns: &'a [String],
+    duplicates: OnDuplicate,
+}
+
+/// A key value as its column compares it: numbers by value, dates by day,
+/// text exactly; IDs such as 007 stay text. None for an empty value, which
+/// never matches.
+fn join_key(value: &str, rule: ColumnRule, decimal_comma: bool) -> Option<String> {
+    if value.trim().is_empty() {
+        return None;
+    }
+    let number = |v: &str| parse_number(v, decimal_comma).map(|n| format!("n{}", (n + 0.0).to_bits()));
+    Some(match rule {
+        ColumnRule::Number => number(value).unwrap_or_else(|| format!("t{value}")),
+        ColumnRule::Date(order) => parse_date(value, order).map(|d| format!("d{d}")).unwrap_or_else(|| format!("t{value}")),
+        ColumnRule::Auto if keep_as_text(value, false).is_none() => number(value).unwrap_or_else(|| format!("t{value}")),
+        _ => format!("t{value}"),
+    })
+}
+
+fn merge(spec: MergeSpec, snapshot: &Snapshot, frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    let name = Path::new(spec.with).file_name().and_then(|n| n.to_str()).unwrap_or(spec.with);
+    let short = name.strip_suffix(".recipe.toml").unwrap_or(name).to_string();
+    let Some(joined) = snapshot.joined.iter().find(|j| j.with == spec.with) else {
+        return fail(report, format!("{name} wasn't read with this run; refresh again"));
+    };
+    if spec.on.is_empty() {
+        return fail(report, "a Merge needs at least one key column (on)".into());
+    }
+    let right_keys: &[String] = if spec.right_on.is_empty() { spec.on } else { spec.right_on };
+    if right_keys.len() != spec.on.len() {
+        return fail(report, format!("on names {} columns but right_on names {}", spec.on.len(), right_keys.len()));
+    }
+    // The other side: its own recipe run on its own snapshot
+    let other = run(&joined.recipe, &joined.snapshot);
+    if !other.report.ok {
+        return fail(report, format!("{name} didn't run cleanly: {}", other.report.failures.join("; ")));
+    }
+    let right = other.output;
+    let find_right = |n: &str| {
+        right.columns.iter().position(|c| c.name == n).or_else(|| right.columns.iter().position(|c| c.name.eq_ignore_ascii_case(n)))
+    };
+    let mut rk = Vec::new();
+    for k in right_keys {
+        match find_right(k) {
+            Some(i) => rk.push(i),
+            None => return fail(report, format!("{name} has no column {k}")),
+        }
+    }
+    let lk: Vec<usize> = spec.on.iter().filter_map(|k| frame.find(k)).collect();
+    if lk.len() != spec.on.len() {
+        return None; // the missing-column policy already spoke
+    }
+    // Columns brought over: chosen ones, or all but the keys
+    let mut bring = Vec::new();
+    if spec.columns.is_empty() {
+        bring.extend((0..right.columns.len()).filter(|i| !rk.contains(i)));
+    } else {
+        for c in spec.columns {
+            match find_right(c) {
+                Some(i) => bring.push(i),
+                None => return fail(report, format!("{name} has no column {c}")),
+            }
+        }
+    }
+    let key_of = |row: &[String], idx: &[usize], cols: &[OutColumn], dc: bool| -> Option<String> {
+        let mut parts = Vec::with_capacity(idx.len());
+        for &i in idx {
+            parts.push(join_key(&row[i], cols[i].rule, dc)?);
+        }
+        Some(parts.join("\u{1f}"))
+    };
+    // Index the other side, refusing (by default) a key it has twice
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (r, row) in right.rows.iter().enumerate() {
+        let Some(key) = key_of(row, &rk, &right.columns, right.decimal_comma) else { continue };
+        if let Some(&first) = index.get(&key) {
+            if spec.duplicates == OnDuplicate::Fail {
+                let shown: Vec<&str> = rk.iter().map(|&i| row[i].as_str()).collect();
+                return fail(
+                    report,
+                    format!(
+                        "{name} has the key {} on rows {} and {}; a match would duplicate rows. Remove the duplicates there, or set duplicates = \"first\"",
+                        shown.join(", "),
+                        first + 1,
+                        r + 1
+                    ),
+                );
+            }
+            continue;
+        }
+        index.insert(key, r);
+    }
+    // Names: a clash gets the other recipe's name
+    let mut new_cols: Vec<OutColumn> = Vec::new();
+    for &i in &bring {
+        let mut col = right.columns[i].clone();
+        let taken = |n: &str| frame.columns.iter().chain(new_cols.iter()).any(|c| c.name.eq_ignore_ascii_case(n));
+        if taken(&col.name) {
+            col.name = format!("{} ({short})", col.name);
+            if taken(&col.name) {
+                return fail(report, format!("a column is already named {}", col.name));
+            }
+        }
+        new_cols.push(col);
+    }
+    let width = frame.columns.len() + if spec.how == JoinHow::Anti { 0 } else { new_cols.len() };
+    if width > NUM_COLS {
+        return fail(report, format!("merging would make {width} columns; a sheet holds {NUM_COLS}"));
+    }
+    let dc = frame.decimal_comma;
+    let mut matched_right = vec![false; right.rows.len()];
+    let (mut matched, mut only_here) = (0usize, 0usize);
+    let mut rows = Vec::with_capacity(frame.rows.len());
+    let mut lines = Vec::with_capacity(frame.rows.len());
+    let mut files = Vec::new();
+    for (r, row) in frame.rows.iter().enumerate() {
+        let hit = key_of(row, &lk, &frame.columns, dc).and_then(|k| index.get(&k).copied());
+        match hit {
+            Some(ri) => matched_right[ri] = true,
+            None => only_here += 1,
+        }
+        if hit.is_some() {
+            matched += 1;
+        }
+        let keep = match spec.how {
+            JoinHow::Left | JoinHow::Full => true,
+            JoinHow::Inner => hit.is_some(),
+            JoinHow::Anti => hit.is_none(),
+        };
+        if !keep {
+            continue;
+        }
+        let mut out = row.clone();
+        if spec.how != JoinHow::Anti {
+            out.extend(bring.iter().map(|&i| hit.map_or(String::new(), |ri| right.rows[ri][i].clone())));
+        }
+        rows.push(out);
+        lines.push(frame.lines[r]);
+        if !frame.files.is_empty() {
+            files.push(frame.files[r]);
+        }
+    }
+    // Rows only in the other table: keys filled in, the rest empty here
+    let only_there: Vec<usize> = (0..right.rows.len())
+        .filter(|&ri| !matched_right[ri] && key_of(&right.rows[ri], &rk, &right.columns, right.decimal_comma).is_some_and(|k| index.get(&k) == Some(&ri)))
+        .collect();
+    if spec.how == JoinHow::Full {
+        for &ri in &only_there {
+            let mut out = vec![String::new(); frame.columns.len()];
+            for (n, &li) in lk.iter().enumerate() {
+                out[li] = right.rows[ri][rk[n]].clone();
+            }
+            out.extend(bring.iter().map(|&i| right.rows[ri][i].clone()));
+            rows.push(out);
+            lines.push(0);
+            if !frame.files.is_empty() {
+                files.push(0);
+            }
+        }
+    }
+    if matched == 0 && !frame.rows.is_empty() && !right.rows.is_empty() && spec.how != JoinHow::Anti {
+        return fail(
+            report,
+            format!("no key matched {name}: check the key columns and their types (a number never matches text, and 007 isn't 7)"),
+        );
+    }
+    let total = rows.len();
+    if total >= NUM_ROWS {
+        return fail(report, format!("merging would make {total} rows; a sheet holds {} below the header row", NUM_ROWS - 1));
+    }
+    if spec.how != JoinHow::Anti {
+        frame.columns.extend(new_cols);
+    }
+    frame.rows = rows;
+    frame.lines = lines;
+    frame.files = files;
+    Some(format!("matched {matched}; {only_here} only here; {} only in {short}", only_there.len()))
 }
 
 /// A number as recipes write them: a point for decimals, no thousands
@@ -3986,6 +4332,131 @@ values_to = "Sales"
             })
             .collect();
         assert!(Snapshot::read_all(&big).unwrap_err().contains("at most 512 MB"));
+    }
+
+    /// Write `files` into a fresh folder; the first must be the main recipe.
+    fn merge_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    fn run_in(dir: &Path, recipe: &str) -> RunResult {
+        let r = Recipe::load(&dir.join(recipe)).unwrap();
+        let snap = r.read_snapshot(dir, None).unwrap();
+        run(&r, &snap)
+    }
+
+    const ORDERS: &str = "Customer,Amount\nAcme,10\nBeta,5\nGamma,7\n";
+    const REGIONS: &str = "Customer,Region,Amount\nacme,West,1\nAcme,East,99\nBeta,North,2\nDelta,South,3\n";
+    const REGIONS_RECIPE: &str = "version = 1\n[source]\nkind = \"csv\"\npath = \"regions.csv\"\n";
+
+    fn orders_recipe(extra: &str) -> String {
+        format!("version = 1\n[source]\nkind = \"csv\"\npath = \"orders.csv\"\n[[step]]\nop = \"merge\"\nwith = \"regions.recipe.toml\"\non = [\"Customer\"]\n{extra}")
+    }
+
+    #[test]
+    fn merge_left_brings_columns_and_counts_matches() {
+        let dir = merge_dir(&[
+            ("orders.recipe.toml", &orders_recipe("columns = [\"Region\"]\n")),
+            ("orders.csv", ORDERS),
+            ("regions.recipe.toml", REGIONS_RECIPE),
+            ("regions.csv", REGIONS),
+        ]);
+        let res = run_in(dir.path(), "orders.recipe.toml");
+        assert!(res.report.ok, "{}", res.report.summary());
+        // Text keys match exactly: "acme" is not "Acme"
+        assert_eq!(res.output.rows, vec![vec!["Acme", "10", "East"], vec!["Beta", "5", "North"], vec!["Gamma", "7", ""]]);
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("matched 2; 1 only here; 2 only in regions"));
+        assert_eq!(Recipe::load(&dir.path().join("orders.recipe.toml")).unwrap().steps[0].describe(), "Merge regions.recipe.toml on Customer (keep every row here)");
+    }
+
+    #[test]
+    fn merge_inner_full_anti_and_name_clashes() {
+        let files = |how: &str| {
+            merge_dir(&[
+                ("orders.recipe.toml", &orders_recipe(&format!("how = \"{how}\"\n"))),
+                ("orders.csv", ORDERS),
+                ("regions.recipe.toml", REGIONS_RECIPE),
+                ("regions.csv", REGIONS),
+            ])
+        };
+        let d = files("inner");
+        let res = run_in(d.path(), "orders.recipe.toml");
+        assert_eq!(res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Customer", "Amount", "Region", "Amount (regions)"]);
+        assert_eq!(res.output.rows, vec![vec!["Acme", "10", "East", "99"], vec!["Beta", "5", "North", "2"]]);
+        let d = files("anti");
+        assert_eq!(run_in(d.path(), "orders.recipe.toml").output.rows, vec![vec!["Gamma", "7"]]);
+        let d = files("full");
+        let rows = run_in(d.path(), "orders.recipe.toml").output.rows;
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[3], vec!["acme", "", "West", "1"]);
+        assert_eq!(rows[4], vec!["Delta", "", "South", "3"]);
+    }
+
+    #[test]
+    fn merge_keys_compare_as_typed_and_refuse_duplicates() {
+        // 10 and 10.0 are the same number; 007 stays text and isn't 7
+        let dir = merge_dir(&[
+            ("a.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"a.csv\"\n[[step]]\nop = \"types\"\ncolumns = { Id = \"number\" }\n[[step]]\nop = \"merge\"\nwith = \"b.recipe.toml\"\non = [\"Id\"]\nright_on = [\"Key\"]\n"),
+            ("a.csv", "Id,X\n10,a\n7,b\n"),
+            ("b.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"b.csv\"\n[[step]]\nop = \"types\"\ncolumns = { Key = \"number\" }\n"),
+            ("b.csv", "Key,Y\n10.0,ten\n0007,seven\n"),
+        ]);
+        let res = run_in(dir.path(), "a.recipe.toml");
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.rows, vec![vec!["10", "a", "ten"], vec!["7", "b", "seven"]]);
+        // A key twice on the other side fails, naming it, unless first is asked for
+        let dup = merge_dir(&[
+            ("orders.recipe.toml", &orders_recipe("")),
+            ("orders.csv", ORDERS),
+            ("regions.recipe.toml", REGIONS_RECIPE),
+            ("regions.csv", "Customer,Region\nAcme,East\nAcme,West\n"),
+        ]);
+        let res = run_in(dup.path(), "orders.recipe.toml");
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("the key Acme on rows 1 and 2"), "{:?}", res.report.failures);
+        std::fs::write(dup.path().join("orders.recipe.toml"), orders_recipe("duplicates = \"first\"\n")).unwrap();
+        let res = run_in(dup.path(), "orders.recipe.toml");
+        assert!(res.report.ok);
+        assert_eq!(res.output.rows[0], vec!["Acme", "10", "East"]);
+    }
+
+    #[test]
+    fn merge_that_matches_nothing_fails_and_loops_are_refused() {
+        let dir = merge_dir(&[
+            ("orders.recipe.toml", &orders_recipe("")),
+            ("orders.csv", ORDERS),
+            ("regions.recipe.toml", REGIONS_RECIPE),
+            ("regions.csv", "Customer,Region\nZed,East\n"),
+        ]);
+        let res = run_in(dir.path(), "orders.recipe.toml");
+        assert!(res.report.failures[0].contains("no key matched regions.recipe.toml"), "{:?}", res.report.failures);
+        // A recipe merging itself: refused when read, not looping
+        let me = merge_dir(&[
+            ("self.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"merge\"\nwith = \"self.recipe.toml\"\non = [\"a\"]\n"),
+            ("x.csv", "a\n1\n"),
+        ]);
+        let r = Recipe::load(&me.path().join("self.recipe.toml")).unwrap();
+        assert!(r.read_snapshot(me.path(), None).unwrap_err().contains("nest more than 8"));
+    }
+
+    #[test]
+    fn approval_covers_what_merged_recipes_read() {
+        let dir = merge_dir(&[
+            ("orders.recipe.toml", &orders_recipe("")),
+            ("orders.csv", ORDERS),
+            ("regions.recipe.toml", REGIONS_RECIPE),
+            ("regions.csv", REGIONS),
+        ]);
+        let path = dir.path().join("orders.recipe.toml");
+        let r = Recipe::load(&path).unwrap();
+        let before = crate::recipe_trust::approval_key(&path, &r);
+        // The merged recipe now reads another file: a new approval is needed
+        std::fs::write(dir.path().join("regions.recipe.toml"), REGIONS_RECIPE.replace("regions.csv", "/etc/passwd")).unwrap();
+        assert_ne!(crate::recipe_trust::approval_key(&path, &r), before);
     }
 
     #[test]
