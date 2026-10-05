@@ -900,7 +900,7 @@ mod tests {
         let layouts = vec![SheetLayout::default()];
         let inline: Value = serde_json::from_str(&visigrid_io::json::export_workbook(&wb, &layouts, 0).unwrap()).unwrap();
         let (manifest, bands) = visigrid_io::json::bands::export_banded(&wb, &layouts, 0).unwrap();
-        assert_eq!(bands.len(), 3);
+        assert_eq!(bands.len(), 9);
         let whole = CollabCore::new(&inline, 4).unwrap();
         let mut banded = CollabCore::new(&serde_json::from_str(&manifest).unwrap(), 4).unwrap();
         banded.lean = true;

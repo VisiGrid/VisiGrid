@@ -1939,7 +1939,7 @@ pub mod bands {
     use sha2::{Digest, Sha256};
 
     /// Rows per band.
-    pub const BAND_ROWS: usize = 65_536;
+    pub const BAND_ROWS: usize = 16_384;
     /// Sheets with more cells than this are banded.
     pub const BAND_THRESHOLD: usize = 200_000;
     pub const BAND_FORMAT: &str = "visigrid-band";

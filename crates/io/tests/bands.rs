@@ -41,11 +41,11 @@ fn banded_export_round_trips_in_any_band_order() {
     let wb = big();
     let layouts = vec![SheetLayout::default(), SheetLayout::default()];
     let (manifest, out) = bands::export_banded(&wb, &layouts, 0).unwrap();
-    assert_eq!(out.len(), 3, "150,000 rows make three 65,536-row bands");
+    assert_eq!(out.len(), 10, "150,000 rows make ten 16,384-row bands");
     assert!(out.iter().all(|b| b.sheet == 0), "the small sheet stays inline");
     assert!(manifest.len() < 4096, "the manifest carries no cells: {} bytes", manifest.len());
     let refs = bands::manifest_bands(&manifest).unwrap();
-    assert_eq!(refs.len(), 3);
+    assert_eq!(refs.len(), 10);
 
     let (mut loaded, _, _) = import_any(&manifest).unwrap();
     assert_eq!(loaded.sheets()[0].cells_iter().count(), 0);

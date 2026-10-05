@@ -331,7 +331,7 @@ fn large_sheets_snapshot_as_bands_and_load_back() {
     assert_eq!(loaded["ok"], json!(true), "{loaded}");
     let snap = a.call(json!({"cmd": "snapshot"}));
     let bands = snap["bands"].as_array().expect("bands listed").clone();
-    assert_eq!(bands.len(), 2, "{bands:?}");
+    assert_eq!(bands.len(), 8, "{bands:?}");
     assert!(snap["document"]["sheets"][0]["cells"].is_null(), "the manifest carries no cells");
     assert!(snap["document"].to_string().len() < 4096);
 
