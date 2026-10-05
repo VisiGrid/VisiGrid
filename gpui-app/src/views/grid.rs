@@ -219,6 +219,13 @@ pub fn render_grid(
     let scrollable_visible_rows = total_visible_rows.saturating_sub(frozen_rows);
     let scrollable_visible_cols = total_visible_cols.saturating_sub(frozen_cols);
 
+    // This frame's scrolling rows, resolved once with one extra row either
+    // side, so each row also knows the rows displayed above and below it
+    // (shared edges) without another walk over hidden rows.
+    let frame_lead = scroll_row.min(1);
+    let frame_count = if frozen_rows == 0 && frozen_cols == 0 { total_visible_rows } else { scrollable_visible_rows };
+    let frame_rows = app.displayed_rows(scroll_row - frame_lead, frame_count + frame_lead + 1, cx);
+
     // Get divider color for freeze pane separators
     let divider_color = app.token(TokenKey::FreezeDivider);
 
@@ -236,10 +243,10 @@ pub fn render_grid(
                         (0..total_visible_rows).filter_map(|screen_row| {
                             // Get the view_row and data_row for this screen position
                             // This respects both sort order AND filter visibility
-                            let visible_index = scroll_row + screen_row;
-                            let (view_row, data_row) = app.nth_visible_row_with_hidden(visible_index, cx)?;
-                            let row_above = visible_index.checked_sub(1).and_then(|i| app.nth_visible_row_with_hidden(i, cx)).map(|(_, d)| d);
-                            let row_below = app.nth_visible_row_with_hidden(visible_index + 1, cx).map(|(_, d)| d);
+                            let at = frame_lead + screen_row;
+                            let (view_row, data_row) = *frame_rows.get(at)?;
+                            let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d);
+                            let row_below = frame_rows.get(at + 1).map(|&(_, d)| d);
                             let is_last_visible_row = screen_row == total_visible_rows - 1;
                             Some(render_row(
                                 view_row,
@@ -374,10 +381,10 @@ pub fn render_grid(
                             (0..scrollable_visible_rows).filter_map(|screen_row| {
                                 // Get the view_row and data_row for this screen position
                                 // Account for frozen rows + scroll position in visible index
-                                let visible_index = scroll_row + screen_row;
-                                let (view_row, data_row) = app.nth_visible_row_with_hidden(visible_index, cx)?;
-                                let row_above = visible_index.checked_sub(1).and_then(|i| app.nth_visible_row_with_hidden(i, cx)).map(|(_, d)| d);
-                                let row_below = app.nth_visible_row_with_hidden(visible_index + 1, cx).map(|(_, d)| d);
+                                let at = frame_lead + screen_row;
+                                let (view_row, data_row) = *frame_rows.get(at)?;
+                                let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d);
+                                let row_below = frame_rows.get(at + 1).map(|&(_, d)| d);
                                 let row_height = metrics.row_height(app.row_height(view_row));
                                 let is_last_row = screen_row == scrollable_visible_rows - 1;
                                 Some(div()
@@ -2660,9 +2667,10 @@ fn merge_in_view(
     stored: &visigrid_engine::sheet::MergedRegion,
     row_view: &visigrid_engine::filter::RowView,
 ) -> Option<visigrid_engine::sheet::MergedRegion> {
-    let shown = |data_row: usize| row_view.data_to_view(data_row).and_then(|v| row_view.visible_index_of(v));
-    let sv = shown(stored.start.0)?;
-    let ev = shown(stored.end.0)?;
+    // O(1) lookups (RowView keeps the inverse of its display order), so
+    // mapping every merge each frame stays linear in the number of merges.
+    let sv = row_view.visible_index_of_data(stored.start.0)?;
+    let ev = row_view.visible_index_of_data(stored.end.0)?;
     (ev >= sv && ev - sv == stored.end.0 - stored.start.0)
         .then(|| visigrid_engine::sheet::MergedRegion::new(sv, stored.start.1, ev, stored.end.1))
 }
@@ -2729,8 +2737,7 @@ fn render_merge_div(
     // cell below it.
     let row_view = &app.row_view;
     let above = row_view
-        .data_to_view(m.origin_row)
-        .and_then(|v| row_view.visible_index_of(v))
+        .visible_index_of_data(m.origin_row)
         .and_then(|i| i.checked_sub(1))
         .and_then(|i| row_view.nth_visible(i))
         .map(|v| row_view.view_to_data(v));
