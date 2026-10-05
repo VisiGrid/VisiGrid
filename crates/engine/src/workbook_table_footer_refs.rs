@@ -1,5 +1,8 @@
 //! References to moved footer cells follow their content. Larger worksheet
 //! ranges retain their authored bounds. Called only on an atomic candidate.
+#[path = "workbook_table_footer_metadata.rs"]
+mod metadata;
+
 use super::{TableCommit, Workbook};
 use crate::{
     cell::{CellValue, ValueRef},
@@ -7,7 +10,6 @@ use crate::{
     named_range::NamedRangeTarget,
     sheet::UnboundSheetRef,
     table::{TableId, TableRange},
-    validation::{ConstraintValue, ListSource, ValidationType},
 };
 
 struct Movement {
@@ -203,47 +205,7 @@ impl Workbook {
                     }
                 }
             }
-            let rule_ids: Vec<_> = sheet.cond_formats.iter().map(|r| r.id).collect();
-            for id in rule_ids {
-                let rule = sheet.cond_formats.get_mut(id).unwrap();
-                if movement.rewrite(&mut rule.predicate, local, &mut guarded)? {
-                    rule.reparse();
-                    metadata_changed = true;
-                }
-            }
-            let validations: Vec<_> = sheet
-                .validations
-                .iter()
-                .map(|(r, rule)| (*r, rule.clone()))
-                .collect();
-            for (range, mut rule) in validations {
-                let mut changed = false;
-                match &mut rule.rule_type {
-                    ValidationType::Custom(source)
-                    | ValidationType::List(ListSource::Range(source))
-                    | ValidationType::List(ListSource::NamedRange(source)) => {
-                        changed |= movement.rewrite(source, local, &mut guarded)?
-                    }
-                    ValidationType::List(_) => {}
-                    ValidationType::WholeNumber(c)
-                    | ValidationType::Decimal(c)
-                    | ValidationType::Date(c)
-                    | ValidationType::Time(c)
-                    | ValidationType::TextLength(c) => {
-                        for value in std::iter::once(&mut c.value1).chain(c.value2.iter_mut()) {
-                            if let ConstraintValue::CellRef(source)
-                            | ConstraintValue::Formula(source) = value
-                            {
-                                changed |= movement.rewrite(source, local, &mut guarded)?;
-                            }
-                        }
-                    }
-                }
-                if changed {
-                    sheet.validations.set(range, rule);
-                    metadata_changed = true;
-                }
-            }
+            metadata_changed |= movement.rewrite_rule_stores(sheet, local, &mut guarded)?;
             for pivot in &mut sheet.pivots {
                 let source = &mut pivot.source;
                 if source.table_id.is_none()

@@ -2903,3 +2903,47 @@ fn dynamic_footer_references_survive_native_json_and_stored_excel() {
         assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), new_total);
     }
 }
+
+#[test]
+fn moved_footer_rules_survive_native_json_and_excel_validation() {
+    use visigrid_engine::{cond_format::CondStyle, cell::CellStyle, validation::{CellRange, ValidationRule, ValidationType}};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let mut validation = ValidationRule::custom("=D9>0");
+    validation.reference_origin = Some((8, 3));
+    wb.sheet_mut(0).unwrap().validations.set(CellRange::single(8, 3), validation);
+    wb.sheet_mut(0).unwrap().cond_formats.add(vec![CellRange::single(8, 3)], "=D9>0", CondStyle::Named(CellStyle::Warning));
+    wb.append_table_rows(id, 1, &[(8, 1, "2".into()), (8, 2, "10".into())]).unwrap();
+    let path = dir.path().join("footer-rules.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let native = native::load_workbook(&path).unwrap();
+    let json = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    let (json, _, _) = visigrid_io::json::import_any(&json).unwrap();
+    let path = dir.path().join("footer-rules.xlsx");
+    let exported = xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    assert!(exported.warnings.iter().any(|w| w.contains("Conditional formatting is not exported")));
+    let (excel, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    for (mut loaded, retains_cf) in [(native, true), (json, true), (excel, false)] {
+        let check = |wb: &Workbook, row: usize| {
+            let sheet = wb.sheet(0).unwrap();
+            let expected = format!("=D{}>0", row + 1);
+            let rule = sheet.validations.get(row, 3).unwrap().at(row, 3);
+            assert_eq!(rule.rule_type, ValidationType::Custom(expected.clone()));
+            assert!(!sheet.validations.has_validation(row - 1, 3));
+            let predicates: Vec<_> = sheet.cond_formats.iter().filter_map(|r| r.predicate_at(row, 3)).collect();
+            if retains_cf { assert_eq!(predicates, [expected]); }
+            else { assert!(predicates.is_empty(), "Excel export reports its existing CF omission"); }
+            assert!(!sheet.cond_formats.any_rule_covers(row - 1, 3));
+        };
+        check(&loaded, 9);
+        let id = loaded.sheet(0).unwrap().tables()[0].id;
+        let commit = loaded.append_table_rows(id, 1, &[]).unwrap();
+        check(&loaded, 10);
+        loaded.apply_table_commit(&commit, true).unwrap();
+        check(&loaded, 9);
+        loaded.apply_table_commit(&commit, false).unwrap();
+        check(&loaded, 10);
+    }
+}

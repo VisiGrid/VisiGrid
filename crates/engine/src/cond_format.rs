@@ -156,9 +156,9 @@ impl CondFormatRule {
         let dr = row as i64 - anchor_row as i64;
         let dc = col as i64 - anchor_col as i64;
         let shifted = offset_expr(ast, dr, dc)?;
-        let bound = bind_expr_same_sheet(&shifted);
-        // format_expr includes the leading '='
-        Some(crate::formula::parser::format_expr(&bound, |name| Some(name.to_string())))
+        // Keep sheet qualifiers symbolic for the inspector. Binding without
+        // workbook context would turn every cross-sheet address into #REF!.
+        Some(crate::formula::parser::format_parsed_expr(&shifted))
     }
 
     /// Evaluate the predicate for a cell. True = the rule's style applies.
@@ -277,6 +277,19 @@ impl CondFormatStore {
         self.next_id += 1;
         self.rules.push(CondFormatRule::new(id, ranges, predicate, style));
         id
+    }
+
+    /// Reserve fragment identities above both the persisted high-water mark
+    /// and every existing rule. Imported stores need not have a current counter.
+    pub(crate) fn fragment_id_start(&self) -> Result<u64, String> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.rules.iter().try_fold(self.next_id, |next, rule| {
+            if !seen.insert(rule.id) {
+                return Err("Conditional-format rule IDs are duplicated. Nothing was changed.".into());
+            }
+            rule.id.checked_add(1).map(|after| next.max(after))
+                .ok_or_else(|| "Conditional-format rule IDs are exhausted. Nothing was changed.".into())
+        })
     }
 
     /// Remove a rule by id. Returns it if it existed.

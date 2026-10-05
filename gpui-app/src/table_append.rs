@@ -447,6 +447,32 @@ mod tests {
     }
 
     #[test]
+    fn footer_rules_move_through_filtered_append_and_rewind() {
+        use visigrid_engine::{cond_format::CondStyle, validation::{CellRange, ValidationRule}};
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.active_sheet_mut().validations.set(CellRange::single(7, 3), ValidationRule::custom("=$D$8>0"));
+        before.active_sheet_mut().cond_formats.add(vec![CellRange::single(7, 3)], "=$D$8>0", CondStyle::Inline(Default::default()));
+        let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+        assert!(!after.active_sheet().validations.has_validation(7, 3));
+        assert!(after.active_sheet().validations.has_validation(8, 3));
+        assert_eq!(after.active_sheet().cond_formats.iter().next().unwrap().predicate_at(8, 3).as_deref(), Some("=$D$9>0"));
+        let undone = entry.replay(&after, true).unwrap();
+        let redone = entry.replay(&undone, false).unwrap();
+        assert!(redone.active_sheet().validations.has_validation(8, 3));
+        let mut history = History::new();
+        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with footer rules".into() }, None);
+        for (end, row) in [(0, 7), (1, 8)] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            let sheet = preview.workbook.active_sheet();
+            assert!(sheet.validations.has_validation(row, 3));
+            assert!(sheet.cond_formats.any_rule_covers(row, 3));
+            assert_eq!(sheet.get_raw(4, 3), "999");
+            assert_eq!(sheet.table_view_spec(), before.active_sheet().table_view_spec());
+        }
+    }
+
+    #[test]
     fn filtered_append_moves_footer_and_rewinds_without_touching_hidden_overrides() {
         let (mut before, id) = book(true);
         before.set_table_totals_visible(id, true, Default::default()).unwrap();

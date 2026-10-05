@@ -330,6 +330,29 @@ mod tests {
     }
 
     #[test]
+    fn footer_rules_follow_filtered_overflow_paste_and_replay() {
+        use visigrid_engine::{cond_format::CondStyle, validation::{CellRange, ValidationRule}};
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.active_sheet_mut().validations.set(CellRange::single(7, 3), ValidationRule::custom("=$D$8>0"));
+        before.active_sheet_mut().cond_formats.add(vec![CellRange::single(7, 3)], "=$D$8>0", CondStyle::Inline(Default::default()));
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        let undone = entry.replay(&after, true).unwrap();
+        let redone = entry.replay(&undone, false).unwrap();
+        for (wb, row) in [(&after, 9), (&undone, 7), (&redone, 9)] {
+            assert!(wb.active_sheet().validations.has_validation(row, 3));
+            assert_eq!(wb.active_sheet().cond_formats.iter().next().unwrap().predicate_at(row, 3), Some(format!("=$D${}>0", row + 1)));
+            assert_eq!(wb.active_sheet().get_raw(4, 3), "999");
+            assert_eq!(wb.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        }
+        assert_eq!(after.active_sheet().get_display(9, 3), "100");
+        assert!(!after.active_sheet().validations.has_validation(7, 3));
+    }
+
+    #[test]
     fn filtered_overflow_paste_moves_footer_and_replays_all_values() {
         let (mut before, id) = book();
         before.set_table_totals_visible(id, true, Default::default()).unwrap();

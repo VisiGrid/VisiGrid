@@ -61,9 +61,7 @@ impl Workbook {
         table: &DataTable,
         rows: [usize; 2],
     ) -> Result<(), String> {
-        let sheet = self
-            .sheet_by_id(sheet_id)
-            .ok_or("Table sheet no longer exists.")?;
+        self.sheet_by_id(sheet_id).ok_or("Table sheet no longer exists.")?;
         for row in rows {
             self.validate_table_region(
                 sheet_id,
@@ -82,11 +80,6 @@ impl Workbook {
                 return Err(
                     "The totals row cannot move from or into a manually hidden row.".into(),
                 );
-            }
-            for col in table.range.start_col..=table.range.end_col {
-                if sheet.has_validation(row, col) || sheet.cond_formats.any_rule_covers(row, col) {
-                    return Err("Clear conditional formatting or validation on the old and new footer cells before moving totals.".into());
-                }
             }
         }
         Ok(())

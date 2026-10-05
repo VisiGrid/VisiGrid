@@ -90,9 +90,10 @@ impl ValidationRule {
         rule
     }
 
-    fn map_references(&mut self, mut map: impl FnMut(&str) -> String) {
+    pub(crate) fn map_references(&mut self, mut map: impl FnMut(&str) -> String) {
         match &mut self.rule_type {
-            ValidationType::Custom(s) | ValidationType::List(ListSource::Range(s)) => *s = map(s),
+            ValidationType::Custom(s) | ValidationType::List(ListSource::Range(s))
+            | ValidationType::List(ListSource::NamedRange(s)) => *s = map(s),
             ValidationType::List(_) => {}
             ValidationType::WholeNumber(c)
             | ValidationType::Decimal(c)

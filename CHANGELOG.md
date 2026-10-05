@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Move conditional formatting, validation rules and validation exclusions with Table totals when appending or resizing. Preserve surrounding rule coverage and relative-reference meaning, replace destination coverage, and restore exact metadata with undo/redo and History rewind.
+- Keep cross-sheet conditional-format references readable in the inspector instead of displaying an erroneous `#REF!` qualifier.
+
 - Append or resize Tables with totals while using `INDIRECT` and `OFFSET`. Explicit footer references follow moved cells; literal addresses and numeric offsets retain their authored meaning. Recalculate and validate before applying, with atomic undo/redo and History rewind.
 
 - Add and delete worksheets while Table sorting/filtering is active, with atomic recalculation, undo/redo and History rewind. Deleted sheet/Table references become permanent `#REF!` tokens; surviving named ranges keep their original sheet targets, and names on the deleted sheet are removed. Deleting a source used by a PivotTable on another sheet is explicitly refused.
