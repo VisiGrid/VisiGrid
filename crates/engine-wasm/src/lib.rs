@@ -20,6 +20,7 @@ use wasm_bindgen::prelude::*;
 
 mod collab;
 mod formula_help;
+mod inspect;
 mod recipes;
 mod session;
 pub use collab::CollabClient;

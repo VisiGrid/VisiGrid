@@ -774,6 +774,19 @@ impl CollabClient {
         self.core.set_snapshot_seq(seq as u64).map_err(js_err)
     }
 
+    /// The inspector's view of a cell: its formula, direct precedents (cells
+    /// and ranges as written) and dependents, and with `full` the whole
+    /// chain both ways (see `crate::inspect`). Undefined for an unknown sheet.
+    pub fn inspect(&self, sheet: f64, row: usize, col: usize, full: bool) -> Result<JsValue, JsValue> {
+        to_js(&crate::inspect::inspect(&self.core.client.wb, sheet as u64, row, col, full).unwrap_or(Value::Null))
+    }
+
+    /// What typing `raw` into the cell would change downstream (before and
+    /// after for every dependent whose value changes), without applying it.
+    pub fn what_if(&self, sheet: f64, row: usize, col: usize, raw: &str) -> Result<JsValue, JsValue> {
+        to_js(&crate::inspect::what_if(&self.core.client.wb, sheet as u64, row, col, raw).unwrap_or(Value::Null))
+    }
+
     /// The socket dropped and is reconnecting: send `hello` with
     /// `last_seen()` next; pending envelopes are resent after the welcome.
     pub fn reconnect(&mut self) {
