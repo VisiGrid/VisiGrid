@@ -2879,6 +2879,7 @@ fn no_untracked_cell_mutations() {
     // PR reviewers: any addition here deserves scrutiny.
     let whitelist_files: &[(&str, &str)] = &[
         ("tests.rs",              "Test code operates on raw Sheet (no live Entity<Workbook>)"),
+        ("extract_tests.rs",      "Test-only cloned workbook edit verifies stale extraction rejects sheet writes without a workbook revision bump"),
         ("sheet_ops.rs",          "Defines the tracked wrappers (set_cell_value, clear_cell_value)"),
         ("history.rs",            "Preview replay on cloned (non-live) workbook — no recalc needed"),
         ("workbook_view.rs",      "SharedWorkbookView uses RefCell<Workbook> — separate architecture"),
@@ -2890,7 +2891,7 @@ fn no_untracked_cell_mutations() {
 
     // ── Count gate ─────────────────────────────────────────────────────────
     // If these counts change, a conscious decision was made. Make it visible.
-    assert_eq!(whitelist_files.len(), 5,
+    assert_eq!(whitelist_files.len(), 6,
         "Whitelist file count changed! If you added an entry, document why.\n\
          Current whitelist:\n{}",
         whitelist_files.iter().map(|(f, r)| format!("  {} — {}", f, r)).collect::<Vec<_>>().join("\n")
@@ -3043,7 +3044,7 @@ fn review_mode_workbook_mutators_are_guarded() {
     assert_contains_near(find_replace, "replace_all", "block_if_previewing_only(cx)");
     assert_guarded(include_str!("dialogs.rs"), "ask_ai_insert_formula");
     assert_contains_near(include_str!("named_ranges/create.rs"), "confirm_create_named_range", "block_if_previewing_only(cx)");
-    assert_guarded(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range");
+    assert_contains_near(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range", "block_if_previewing_only(cx)");
     assert_contains_near(include_str!("named_ranges/panel.rs"), "delete_named_range", "block_if_previewing_only(cx)");
     assert_contains_near(include_str!("named_ranges/plan.rs"), "apply_named_range_edit", "block_if_previewing_only(cx)");
     assert_contains_near(include_str!("impact_preview.rs"), "apply_impact_preview", "block_if_previewing_only(cx)");

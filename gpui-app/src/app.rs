@@ -845,6 +845,7 @@ pub struct Spreadsheet {
     pub refactor_log: Vec<crate::views::refactor_log::RefactorLogEntry>,
 
     // Extract Named Range state
+    pub(crate) extract_draft: Option<crate::named_ranges::extract_plan::ExtractionDraft>,
     pub extract_range_literal: String,           // The detected range literal (e.g., "A1:A100")
     pub extract_name: String,                    // User-entered name
     pub extract_description: String,             // User-entered description (optional)
@@ -1493,6 +1494,7 @@ impl Spreadsheet {
 
             refactor_log: Vec::new(),
 
+            extract_draft: None,
             extract_range_literal: String::new(),
             extract_name: String::new(),
             extract_description: String::new(),

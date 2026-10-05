@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Extract Named Range works through Table sorting and filters, targeting canonical visible formulas on the current sheet. The name and formula changes share one atomic undo/redo and History rewind step; stale dialogs and unsafe edits leave the workbook unchanged.
+- Extract actual reference tokens while preserving formula spelling, quoted text and structured headers. Respect qualified sheet targets and LET/LAMBDA scopes, and explicitly show that hidden formulas are excluded.
+
 - Table `SUBTOTAL` sums and averages use the same compensated summation as worksheet aggregates, keeping totals consistent when large values cancel or many small amounts accumulate.
 
 - Support nested named, cross-sheet and Table references in formula-backed dropdowns and worksheet `INDIRECT`/`OFFSET` expressions. Share reference bounds and geometry checks across both paths.

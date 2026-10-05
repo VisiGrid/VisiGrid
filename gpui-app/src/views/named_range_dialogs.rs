@@ -407,11 +407,13 @@ pub(crate) fn render_extract_named_range_dialog(app: &Spreadsheet) -> impl IntoE
     let desc_focused = app.extract_focus == CreateNameFocus::Description;
 
     // Format occurrence message
-    let occurrence_msg = if app.extract_affected_cells.len() == 1 {
-        format!("Will replace {} occurrence in 1 formula", app.extract_occurrence_count)
-    } else {
-        format!("Will replace {} occurrences in {} formulas", app.extract_occurrence_count, app.extract_affected_cells.len())
-    };
+    let occurrence_msg = format!(
+        "{} {} in {} visible {} on this sheet. Hidden formulas stay unchanged.",
+        app.extract_occurrence_count,
+        if app.extract_occurrence_count == 1 { "occurrence" } else { "occurrences" },
+        app.extract_affected_cells.len(),
+        if app.extract_affected_cells.len() == 1 { "formula" } else { "formulas" },
+    );
 
     // Centered dialog overlay
     div()
