@@ -484,12 +484,15 @@ pub(crate) fn merges_overlapping(
     area: (usize, usize, usize, usize),
 ) -> Vec<visigrid_engine::sheet::MergedRegion> {
     let (r0, c0, r1, c1) = area;
-    sheet
+    let mut found: Vec<_> = sheet
         .merged_regions
         .iter()
         .filter(|m| m.start.0 <= r1 && m.end.0 >= r0 && m.start.1 <= c1 && m.end.1 >= c0)
         .cloned()
-        .collect()
+        .collect();
+    // Sheet order, so a refusal names the first merge in the way.
+    found.sort_by_key(|m| m.start);
+    found
 }
 
 #[cfg(test)]
@@ -537,6 +540,19 @@ mod table_range_tests {
         // Anything that writes row 1 under the title does.
         assert_eq!(merges_overlapping(&s, (0, 2, 2, 2)).len(), 1);
         assert_eq!(merges_overlapping(&s, (0, 0, 0, usize::MAX)).len(), 1);
+    }
+
+    #[test]
+    fn blocking_merges_come_back_in_sheet_order() {
+        use super::merges_overlapping;
+        use visigrid_engine::sheet::MergedRegion;
+        let mut s = sheet(&[&["", "", ""], &["", "", ""], &["", "", ""], &["", "", ""]]);
+        // Added out of order, as an import or edit history might leave them.
+        for row in [3, 1, 2] {
+            s.add_merge(MergedRegion::new(row, 0, row, 1)).unwrap();
+        }
+        let rows: Vec<usize> = merges_overlapping(&s, (1, 0, 3, usize::MAX)).iter().map(|m| m.start.0).collect();
+        assert_eq!(rows, vec![1, 2, 3]);
     }
 
     #[test]

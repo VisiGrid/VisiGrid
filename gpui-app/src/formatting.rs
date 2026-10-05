@@ -385,8 +385,8 @@ impl Spreadsheet {
         }
         // Right after a sort/filter refused because of merged titles, the
         // shortcut converts those titles (the refusal says so).
-        if let Some((origins, at, when)) = self.merge_block_offer.take() {
-            if at == self.view_state.selected && when.elapsed() < std::time::Duration::from_secs(30) {
+        if let Some((origins, at, message)) = self.merge_block_offer.take() {
+            if at == self.view_state.selected && self.status_message.as_deref() == Some(message.as_str()) {
                 self.convert_merges_at(origins, cx);
                 return;
             }
