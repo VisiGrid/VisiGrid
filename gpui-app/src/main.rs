@@ -52,7 +52,8 @@ mod fill;
 mod find_replace;
 mod formatting;
 mod fonts;
-mod formula_context;
+// Formula-editing help lives in the engine, shared with the web grid.
+pub(crate) use visigrid_engine::formula::help as formula_context;
 mod formula_refs;
 mod grid_ops;
 mod hints;

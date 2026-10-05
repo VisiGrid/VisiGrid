@@ -2869,7 +2869,7 @@ mod tests {
 #[cfg(test)]
 mod engine_parity_tests {
     use super::FUNCTIONS;
-    use visigrid_engine::formula::functions::list_functions;
+    use crate::formula::functions::list_functions;
 
     /// Autocomplete, signature help and the palette's `=` search all read
     /// FUNCTIONS, which is written by hand. It fell 39 functions behind the

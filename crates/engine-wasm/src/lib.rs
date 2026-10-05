@@ -19,6 +19,7 @@ use visigrid_engine::workbook::Workbook;
 use wasm_bindgen::prelude::*;
 
 mod collab;
+mod formula_help;
 mod recipes;
 mod session;
 pub use collab::CollabClient;
