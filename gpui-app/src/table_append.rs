@@ -414,6 +414,39 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_footer_links_follow_filtered_tab_append_and_history() {
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.define_name_for_cell("Footer", 0, 7, 3).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=OFFSET($D$8,0,0)");
+        before.set_cell_value_tracked(0, 1, 0, "=INDIRECT(\"Footer\")");
+        before.set_cell_value_tracked(0, 9, 0, "=INDIRECT(\"D8\")");
+        let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=OFFSET($D$9, 0, 0)");
+        assert_eq!(after.active_sheet().get_raw(9, 0), "=INDIRECT(\"D8\")");
+        assert_eq!(after.active_sheet().get_display(9, 0), after.active_sheet().get_display(7, 3));
+        for row in [0, 1] {
+            assert_eq!(after.active_sheet().get_display(row, 0), after.active_sheet().get_display(8, 3));
+        }
+        let undone = entry.replay(&after, true).unwrap();
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(0, 0), before.active_sheet().get_raw(0, 0));
+        assert_eq!(redone.active_sheet().get_raw(0, 0), after.active_sheet().get_raw(0, 0));
+        let mut history = History::new();
+        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with dynamic totals references".into() }, None);
+        for (end, expected) in [(0, &before), (1, &after)] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            let sheet = preview.workbook.active_sheet();
+            for row in [0, 1, 9] {
+                assert_eq!(sheet.get_raw(row, 0), expected.active_sheet().get_raw(row, 0));
+                assert_eq!(sheet.get_display(row, 0), expected.active_sheet().get_display(row, 0));
+            }
+            assert_eq!(sheet.get_raw(4, 3), "999");
+            assert_eq!(sheet.table_view_spec(), before.active_sheet().table_view_spec());
+        }
+    }
+
+    #[test]
     fn filtered_append_moves_footer_and_rewinds_without_touching_hidden_overrides() {
         let (mut before, id) = book(true);
         before.set_table_totals_visible(id, true, Default::default()).unwrap();

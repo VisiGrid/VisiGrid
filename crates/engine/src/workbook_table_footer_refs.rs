@@ -75,9 +75,11 @@ impl Movement {
         };
         let mut expr = parser::parse(&input)
             .map_err(|_| "A formula cannot be checked for totals-row references. Resolve it before moving the footer.".to_string())?;
-        if crate::formula::analyze::has_dynamic_deps(&expr) {
-            return Err("INDIRECT or OFFSET references cannot be checked safely before moving totals. Use explicit or structured references first.".into());
-        }
+        // Explicit OFFSET bases follow the moved cells. Constructed addresses
+        // and offsets retain their authored meaning; runtime dependencies are
+        // rebuilt/settled on the final candidate, with guarded history even if
+        // no source token changes (for example INDIRECT("B5")).
+        *guarded |= crate::formula::analyze::has_dynamic_deps(&expr);
         let future = Movement {
             owner: self.owner.clone(),
             footer: TableRange {
@@ -103,6 +105,17 @@ impl Movement {
 }
 
 impl Workbook {
+    pub(super) fn validate_footer_relocation(&mut self) -> Result<(), String> {
+        let report = self.recompute_full_ordered();
+        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+            return Err("Moving totals would create a cycle or an unsettled calculation. Nothing was changed.".into());
+        }
+        for sheet in &self.sheets {
+            sheet.build_saved_table_view(sheet.rows)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn relocate_footer_references(
         &mut self,
         id: TableId,
@@ -207,7 +220,8 @@ impl Workbook {
                 let mut changed = false;
                 match &mut rule.rule_type {
                     ValidationType::Custom(source)
-                    | ValidationType::List(ListSource::Range(source)) => {
+                    | ValidationType::List(ListSource::Range(source))
+                    | ValidationType::List(ListSource::NamedRange(source)) => {
                         changed |= movement.rewrite(source, local, &mut guarded)?
                     }
                     ValidationType::List(_) => {}

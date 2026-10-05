@@ -305,6 +305,31 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_footer_readers_survive_filtered_overflow_paste_and_replay() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=OFFSET(D8,0,0)");
+        before.set_cell_value_tracked(0, 1, 0, "=INDIRECT(\"D8\")");
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=OFFSET(D10, 0, 0)");
+        assert_eq!(after.active_sheet().get_display(0, 0), "100");
+        assert_eq!(after.active_sheet().get_display(1, 0), "28");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        let undone = entry.replay(&after, true).unwrap();
+        for row in [0, 1] {
+            assert_eq!(undone.active_sheet().get_raw(row, 0), before.active_sheet().get_raw(row, 0));
+            assert_eq!(undone.active_sheet().get_display(row, 0), before.active_sheet().get_display(row, 0));
+        }
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(0, 0), "100");
+        assert_eq!(redone.active_sheet().get_display(1, 0), "28");
+        assert_eq!(redone.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+    }
+
+    #[test]
     fn filtered_overflow_paste_moves_footer_and_replays_all_values() {
         let (mut before, id) = book();
         before.set_table_totals_visible(id, true, Default::default()).unwrap();

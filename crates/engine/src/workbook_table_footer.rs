@@ -164,7 +164,7 @@ impl Workbook {
         if !movement.references_guarded {
             let target = if undo { commit.before_table() } else { commit.after_table() }.unwrap();
             if self.clone().relocate_footer_references(commit.table_id(), target.range.end_row, Some(commit))? {
-                return Err("New fixed footer references require a fresh Table operation.".into());
+                return Err("New footer references require a fresh Table operation.".into());
             }
         }
         let sheet = self.sheet_by_id(commit.sheet_id).unwrap();

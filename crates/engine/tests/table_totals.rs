@@ -291,7 +291,7 @@ fn fixed_and_structured_footer_references_follow_and_stale_replay_refuses() {
     wb.restore_snapshot_monotonic(&saved);
     wb.apply_table_commit(&append, true).unwrap();
     assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "60");
-    for source in ["=INDIRECT(\"B5\")", "=OFFSET(B1,4,0)", "=SUM((("] {
+    for source in ["=SUM(((", "=INDIRECT(", "=OFFSET("] {
         wb.set_cell_value_tracked(0, 0, 4, source);
         let revision = wb.revision();
         assert!(wb.append_table_rows(id, 1, &[]).is_err(), "{source}");

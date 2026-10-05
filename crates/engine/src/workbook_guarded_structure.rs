@@ -588,10 +588,8 @@ impl GuardedStructureCommit {
         }
         candidate.rebuild_dep_graph();
         let report = candidate.recompute_full_ordered();
-        if report.had_cycles || report.errors.iter().any(|e| e.error.contains(
-            if self.renamed_sheets.is_empty() && self.sheet_change.is_none() { "spill not settled" } else { "not settled" }
-        )) {
-            return Err("History replay would create a cycle or an unsettled spill.".into());
+        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+            return Err("History replay would create a cycle or an unsettled calculation.".into());
         }
         if self.sheet_change.is_some() || !self.renamed_sheets.is_empty() || self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some()) {
             // A pivot can source an unchanged formula whose result depends on

@@ -2861,3 +2861,45 @@ fn large_worksheet_parts_do_not_block_table_import() {
     assert_eq!(result.tables_imported, 1, "{:?}", result.warnings);
     assert_eq!(imported.tables().count(), 1);
 }
+
+#[test]
+fn dynamic_footer_references_survive_native_json_and_stored_excel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.define_name_for_cell("Footer", 0, 8, 3).unwrap();
+    wb.set_cell_value_tracked(1, 1, 0, "=OFFSET(Sheet1!$D$9,0,0)");
+    wb.set_cell_value_tracked(1, 2, 0, "=INDIRECT(\"Footer\")");
+    wb.set_cell_value_tracked(1, 3, 0, "=INDIRECT(\"Sheet1!D9\")");
+    wb.append_table_rows(id, 1, &[(8, 1, "2".into()), (8, 2, "10".into())]).unwrap();
+    let expected = wb.sheet(0).unwrap().get_display(9, 3);
+    let path = dir.path().join("dynamic-footer.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let native = native::load_workbook(&path).unwrap();
+    let json = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    let (json, _, _) = visigrid_io::json::import_any(&json).unwrap();
+    let path = dir.path().join("dynamic-footer.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (excel, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    for mut loaded in [native, json, excel] {
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "=OFFSET(Sheet1!$D$10, 0, 0)");
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(3, 0), "=INDIRECT(\"Sheet1!D9\")");
+        for row in [1, 2] {
+            assert_eq!(loaded.sheet(1).unwrap().get_display(row, 0), expected);
+        }
+        assert_eq!(loaded.sheet(1).unwrap().get_display(3, 0), "20");
+        let id = loaded.sheet(0).unwrap().tables()[0].id;
+        let commit = loaded.append_table_rows(id, 1, &[(9, 1, "3".into()), (9, 2, "10".into())]).unwrap();
+        let new_total = loaded.sheet(0).unwrap().get_display(10, 3);
+        assert_ne!(expected, new_total);
+        for row in [1, 2] {
+            assert_eq!(loaded.sheet(1).unwrap().get_display(row, 0), new_total);
+        }
+        assert_eq!(loaded.sheet(1).unwrap().get_display(3, 0), "20");
+        loaded.apply_table_commit(&commit, true).unwrap();
+        assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
+        loaded.apply_table_commit(&commit, false).unwrap();
+        assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), new_total);
+    }
+}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Append or resize Tables with totals while using `INDIRECT` and `OFFSET`. Explicit footer references follow moved cells; literal addresses and numeric offsets retain their authored meaning. Recalculate and validate before applying, with atomic undo/redo and History rewind.
+
 - Add and delete worksheets while Table sorting/filtering is active, with atomic recalculation, undo/redo and History rewind. Deleted sheet/Table references become permanent `#REF!` tokens; surviving named ranges keep their original sheet targets, and names on the deleted sheet are removed. Deleting a source used by a PivotTable on another sheet is explicitly refused.
 - Keep sheet identities and pane targets stable through sheet deletion and undo. History retains the removed sheet and sparse changes to surviving sheets, rather than a full workbook snapshot.
 

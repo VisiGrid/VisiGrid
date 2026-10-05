@@ -519,6 +519,7 @@ impl Workbook {
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Could not recalculate the resized Table: {error:?}"));
         }
+        if reference_guarded { candidate.validate_footer_relocation()?; }
         let guarded = if width_changed || reference_guarded { Some(Box::new(self.capture_guarded_batch(&candidate)?)) } else { None };
         commit.before.table = Some(before);
         commit.after.table = Some(candidate.table(id).unwrap().1.clone());
@@ -655,12 +656,17 @@ impl Workbook {
         let before = old.clone();
         let end = old.range.end_row.checked_add(count).ok_or("Append exceeds the sheet boundary.")?;
         let mut candidate = self.clone();
-        let guarded = candidate.relocate_footer_references(id, end, None)?;
+        let guarded = candidate.relocate_footer_references(id, end, None)?
+            || writes.iter().any(|(_, _, source)| crate::formula::parser::parse(source)
+                .is_ok_and(|expr| crate::formula::analyze::has_dynamic_deps(&expr)));
         let mut commit = candidate.append_table_rows_inner(id, count, writes, infer_rule)?;
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Could not recalculate the appended Table: {error:?}"));
         }
-        if guarded { commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?)); }
+        if guarded {
+            candidate.validate_footer_relocation()?;
+            commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?));
+        }
         commit.before.table = Some(before);
         commit.after.table = Some(candidate.table(id).unwrap().1.clone());
         self.restore_snapshot_monotonic(&candidate);
