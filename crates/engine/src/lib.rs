@@ -15,6 +15,7 @@ pub mod operation_plan;
 pub mod pivot;
 pub mod provenance;
 pub mod recalc;
+pub mod series_fill;
 pub mod sheet;
 mod store;
 pub mod structural;

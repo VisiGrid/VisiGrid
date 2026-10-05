@@ -146,3 +146,18 @@ mod tests {
         assert!(h["diagnostic"]["message"].as_str().unwrap_or("").to_lowercase().contains("unknown"), "{h}");
     }
 }
+
+/// A formula with its relative references shifted by (`dr`, `dc`): what a
+/// copy lands as `dr` rows and `dc` columns away (absolute `$` parts stay).
+#[wasm_bindgen]
+pub fn adjust_formula(formula: &str, dr: i32, dc: i32) -> String {
+    visigrid_engine::formula::parser::adjust_formula_refs(formula, dr, dc)
+}
+
+/// What a fill writes past a run of raw cell texts (see
+/// `visigrid_engine::series_fill::fill_line`), shared with the desktop's
+/// fill handle.
+#[wasm_bindgen]
+pub fn fill_line(sources: Vec<String>, count: usize, ctrl_held: bool, copy_only: bool, backward: bool, rows: bool) -> Vec<String> {
+    visigrid_engine::series_fill::fill_line(&sources, count.min(1_048_576), ctrl_held, copy_only, backward, rows)
+}

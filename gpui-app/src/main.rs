@@ -88,7 +88,7 @@ mod review_mode;
 mod role_styles;
 mod search;
 mod selection_differences;
-mod series_fill;
+pub(crate) use visigrid_engine::series_fill;
 mod session;
 mod session_adapter;
 mod session_server;

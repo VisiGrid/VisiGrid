@@ -1124,129 +1124,17 @@ impl Spreadsheet {
 
     /// Convert a cell's content to a series_fill Value
     fn cell_to_value(&self, row: usize, col: usize, cx: &App) -> Value {
-        let raw = self.sheet(cx).get_raw(row, col);
-
-        if raw.is_empty() {
-            return Value::Empty;
-        }
-
-        // Try to parse as number
-        if let Ok(n) = raw.parse::<f64>() {
-            return Value::Number(n);
-        }
-
-        // Otherwise it's text
-        Value::Text(raw)
+        series_fill::raw_value(&self.sheet(cx).get_raw(row, col))
     }
 
-    /// Check if a string matches a pattern that should series by default:
-    /// - Built-in lists (months, weekdays, quarters)
-    /// - Alphanumeric patterns (Item1, Row Z, etc.)
+    /// Whether a single cell should series by default (shared with the web grid).
     fn is_list_item(&self, text: &str) -> bool {
-        let lower = text.to_lowercase();
-        let trimmed = lower.trim();
-
-        // Skip formulas
-        if trimmed.starts_with('=') {
-            return false;
-        }
-
-        // Months (short)
-        const MONTHS_SHORT: [&str; 12] = [
-            "jan", "feb", "mar", "apr", "may", "jun",
-            "jul", "aug", "sep", "oct", "nov", "dec",
-        ];
-        if MONTHS_SHORT.contains(&trimmed) {
-            return true;
-        }
-
-        // Months (long)
-        const MONTHS_LONG: [&str; 12] = [
-            "january", "february", "march", "april", "may", "june",
-            "july", "august", "september", "october", "november", "december",
-        ];
-        if MONTHS_LONG.contains(&trimmed) {
-            return true;
-        }
-
-        // Weekdays (short)
-        const WEEKDAYS_SHORT: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-        if WEEKDAYS_SHORT.contains(&trimmed) {
-            return true;
-        }
-
-        // Weekdays (long)
-        const WEEKDAYS_LONG: [&str; 7] = [
-            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-        ];
-        if WEEKDAYS_LONG.contains(&trimmed) {
-            return true;
-        }
-
-        // Quarters (Q1-Q4, with or without year)
-        if (trimmed.starts_with('q') || trimmed.starts_with('Q'))
-            && trimmed.len() >= 2
-        {
-            let rest = &trimmed[1..];
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if let Some(first) = parts.first() {
-                if let Ok(q) = first.parse::<i32>() {
-                    if (1..=4).contains(&q) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        // Alphanumeric with trailing number (Item1, Row-5, etc.)
-        // Must have a non-digit prefix and trailing digits
-        let chars: Vec<char> = text.chars().collect();
-        if chars.len() >= 2 {
-            // Check for trailing digits
-            let has_trailing_digits = chars.last().map_or(false, |c| c.is_ascii_digit());
-            let has_prefix = !chars.first().map_or(false, |c| c.is_ascii_digit() || *c == '-');
-            if has_trailing_digits && has_prefix {
-                return true;
-            }
-
-            // Check for trailing letters with a non-letter prefix (Row A, Item Z)
-            let last_is_letter = chars.last().map_or(false, |c| c.is_ascii_alphabetic());
-            if last_is_letter {
-                // Find where the trailing letter sequence starts
-                let mut letter_start = chars.len();
-                for i in (0..chars.len()).rev() {
-                    if chars[i].is_ascii_alphabetic() {
-                        letter_start = i;
-                    } else {
-                        break;
-                    }
-                }
-                // Must have at least one non-letter before the trailing letters
-                if letter_start > 0 && !chars[letter_start - 1].is_ascii_alphabetic() {
-                    return true;
-                }
-            }
-        }
-
-        false
+        series_fill::is_list_item(text)
     }
 
     /// Convert a series_fill Value to a cell string
     fn value_to_string(&self, value: &Value) -> String {
-        match value {
-            Value::Number(n) => {
-                // Format without unnecessary decimal places
-                if n.fract() == 0.0 && n.abs() < 1e15 {
-                    format!("{}", *n as i64)
-                } else {
-                    format!("{}", n)
-                }
-            }
-            Value::Text(s) => s.clone(),
-            Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-            Value::Empty => String::new(),
-            Value::Error(e) => format!("{}", e),
-        }
+        series_fill::value_text(value)
     }
 }
 
