@@ -87,21 +87,11 @@ mod tests {
 // Contract: fields may be ADDED in later versions; existing fields keep
 // their meaning. `version` bumps only on breaking changes.
 //
-// UNKNOWN FIELDS ARE DROPPED, NOT PRESERVED. A reader ignores what it does not
-// recognise, and a writer emits only what it knows, so anything this build has
-// no field for is gone after a round trip. That matters more than it sounds:
-// `vgrid convert -f json-full -t json-full` is what the server runs on every
-// web save, so an annotation added by any other layer survives until the next
-// save and no longer.
-//
-// "Consumers must ignore unknown fields" was the old wording, and both a
-// browser converter and this one were written on the assumption that ignoring
-// meant tolerating rather than discarding. If you are extending the format,
-// add a field here — a passenger will not survive.
-//
-// Making passengers survive would mean the engine carrying opaque per-cell
-// JSON through a Sheet, which does not currently hold any. SheetLayout::charts
-// is the precedent for doing that deliberately at the sheet level.
+// A projected grid is not permission to discard source content. Import checks
+// the writer's projection against the source. If content cannot be represented,
+// every sheet becomes read-only and retains the original canonical document.
+// An unchanged protected workbook can be copied exactly; a changed partial
+// projection cannot be exported as though it preserved the full document.
 //
 // Single-sheet form (version 1):
 // {
@@ -578,6 +568,11 @@ pub fn export_full(sheet: &Sheet) -> Result<String, String> {
 
 /// Export a sheet as visigrid-json v1 with presentation state.
 pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<String, String> {
+    if sheet.canonical_content_protection.is_some() {
+        let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
+        return crate::content_protection::original_source(&wb)?.map(str::to_owned)
+            .ok_or_else(|| "Protected source is unavailable.".into());
+    }
     if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
     sheet.validate_table_view_spec()?;
     if sheet.table_view_spec().is_some() && layout.filter.is_some() {
@@ -603,6 +598,9 @@ pub fn export_workbook(
     layouts: &[SheetLayout],
     active_sheet: usize,
 ) -> Result<String, String> {
+    if let Some(source) = crate::content_protection::original_source(wb)? {
+        return Ok(source.to_owned());
+    }
     wb.ensure_writable()?;
     wb.validate_table_view_specs()?;
     if wb.sheets().iter().zip(layouts).any(|(sheet, layout)| sheet.table_view_spec().is_some() && layout.filter.is_some()) {
@@ -800,6 +798,20 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
     }
 }
 
+pub(crate) fn protection_projection(sheet: &Sheet) -> Result<serde_json::Value, String> {
+    // The canonical writer already converts range-keyed validation maps into
+    // JSON-safe lists. Serializing Sheet directly would fail for those maps.
+    let workbook = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
+    serde_json::to_value(serde_json::json!({
+        "id": sheet.id,
+        "reason": sheet.read_only_reason,
+        "rows": sheet.rows,
+        "cols": sheet.cols,
+        "body": sheet_body(sheet, &SheetLayout::default()),
+        "tables": workbook.saved_tables(),
+    })).map_err(|e| e.to_string())
+}
+
 /// What a cloud blob actually is, regardless of the key's extension.
 ///
 /// Both API controllers reuse `data_blob_key` when one exists, so a desktop
@@ -888,12 +900,7 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
-    if doc.version > FULL_JSON_TABLE_VERSION {
-        return Err(format!(
-            "visigrid-json version {} is newer than supported ({})",
-            doc.version, FULL_JSON_TABLE_VERSION
-        ));
-    }
+
 
     let bodies: Vec<&SheetBody> = if doc.sheets.is_empty() {
         vec![&doc.body]
@@ -912,6 +919,14 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     let active = doc.active_sheet.unwrap_or(0).min(sheets.len() - 1);
     // Recompute formulas (stored values are only a fallback for engine-less consumers)
     let mut wb = Workbook::from_sheets(sheets, active);
+    if doc.version > FULL_JSON_TABLE_VERSION {
+        let cached = cached_formula_values(&doc, &wb);
+        let reason = format!("visigrid-json version {} is newer than supported ({}). Opened read-only; original content is retained.", doc.version, FULL_JSON_TABLE_VERSION);
+        crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
+        retain_protected_source(&mut wb, content)?;
+        return Ok((wb, layouts, active));
+    }
+
     // Pivots after cells, so ownership never blocks loading their output.
     for (i, body) in bodies.iter().enumerate() {
         if let Some(p) = &body.pivots {
@@ -938,13 +953,41 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
         if !recovery { return Err(issue.to_string()); }
         let cached = cached_formula_values(&doc, &wb);
         crate::table_recovery::finish_recovery(&mut wb, &issue, &cached);
+        retain_protected_source(&mut wb, content)?;
         return Ok((wb, layouts, active));
     }
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
     let cached = cached_formula_values(&doc, &wb);
     crate::keep_uncomputable_values(&mut wb, &cached);
+    let projected = if doc.sheets.is_empty() {
+        export_full_with_layout(wb.active_sheet(), &layouts[0])?
+    } else {
+        export_workbook(&wb, &layouts, active)?
+    };
+    let source: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    let projected: serde_json::Value = serde_json::from_str(&projected).map_err(|e| e.to_string())?;
+    if let Some(path) = crate::content_protection::first_loss(&source, &projected) {
+        let reason = format!("This VisiGrid cannot preserve content at {path}. Opened read-only; original content is retained. Upgrade VisiGrid to edit.");
+        crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
+        retain_protected_source(&mut wb, content)?;
+    }
     Ok((wb, layouts, active))
+}
+
+
+fn retain_protected_source(wb: &mut visigrid_engine::workbook::Workbook, content: &str) -> Result<(), String> {
+    let source = std::sync::Arc::new(content.to_owned());
+    let sheet_ids = wb.sheets().iter().map(|s| s.id).collect::<Vec<_>>();
+    for index in 0..wb.sheet_count() {
+        let fingerprint = crate::content_protection::fingerprint(wb.sheet(index).unwrap())?;
+        wb.sheet_mut(index).unwrap().canonical_content_protection = Some(
+            visigrid_engine::sheet::CanonicalContentProtection {
+                source: source.clone(), sheet_ids: sheet_ids.clone(), fingerprint,
+            },
+        );
+    }
+    Ok(())
 }
 
 

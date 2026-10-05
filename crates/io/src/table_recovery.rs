@@ -36,6 +36,14 @@ pub(crate) fn finish_recovery(
     issue: &TableLoadIssue,
     cached: &[(usize, usize, usize, crate::CachedFormulaValue)],
 ) {
+    finish_read_only(wb, &issue.to_string(), cached);
+}
+
+pub(crate) fn finish_read_only(
+    wb: &mut Workbook,
+    reason: &str,
+    cached: &[(usize, usize, usize, crate::CachedFormulaValue)],
+) {
     for (sheet_index, row, col, value) in cached {
         if let Some(sheet) = wb.sheet(*sheet_index) {
             use visigrid_engine::formula::eval::Value;
@@ -50,7 +58,7 @@ pub(crate) fn finish_recovery(
         }
     }
     for index in 0..wb.sheet_count() {
-        wb.sheet_mut(index).unwrap().read_only_reason = Some(issue.to_string());
+        wb.sheet_mut(index).unwrap().read_only_reason = Some(reason.to_owned());
     }
     wb.set_auto_recalc(false);
 }

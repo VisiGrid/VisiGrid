@@ -4,6 +4,7 @@ pub mod csv;
 pub mod csv_import;
 pub mod duckdb;
 pub mod json;
+pub mod content_protection;
 pub mod native;
 pub mod parquet;
 pub mod parquet_export;

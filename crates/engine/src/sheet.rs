@@ -289,6 +289,13 @@ const CYCLE_ERROR: &str = "#CYCLE!";
 /// the map holds one entry per populated cell — 8 bytes of key instead of 16 is
 /// the difference between a 1M-row import fitting in memory and not. Public
 /// APIs still speak usize; this is the storage shape.
+#[derive(Debug, Clone)]
+pub struct CanonicalContentProtection {
+    pub source: std::sync::Arc<String>,
+    pub sheet_ids: Vec<SheetId>,
+    pub fingerprint: [u8; 32],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sheet {
     /// Stable identity - never changes, never reused after deletion
@@ -377,6 +384,10 @@ pub struct Sheet {
     /// Cells recovered without their Table definitions. Never save this view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
+    /// Original canonical document retained when this build cannot represent
+    /// all its content. Never serialize this recursively into engine state.
+    #[serde(skip)]
+    pub canonical_content_protection: Option<CanonicalContentProtection>,
     #[serde(default)]
     pub(crate) table_id_high_water: u64,
     #[serde(default)]
@@ -581,6 +592,7 @@ impl Sheet {
             data_tables: Vec::new(),
             table_view_spec: None,
             read_only_reason: None,
+            canonical_content_protection: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
             edit_generation: 0,
@@ -617,6 +629,7 @@ impl Sheet {
             data_tables: Vec::new(),
             table_view_spec: None,
             read_only_reason: None,
+            canonical_content_protection: None,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
             edit_generation: 0,

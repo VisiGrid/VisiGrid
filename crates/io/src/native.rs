@@ -610,6 +610,9 @@ fn write_fresh_db(
 }
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
+    if sheet.canonical_content_protection.is_some() {
+        return save_workbook(&Workbook::from_sheets(vec![sheet.clone()], 0), path);
+    }
     if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
     sheet.validate_table_view_spec()?;
     if sheet.has_table_history() {
@@ -764,6 +767,9 @@ fn build_number_format(
 
 pub fn load(path: &Path) -> Result<Sheet, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    if let Some(source) = protected_source(&conn)? {
+        return crate::json::import_full(&source);
+    }
     let has_tables: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'tables')", [], |r| r.get(0))
         .unwrap_or(false);
     if has_tables {
@@ -942,9 +948,32 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 
 /// Save a complete workbook including all sheets and named ranges
 pub fn save_workbook(workbook: &Workbook, path: &Path) -> Result<(), String> {
+    if let Some(source) = crate::content_protection::original_source(workbook)? {
+        return save_protected_source(workbook, source, path);
+    }
     workbook.ensure_writable()?;
     workbook.validate_table_view_specs()?;
     write_fresh_db(path, |conn| write_workbook(conn, workbook, path.parent()))
+}
+
+fn protected_source(conn: &Connection) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT value FROM meta WHERE key = 'protected_canonical_source'", [], |r| r.get(0))
+        .optional().or_else(|error| {
+            // Legacy files without a meta table keep their existing loader.
+            if error.to_string().contains("no such table: meta") { Ok(None) } else { Err(error) }
+        }).map_err(|e| e.to_string())
+}
+
+fn save_protected_source(workbook: &Workbook, source: &str, path: &Path) -> Result<(), String> {
+    write_fresh_db(path, |conn| {
+        // Keep an ordinary preview alongside the authoritative source. The
+        // reader restores the source before migrations or recalculation.
+        write_workbook(conn, workbook, path.parent())?;
+        conn.execute("INSERT INTO meta (key, value) VALUES ('protected_canonical_source', ?1)", params![source])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
 }
 
 /// Populate a fresh database with the workbook. See [`save_workbook`].
@@ -1468,6 +1497,9 @@ pub fn load_workbook_for_recovery(path: &Path) -> Result<(Workbook, Option<crate
 
 fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<crate::table_recovery::TableLoadIssue>), String> {
     let read = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+    if let Some(source) = protected_source(&read)? {
+        return crate::json::import_any(&source).map(|(wb, _, _)| (wb, None));
+    }
     let has_tables = read.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'tables')", [], |r| r.get::<_, bool>(0)).unwrap_or(false);
     // Table-bearing files already use the current cell schema. Never migrate
     // a file whose Table definitions may be unsupported or damaged.
