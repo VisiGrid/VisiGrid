@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Convert large calculated Tables to ordinary ranges beyond the 100,000-cell history limit. Index dependent-formula checks, store compact formula history, and reduce temporary history allocations while retaining atomic validation and stale undo protection.
+
 - Convert Tables referenced by another Table’s custom totals, including dormant settings and independently stored footer formulas. Preserve local reference ownership when a dormant footer overlaps another Table, including during column renaming.
 
 - Preserve conditional formatting and validation when converting Tables to ranges, including this-row references and dropdown sources. Evaluate conditional-format rules in their target cell context, and support standard error literals inside formulas so converted rules retain error handling.

@@ -849,7 +849,11 @@ impl Workbook {
         if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
             return Err("Converting this Table would leave a cycle or unsettled calculation. Nothing was changed.".into());
         }
-        commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?));
+        commit.guarded = Some(Box::new(self.capture_table_conversion(&candidate)?));
+        // Guarded history owns these rewrites now; retaining a second list of
+        // sources/templates can dominate memory for large calculated Tables.
+        commit.formulas = Vec::new();
+        commit.rules = Vec::new();
         self.restore_snapshot_monotonic(&candidate);
         Ok(commit)
     }
@@ -1160,22 +1164,16 @@ impl Workbook {
                 return Err("Table references changed since creation.".into());
             }
         } else {
+            let rewritten_cells: HashSet<_> = commit.formulas.iter().map(|change| change.cell)
+                .chain(commit.cells.iter().map(|(cell, _)| crate::cell_id::CellId::new(commit.sheet_id, cell.row, cell.col)))
+                .collect();
             for change in self.table_formula_changes(
                 commit.sheet_id,
                 expected.table.as_ref(),
                 target.table.as_ref(),
                 commit.totals_schema_edit,
             )? {
-                if !commit
-                    .formulas
-                    .iter()
-                    .any(|saved| saved.cell == change.cell)
-                    && !commit.cells.iter().any(|(cell, _)| {
-                        change.cell.sheet == commit.sheet_id
-                            && change.cell.row == cell.row
-                            && change.cell.col == cell.col
-                    })
-                {
+                if !rewritten_cells.contains(&change.cell) {
                     return Err("New dependent formulas require a fresh table operation.".into());
                 }
             }

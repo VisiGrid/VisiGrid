@@ -2,8 +2,13 @@
 //! Temporary candidates are discarded. Lifecycle history retains only the
 //! added/deleted sheet; survivors use sparse cell and metadata patches.
 use super::Workbook;
+#[path = "workbook_history_cells.rs"]
+mod cell_history;
+use cell_history::{same_cells, CellPatch, SignatureEncoder};
+#[cfg(test)]
+use crate::cell::Cell;
 use crate::{
-    cell::{Cell, CellFormat, ValueRef},
+    cell::{CellFormat, ValueRef},
     cond_format::CondFormatStore,
     named_range::NamedRangeStore,
     pivot::PivotTable,
@@ -95,14 +100,6 @@ impl Metadata {
     }
 }
 #[derive(Clone, Debug)]
-struct CellPatch {
-    sheet: SheetId,
-    row: usize,
-    col: usize,
-    before: Option<Cell>,
-    after: Option<Cell>,
-}
-#[derive(Clone, Debug)]
 struct MetaPatch {
     sheet: SheetId,
     before: Metadata,
@@ -131,6 +128,7 @@ pub struct GuardedStructureCommit {
     views: Vec<(SheetId, Option<TableViewSpec>)>,
 }
 
+#[cfg(test)]
 fn image(s: &Sheet, r: usize, c: usize) -> Option<Cell> {
     s.get_cell_opt(r, c).map(|cell| {
         let mut cell = cell.to_cell();
@@ -138,6 +136,7 @@ fn image(s: &Sheet, r: usize, c: usize) -> Option<Cell> {
         cell
     })
 }
+#[cfg(test)]
 fn signature(cell: &Option<Cell>) -> serde_json::Value {
     let Some(cell) = cell else {
         return serde_json::Value::Null;
@@ -164,10 +163,11 @@ fn fingerprint(s: &Sheet) -> [u8; 32] {
     let mut positions: Vec<_> = s.cells_iter().map(|(p, _)| p).collect();
     positions.sort_unstable();
     let mut h = Sha256::new();
+    let mut encoder = SignatureEncoder::default();
     for (r, c) in positions {
         h.update((r as u64).to_le_bytes());
         h.update((c as u64).to_le_bytes());
-        let bytes = serde_json::to_vec(&signature(&image(s, r, c))).unwrap();
+        let bytes = encoder.encode(s.get_cell_opt(r, c).unwrap());
         h.update((bytes.len() as u64).to_le_bytes());
         h.update(bytes);
     }
@@ -389,11 +389,18 @@ impl Workbook {
         &self,
         candidate: &Workbook,
     ) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false, None)
+        self.capture_guarded_batch_inner(candidate, false, None, Some(100_000))
+    }
+
+    /// Conversion can rewrite every calculated cell in an existing Table.
+    /// Its source-only patches are compact; the ordinary edit limit must not
+    /// make a previously supported Table impossible to convert.
+    pub(super) fn capture_table_conversion(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
+        self.capture_guarded_batch_inner(candidate, false, None, None)
     }
 
     pub(super) fn capture_sheet_rename(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, true, None)
+        self.capture_guarded_batch_inner(candidate, true, None, Some(100_000))
     }
 
     pub(super) fn capture_sheet_change(&self, candidate: &Workbook, index: usize, added: bool) -> Result<GuardedStructureCommit, String> {
@@ -401,10 +408,10 @@ impl Workbook {
         let sheet = source.sheet(index).ok_or("The changed sheet no longer exists.")?;
         self.capture_guarded_batch_inner(candidate, false, Some(SheetChange {
             index, sheet: Box::new(sheet.clone()), added,
-        }))
+        }), Some(100_000))
     }
 
-    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>) -> Result<GuardedStructureCommit, String> {
+    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>, cell_limit: Option<usize>) -> Result<GuardedStructureCommit, String> {
         self.ensure_writable()?;
         let mut before = identity(self);
         let mut after = identity(candidate);
@@ -433,10 +440,10 @@ impl Workbook {
                 .chain(a.cells_iter().map(|(p, _)| p))
                 .collect();
             for (row, col) in positions {
-                let before = image(b, row, col);
-                let after = image(a, row, col);
-                if signature(&before) != signature(&after) {
-                    if cells.len() >= 100_000 {
+                let before = b.get_cell_opt(row, col);
+                let after = a.get_cell_opt(row, col);
+                if !same_cells(before, after) {
+                    if cell_limit.is_some_and(|limit| cells.len() >= limit) {
                         if allow_rename {
                             return Err("Renaming would change more than 100,000 stored cells. Nothing was renamed.".into());
                         }
@@ -445,13 +452,7 @@ impl Workbook {
                         }
                         return Err("This transaction changes more than 100,000 stored cells. Use a smaller selection or clear Table views first.".into());
                     }
-                    cells.push(CellPatch {
-                        sheet: b.id,
-                        row,
-                        col,
-                        before,
-                        after,
-                    });
+                    cells.push(CellPatch::capture(b.id, row, col, before, after));
                 }
             }
             let bm = Metadata::capture(b);
@@ -530,9 +531,7 @@ impl GuardedStructureCommit {
             let s = wb
                 .sheet_by_id(p.sheet)
                 .ok_or("A dependent sheet no longer exists.")?;
-            if signature(&image(s, p.row, p.col))
-                != signature(if undo { &p.after } else { &p.before })
-            {
+            if !p.matches(s, undo) {
                 return Err("A rewritten cell changed. Undo/redo was not applied.".into());
             }
         }
@@ -573,18 +572,7 @@ impl GuardedStructureCommit {
             candidate.named_ranges = if undo { before } else { after }.clone();
         }
         for p in &self.cells {
-            candidate
-                .sheet_by_id_mut(p.sheet)
-                .unwrap()
-                .restore_history_cell(
-                    p.row,
-                    p.col,
-                    if undo {
-                        p.before.clone()
-                    } else {
-                        p.after.clone()
-                    },
-                );
+            p.install(candidate.sheet_by_id_mut(p.sheet).unwrap(), undo);
         }
         candidate.rebuild_dep_graph();
         let report = candidate.recompute_full_ordered();

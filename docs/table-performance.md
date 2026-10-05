@@ -114,3 +114,89 @@ paste, undo and rendering on representative workbooks.
 Validation: 1,883 engine and desktop tests passed, with 18 existing ignores.
 The native desktop build and diff checks passed. No live UI, Microsoft Excel
 or cross-platform performance checks were performed in this measurement pass.
+
+## Large Table conversion and compact history
+
+Run each fixture in a separate process, after building the example:
+
+```sh
+cargo build --release -p visigrid-engine --example table_conversion_bench
+target/release/examples/table_conversion_bench 10000
+target/release/examples/table_conversion_bench 100000
+target/release/examples/table_conversion_bench 1000000
+```
+
+The fixture has ten columns: eight numeric and two calculated, native totals,
+and a cross-sheet structured `SUM`. Worksheets use their full dimensions. Setup
+is excluded. Conversion, undo and redo are timed separately. Assertions check
+every converted body formula's result, totals, the dependent summary, replay,
+subsequent recalculation and atomic stale-history refusal. History-only RSS is
+measured after dropping the workbook and trimming the allocator, then again
+after dropping history. That difference is diagnostic process memory, not an
+allocation counter. This benchmark still excludes desktop dispatch/rendering.
+
+The pre-optimization baseline (`6d15354`) scans the complete rewrite list for
+each formula during Table-operation validation. That quadratic check now uses
+an indexed set of cell identities. Ordinary source checks and new-dependent
+refusal remain in place. Guarded capture compares borrowed authored fields
+instead of cloning cells and constructing JSON trees for unchanged values.
+Fingerprint serialization reuses a buffer and a bounded format cache while
+retaining the exact original encoding. Formula changes with unchanged
+presentation retain only their before/after sources; other changes retain
+complete authored images. The full-workbook fingerprint still protects all
+formatting, comments, styles, frozen sources and other authored state.
+
+Conversion no longer inherits the ordinary 100,000-cell batch limit and no
+longer retains a duplicate list of formula/rule rewrites alongside guarded
+history. Other guarded operations retain their existing limits. Replay reparses
+source-only formula patches and rebuilds calculation caches and spills on its
+candidate before publishing. Full scans,
+recalculation and view validation remain; this is not an off-thread execution
+or cancellation implementation.
+
+### Conversion measurements, 2026-10-05
+
+Same Linux x86-64 Intel Core i7-1270P machine with 32 GiB RAM and Rust 1.98.1,
+using the repository release profile. One sample per size and implementation,
+each in a separate process. Other workloads were present; these are diagnostic
+measurements, not latency guarantees. In particular, setup times differed
+substantially between runs. Baseline setup and conversion used the same fixture
+and the pre-optimization engine executable retained before these changes.
+
+| Body rows | Baseline conversion, seconds | New conversion, seconds | New undo, seconds | New redo, seconds |
+| --- | ---: | ---: | ---: | ---: |
+| 10,000 | 1.718 | 1.173 | 0.533 | 0.518 |
+| 100,000 | 66.378, then refused | 12.103 | 5.883 | 6.401 |
+| 1,000,000 | 7,581.916, then refused | 135.101 | 69.981 | 61.485 |
+
+Both baseline refusals were the 100,000-changed-cell history limit, after
+performing the expensive candidate conversion. The baseline verified that its
+refusal left the original Table and formulas intact. All three new runs passed
+the full success-path assertions, including every body result, totals,
+cross-sheet results, undo/redo, a subsequent value edit and stale-undo refusal.
+
+| Body rows | Baseline peak through conversion, MiB | New peak through conversion, MiB | Baseline retained history, approximate MiB | New retained history, approximate MiB |
+| --- | ---: | ---: | ---: | ---: |
+| 10,000 | 63.9 | 50.5 | 19.6 | 4.1 |
+| 100,000 | 475.5 | 440.8 | unavailable: refused | 32.9 |
+| 1,000,000 | 4,738.0 | 4,736.5 | unavailable: refused | 290.3 |
+
+Retained-history estimates subtract RSS after dropping history from RSS with
+only history retained, after allocator trimming in each case. The 10k sample
+fell about 79%. The million-row workbook's baseline RSS was about 1,923 MiB in
+both runs. Peak memory at that size did not improve materially: temporary
+workbook/calculation work still dominates. Including undo/redo, the new process
+peaked at 4,864.9 MiB. The result removes a quadratic validation scan and the
+conversion history ceiling; it does not establish interactive performance or
+solve the outstanding desktop scheduling/cancellation work.
+
+Validation: the combined engine, I/O, desktop, session-host, browser-adapter
+and CLI run passed 3,501 tests across 99 suites, with zero failures and 35
+existing ignores. New tests compare borrowed cell equality and fingerprint
+encoding with the original JSON semantics, exercise the bounded format cache,
+preserve malformed formula variants and presentation, replay mixed full-cell
+and source-only patches with changing spills, and convert/undo/redo 100,002
+formula rewrites while retaining the ordinary batch limit and stale-comment
+refusal. Existing Table/schema, conversion, persistence and desktop History
+rewind regressions passed. The launchable native desktop build and diff checks
+passed. Live UI, real Excel and cross-platform verification remain outstanding.
