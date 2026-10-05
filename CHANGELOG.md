@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Rename worksheets through active Table sorting and filters without breaking formula references. Cell formulas, calculated-column rules, totals, conditional formatting and validation sources update atomically, with undo/redo and History rewind. Session and browser renames use the same checked behavior; quoted text such as `INDIRECT("OldName!A1")` remains literal.
+
 - Extract Named Range works through Table sorting and filters, targeting canonical visible formulas on the current sheet. The name and formula changes share one atomic undo/redo and History rewind step; stale dialogs and unsafe edits leave the workbook unchanged.
 - Extract actual reference tokens while preserving formula spelling, quoted text and structured headers. Respect qualified sheet targets and LET/LAMBDA scopes, and explicitly show that hidden formulas are excluded.
 

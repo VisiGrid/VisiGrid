@@ -439,10 +439,11 @@ pub fn validate_structure_op(
                 None,
             ));
         }
-        if trimmed.chars().count() > 64 {
+        let limit = if exclude.is_some() { 31 } else { 64 };
+        if trimmed.chars().count() > limit {
             return Some((
                 "invalid_op",
-                "sheet name is longer than 64 characters".to_string(),
+                format!("sheet name is longer than {limit} characters"),
                 None,
             ));
         }
@@ -492,6 +493,7 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
                 | StructureOp::DeleteRows { .. }
                 | StructureOp::InsertCols { .. }
                 | StructureOp::DeleteCols { .. }
+                | StructureOp::RenameSheet { .. }
         )
     {
         return Err("Clear Table criteria before sheet or pivot automation.".into());
@@ -553,13 +555,12 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
             format!("Added sheet \"{}\"", wb.sheets()[idx].name)
         }
         StructureOp::RenameSheet { name, .. } => {
-            let old = wb
-                .sheets()
-                .get(target)
-                .map(|s| s.name.clone())
-                .unwrap_or_default();
-            wb.rename_sheet(target, name.trim());
-            wb.bump_revision_for_structure();
+            let sheet = wb.sheets().get(target).ok_or("Sheet does not exist.")?;
+            let old = sheet.name.clone();
+            let (candidate, commit) = wb.prepare_sheet_rename(sheet.id, &old, name)?;
+            if !commit.is_empty() {
+                wb.restore_snapshot_monotonic(&candidate);
+            }
             format!("Renamed sheet \"{}\" to \"{}\"", old, name.trim())
         }
         StructureOp::CreatePivot { .. } => {
@@ -1075,6 +1076,50 @@ mod tests {
         assert_eq!(wb.revision(), rev);
     }
     #[test]
+    fn session_sheet_rename_preserves_table_criteria_and_rewrites_references_atomically() {
+        use visigrid_engine::{
+            filter::SortDirection,
+            table::TableRange,
+            table_view::{TableSort, TableViewSpec},
+        };
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "Amount");
+        wb.set_cell_value_tracked(0, 1, 0, "30");
+        wb.set_cell_value_tracked(0, 2, 0, "10");
+        let sid = wb.active_sheet_id();
+        let id = wb.create_table(sid, TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap().table_id();
+        let mut spec = TableViewSpec::new(id);
+        spec.sort = Some(TableSort {
+            column: wb.table(id).unwrap().1.columns[0].id,
+            direction: SortDirection::Ascending,
+        });
+        wb.set_table_view_spec(sid, Some(spec.clone())).unwrap();
+        let summary = wb.add_sheet_named("Summary").unwrap();
+        wb.set_cell_value_tracked(summary, 0, 0, "=(Sheet1!A2+Sheet1!A3)*2");
+        let op = StructureOp::RenameSheet { sheet: Some(0), name: "New Data".into() };
+        let before = wb.revision();
+        apply_structure(&mut wb, &op).unwrap();
+        assert!(wb.revision() > before);
+        assert_eq!(wb.sheet(0).unwrap().name, "New Data");
+        assert_eq!(wb.sheet(0).unwrap().table_view_spec(), Some(&spec));
+        assert_eq!(wb.sheet(summary).unwrap().get_raw(0, 0), "=('New Data'!A2+'New Data'!A3)*2");
+        assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "80");
+        let revision = wb.revision();
+        apply_structure(&mut wb, &op).unwrap();
+        assert_eq!(wb.revision(), revision);
+        wb.set_cell_value_tracked(summary, 1, 0, "='New Data'!A2+@");
+        let revision = wb.revision();
+        assert!(apply_structure(&mut wb, &StructureOp::RenameSheet {
+            sheet: Some(0), name: "Next".into(),
+        }).is_err());
+        assert_eq!(wb.revision(), revision);
+        assert_eq!(wb.sheet(0).unwrap().name, "New Data");
+        assert_eq!(wb.sheet(summary).unwrap().get_raw(0, 0), "=('New Data'!A2+'New Data'!A3)*2");
+    }
+
+    #[test]
     fn table_header_write_rejects_entire_session_batch() {
         let mut wb = Workbook::new();
         let sid = wb.active_sheet().id;
@@ -1239,6 +1284,7 @@ mod tests {
         assert_eq!(code(&StructureOp::AddSheet { name: Some("sheet1".into()) }, &wb), "invalid_op");
         // Renaming a sheet to its own name is fine (self is excluded).
         assert!(ok(&StructureOp::RenameSheet { sheet: Some(0), name: "Sheet1".into() }, &wb));
+        assert_eq!(code(&StructureOp::RenameSheet { sheet: Some(0), name: "x".repeat(32) }, &wb), "invalid_op");
 
         // Apply path: insert shifts a formula's target and it recomputes.
         wb.sheet_mut(0).unwrap().set_value(0, 0, "10");

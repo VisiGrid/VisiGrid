@@ -2,6 +2,7 @@
 
 pub mod parser;
 pub mod names;
+pub mod sheets;
 pub mod extract;
 pub mod structured;
 pub mod eval;

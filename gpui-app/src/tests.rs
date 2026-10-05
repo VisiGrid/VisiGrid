@@ -3030,13 +3030,14 @@ fn review_mode_workbook_mutators_are_guarded() {
     assert_contains_near(sheets, "activate_sheet", "review.source_sheet_id");
     for function in [
         "add_sheet",
-        "start_sheet_rename",
-        "confirm_sheet_rename",
         "delete_sheet",
     ] {
         assert_guarded(sheets, function);
     }
 
+    for function in ["start_sheet_rename", "confirm_sheet_rename"] {
+        assert_contains_near(sheets, function, "block_if_previewing_only(cx)");
+    }
     assert_guarded(include_str!("editing.rs"), "recalculate");
     assert_contains_near(include_str!("app.rs"), "commit_validation_value", "block_if_previewing_only(cx)");
     let find_replace = include_str!("find_replace.rs");

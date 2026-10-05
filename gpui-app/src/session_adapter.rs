@@ -960,6 +960,7 @@ impl Spreadsheet {
                     | StructureOp::DeleteRows { .. }
                     | StructureOp::InsertCols { .. }
                     | StructureOp::DeleteCols { .. }
+                    | StructureOp::RenameSheet { .. }
             )
         {
             out.error = Some((
@@ -970,6 +971,12 @@ impl Spreadsheet {
         }
         if self.review_mode.is_some() {
             out.error = Some(plan_under_review_error());
+            return out;
+        }
+        if matches!(op, StructureOp::RenameSheet { .. })
+            && (self.block_if_previewing_only(cx) || self.mode.is_editing())
+        {
+            out.error = Some(("invalid_op".into(), "Finish editing or reviewing before renaming a sheet.".into()));
             return out;
         }
 
@@ -1058,12 +1065,22 @@ impl Spreadsheet {
             StructureOp::RenameSheet { name, .. } => {
                 let old = self.workbook.read(cx).sheets()[target].name.clone();
                 let new_name = name.trim().to_string();
-                self.wb_mut(cx, |wb| {
-                    wb.rename_sheet(target, &new_name);
-                });
-                self.is_modified = true;
-                cx.notify();
-                format!("Renamed sheet \"{}\" to \"{}\"", old, new_name)
+                let id = self.workbook.read(cx).sheets()[target].id;
+                let description = format!("Renamed sheet \"{}\" to \"{}\"", old, new_name);
+                let result = self.wb(cx).prepare_sheet_rename(id, &old, &new_name)
+                    .and_then(|(candidate, commit)| {
+                        if commit.is_empty() { return Ok(()); }
+                        let source = client.clone()
+                            .map(|client| MutationSource::Agent { client })
+                            .unwrap_or(MutationSource::Human);
+                        self.publish_table_batch(candidate, commit, description.clone(), source, cx)
+                    });
+                if let Err(message) = result {
+                    self.suppress_repeat_capture = false;
+                    out.error = Some(("invalid_op".into(), message));
+                    return out;
+                }
+                description
             }
             StructureOp::CreatePivot { .. } => {
                 let resolved =
@@ -1148,7 +1165,7 @@ impl Spreadsheet {
         }
 
         // Attribute the undo entry the GUI method just recorded (row/col ops
-        // record one; sheet ops record none, matching the GUI's own behavior).
+        // record one; sheet rename records its agent source at publication).
         if row_col_op {
             if let Some(client) = client {
                 self.history

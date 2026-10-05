@@ -180,6 +180,10 @@ impl Workbook {
             *source = rewritten;
             Ok(changed)
         };
+        self.rewrite_formula_sources(rewrite)
+    }
+
+    pub(super) fn rewrite_formula_sources(&mut self, rewrite: impl Fn(&mut String) -> Result<bool, String>) -> Result<(), String> {
         for sheet in &mut self.sheets {
             let mut cells = Vec::new();
             for ((r, c), cell) in sheet.cells_iter() {
@@ -237,14 +241,9 @@ impl Workbook {
                 let mut changed = false;
                 match &mut rule.rule_type {
                     ValidationType::Custom(source)
-                    | ValidationType::List(ListSource::Range(source)) => {
+                    | ValidationType::List(ListSource::Range(source))
+                    | ValidationType::List(ListSource::NamedRange(source)) => {
                         changed |= rewrite(source)?;
-                    }
-                    ValidationType::List(ListSource::NamedRange(name))
-                        if name.eq_ignore_ascii_case(old) =>
-                    {
-                        *name = new.into();
-                        changed = true;
                     }
                     ValidationType::List(_) => {}
                     ValidationType::WholeNumber(c)

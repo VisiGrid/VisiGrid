@@ -14,6 +14,8 @@ mod sheet_copy;
 mod guarded_structure;
 #[path = "workbook_automation.rs"]
 mod automation;
+#[path = "workbook_sheet_rename.rs"]
+mod sheet_rename;
 #[path = "workbook_names.rs"]
 mod names;
 #[path = "workbook_validation.rs"]

@@ -564,6 +564,7 @@ pub struct Spreadsheet {
     pub menu_highlight: Option<usize>,
 
     // Sheet tab state
+    pub(crate) sheet_rename_draft: Option<crate::sheet_ops::SheetRenameDraft>,
     pub renaming_sheet: Option<usize>,     // Index of sheet being renamed
     pub sheet_rename_input: String,        // Current rename input value
     pub sheet_rename_cursor: usize,        // Cursor position (byte index)
@@ -1348,6 +1349,7 @@ impl Spreadsheet {
             resize_start_original: None,
             open_menu: None,
             menu_highlight: None,
+            sheet_rename_draft: None,
             renaming_sheet: None,
             sheet_rename_input: String::new(),
             sheet_rename_cursor: 0,

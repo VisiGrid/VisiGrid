@@ -17,6 +17,29 @@ use crate::mode::Mode;
 use crate::session::SessionManager;
 use crate::window_registry::{WindowInfo, WindowRegistry};
 
+#[derive(Clone, Debug)]
+pub(crate) struct SheetRenameDraft {
+    revision: u64,
+    sheet: visigrid_engine::sheet::SheetId,
+    name: String,
+    generations: Vec<(visigrid_engine::sheet::SheetId, String, u64)>,
+}
+impl SheetRenameDraft {
+    fn capture(wb: &Workbook, index: usize) -> Result<Self, String> {
+        wb.ensure_writable()?;
+        let sheet = wb.sheet(index).ok_or("The sheet no longer exists.")?;
+        Ok(Self { revision: wb.revision(), sheet: sheet.id, name: sheet.name.clone(),
+            generations: wb.sheets().iter().map(|s| (s.id, s.name.clone(), s.edit_generation())).collect() })
+    }
+    fn prepare(&self, wb: &Workbook, name: &str) -> Result<(Workbook, visigrid_engine::workbook::GuardedStructureCommit), String> {
+        if wb.revision() != self.revision
+            || wb.sheets().iter().map(|s| (s.id, s.name.clone(), s.edit_generation())).collect::<Vec<_>>() != self.generations {
+            return Err("The workbook changed while renaming. Cancel and start the rename again.".into());
+        }
+        wb.prepare_sheet_rename(self.sheet, &self.name, name)
+    }
+}
+
 impl Spreadsheet {
     // =========================================================================
     // Freeze Panes
@@ -665,76 +688,49 @@ impl Spreadsheet {
 
     /// Start renaming a sheet (double-click on tab or context menu)
     pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        if let Some(name) = self.wb(cx).sheet_names().get(index).map(|s| s.to_string()) {
-            self.renaming_sheet = Some(index);
-            self.sheet_rename_input = name;
-            self.sheet_rename_cursor = self.sheet_rename_input.len();
-            self.sheet_rename_select_all = true;  // Select all on start
-            self.sheet_context_menu = None;
-            self.start_caret_blink(cx);
-            cx.notify();
-        }
+        if self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        let draft = match SheetRenameDraft::capture(self.wb(cx), index) {
+            Ok(draft) => draft,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        self.renaming_sheet = Some(index);
+        self.sheet_rename_input = draft.name.clone();
+        self.sheet_rename_draft = Some(draft);
+        self.sheet_rename_cursor = self.sheet_rename_input.len();
+        self.sheet_rename_select_all = true;
+        self.sheet_context_menu = None;
+        self.start_caret_blink(cx);
+        cx.notify();
     }
 
-    /// Confirm the sheet rename with validation.
-    /// Rejects: empty names, duplicates, too long. Trims whitespace.
+    /// Rename the sheet and every authored qualifier in one guarded batch.
     pub fn confirm_sheet_rename(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        if let Some(index) = self.renaming_sheet {
-            let new_name = self.sheet_rename_input.trim();
-
-            // Helper to reset rename state
-            let reset_state = |this: &mut Self| {
-                this.renaming_sheet = None;
-                this.sheet_rename_input.clear();
-                this.sheet_rename_cursor = 0;
-                this.sheet_rename_select_all = false;
-                this.stop_caret_blink();
-            };
-
-            // Validation: reject empty names
-            if new_name.is_empty() {
-                self.status_message = Some("Sheet name cannot be empty".to_string());
-                reset_state(self);
-                cx.notify();
-                return;
+        if self.block_if_previewing_only(cx) { return; }
+        if self.renaming_sheet.is_none() { return; }
+        let name = self.sheet_rename_input.trim().to_string();
+        let result = self.sheet_rename_draft.as_ref()
+            .ok_or_else(|| "Cancel and start the sheet rename again.".to_string())
+            .and_then(|draft| draft.prepare(self.wb(cx), &name))
+            .and_then(|(candidate, commit)| {
+                if commit.is_empty() { return Ok(()); }
+                self.publish_table_batch(candidate, commit, format!("Rename sheet to '{name}'"), crate::history::MutationSource::Human, cx)
+            });
+        match result {
+            Ok(()) => {
+                self.cancel_sheet_rename(cx);
+                self.status_message = Some(format!("Renamed sheet to '{name}'"));
+                self.request_title_refresh(cx);
             }
-
-            // Validation: reject too long names (Excel uses 31 chars max)
-            if new_name.chars().count() > 31 {
-                self.status_message = Some("Sheet name cannot exceed 31 characters".to_string());
-                reset_state(self);
-                cx.notify();
-                return;
-            }
-
-            // Validation: reject duplicates (case-insensitive)
-            let is_duplicate = self.wb(cx).sheet_names()
-                .iter()
-                .enumerate()
-                .any(|(i, name)| i != index && name.eq_ignore_ascii_case(new_name));
-
-            if is_duplicate {
-                self.status_message = Some(format!("Sheet '{}' already exists", new_name));
-                reset_state(self);
-                cx.notify();
-                return;
-            }
-
-            // Apply the rename
-            let new_name_owned = new_name.to_string();
-            self.wb_mut(cx, |wb| wb.rename_sheet(index, &new_name_owned));
-            self.is_modified = true;
-
-            reset_state(self);
-            self.request_title_refresh(cx);
+            Err(error) => { self.status_message = Some(error); cx.notify(); }
         }
     }
 
     /// Cancel the sheet rename
     pub fn cancel_sheet_rename(&mut self, cx: &mut Context<Self>) {
         self.renaming_sheet = None;
+        self.sheet_rename_draft = None;
         self.sheet_rename_input.clear();
         self.sheet_rename_cursor = 0;
         self.sheet_rename_select_all = false;
@@ -866,8 +862,8 @@ impl Spreadsheet {
 
     /// Show context menu for a sheet tab
     pub fn show_sheet_context_menu(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.cancel_sheet_rename(cx);
         self.sheet_context_menu = Some(index);
-        self.renaming_sheet = None;
         cx.notify();
     }
 
@@ -1079,3 +1075,7 @@ pub fn install_close_guard(
         })
     });
 }
+
+#[cfg(test)]
+#[path = "sheet_rename_tests.rs"]
+mod table_sheet_rename_tests;
