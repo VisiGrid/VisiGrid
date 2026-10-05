@@ -48,7 +48,7 @@ pub(crate) fn metadata_history_allowed(wb: &Workbook, action: &UndoAction) -> bo
         UndoAction::Format { sheet_index, .. } | UndoAction::Comments { sheet_index, .. } => wb.sheet(*sheet_index).is_some(),
         UndoAction::FreezePanesChanged { sheet_id, .. } => wb
             .sheet_index_by_id(*sheet_id)
-            .is_some_and(|index| sheet_metadata_allowed(wb, index)),
+            .is_some(),
         UndoAction::Group { actions, .. } => {
             !actions.is_empty()
                 && actions
@@ -59,34 +59,36 @@ pub(crate) fn metadata_history_allowed(wb: &Workbook, action: &UndoAction) -> bo
     }
 }
 
-/// Reject missing freeze targets before any grouped history action can mutate.
-pub(crate) fn validate_freeze_history(wb: &Workbook, action: &UndoAction) -> Result<(), String> {
+/// Validate the entire group's destination before any child mutates state.
+pub(crate) fn validate_freeze_history(wb: &Workbook, action: &UndoAction, forward: bool) -> Result<(), String> {
     match action {
-        UndoAction::FreezePanesChanged { sheet_id, .. }
-            if wb.sheet_index_by_id(*sheet_id).is_none() =>
-        {
-            Err("The freeze-pane sheet no longer exists.".into())
+        UndoAction::FreezePanesChanged { sheet_id, old_frozen_rows, old_frozen_cols, new_frozen_rows, new_frozen_cols } => {
+            validate_freeze_target(wb, *sheet_id, if forward { (*new_frozen_rows, *new_frozen_cols) } else { (*old_frozen_rows, *old_frozen_cols) })
         }
         UndoAction::Group { actions, .. } => {
-            for action in actions {
-                validate_freeze_history(wb, action)?;
-            }
+            for action in actions { validate_freeze_history(wb, action, forward)?; }
             Ok(())
         }
         _ => Ok(()),
     }
 }
 
-pub(crate) fn restore_freeze_panes(
-    wb: &mut Workbook,
-    sheet_id: SheetId,
-    frozen: (usize, usize),
-) -> Result<(), String> {
+fn validate_freeze_target(wb: &Workbook, sheet_id: SheetId, frozen: (usize, usize)) -> Result<(), String> {
+    let sheet = wb.sheet_by_id(sheet_id).ok_or("The freeze-pane sheet no longer exists.")?;
+    if frozen.0 > sheet.rows || frozen.1 > sheet.cols {
+        return Err("The freeze boundary is outside the worksheet.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn restore_freeze_panes(wb: &mut Workbook, sheet_id: SheetId, frozen: (usize, usize)) -> Result<(), String> {
     wb.ensure_writable()?;
-    let index = wb
-        .sheet_index_by_id(sheet_id)
-        .ok_or("The freeze-pane sheet no longer exists.")?;
-    wb.sheet_mut(index).unwrap().frozen_panes = frozen;
+    validate_freeze_target(wb, sheet_id, frozen)?;
+    let sheet = wb.sheet_by_id_mut(sheet_id).unwrap();
+    if sheet.frozen_panes != frozen {
+        sheet.frozen_panes = frozen;
+        wb.bump_revision_for_structure();
+    }
     Ok(())
 }
 
@@ -140,9 +142,7 @@ impl Spreadsheet {
             return;
         }
         if self.sheet(cx).id == sheet_id {
-            self.view_state.frozen_rows = frozen.0;
-            self.view_state.frozen_cols = frozen.1;
-            self.clamp_scroll_to_freeze(cx);
+            self.sync_freeze_panes(frozen);
         }
     }
 }

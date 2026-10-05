@@ -2993,7 +2993,7 @@ fn review_mode_workbook_mutators_are_guarded() {
     let metadata_scope = include_str!("table_command_scope.rs");
     assert_contains_near(metadata_scope, "block_active_sheet_metadata_edit", "block_sheet_metadata_edit(");
     for function in ["freeze_top_row", "freeze_first_column", "freeze_panes", "unfreeze_panes"] {
-        assert_contains_near(include_str!("sheet_ops.rs"), function, "block_active_sheet_metadata_edit(cx)");
+        assert_contains_near(include_str!("sheet_ops.rs"), function, "block_if_previewing_only(cx)");
     }
     assert_contains_near(include_str!("comments.rs"), "change_comment", "block_if_previewing_only(cx)");
     let conditional_formats = include_str!("cond_format_ui.rs");

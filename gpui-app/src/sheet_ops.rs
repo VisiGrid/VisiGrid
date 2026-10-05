@@ -22,110 +22,67 @@ impl Spreadsheet {
     // Freeze Panes
     // =========================================================================
 
-    /// Freeze the top row (row 0)
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = 1;
-        self.view_state.frozen_cols = 0;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: 1, new_frozen_cols: 0,
-            }, None);
-        self.status_message = Some("Frozen top row".to_string());
-        cx.notify();
+        if self.block_if_previewing_only(cx) { return; }
+        self.change_freeze_panes((1, 0), "Frozen top row", cx);
     }
 
-    /// Freeze the first column (column A)
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = 0;
-        self.view_state.frozen_cols = 1;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: 0, new_frozen_cols: 1,
-            }, None);
-        self.status_message = Some("Frozen first column".to_string());
-        cx.notify();
+        if self.block_if_previewing_only(cx) { return; }
+        self.change_freeze_panes((0, 1), "Frozen first column", cx);
     }
 
-    /// Freeze panes at the current selection
-    /// Freezes all rows above and all columns to the left of the active cell
+    /// Freeze boundaries are view-slot positions, not canonical record identities.
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let (row, col) = self.view_state.selected;
-        if row == 0 && col == 0 {
-            // Nothing to freeze - show message
-            self.status_message = Some("Select a cell to freeze rows above and columns to the left".to_string());
-            cx.notify();
-            return;
+        if self.block_if_previewing_only(cx) { return; }
+        let (row, col) = self.active_view_state().selected;
+        if (row, col) == (0, 0) {
+            self.status_message = Some("Select a cell to freeze rows above and columns to the left".into());
+            cx.notify(); return;
         }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = row;
-        self.view_state.frozen_cols = col;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: row, new_frozen_cols: col,
-            }, None);
-        let msg = match (row, col) {
-            (0, c) => format!("Frozen {} column{}", c, if c == 1 { "" } else { "s" }),
-            (r, 0) => format!("Frozen {} row{}", r, if r == 1 { "" } else { "s" }),
-            (r, c) => format!("Frozen {} row{} and {} column{}", r, if r == 1 { "" } else { "s" }, c, if c == 1 { "" } else { "s" }),
+        let message = match (row, col) {
+            (0, c) => format!("Frozen columns before {}", Self::col_letter(c)),
+            (r, 0) => format!("Frozen rows above {}", r + 1),
+            (r, c) => format!("Frozen rows above {} and columns before {}", r + 1, Self::col_letter(c)),
         };
-        self.status_message = Some(msg);
-        cx.notify();
+        self.change_freeze_panes((row, col), &message, cx);
     }
 
-    /// Remove all freeze panes
     pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        if self.view_state.frozen_rows == 0 && self.view_state.frozen_cols == 0 {
-            self.status_message = Some("No frozen panes to unfreeze".to_string());
-            cx.notify();
-            return;
+        if self.block_if_previewing_only(cx) { return; }
+        self.change_freeze_panes((0, 0), "Unfrozen all panes", cx);
+    }
+
+    fn change_freeze_panes(&mut self, frozen: (usize, usize), message: &str, cx: &mut Context<Self>) {
+        let sheet_id = self.sheet(cx).id;
+        let before = self.sheet(cx).frozen_panes;
+        if before == frozen {
+            self.status_message = Some("Freeze panes are already set this way".into());
+            cx.notify(); return;
         }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = 0;
-        self.view_state.frozen_cols = 0;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: 0, new_frozen_cols: 0,
-            }, None);
-        self.status_message = Some("Unfrozen all panes".to_string());
+        let result = self.workbook.update(cx, |wb, _| crate::table_command_scope::restore_freeze_panes(wb, sheet_id, frozen));
+        if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+        self.sync_freeze_panes(frozen);
+        self.history.record_action_with_provenance(crate::history::UndoAction::FreezePanesChanged {
+            sheet_id, old_frozen_rows: before.0, old_frozen_cols: before.1,
+            new_frozen_rows: frozen.0, new_frozen_cols: frozen.1,
+        }, None);
+        self.is_modified = true;
+        self.request_title_refresh(cx);
+        self.status_message = Some(message.into());
         cx.notify();
     }
 
-    /// Clamp scroll position to ensure it doesn't overlap with frozen regions
-    pub(crate) fn clamp_scroll_to_freeze(&mut self, cx: &mut Context<Self>) {
-        let frozen = (self.view_state.frozen_rows, self.view_state.frozen_cols);
-        if self.wb(cx).active_sheet().frozen_panes != frozen {
-            self.wb_mut(cx, |wb| wb.active_sheet_mut().frozen_panes = frozen);
-            self.is_modified = true;
-        }
-        // When freeze panes are active, scrollable region starts after frozen rows/cols
-        // Ensure scroll position doesn't show frozen rows/cols in the scrollable area
-        if self.view_state.frozen_rows > 0 && self.view_state.scroll_row < self.view_state.frozen_rows {
-            self.view_state.scroll_row = self.view_state.frozen_rows;
-        }
-        if self.view_state.frozen_cols > 0 && self.view_state.scroll_col < self.view_state.frozen_cols {
-            self.view_state.scroll_col = self.view_state.frozen_cols;
+    pub(crate) fn sync_freeze_panes(&mut self, frozen: (usize, usize)) {
+        self.view_state.frozen_rows = frozen.0;
+        self.view_state.frozen_cols = frozen.1;
+        self.view_state.scroll_row = self.view_state.scroll_row.max(frozen.0);
+        self.view_state.scroll_col = self.view_state.scroll_col.max(frozen.1);
+        if let Some(pane) = &mut self.split_pane {
+            pane.view_state.frozen_rows = frozen.0;
+            pane.view_state.frozen_cols = frozen.1;
+            pane.view_state.scroll_row = pane.view_state.scroll_row.max(frozen.0);
+            pane.view_state.scroll_col = pane.view_state.scroll_col.max(frozen.1);
         }
     }
 

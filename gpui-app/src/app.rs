@@ -3546,21 +3546,13 @@ impl Spreadsheet {
     /// Get the X position of a column's left edge (relative to start of grid, after row header)
     /// Returns scaled (zoomed) position for rendering.
     pub fn col_x_offset(&self, target_col: usize) -> f32 {
-        let mut x = 0.0;
-        for col in self.view_state.scroll_col..target_col {
-            x += self.metrics.col_width(self.col_width(col));
-        }
-        GridMetrics::snap_floor(x, self.metrics.scale)
+        GridMetrics::snap_floor(crate::pane_layout::offset(target_col, self.view_state.frozen_cols,
+            self.view_state.scroll_col, |c| self.displayed_col_width(c)), self.metrics.scale)
     }
 
-    /// Get the Y position of a row's top edge (relative to start of grid, after column header)
-    /// Returns scaled (zoomed) position for rendering.
     pub fn row_y_offset(&self, target_row: usize) -> f32 {
-        let mut y = 0.0;
-        for row in self.view_state.scroll_row..target_row {
-            y += self.metrics.row_height(self.row_height(row));
-        }
-        GridMetrics::snap_floor(y, self.metrics.scale)
+        GridMetrics::snap_floor(crate::pane_layout::offset(target_row, self.view_state.frozen_rows,
+            self.view_state.scroll_row, |r| self.displayed_row_height(r)), self.metrics.scale)
     }
 
     /// Get the bounding rect of a cell in grid-relative coordinates.
@@ -3570,8 +3562,8 @@ impl Spreadsheet {
         CellRect {
             x: self.col_x_offset(col),
             y: self.row_y_offset(row),
-            width: self.metrics.col_width(self.col_width(col)),
-            height: self.metrics.row_height(self.row_height(row)),
+            width: self.displayed_col_width(col),
+            height: self.displayed_row_height(row),
         }
     }
 
@@ -3591,51 +3583,11 @@ impl Spreadsheet {
     /// Uses measured grid_layout.grid_body_origin for accuracy.
     /// Uses scaled (zoomed) column widths for hit-testing.
     pub fn col_from_window_x(&self, window_x: f32) -> Option<usize> {
-        let x = window_x - self.grid_layout.grid_body_origin.0;
-        if x < 0.0 { return None; }
-
-        let viewport_width = self.grid_layout.viewport_size.0;
-        let mut current_x = 0.0;
-        for col in self.view_state.scroll_col..NUM_COLS {
-            if current_x > viewport_width { break; }
-            // Use scaled width for hit-testing in screen coordinates
-            let width = self.metrics.col_width(self.col_width(col));
-            if x < current_x + width {
-                return Some(col);
-            }
-            current_x += width;
-        }
-        Some(NUM_COLS - 1)  // Clamp to last column if beyond viewport
+        self.pane_cols(&self.view_state).hit(window_x - self.grid_layout.grid_body_origin.0)
     }
 
-    /// Convert window Y position to row index.
-    /// O(1) for uniform heights, O(visible rows) for variable heights.
-    /// Uses scaled (zoomed) row heights for hit-testing.
     pub fn row_from_window_y(&self, window_y: f32) -> Option<usize> {
-        let y = window_y - self.grid_layout.grid_body_origin.1;
-        if y < 0.0 { return None; }
-
-        // O(1) fast path: uniform row heights (use scaled cell height)
-        if !self.has_custom_row_heights() {
-            let row = self.view_state.scroll_row + (y / self.metrics.cell_h).floor() as usize;
-            return Some(row.min(NUM_ROWS - 1));
-        }
-
-        // O(visible rows) slow path: variable heights, stop at viewport bottom
-        let viewport_height = self.grid_layout.viewport_size.1;
-        let mut current_y = 0.0;
-        let mut last_row = self.view_state.scroll_row;
-        for row in self.view_state.scroll_row..NUM_ROWS {
-            if current_y > viewport_height { break; }
-            last_row = row;
-            // Use scaled height for hit-testing in screen coordinates
-            let height = self.metrics.row_height(self.row_height(row));
-            if y < current_y + height {
-                return Some(row);
-            }
-            current_y += height;
-        }
-        Some(last_row)
+        self.pane_rows(&self.view_state).hit(window_y - self.grid_layout.grid_body_origin.1)
     }
 
     /// Auto-fit column width to content
@@ -4433,6 +4385,9 @@ impl Spreadsheet {
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_table_view(cx);
+        // Freeze boundaries belong to the sheet, including both split panes and rewind.
+        let frozen = self.display_workbook(cx).active_sheet().frozen_panes;
+        self.sync_freeze_panes(frozen);
         // Drain pending session server requests (TCP → GUI bridge)
         self.drain_session_requests(cx);
 

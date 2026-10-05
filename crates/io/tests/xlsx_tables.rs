@@ -833,6 +833,11 @@ fn importing_filters_respects_adjacent_cells_row_heights_and_freeze_boundaries()
             "mode {mode}: {:?}",
             report.warnings
         );
+        if mode == 2 {
+            assert!(!loaded.sheet(0).unwrap().table_view_spec().unwrap().filters.is_empty());
+            assert_eq!(loaded.sheet(0).unwrap().frozen_panes, (4, 0));
+            continue;
+        }
         assert!(
             loaded.sheet(0).unwrap().table_view_spec().is_none(),
             "mode {mode}"
@@ -1432,6 +1437,9 @@ fn sort_only_import_refuses_unsafe_layouts_and_preserves_manual_hidden_rows() {
             assert!(sheet.table_view_spec().unwrap().sort.is_some());
             assert!(report.imported_layouts[0].hidden_rows.contains(&3));
             assert!(!sheet.build_saved_table_view(sheet.rows).unwrap().unwrap().rows().is_data_row_visible(3));
+        } else if mode == 2 {
+            assert!(loaded.sheet(0).unwrap().table_view_spec().unwrap().sort.is_some());
+            assert_eq!(loaded.sheet(0).unwrap().frozen_panes, (4, 0));
         } else {
             assert!(loaded.sheet(0).unwrap().table_view_spec().is_none(), "mode {mode}");
             assert!(report.warnings.iter().any(|w| w.contains("saved sort/filter/button settings were not imported")), "mode {mode}: {:?}", report.warnings);
@@ -1638,14 +1646,13 @@ fn sorted_export_refuses_nonuniform_calculated_rules_before_writing() {
 fn sorted_export_refuses_unsafe_host_layout_before_writing() {
     let (mut wb, id) = book();
     set_saved_sort(&mut wb, id, 0, true, true);
-    for mode in 0..4 {
+    for mode in 0..3 {
         let mut layout = xlsx::ExportLayout::default();
         match mode {
             0 => {
                 layout.row_heights.insert(4, 30.0);
             }
             1 => layout.hidden_rows.push(4),
-            2 => layout.frozen_rows = 4,
             _ => layout.autofilter_range = Some((2, 1, 7, 3)),
         }
         assert_sorted_export_refuses(&wb, "row layout", Some(&[layout]));
@@ -1756,13 +1763,13 @@ fn sorted_export_refuses_stale_results_without_changing_live_caches() {
 }
 
 #[test]
-fn sorted_export_refuses_validation_conditional_format_spills_and_native_freeze_boundaries() {
+fn sorted_export_refuses_validation_conditional_format_and_spills() {
     use visigrid_engine::{
         cell::CellStyle,
         cond_format::CondStyle,
         validation::{CellRange, ValidationRule},
     };
-    for mode in 0..4 {
+    for mode in 0..3 {
         let (mut wb, id) = book();
         set_saved_sort(&mut wb, id, 0, true, true);
         let expected = match mode {
@@ -1784,14 +1791,11 @@ fn sorted_export_refuses_validation_conditional_format_spills_and_native_freeze_
                 );
                 "conditional-format"
             }
-            2 => {
+            _ => {
                 wb.set_cell_value_tracked(1, 2, 0, "=SEQUENCE(2,1)");
                 "Spilled formulas"
             }
-            _ => {
-                wb.sheet_mut(0).unwrap().frozen_panes = (4, 0);
-                "freeze boundary"
-            }
+
         };
         assert_sorted_export_refuses(&wb, expected, None);
     }
@@ -2776,4 +2780,32 @@ fn relocated_footer_links_and_names_survive_native_and_stored_excel_roundtrips()
     assert_eq!(loaded.named_ranges().get("SalesTotal").unwrap().reference_string(), "D11");
     assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
     assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
+}
+
+#[test]
+fn freeze_boundaries_roundtrip_through_sorted_and_stored_table_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    for host in [false, true] {
+        for order in [xlsx::ExportOrder::Sorted, xlsx::ExportOrder::Stored] {
+            let (mut wb, id) = book();
+            set_saved_sort(&mut wb, id, 0, true, true);
+            wb.sheet_mut(0).unwrap().frozen_panes = (4, 2);
+            let before = authored_snapshot(&wb);
+            let mut layout = xlsx::ExportLayout::default();
+            layout.frozen_rows = 5;
+            layout.frozen_cols = 3;
+            let layouts = [layout];
+            let file = dir.path().join(format!("freeze-{host}-{order:?}.xlsx"));
+            xlsx::export_with_order(&wb, &file, host.then_some(&layouts[..]), order).unwrap();
+            let (loaded, report) = xlsx::import(&file).unwrap();
+            let expected = if host { (5, 3) } else { (4, 2) };
+            assert_eq!(loaded.sheet(0).unwrap().frozen_panes, expected);
+            assert_eq!((report.imported_layouts[0].frozen_rows, report.imported_layouts[0].frozen_cols), expected);
+            assert!(loaded.sheet(0).unwrap().table_view_spec().unwrap().sort.is_some());
+            assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), if order == xlsx::ExportOrder::Sorted { "6" } else { "2" });
+            assert!(!report.warnings.iter().any(|w| w.contains("settings were not imported")));
+            assert_eq!(authored_snapshot(&wb), before);
+            assert_eq!(wb.sheet(0).unwrap().frozen_panes, (4, 2));
+        }
+    }
 }

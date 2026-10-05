@@ -349,33 +349,12 @@ impl Spreadsheet {
 
     /// Ensure a cell is visible (scroll if necessary)
     pub(crate) fn ensure_cell_visible(&mut self, row: usize, col: usize) {
-        let visible_rows = self.visible_rows();
-        let visible_cols = self.visible_cols();
-
-        // Adjust scroll to keep cell visible
-        if row < self.view_state.scroll_row {
-            self.view_state.scroll_row = row;
-        } else if row >= self.view_state.scroll_row + visible_rows {
-            self.view_state.scroll_row = row.saturating_sub(visible_rows - 1);
-        }
-
-        if col < self.view_state.scroll_col {
-            self.view_state.scroll_col = col;
-        } else if col >= self.view_state.scroll_col + visible_cols {
-            self.view_state.scroll_col = col.saturating_sub(visible_cols - 1);
-        }
-
-        // Never let the scrollable pane duplicate frozen rows or columns.
-        // Review navigation can call this immediately after file load, before
-        // the normal deferred navigation clamp has run.
-        self.view_state.scroll_row = self
-            .view_state
-            .scroll_row
-            .max(self.view_state.frozen_rows);
-        self.view_state.scroll_col = self
-            .view_state
-            .scroll_col
-            .max(self.view_state.frozen_cols);
+        self.view_state.scroll_row = crate::pane_layout::ensure_visible(self.row_view.row_count(),
+            self.view_state.frozen_rows, self.view_state.scroll_row, row,
+            self.grid_layout.viewport_size.1, |r| self.displayed_row_height(r));
+        self.view_state.scroll_col = crate::pane_layout::ensure_visible(crate::app::NUM_COLS,
+            self.view_state.frozen_cols, self.view_state.scroll_col, col,
+            self.grid_layout.viewport_size.0, |c| self.displayed_col_width(c));
     }
 
     // ========================================================================

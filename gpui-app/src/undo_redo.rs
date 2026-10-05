@@ -36,7 +36,7 @@ impl Spreadsheet {
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
-            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action, false) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
             if let Err(error) = crate::formatting::plan::validate_history(self.wb(cx), &entry.action, false) {
@@ -1284,7 +1284,7 @@ impl Spreadsheet {
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
-            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action, true) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
             if let Err(error) = crate::formatting::plan::validate_history(self.wb(cx), &entry.action, true) {

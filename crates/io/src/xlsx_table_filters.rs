@@ -345,11 +345,10 @@ pub(super) fn finish_import(
                         .row_heights
                         .keys()
                         .any(|r| *r > range.start_row && *r <= range.end_row)
-                        || (layout.frozen_rows > range.start_row + 1
-                            && layout.frozen_rows <= range.end_row)
+
                 })
                 {
-                    return Err("Table body has custom row heights or a freeze boundary".into());
+                    return Err("Table body has custom row heights".into());
                 }
             }
             let mut spec = TableViewSpec::new(p.table);

@@ -52,6 +52,28 @@ mod tests {
     use visigrid_engine::sheet::SheetId;
 
     #[test]
+    fn full_json_freeze_state_uses_engine_defaults_and_explicit_host_overrides() {
+        let mut wb = visigrid_engine::workbook::Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
+        wb.active_sheet_mut().frozen_panes = (5, 2);
+        for json in [export_full(wb.active_sheet()).unwrap(), export_workbook(&wb, &[], 0).unwrap()] {
+            let (loaded, layouts, _) = import_any(&json).unwrap();
+            assert_eq!(loaded.active_sheet().frozen_panes, (5, 2));
+            assert_eq!((layouts[0].frozen_rows, layouts[0].frozen_cols), (5, 2));
+        }
+        for panes in [(0, 0), (3, 1)] {
+            let layout = SheetLayout { frozen_rows: panes.0, frozen_cols: panes.1, ..Default::default() };
+            for json in [export_full_with_layout(wb.active_sheet(), &layout).unwrap(), export_workbook(&wb, &[layout], 0).unwrap()] {
+                let loaded = import_any(&json).unwrap().0;
+                assert_eq!(loaded.active_sheet().frozen_panes, panes);
+            }
+        }
+        let legacy = r#"{"format":"visigrid-json","version":1,"cells":[]}"#;
+        assert_eq!(import_any(legacy).unwrap().0.active_sheet().frozen_panes, (0, 0));
+        assert!(import_any(&legacy.replace("\"cells\":[]", "\"frozen_rows\":999999999")).is_err());
+        assert!(import_any(&legacy.replace("\"cells\":[]", "\"frozen_cols\":999999999")).is_err());
+    }
+
+    #[test]
     fn full_json_comments_preserve_empty_text_formula_and_spill_cells() {
         use visigrid_engine::{cell::CellComment, workbook::Workbook};
         let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
@@ -189,7 +211,8 @@ pub const FULL_JSON_WORKBOOK_VERSION: u32 = 2;
 pub const FULL_JSON_TABLE_VERSION: u32 = 3;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
-/// the web mapper own it). BTreeMap for deterministic serialization.
+/// the web mapper own it). Frozen panes also live in the engine; an explicit
+/// host layout overrides those defaults on export. BTreeMap for deterministic serialization.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SheetLayout {
     pub col_widths: BTreeMap<usize, f32>,
@@ -608,7 +631,8 @@ fn parse_hex(s: &str) -> Option<[u8; 4]> {
 
 /// Export a sheet as visigrid-json v1 (no layout side-car).
 pub fn export_full(sheet: &Sheet) -> Result<String, String> {
-    export_full_with_layout(sheet, &SheetLayout::default())
+    export_full_with_layout(sheet, &SheetLayout { frozen_rows: sheet.frozen_panes.0,
+        frozen_cols: sheet.frozen_panes.1, ..SheetLayout::default() })
 }
 
 /// Export a sheet as visigrid-json v1 with presentation state.
@@ -632,7 +656,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
 
 /// Export a whole workbook as visigrid-json v2 (workbook form).
 /// `layouts` is per-sheet, parallel to `wb.sheets()`; missing entries mean
-/// no presentation state.
+/// no host presentation state; engine-owned frozen panes are retained.
 pub fn export_workbook(
     wb: &visigrid_engine::workbook::Workbook,
     layouts: &[SheetLayout],
@@ -643,12 +667,13 @@ pub fn export_workbook(
     if wb.sheets().iter().zip(layouts).any(|(sheet, layout)| sheet.table_view_spec().is_some() && layout.filter.is_some()) {
         return Err("A sheet cannot save both a Table view and a worksheet-range filter.".into());
     }
-    let default_layout = SheetLayout::default();
     let sheets: Vec<SheetBody> = wb
         .sheets()
         .iter()
         .enumerate()
         .map(|(i, s)| {
+            let default_layout = SheetLayout { frozen_rows: s.frozen_panes.0,
+                frozen_cols: s.frozen_panes.1, ..SheetLayout::default() };
             let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout));
             let saved = wb.saved_pivots(i);
             if !saved.is_empty() {
@@ -1169,6 +1194,10 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
     }
 
     sheet.set_manual_hidden_rows(body.hidden_rows.iter().copied().collect())?;
+    if body.frozen_rows > sheet.rows || body.frozen_cols > sheet.cols {
+        return Err("Freeze boundary is outside the worksheet.".into());
+    }
+    sheet.frozen_panes = (body.frozen_rows, body.frozen_cols);
     let layout = SheetLayout {
         col_widths: keys_to_usize(&body.col_widths),
         row_heights: keys_to_usize(&body.row_heights),

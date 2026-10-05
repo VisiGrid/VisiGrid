@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use gpui::*;
 
-use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
+use crate::app::{Spreadsheet, NUM_ROWS};
 
 /// Time between scroll steps while the pointer stays outside the grid.
 const TICK: Duration = Duration::from_millis(50);
@@ -158,31 +158,19 @@ impl Spreadsheet {
 
     /// The cell the drag should reach after a step: the row or column at the
     /// edge it is scrolling toward, and the last cell reached on the other axis.
-    fn drag_autoscroll_target(&self, d_rows: i32, d_cols: i32, cx: &App) -> (usize, usize) {
+    fn drag_autoscroll_target(&self, d_rows: i32, d_cols: i32, _cx: &App) -> (usize, usize) {
         let view_state = self.active_view_state();
-        let (scroll_row, scroll_col) = (view_state.scroll_row, view_state.scroll_col);
-        let scrollable_rows = self.visible_rows().saturating_sub(view_state.frozen_rows).max(1);
-        let scrollable_cols = self.visible_cols().saturating_sub(view_state.frozen_cols).max(1);
-        let (last_row, last_col) = self
-            .drag_last_cell
-            .or(view_state.selection_end)
-            .unwrap_or(view_state.selected);
-
-        // Rows go through the visible-row mapping so sorted, filtered and
-        // hidden rows land on the row actually drawn at that edge.
+        let (last_row, last_col) = self.drag_last_cell.or(view_state.selection_end).unwrap_or(view_state.selected);
+        let rows = self.pane_rows(view_state);
+        let cols = self.pane_cols(view_state);
         let row = match d_rows.signum() {
-            1 => self
-                .nth_visible_row_with_hidden(scroll_row + scrollable_rows - 1, cx)
-                .or_else(|| self.nth_visible_row_with_hidden(scroll_row, cx))
-                .map_or(last_row, |(view_row, _)| view_row),
-            -1 => self
-                .nth_visible_row_with_hidden(scroll_row, cx)
-                .map_or(last_row, |(view_row, _)| view_row),
+            1 => rows.body.last().map_or(last_row, |s| s.index),
+            -1 => rows.body.first().map_or(last_row, |s| s.index),
             _ => last_row,
         };
         let col = match d_cols.signum() {
-            1 => (scroll_col + scrollable_cols - 1).min(NUM_COLS - 1),
-            -1 => scroll_col,
+            1 => cols.body.last().map_or(last_col, |s| s.index),
+            -1 => cols.body.first().map_or(last_col, |s| s.index),
             _ => last_col,
         };
         (row.min(NUM_ROWS - 1), col)

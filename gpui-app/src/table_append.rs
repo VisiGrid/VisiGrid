@@ -761,7 +761,7 @@ mod tests {
         assert!(
             crate::table_filter_ui::desktop_layout_error(new, None, Some(&hidden), 0).is_none()
         );
-        assert!(crate::table_filter_ui::desktop_layout_error(new, None, None, 7).is_some());
+        assert!(crate::table_filter_ui::desktop_layout_error(new, None, None, 7).is_none());
     }
     #[test]
     fn recovery_and_grid_boundary_refuse_before_changing_anything() {

@@ -14,6 +14,7 @@ mod table_calculated;
 mod table_create;
 mod table_bulk_append;
 mod table_command_scope;
+mod pane_layout;
 mod table_header_paste;
 mod ai;
 mod ai_cli;

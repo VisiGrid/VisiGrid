@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Freeze and unfreeze panes inside sorted/filtered Tables without clearing criteria. Frozen/body cells and overlays share visible-row geometry; keyboard/wheel/drag scrolling and hit-testing skip hidden rows and columns. Freeze changes support sheet-scoped undo/redo and rewind.
+- Preserve interior freeze boundaries with Table criteria in XLSX import and both export orders. Full-fidelity JSON now restores engine freeze state and retains it on exports without a host layout, using the existing format fields.
+
 - Author and manage conditional formatting through sorted/filtered Tables. New rules target visible stored records; partial clearing preserves hidden cells and formula anchors. Undo/redo and rewind retain rule order and validate all targets before replay.
 - Keep conditional-format previews private until Save/Add: saving or exporting while editing no longer captures a draft or temporarily removes the original rule. Stale drafts are refused without discarding text; editing preserves disabled rules and their precedence.
 

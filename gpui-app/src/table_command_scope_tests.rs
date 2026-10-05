@@ -250,9 +250,9 @@ fn a_missing_freeze_target_refuses_the_whole_history_group() {
         ],
         description: "Stale report".into(),
     };
-    assert!(super::validate_freeze_history(&wb, &action).is_err());
+    assert!(super::validate_freeze_history(&wb, &action, true).is_err());
     assert!(!metadata_history_allowed(&wb, &action));
-    assert!(super::validate_freeze_history(&wb, &freeze()).is_ok());
+    assert!(super::validate_freeze_history(&wb, &freeze(), true).is_ok());
 }
 
 #[test]

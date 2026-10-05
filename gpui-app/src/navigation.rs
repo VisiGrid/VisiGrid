@@ -521,47 +521,15 @@ impl Spreadsheet {
         }
         self.nav_scroll_dirty = false;
 
-        let visible_rows = self.visible_rows();
-        let visible_cols = self.visible_cols();
-
-        let view_state = self.active_view_state_mut();
-
-        // Detect full-row/column selections: for the fully-spanned axis,
-        // keep the current scroll position instead of scrolling to sentinel
-        // coordinates (e.g., row 65535 or col 255).
-        let (row, col) = scroll_target(
-            view_state.selected,
-            view_state.selection_end,
-            (view_state.scroll_row, view_state.scroll_col),
-        );
-
-        // When freeze panes are active, calculate scrollable region
-        let scrollable_visible_rows = visible_rows.saturating_sub(view_state.frozen_rows);
-        let scrollable_visible_cols = visible_cols.saturating_sub(view_state.frozen_cols);
-
-        // Vertical scroll - frozen rows are always visible, only scroll for rows in scrollable region
-        if row < view_state.frozen_rows {
-            // Row is in frozen region - always visible, but ensure scroll_row is valid
-            view_state.scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
-        } else if row < view_state.scroll_row {
-            view_state.scroll_row = row;
-        } else if scrollable_visible_rows > 0 && row >= view_state.scroll_row + scrollable_visible_rows {
-            view_state.scroll_row = row - scrollable_visible_rows + 1;
-        }
-
-        // Horizontal scroll - frozen cols are always visible, only scroll for cols in scrollable region
-        if col < view_state.frozen_cols {
-            // Col is in frozen region - always visible, but ensure scroll_col is valid
-            view_state.scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
-        } else if col < view_state.scroll_col {
-            view_state.scroll_col = col;
-        } else if scrollable_visible_cols > 0 && col >= view_state.scroll_col + scrollable_visible_cols {
-            view_state.scroll_col = col - scrollable_visible_cols + 1;
-        }
-
-        // Ensure scroll positions don't go below freeze bounds
-        view_state.scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
-        view_state.scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
+        let view = self.active_view_state();
+        let (row, col) = scroll_target(view.selected, view.selection_end, (view.scroll_row, view.scroll_col));
+        let scroll_row = crate::pane_layout::ensure_visible(self.row_view.row_count(), view.frozen_rows,
+            view.scroll_row, row, self.grid_layout.viewport_size.1, |r| self.displayed_row_height(r));
+        let scroll_col = crate::pane_layout::ensure_visible(NUM_COLS, view.frozen_cols,
+            view.scroll_col, col, self.grid_layout.viewport_size.0, |c| self.displayed_col_width(c));
+        let view = self.active_view_state_mut();
+        view.scroll_row = scroll_row;
+        view.scroll_col = scroll_col;
     }
 
     pub fn scroll(&mut self, delta_rows: i32, delta_cols: i32, cx: &mut Context<Self>) {
@@ -571,24 +539,15 @@ impl Spreadsheet {
             cx,
         );
 
-        let visible_rows = self.visible_rows();
-        let visible_cols = self.visible_cols();
-
-        let view_state = self.active_view_state_mut();
-        // When freeze panes are active, scrollable region starts after frozen rows/cols
-        let min_scroll_row = view_state.frozen_rows;
-        let min_scroll_col = view_state.frozen_cols;
-
-        let new_row = (view_state.scroll_row as i32 + delta_rows)
-            .max(min_scroll_row as i32)
-            .min((NUM_ROWS.saturating_sub(visible_rows)) as i32) as usize;
-        let new_col = (view_state.scroll_col as i32 + delta_cols)
-            .max(min_scroll_col as i32)
-            .min((NUM_COLS.saturating_sub(visible_cols)) as i32) as usize;
-
-        if new_row != view_state.scroll_row || new_col != view_state.scroll_col {
-            view_state.scroll_row = new_row;
-            view_state.scroll_col = new_col;
+        let view = self.active_view_state();
+        let new_row = crate::pane_layout::scroll(self.row_view.row_count(), view.frozen_rows,
+            view.scroll_row, delta_rows, |r| self.displayed_row_height(r) > 0.0);
+        let new_col = crate::pane_layout::scroll(NUM_COLS, view.frozen_cols,
+            view.scroll_col, delta_cols, |c| !self.is_col_hidden(c));
+        let view = self.active_view_state_mut();
+        if new_row != view.scroll_row || new_col != view.scroll_col {
+            view.scroll_row = new_row;
+            view.scroll_col = new_col;
             cx.notify();
         }
     }

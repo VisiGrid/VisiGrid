@@ -387,8 +387,7 @@ pub(super) fn prepare_inner<'a>(
                 .keys()
                 .chain(layout.hidden_rows.iter())
                 .any(|r| *r > table.range.start_row && *r <= table.range.end_row)
-                || (layout.frozen_rows > table.range.start_row + 1
-                    && layout.frozen_rows <= table.range.end_row)
+
                 || layout.autofilter_range.is_some()
             {
                 return Err(format!(
@@ -396,14 +395,6 @@ pub(super) fn prepare_inner<'a>(
                     table.name
                 ));
             }
-        }
-        if sheet.frozen_panes.0 > table.range.start_row + 1
-            && sheet.frozen_panes.0 <= table.range.end_row
-        {
-            return Err(format!(
-                "Table {} has a freeze boundary through its body",
-                table.name
-            ));
         }
         if sheet
             .row_formats

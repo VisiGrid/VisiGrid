@@ -44,13 +44,12 @@ pub(crate) fn desktop_layout_error(
     table: &DataTable,
     heights: Option<&std::collections::HashMap<usize, f32>>,
     _hidden: Option<&std::collections::BTreeSet<usize>>,
-    frozen_rows: usize,
+    _frozen_rows: usize,
 ) -> Option<String> {
     let body = table.range.start_row + 1..=table.range.end_row;
     if heights.is_some_and(|h| h.keys().any(|r| body.contains(r)))
-        || (frozen_rows > table.range.start_row + 1 && frozen_rows <= table.range.end_row)
     {
-        Some("Table views need uniform body row heights with no freeze boundary through the records. Reset row heights or unfreeze the body first.".into())
+        Some("Table views need uniform body row heights. Reset body row heights first.".into())
     } else {
         None
     }
@@ -661,7 +660,7 @@ mod tests {
         );
         assert!(desktop_layout_error(table, Some(&[(3, 32.0)].into()), None, 0).is_some());
         assert!(desktop_layout_error(table, None, Some(&[5].into()), 0).is_none());
-        assert!(desktop_layout_error(table, None, None, 4).is_some());
+        assert!(desktop_layout_error(table, None, None, 4).is_none());
         assert!(desktop_layout_error(table, None, None, 6).is_none());
     }
 

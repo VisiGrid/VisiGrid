@@ -498,7 +498,7 @@ mod tests {
         assert!(
             crate::table_filter_ui::desktop_layout_error(table, None, Some(&hidden), 0).is_none()
         );
-        assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 8).is_some());
+        assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 8).is_none());
         assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 3).is_none());
     }
     #[test]
