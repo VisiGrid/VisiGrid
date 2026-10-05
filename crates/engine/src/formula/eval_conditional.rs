@@ -1,5 +1,5 @@
 // Conditional aggregate functions: SUMIF, AVERAGEIF, COUNTIF, COUNTBLANK,
-// SUMIFS, AVERAGEIFS, COUNTIFS
+// SUMIFS, AVERAGEIFS, COUNTIFS, MINIFS, MAXIFS
 
 use crate::sheet::SheetRef;
 use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution};
@@ -142,7 +142,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#VALUE! Empty sum range for nonempty criteria range".into()));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             let (min_row, min_col) = (range.min_row(), range.min_col());
 
             for row_offset in 0..range.num_rows() {
@@ -163,7 +163,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     }
                 }
             }
-            EvalResult::Number(sum)
+            EvalResult::Number(sum.value())
         }
         "AVERAGEIF" => {
             // AVERAGEIF(range, criteria, [average_range])
@@ -187,7 +187,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#VALUE! Empty average range for nonempty criteria range".into()));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             let mut count = 0;
             let (min_row, min_col) = (range.min_row(), range.min_col());
 
@@ -215,7 +215,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if count == 0 {
                 EvalResult::Error("#DIV/0!".to_string())
             } else {
-                EvalResult::Number(sum / count as f64)
+                EvalResult::Number(sum.value() / count as f64)
             }
         }
         "COUNTIF" => {
@@ -300,7 +300,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 criteria_values.push(evaluate(criteria_arg, lookup));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             for row_offset in 0..num_rows {
                 for col_offset in 0..num_cols {
                     let mut all_match = true;
@@ -325,7 +325,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     }
                 }
             }
-            EvalResult::Number(sum)
+            EvalResult::Number(sum.value())
         }
         "AVERAGEIFS" => {
             // AVERAGEIFS(average_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
@@ -363,7 +363,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 criteria_values.push(evaluate(criteria_arg, lookup));
             }
 
-            let mut sum = 0.0;
+            let mut sum = crate::numeric::Sum::default();
             let mut count = 0;
             for row_offset in 0..num_rows {
                 for col_offset in 0..num_cols {
@@ -396,7 +396,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if count == 0 {
                 EvalResult::Error("#DIV/0!".to_string())
             } else {
-                EvalResult::Number(sum / count as f64)
+                EvalResult::Number(sum.value() / count as f64)
             }
         }
         "COUNTIFS" => {
@@ -458,6 +458,59 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             }
             EvalResult::Number(count as f64)
+        }
+        "MINIFS" | "MAXIFS" => {
+            // MINIFS(min_range, criteria_range1, criteria1, ...): the smallest
+            // (or largest) number in min_range whose row meets every criterion,
+            // with SUMIFS's criteria syntax. Text, logicals and blanks in
+            // min_range are skipped; an error in a matched cell is the result.
+            // No match is 0, as in Excel. Mismatched sizes are #VALUE!.
+            if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+                return Some(EvalResult::Error(format!("{name} requires a range and pairs of criteria_range and criteria")));
+            }
+            let target = match extract_range(&args[0], lookup, &format!("{name} range")) {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let (num_rows, num_cols) = (target.num_rows(), target.num_cols());
+            let mut criteria = Vec::with_capacity((args.len() - 1) / 2);
+            for pair in args[1..].chunks(2) {
+                let range = match extract_range(&pair[0], lookup, &format!("{name} criteria_range")) {
+                    Ok(r) => r,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                if range.num_rows() != num_rows || range.num_cols() != num_cols {
+                    return Some(EvalResult::Error("#VALUE!".to_string()));
+                }
+                criteria.push((range, evaluate(&pair[1], lookup)));
+            }
+            let mut best: Option<f64> = None;
+            for row_offset in 0..num_rows {
+                for col_offset in 0..num_cols {
+                    let matched = criteria.iter().all(|(range, criterion)| {
+                        let text = range_get_text(lookup, &range.sheet, range.min_row() + row_offset, range.min_col() + col_offset);
+                        matches_criteria(&text_to_eval_result(&text, true), criterion)
+                    });
+                    if !matched {
+                        continue;
+                    }
+                    let value = super::eval_helpers::read_cell_value(
+                        lookup, &target.sheet, target.min_row() + row_offset, target.min_col() + col_offset,
+                    );
+                    match value {
+                        super::eval::Value::Number(n) => {
+                            best = Some(match best {
+                                None => n,
+                                Some(b) if name == "MINIFS" => b.min(n),
+                                Some(b) => b.max(n),
+                            });
+                        }
+                        super::eval::Value::Error(e) => return Some(EvalResult::Error(e)),
+                        _ => {}
+                    }
+                }
+            }
+            EvalResult::Number(best.unwrap_or(0.0))
         }
         _ => return None,
     };

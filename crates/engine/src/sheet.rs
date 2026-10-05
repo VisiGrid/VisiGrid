@@ -280,6 +280,9 @@ pub const NUM_ROWS: usize = 1_048_576;
 /// Columns in a sheet. See [`NUM_ROWS`].
 pub const NUM_COLS: usize = 16_384;
 
+/// The computed value of every member of a reference cycle.
+const CYCLE_ERROR: &str = "#CYCLE!";
+
 /// The cell map's key: two u32 rather than two usize.
 ///
 /// The grid is 1,048,576 x 16,384, so neither coordinate can approach u32, and
@@ -336,6 +339,13 @@ pub struct Sheet {
     /// once the pass is done.
     #[serde(skip)]
     pending_spills: RefCell<Vec<(usize, usize, crate::formula::eval::Array2D)>>,
+    /// Anchors currently showing #SPILL!, with the extent they were refused
+    /// (rows, cols). A write inside that extent can move the obstruction, so
+    /// the workbook re-evaluates the anchor; without this a cleared blocker
+    /// left the anchor #SPILL! until a full recalc. Runtime state, rebuilt by
+    /// placement; stale entries (the cell is no longer blocked) are ignored.
+    #[serde(skip)]
+    blocked_spill_extents: HashMap<(usize, usize), (usize, usize)>,
     /// Data validation rules for cells
     #[serde(default)]
     pub validations: ValidationStore,
@@ -580,6 +590,7 @@ impl Sheet {
             retired_spill_cells: HashSet::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
+            blocked_spill_extents: HashMap::new(),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
@@ -619,6 +630,7 @@ impl Sheet {
             retired_spill_cells: HashSet::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
+            blocked_spill_extents: HashMap::new(),
             validations: ValidationStore::new(),
             cond_formats: super::cond_format::CondFormatStore::new(),
             tab_color: None,
@@ -987,21 +999,36 @@ impl Sheet {
         pending
     }
 
-    /// Mark a cell as having a cycle error.
+    /// Mark a cell as a member of a reference cycle.
     ///
-    /// Used when loading workbooks with circular references to mark
-    /// participating cells without crashing.
+    /// The formula stays the cell's content; `#CYCLE!` is only its computed
+    /// value, as Excel shows a circular reference. Writing the error into the
+    /// content (as this did until #95) destroyed every member's formula, so a
+    /// cycle could never be repaired by editing one cell.
     pub fn set_cycle_error(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
-        if !self.accept_value_write(row, col) {
-            return;
-        }
+        // This updates a computed cache, not authored content. In particular,
+        // protected Table totals still need to display calculation errors.
+        // Cached as text, exactly what the cell used to hold, so everything
+        // downstream (#VALUE! in arithmetic, inspectors, exports) behaves as
+        // before. Only the formula is no longer lost.
+        self.cells.set_computed(row, col, Value::Text(CYCLE_ERROR.to_string()));
+    }
 
-        // Store #CYCLE! as the cell value while preserving the formula source
-        // For now, we just set a text value - the original formula is lost
-        // A future improvement could preserve the formula for editing
-        self.with_cell(row, col, |cell| cell.value = CellValue::Text("#CYCLE!".to_string()));
+    /// Whether this cell is a reference-cycle member: a formula whose computed
+    /// value is the `#CYCLE!` marker, or the literal `#CYCLE!` text that files
+    /// saved before #95 contain in place of the lost formula.
+    pub fn is_cycle_error(&self, row: usize, col: usize) -> bool {
+        match self.cells.get(row, col) {
+            Some(cell) => match cell.value() {
+                ValueRef::Formula { ast: Some(_), .. } => self.cells.with_computed(row, col, |v| {
+                    matches!(v, Some(Value::Text(t)) if t == CYCLE_ERROR)
+                }),
+                other => other.is_cycle_error(),
+            },
+            None => false,
+        }
     }
 
     /// Replace a formula cell with a static cached value, preserving the
@@ -1129,6 +1156,7 @@ impl Sheet {
                     cell.set_spill_error(Some(SpillError { blocked_by,
                         dimensions: Some(SpillInfo { rows: array.rows(), cols: array.cols() }) }));
                 });
+                self.blocked_spill_extents.insert((row, col), (array.rows(), array.cols()));
             }
         }
     }
@@ -1150,6 +1178,7 @@ impl Sheet {
                 if parents.is_empty() { self.blocked_spills.remove(&blocker); }
             }
         }
+        self.blocked_spill_extents.remove(&(row, col));
         self.cells.update(row, col, |cell| {
             cell.set_spill_error(None);
         });
@@ -1186,6 +1215,62 @@ impl Sheet {
         self.blocked_spills.get(&(row, col)).into_iter().flatten().copied().filter(move |(r, c)| {
             self.cells.get(*r, *c).and_then(|cell| cell.spill_error()).is_some_and(|e| e.blocked_by == (row, col))
         })
+    }
+
+    /// Anchors showing #SPILL! whose refused extent contains (row, col): the
+    /// anchors a write there could unblock (or newly block). Excludes the
+    /// cell itself. Ordered, so the caller's recalc order is stable.
+    pub fn blocked_spill_anchors_covering(&self, row: usize, col: usize) -> Vec<(usize, usize)> {
+        let mut anchors: Vec<(usize, usize)> = self
+            .blocked_spill_extents
+            .iter()
+            .filter(|(&(ar, ac), &(rows, cols))| {
+                (ar, ac) != (row, col)
+                    && row >= ar
+                    && row < ar + rows
+                    && col >= ac
+                    && col < ac + cols
+                    && self.cells.get(ar, ac).is_some_and(|c| c.spill_error().is_some())
+            })
+            .map(|(&anchor, _)| anchor)
+            .collect();
+        anchors.sort_unstable();
+        anchors
+    }
+
+    /// Retire every spill on the sheet: receivers emptied, parents no longer
+    /// marked as spilling, the blocked-spill index forgotten. Spill state is
+    /// keyed by absolute position, so a structural edit must drop it before
+    /// cells move; the recompute that follows re-places each array from its
+    /// anchor's new position.
+    pub fn retire_all_spills(&mut self) {
+        let mut parents: Vec<(usize, usize)> = self
+            .cells_iter()
+            .filter(|(_, cell)| cell.spill_info().is_some())
+            .map(|(pos, _)| pos)
+            .collect();
+        parents.sort_unstable();
+        for (row, col) in parents {
+            self.clear_spill_from(row, col);
+        }
+        self.spill_values.clear();
+        self.blocked_spill_extents.clear();
+    }
+
+    /// The cells a spill parent currently fills, excluding the parent itself.
+    pub fn spill_receivers_of(&self, row: usize, col: usize) -> Vec<(usize, usize)> {
+        let Some(info) = self.cells.get(row, col).and_then(|c| c.spill_info().cloned()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(info.rows * info.cols);
+        for dr in 0..info.rows {
+            for dc in 0..info.cols {
+                if dr != 0 || dc != 0 {
+                    out.push((row + dr, col + dc));
+                }
+            }
+        }
+        out
     }
 
     /// Whether any array recorded during evaluation is still waiting to be placed.
@@ -5150,6 +5235,9 @@ mod tests {
         let mut sheet = Sheet::new(SheetId(1), 10, 10);
         sheet.add_merge(MergedRegion::new(0, 0, 0, 2)).unwrap();
 
+        // Only formula cells can be cycle members: give the origin one.
+        sheet.set_value(0, 0, "=A1+1");
+
         // Set bold on hidden cell B1
         sheet.toggle_bold(0, 1);
         assert!(sheet.get_format(0, 1).bold);
@@ -5157,8 +5245,9 @@ mod tests {
         // Cycle error on B1 — redirects to origin A1
         sheet.set_cycle_error(0, 1);
 
-        // Origin holds the cycle error
+        // Origin shows the cycle error and keeps its formula (#95)
         assert_eq!(sheet.get_display(0, 0), "#CYCLE!");
+        assert_eq!(sheet.get_raw(0, 0), "=A1+1");
         // B1 style unchanged
         assert!(sheet.get_format(0, 1).bold);
         // B1 has no stored value

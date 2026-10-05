@@ -57,7 +57,7 @@ impl Spreadsheet {
         Ok(())
     }
 
-    fn install_table_batch(&mut self, candidate: &Workbook, cx: &mut Context<Self>) {
+    pub(crate) fn install_table_batch(&mut self, candidate: &Workbook, cx: &mut Context<Self>) {
         let (row, col) = self.view_state.selected;
         let data_row = self.row_view.view_to_data(row);
         self.workbook
@@ -79,6 +79,31 @@ impl Spreadsheet {
         self.bump_cells_rev();
         self.bump_cf_rules_rev();
         cx.notify();
+    }
+
+    /// Publish a candidate with whole-workbook undo, for changes too large
+    /// for the sparse guarded history (a big recipe refresh). Same install
+    /// as a guarded batch; one undo step either way.
+    pub(crate) fn publish_workbook_snapshot(
+        &mut self,
+        candidate: Workbook,
+        description: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.validate_saved_view_layout(&candidate)?;
+        let before = self.wb(cx).clone();
+        let before_row_view = self.row_view.clone();
+        self.install_table_batch(&candidate, cx);
+        let after = self.wb(cx).clone();
+        self.history.record_named_range_action(UndoAction::WorkbookSnapshot {
+            commit: Box::new(crate::history::WorkbookSnapshotCommit::new(description, before, after)),
+            before_row_view,
+            after_row_view: self.row_view.clone(),
+        });
+        self.history.retag_last_source(MutationSource::Human);
+        self.is_modified = true;
+        self.cached_title = None;
+        Ok(())
     }
 
     pub(crate) fn replay_table_batch(

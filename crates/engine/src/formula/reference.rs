@@ -64,8 +64,10 @@ fn reference(
     r1: usize,
     c1: usize,
 ) -> Result<Source, String> {
-    if matches!(sheet, SheetRef::RefError { .. })
-        || r0 >= NUM_ROWS
+    if matches!(sheet, SheetRef::RefError { .. }) {
+        return Err("#REF!".into());
+    }
+    if r0 >= NUM_ROWS
         || r1 >= NUM_ROWS
         || c0 >= NUM_COLS
         || c1 >= NUM_COLS

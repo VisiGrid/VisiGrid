@@ -617,7 +617,7 @@ impl ItemSet {
 
 #[derive(Debug, Clone, Default)]
 struct Acc {
-    sum: f64,
+    sum: crate::numeric::Sum,
     numeric: u64,
     non_empty: u64,
     min: Option<f64>,
@@ -651,7 +651,7 @@ impl Acc {
             Value::Number(n) => {
                 self.non_empty += 1;
                 self.numeric += 1;
-                self.sum += n;
+                self.sum += *n;
                 self.min = Some(self.min.map_or(*n, |m| m.min(*n)));
                 self.max = Some(self.max.map_or(*n, |m| m.max(*n)));
             }
@@ -670,7 +670,7 @@ impl Acc {
         if let (Some(a), Some(b)) = (&mut self.distinct, &o.distinct) {
             a.extend(b.iter().cloned());
         }
-        self.sum += o.sum;
+        self.sum.merge(o.sum);
         self.numeric += o.numeric;
         self.non_empty += o.non_empty;
         self.min = match (self.min, o.min) {
@@ -700,12 +700,12 @@ impl Acc {
             return Value::Error(e.clone());
         }
         match agg {
-            Aggregation::Sum => Value::Number(self.sum),
+            Aggregation::Sum => Value::Number(self.sum.value()),
             Aggregation::Average => {
                 if self.numeric == 0 {
                     Value::Error("#DIV/0!".to_string())
                 } else {
-                    Value::Number(self.sum / self.numeric as f64)
+                    Value::Number(self.sum.value() / self.numeric as f64)
                 }
             }
             Aggregation::Min => Value::Number(self.min.unwrap_or(0.0)),

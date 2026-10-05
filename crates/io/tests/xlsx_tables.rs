@@ -2705,9 +2705,9 @@ fn table_metadata_byte_budget_skips_large_parts_but_keeps_later_small_tables() {
 fn unreadable_table_sheet_does_not_discard_valid_tables_on_later_sheets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two-table-sheets.xlsx");
-    let changed = dir.path().join("oversized-table-sheet.xlsx");
+    let changed = dir.path().join("malformed-table-sheet.xlsx");
     let mut file = rust_xlsxwriter::Workbook::new();
-    for name in ["OversizedData", "LaterValidData"] {
+    for name in ["MalformedData", "LaterValidData"] {
         let sheet = file.add_worksheet();
         sheet.set_name(name).unwrap();
         sheet.write_number(1, 0, 42).unwrap();
@@ -2716,7 +2716,10 @@ fn unreadable_table_sheet_does_not_discard_valid_tables_on_later_sheets() {
     file.save(&path).unwrap();
     rewrite(&path, &changed, |name, data| {
         (name.into(), if name == "xl/worksheets/sheet1.xml" {
-            data.replace("</worksheet>", &format!("<!--{}--></worksheet>", " ".repeat(33 * 1024 * 1024)))
+            // Large worksheets are now valid; exercise failure isolation with
+            // an actually unreadable Table link, while keeping the cell XML.
+            assert!(data.contains("<tablePart r:id="));
+            data.replace("<tablePart r:id=", "<tablePart missingId=")
         } else { data })
     });
     let (loaded, report) = xlsx::import(&changed).unwrap();
@@ -2724,7 +2727,7 @@ fn unreadable_table_sheet_does_not_discard_valid_tables_on_later_sheets() {
     assert_eq!(report.tables_skipped, 1);
     assert!(loaded.table_by_name("LaterValidData").is_some());
     assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 0), "42");
-    assert!(report.warnings.iter().any(|w| w.contains("on OversizedData") && w.contains("too large")));
+    assert!(report.warnings.iter().any(|w| w.contains("on MalformedData") && w.contains("Missing Table relationship")));
 }
 
 #[test]
@@ -2808,4 +2811,53 @@ fn freeze_boundaries_roundtrip_through_sorted_and_stored_table_exports() {
             assert_eq!(wb.sheet(0).unwrap().frozen_panes, (4, 2));
         }
     }
+}
+
+/// Formulas are saved with their computed results. Excel recalculates on
+/// open, but readers of saved results (pandas, previews, recipes) used to
+/// see 0 for every formula.
+#[test]
+fn exported_formulas_carry_their_computed_results() {
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "7");
+    wb.set_cell_value_tracked(0, 0, 1, "=A1*3");
+    wb.set_cell_value_tracked(0, 0, 2, "=\"id-\"&A1");
+    wb.set_cell_value_tracked(0, 0, 3, "=A1>5");
+    wb.set_cell_value_tracked(0, 0, 4, "=1/0");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("results.xlsx");
+    xlsx::export(&wb, &path, None).unwrap();
+    let sheet = xml(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<f>A1*3</f><v>21</v>"), "{sheet}");
+    assert!(sheet.contains("<v>id-7</v>"), "{sheet}");
+    assert!(sheet.contains("t=\"b\"") && sheet.contains("<v>1</v>"), "{sheet}");
+    assert!(sheet.contains("<v>#DIV/0!</v>"), "{sheet}");
+    // And they import as formulas again, with the same results
+    let (back, _) = xlsx::import(&path).unwrap();
+    assert_eq!(back.sheet(0).unwrap().get_display(0, 1), "21");
+}
+
+/// Worksheet parts hold every cell. A sheet over the 32 MB cap for small
+/// metadata parts used to abort the whole Table pass ("XLSX part … is too
+/// large"), dropping every Table in the workbook, even on sheets without one.
+#[test]
+fn large_worksheet_parts_do_not_block_table_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wb, _) = book();
+    let small = dir.path().join("small.xlsx");
+    xlsx::export(&wb, &small, None).unwrap();
+    let big = dir.path().join("big.xlsx");
+    let padding = format!("<!--{}-->", " ".repeat(33 * 1024 * 1024));
+    rewrite(&small, &big, |name, data| {
+        if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+            let at = data.find("?>").map_or(0, |i| i + 2);
+            (name.into(), format!("{}{}{}", &data[..at], padding, &data[at..]))
+        } else {
+            (name.into(), data)
+        }
+    });
+    let (imported, result) = xlsx::import(&big).unwrap();
+    assert!(!result.warnings.iter().any(|w| w.contains("too large")), "{:?}", result.warnings);
+    assert_eq!(result.tables_imported, 1, "{:?}", result.warnings);
+    assert_eq!(imported.tables().count(), 1);
 }

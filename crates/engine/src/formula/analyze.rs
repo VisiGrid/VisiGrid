@@ -38,20 +38,45 @@ pub fn tally_unknown_functions<S>(expr: &Expr<S>, counts: &mut HashMap<String, u
 }
 
 /// Walk the AST and call the visitor for each function name encountered.
+///
+/// Calls of names bound by an enclosing LET or LAMBDA (`f(3)` in
+/// `LET(f, LAMBDA(x, x*2), f(3))`) are not function names, and neither are
+/// the parser's internal call names (underscore-prefixed); neither is
+/// visited.
 fn walk_expr<S, F: FnMut(&str)>(expr: &Expr<S>, visitor: &mut F) {
+    walk_scoped(expr, &mut Vec::new(), visitor);
+}
+
+fn walk_scoped<S, F: FnMut(&str)>(expr: &Expr<S>, bound: &mut Vec<String>, visitor: &mut F) {
     match expr {
         Expr::RefError => {}
         Expr::Function { name, args } => {
-            // Visit this function
-            visitor(name);
-            // Recurse into arguments
-            for arg in args {
-                walk_expr(arg, visitor);
+            if !name.starts_with('_') && !bound.contains(name) {
+                visitor(name);
             }
+            let binds_names = (name == "LET" && args.len() >= 3) || (name == "LAMBDA" && !args.is_empty());
+            if !binds_names {
+                for arg in args {
+                    walk_scoped(arg, bound, visitor);
+                }
+                return;
+            }
+            // LET(n1, v1, ..., calc) binds each name for what follows it;
+            // LAMBDA(p1, ..., calc) binds its parameters for the calculation.
+            let depth = bound.len();
+            let last = args.len() - 1;
+            for (i, arg) in args.iter().enumerate() {
+                let is_name = if name == "LET" { i < last && i % 2 == 0 } else { i < last };
+                match arg {
+                    Expr::NamedRange(n) if is_name => bound.push(n.clone()),
+                    _ => walk_scoped(arg, bound, visitor),
+                }
+            }
+            bound.truncate(depth);
         }
         Expr::BinaryOp { left, right, .. } => {
-            walk_expr(left, visitor);
-            walk_expr(right, visitor);
+            walk_scoped(left, bound, visitor);
+            walk_scoped(right, bound, visitor);
         }
         // Leaf nodes - no functions to visit
         Expr::Number(_) |
@@ -109,6 +134,25 @@ const DYNAMIC_REF_FUNCTIONS: &[&str] = &[
 ///
 /// Formulas with dynamic deps must be conservatively recomputed in
 /// full ordered mode since their dependencies are incomplete.
+/// Functions Excel treats as volatile: their result can change without any
+/// cell they reference changing — the clock, the random generator, and
+/// references resolved at evaluation time (INDIRECT and OFFSET read cells the
+/// dependency graph cannot see). A formula using any of them is recalculated
+/// on every recalculation, not only when its static inputs change.
+const VOLATILE_FUNCTIONS: &[&str] = &["NOW", "TODAY", "RAND", "RANDBETWEEN", "INDIRECT", "OFFSET"];
+
+/// Whether a formula calls a volatile function anywhere (see
+/// `VOLATILE_FUNCTIONS`).
+pub fn is_volatile<S>(expr: &Expr<S>) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |name| {
+        if !found && VOLATILE_FUNCTIONS.contains(&name) {
+            found = true;
+        }
+    });
+    found
+}
+
 pub fn has_dynamic_deps<S>(expr: &Expr<S>) -> bool {
     let mut found = false;
     walk_expr(expr, &mut |name| {
@@ -134,49 +178,49 @@ mod tests {
 
     #[test]
     fn test_single_unknown_function() {
-        // LET is not implemented (it's a lambda-like function)
-        let expr = parse("=LET(A1, B1:B10, C1:C10)").unwrap();
+        // BYROW is not implemented (it takes a LAMBDA)
+        let expr = parse("=BYROW(A1, B1:B10, C1:C10)").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("LET"), Some(&1));
+        assert_eq!(counts.get("BYROW"), Some(&1));
         assert_eq!(counts.len(), 1);
     }
 
     #[test]
     fn test_unknown_function_multiple_occurrences() {
-        let expr = parse("=LET(A1, B1:B10, C1:C10) + LET(A2, B1:B10, C1:C10)").unwrap();
+        let expr = parse("=BYROW(A1, B1:B10, C1:C10) + BYROW(A2, B1:B10, C1:C10)").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("LET"), Some(&2));
+        assert_eq!(counts.get("BYROW"), Some(&2));
     }
 
     #[test]
     fn test_mixed_known_and_unknown() {
-        // SUM is known, LET and LAMBDA are unknown
-        let expr = parse("=SUM(LET(A1, B1:B10, C1:C10), LAMBDA(A1, A2, A3))").unwrap();
+        // SUM is known, BYROW and MAP are unknown
+        let expr = parse("=SUM(BYROW(A1, B1:B10, C1:C10), MAP(A1, A2, A3))").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("LET"), Some(&1));
-        assert_eq!(counts.get("LAMBDA"), Some(&1));
+        assert_eq!(counts.get("BYROW"), Some(&1));
+        assert_eq!(counts.get("MAP"), Some(&1));
         assert!(counts.get("SUM").is_none()); // SUM is known
         assert_eq!(counts.len(), 2);
     }
 
     #[test]
     fn test_nested_unknown_functions() {
-        // IF is known, LAMBDA and LET are unknown
-        let expr = parse("=IF(LAMBDA(5) > 10, LET(A1, B1:B10, C1:C10), 0)").unwrap();
+        // IF is known, MAP and BYROW are unknown
+        let expr = parse("=IF(MAP(5) > 10, BYROW(A1, B1:B10, C1:C10), 0)").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("LAMBDA"), Some(&1));
-        assert_eq!(counts.get("LET"), Some(&1));
+        assert_eq!(counts.get("MAP"), Some(&1));
+        assert_eq!(counts.get("BYROW"), Some(&1));
         assert!(counts.get("IF").is_none());
     }
 
     #[test]
     fn test_has_unknown_functions() {
         let known = parse("=SUM(A1:A10)").unwrap();
-        let unknown = parse("=LET(A1, B1:B10, C1:C10)").unwrap();
+        let unknown = parse("=BYROW(A1, B1:B10, C1:C10)").unwrap();
 
         assert!(!has_unknown_functions(&known));
         assert!(has_unknown_functions(&unknown));

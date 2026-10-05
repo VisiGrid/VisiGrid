@@ -1631,6 +1631,230 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
             ParameterInfo { name: "data", description: "The numbers to draw, in order.", optional: false, repeatable: false },
             ParameterInfo { name: "type", description: "\"bar\" (the default) or \"winloss\". \"line\" is accepted and currently draws the same as \"bar\".", optional: true, repeatable: false },
         ],
+    },    // Added for web formula authority (21)
+    FunctionInfo {
+        name: "HYPERLINK",
+        signature: "HYPERLINK(link_location, [friendly_name])",
+        description: "Show a link's friendly name (or the link itself) in the cell.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "link_location", description: "The address the link points to.", optional: false, repeatable: false },
+            ParameterInfo { name: "friendly_name", description: "What the cell shows. Defaults to the link.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "LAMBDA",
+        signature: "LAMBDA([parameter1, ...], calculation)",
+        description: "Write a reusable calculation with named parameters; call it in place, LAMBDA(x, x+1)(2), or through a LET name.",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "parameter", description: "A name for an input.", optional: true, repeatable: true },
+            ParameterInfo { name: "calculation", description: "The formula to compute, using the parameter names.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "LARGE",
+        signature: "LARGE(array, k)",
+        description: "Return the k-th largest number in a range.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The numbers to rank. Text and blanks are skipped.", optional: false, repeatable: false },
+            ParameterInfo { name: "k", description: "Which position from the top: 1 is the largest.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "LET",
+        signature: "LET(name1, value1, [name2, value2, ...], calculation)",
+        description: "Name intermediate results and use the names in a final calculation. Each value is computed once.",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "name1", description: "A name for the first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value1", description: "The value, formula or range the name stands for.", optional: false, repeatable: false },
+            ParameterInfo { name: "name2, value2", description: "Further names and values, each able to use the earlier ones.", optional: true, repeatable: true },
+            ParameterInfo { name: "calculation", description: "The result, using the names.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "LOOKUP",
+        signature: "LOOKUP(lookup_value, lookup_vector, [result_vector])",
+        description: "Find the largest value not above lookup_value in a sorted row or column and return the value in the same position of another.",
+        category: FunctionCategory::Lookup,
+        parameters: &[
+            ParameterInfo { name: "lookup_value", description: "The value to find.", optional: false, repeatable: false },
+            ParameterInfo { name: "lookup_vector", description: "One row or column, sorted ascending. A two-dimensional range searches its first row or column.", optional: false, repeatable: false },
+            ParameterInfo { name: "result_vector", description: "Where to take the answer from. Defaults to the last row or column of the range.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "MAXIFS",
+        signature: "MAXIFS(max_range, criteria_range1, criteria1, ...)",
+        description: "Return the largest number in a range whose rows meet every criterion.",
+        category: FunctionCategory::Conditional,
+        parameters: &[
+            ParameterInfo { name: "max_range", description: "The numbers to compare.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range1", description: "The range to test, the same size as max_range.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria1", description: "The condition, such as \">10\" or \"East\".", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range2, criteria2", description: "More range-and-condition pairs.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "MINIFS",
+        signature: "MINIFS(min_range, criteria_range1, criteria1, ...)",
+        description: "Return the smallest number in a range whose rows meet every criterion.",
+        category: FunctionCategory::Conditional,
+        parameters: &[
+            ParameterInfo { name: "min_range", description: "The numbers to compare.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range1", description: "The range to test, the same size as min_range.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria1", description: "The condition, such as \">10\" or \"East\".", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range2, criteria2", description: "More range-and-condition pairs.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "MODE",
+        signature: "MODE(number1, [number2], ...)",
+        description: "Return the most frequent number. A tie goes to the value that appears first.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "number1", description: "A number or range.", optional: false, repeatable: false },
+            ParameterInfo { name: "number2", description: "More numbers or ranges.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "MODE.SNGL",
+        signature: "MODE.SNGL(number1, [number2], ...)",
+        description: "Return the most frequent number (the same as MODE).",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "number1", description: "A number or range.", optional: false, repeatable: false },
+            ParameterInfo { name: "number2", description: "More numbers or ranges.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "NA",
+        signature: "NA()",
+        description: "Return the #N/A error, to mark a value as not available.",
+        category: FunctionCategory::Logical,
+        parameters: &[
+
+        ],
+    },
+    FunctionInfo {
+        name: "PERCENTILE",
+        signature: "PERCENTILE(array, k)",
+        description: "Return the k-th percentile of a range, interpolating between values.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "k", description: "The percentile, from 0 to 1.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "PERCENTILE.INC",
+        signature: "PERCENTILE.INC(array, k)",
+        description: "Return the k-th percentile of a range, 0 to 1 inclusive (the same as PERCENTILE).",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "k", description: "The percentile, from 0 to 1.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "QUARTILE",
+        signature: "QUARTILE(array, quart)",
+        description: "Return a quartile of a range: 0 is the minimum, 2 the median, 4 the maximum.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "quart", description: "Which quartile, 0 to 4.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "QUARTILE.INC",
+        signature: "QUARTILE.INC(array, quart)",
+        description: "Return a quartile of a range, 0 to 4 inclusive (the same as QUARTILE).",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "quart", description: "Which quartile, 0 to 4.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "RANK",
+        signature: "RANK(number, ref, [order])",
+        description: "Return a number's rank in a list. Equal numbers share a rank.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to rank.", optional: false, repeatable: false },
+            ParameterInfo { name: "ref", description: "The list of numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "order", description: "0 or omitted ranks the largest first; any other value ranks the smallest first.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "RANK.EQ",
+        signature: "RANK.EQ(number, ref, [order])",
+        description: "Return a number's rank in a list (the same as RANK).",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to rank.", optional: false, repeatable: false },
+            ParameterInfo { name: "ref", description: "The list of numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "order", description: "0 or omitted ranks the largest first; any other value ranks the smallest first.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "SMALL",
+        signature: "SMALL(array, k)",
+        description: "Return the k-th smallest number in a range.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The numbers to rank. Text and blanks are skipped.", optional: false, repeatable: false },
+            ParameterInfo { name: "k", description: "Which position from the bottom: 1 is the smallest.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "SORTBY",
+        signature: "SORTBY(array, by_array1, [sort_order1], ...)",
+        description: "Sort a range by the values of other ranges. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The range to sort.", optional: false, repeatable: false },
+            ParameterInfo { name: "by_array1", description: "The keys to sort by: a column as tall as array, or a row as wide.", optional: false, repeatable: false },
+            ParameterInfo { name: "sort_order1", description: "1 for ascending (the default), -1 for descending.", optional: true, repeatable: false },
+            ParameterInfo { name: "by_array2, sort_order2", description: "More keys, used to break ties.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "TEXTSPLIT",
+        signature: "TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])",
+        description: "Split text into columns and rows at delimiters. The result spills.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to split.", optional: false, repeatable: false },
+            ParameterInfo { name: "col_delimiter", description: "Where to start a new column. A list such as {\",\",\";\"} splits at any of them.", optional: false, repeatable: false },
+            ParameterInfo { name: "row_delimiter", description: "Where to start a new row.", optional: true, repeatable: false },
+            ParameterInfo { name: "ignore_empty", description: "TRUE to drop empty pieces.", optional: true, repeatable: false },
+            ParameterInfo { name: "match_mode", description: "1 to ignore case.", optional: true, repeatable: false },
+            ParameterInfo { name: "pad_with", description: "What fills short rows. Defaults to #N/A.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "WEEKNUM",
+        signature: "WEEKNUM(serial_number, [return_type])",
+        description: "Return the week of the year for a date.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "serial_number", description: "The date.", optional: false, repeatable: false },
+            ParameterInfo { name: "return_type", description: "1 or omitted: weeks start Sunday; 2: Monday; 11-17: Monday to Sunday; 21: ISO 8601 weeks.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "XOR",
+        signature: "XOR(logical1, [logical2], ...)",
+        description: "Return TRUE when an odd number of the values are TRUE.",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "logical1", description: "A condition or range.", optional: false, repeatable: false },
+            ParameterInfo { name: "logical2", description: "More conditions or ranges.", optional: true, repeatable: true },
+        ],
     },
 ];
 

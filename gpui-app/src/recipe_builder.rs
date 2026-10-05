@@ -13,8 +13,8 @@ use visigrid_engine::table::TableId;
 use visigrid_io::csv::{CsvOptions, Encoding};
 use visigrid_io::csv_import::{ColumnRule, DateOrder};
 use visigrid_io::recipe::{
-    self, CsvSource, FilterOp, Missing, OnError, OutColumn, Recipe, RunReport, Snapshot, Source, SourceInfo, Step,
-    RECIPE_VERSION,
+    self, CsvSource, FilterOp, Missing, OnError, OutColumn, Recipe, RunReport, Snapshot, SortKey, Source, SourceInfo, Step,
+    Total, TotalFn, RECIPE_VERSION,
 };
 
 use crate::app::Spreadsheet;
@@ -31,10 +31,13 @@ pub enum Pane {
 }
 
 /// Source settings in the left column, in focus order.
-pub const SOURCE_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
+pub const CSV_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
+const PARQUET_ROWS: [&str; 2] = ["File", "Each refresh reads"];
+const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
+const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
 
 /// The kinds of step "Add step" offers, in menu order.
-pub const ADD_KINDS: [(&str, &str); 7] = [
+pub const ADD_KINDS: [(&str, &str); 13] = [
     ("Keep columns", "choose which, in order"),
     ("Remove columns", ""),
     ("Rename columns", ""),
@@ -42,6 +45,12 @@ pub const ADD_KINDS: [(&str, &str); 7] = [
     ("Trim spaces", ""),
     ("Filter rows", "column, condition, value"),
     ("Remove duplicates", "whole row or by key"),
+    ("Group by", "one row per group, with totals"),
+    ("Unpivot", "other columns into rows"),
+    ("Sort rows", "by one or more columns"),
+    ("Fill down", "empty cells take the value above"),
+    ("Replace values", "a whole cell or text inside it"),
+    ("Split column", "at a delimiter, into new columns"),
 ];
 
 /// One row of the selected step's settings.
@@ -55,6 +64,36 @@ pub enum EditorRow {
     FilterValue,
     OnError,
     Missing,
+    /// Group: a column to group by (checkbox).
+    GroupBy { name: String, present: bool },
+    /// Group: one part of total `index`.
+    Total { index: usize, part: TotalPart },
+    AddTotal,
+    /// Unpivot: a column kept as it is (checkbox); the rest become rows.
+    Keep { name: String, present: bool },
+    NamesTo,
+    ValuesTo,
+    DropEmpty,
+    /// Sort: a column's place in the order (not sorted, ascending,
+    /// descending).
+    SortBy { name: String, present: bool },
+    ReplaceFind,
+    ReplaceWith,
+    ReplacePart,
+    ReplaceCase,
+    SplitColumn,
+    SplitBy,
+    /// Split: the name of new column `index`.
+    SplitInto { index: usize },
+    AddSplitPiece,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TotalPart {
+    Func,
+    Column,
+    Name,
+    Remove,
 }
 
 pub struct Preview {
@@ -84,6 +123,8 @@ pub struct RecipeBuilder {
     pub dirty: bool,
     pub confirm_discard: bool,
     pub file_columns: Vec<String>,
+    /// A DuckDB source's tables, for the Table setting.
+    pub tables: Vec<String>,
     /// Columns going into the selected step.
     pub step_columns: Vec<String>,
     pub full: Option<RunReport>,
@@ -93,14 +134,26 @@ pub struct RecipeBuilder {
     pub editor_scroll: ScrollHandle,
 }
 
-fn source_mut(r: &mut Recipe) -> &mut CsvSource {
-    let Source::Csv(s) = &mut r.source;
-    s
+/// The CSV settings, when the source is a CSV.
+fn csv_mut(r: &mut Recipe) -> Option<&mut CsvSource> {
+    match &mut r.source {
+        Source::Csv(s) => Some(s),
+        _ => None,
+    }
 }
 
-pub fn source(r: &Recipe) -> &CsvSource {
-    let Source::Csv(s) = &r.source;
-    s
+pub fn csv(r: &Recipe) -> Option<&CsvSource> {
+    match &r.source {
+        Source::Csv(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// The tables of a DuckDB file, for the Table setting.
+fn duckdb_tables(path: &Path) -> Vec<String> {
+    visigrid_io::duckdb::Database::open(path)
+        .map(|db| db.tables().iter().map(|t| t.name.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// `types` values in the order Space cycles them.
@@ -182,7 +235,13 @@ pub fn step_missing(step: &Step) -> Missing {
         | Step::Types { missing, .. }
         | Step::Trim { missing, .. }
         | Step::Filter { missing, .. }
-        | Step::Dedupe { missing, .. } => *missing,
+        | Step::Dedupe { missing, .. }
+        | Step::Group { missing, .. }
+        | Step::Unpivot { missing, .. }
+        | Step::Sort { missing, .. }
+        | Step::FillDown { missing, .. }
+        | Step::Replace { missing, .. }
+        | Step::Split { missing, .. } => *missing,
     }
 }
 
@@ -194,7 +253,13 @@ fn step_missing_mut(step: &mut Step) -> &mut Missing {
         | Step::Types { missing, .. }
         | Step::Trim { missing, .. }
         | Step::Filter { missing, .. }
-        | Step::Dedupe { missing, .. } => missing,
+        | Step::Dedupe { missing, .. }
+        | Step::Group { missing, .. }
+        | Step::Unpivot { missing, .. }
+        | Step::Sort { missing, .. }
+        | Step::FillDown { missing, .. }
+        | Step::Replace { missing, .. }
+        | Step::Split { missing, .. } => missing,
     }
 }
 
@@ -208,6 +273,12 @@ pub fn step_kind(step: &Step) -> &'static str {
         Step::Trim { .. } => ADD_KINDS[4].0,
         Step::Filter { .. } => ADD_KINDS[5].0,
         Step::Dedupe { .. } => ADD_KINDS[6].0,
+        Step::Group { .. } => ADD_KINDS[7].0,
+        Step::Unpivot { .. } => ADD_KINDS[8].0,
+        Step::Sort { .. } => ADD_KINDS[9].0,
+        Step::FillDown { .. } => ADD_KINDS[10].0,
+        Step::Replace { .. } => ADD_KINDS[11].0,
+        Step::Split { .. } => ADD_KINDS[12].0,
     }
 }
 
@@ -263,9 +334,25 @@ fn stored_source_path(source: &Path, recipe_dir: Option<&Path>) -> String {
     source.display().to_string()
 }
 
+/// What the builder previews: the file, or every file an appending recipe
+/// reads (the same files a run would).
+fn read_snapshot(recipe: &Recipe, recipe_path: Option<&Path>, source_path: &Path) -> Result<Snapshot, String> {
+    if recipe.source.combine() && recipe.source_is_pattern() {
+        let base = recipe_path.and_then(Path::parent).or_else(|| source_path.parent()).unwrap_or(Path::new("."));
+        recipe.read_snapshot(base, None)
+    } else {
+        Snapshot::read(source_path)
+    }
+}
+
 impl RecipeBuilder {
+    /// Read the source again after a setting changed which files it reads.
+    fn reload(&mut self) {
+        self.snapshot = read_snapshot(&self.recipe, self.recipe_path.as_deref(), &self.source_path);
+    }
+
     fn new(recipe: Recipe, recipe_path: Option<PathBuf>, source_path: PathBuf, link_table: Option<TableId>) -> Self {
-        let snapshot = Snapshot::read(&source_path);
+        let snapshot = read_snapshot(&recipe, recipe_path.as_deref(), &source_path);
         let mut b = Self {
             recipe_path,
             recipe,
@@ -282,6 +369,7 @@ impl RecipeBuilder {
             dirty: false,
             confirm_discard: false,
             file_columns: Vec::new(),
+            tables: Vec::new(),
             step_columns: Vec::new(),
             full: None,
             preview: None,
@@ -290,8 +378,28 @@ impl RecipeBuilder {
             editor_scroll: ScrollHandle::new(),
         };
         b.selected = b.recipe.steps.len().checked_sub(1);
+        b.refresh_tables();
         b.recompute();
         b
+    }
+
+    /// Re-list a DuckDB source's tables (after opening or choosing a file).
+    pub fn refresh_tables(&mut self) {
+        self.tables = match &self.recipe.source {
+            Source::Duckdb(_) => duckdb_tables(&self.source_path),
+            Source::Xlsx(_) => recipe::xlsx_sheet_names(&self.source_path).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// The source settings this kind of source has, in focus order.
+    pub fn source_rows(&self) -> &'static [&'static str] {
+        match &self.recipe.source {
+            Source::Csv(_) => &CSV_ROWS,
+            Source::Parquet(_) => &PARQUET_ROWS,
+            Source::Duckdb(_) => &DUCKDB_ROWS,
+            Source::Xlsx(_) => &XLSX_ROWS,
+        }
     }
 
     /// Re-run everything the builder shows. Cheap for the monthly exports
@@ -305,7 +413,7 @@ impl RecipeBuilder {
             self.step_columns.clear();
             return;
         };
-        self.info = Some(recipe::source_info(source(&self.recipe), snapshot));
+        self.info = csv(&self.recipe).map(|src| recipe::source_info(src, snapshot));
         let upto = |n: usize| {
             let mut r = self.recipe.clone();
             r.steps.truncate(n);
@@ -365,7 +473,30 @@ impl RecipeBuilder {
             Step::Select { columns: c, .. }
             | Step::Remove { columns: c, .. }
             | Step::Trim { columns: c, .. }
-            | Step::Dedupe { columns: c, .. } => rows.extend(columns(c)),
+            | Step::Dedupe { columns: c, .. }
+            | Step::FillDown { columns: c, .. } => rows.extend(columns(c)),
+            Step::Sort { by, .. } => {
+                let named: Vec<String> = by.iter().map(|k| k.column.clone()).collect();
+                rows.extend(columns(&named).into_iter().map(|r| match r {
+                    EditorRow::Column { name, present } => EditorRow::SortBy { name, present },
+                    other => other,
+                }));
+            }
+            Step::Replace { columns: c, find, part, .. } => {
+                rows.push(EditorRow::ReplaceFind);
+                rows.push(EditorRow::ReplaceWith);
+                rows.push(EditorRow::ReplacePart);
+                if !(find.is_empty() && !part) {
+                    rows.push(EditorRow::ReplaceCase);
+                }
+                rows.extend(columns(c));
+            }
+            Step::Split { into, .. } => {
+                rows.push(EditorRow::SplitColumn);
+                rows.push(EditorRow::SplitBy);
+                rows.extend((0..into.len()).map(|index| EditorRow::SplitInto { index }));
+                rows.push(EditorRow::AddSplitPiece);
+            }
             Step::Rename { columns: m, .. } => rows.extend(columns(&m.keys().cloned().collect::<Vec<_>>())),
             Step::Types { columns: m, .. } => {
                 rows.extend(columns(&m.keys().cloned().collect::<Vec<_>>()));
@@ -378,6 +509,30 @@ impl RecipeBuilder {
                     rows.push(EditorRow::FilterValue);
                 }
             }
+            Step::Group { by, totals, .. } => {
+                rows.extend(columns(by).into_iter().map(|r| match r {
+                    EditorRow::Column { name, present } => EditorRow::GroupBy { name, present },
+                    other => other,
+                }));
+                for (index, t) in totals.iter().enumerate() {
+                    rows.push(EditorRow::Total { index, part: TotalPart::Func });
+                    if t.func != TotalFn::CountRows {
+                        rows.push(EditorRow::Total { index, part: TotalPart::Column });
+                    }
+                    rows.push(EditorRow::Total { index, part: TotalPart::Name });
+                    rows.push(EditorRow::Total { index, part: TotalPart::Remove });
+                }
+                rows.push(EditorRow::AddTotal);
+            }
+            Step::Unpivot { keep, .. } => {
+                rows.extend(columns(keep).into_iter().map(|r| match r {
+                    EditorRow::Column { name, present } => EditorRow::Keep { name, present },
+                    other => other,
+                }));
+                rows.push(EditorRow::NamesTo);
+                rows.push(EditorRow::ValuesTo);
+                rows.push(EditorRow::DropEmpty);
+            }
         }
         rows.push(EditorRow::Missing);
         rows
@@ -389,7 +544,9 @@ impl RecipeBuilder {
             Some(Step::Select { columns, .. })
             | Some(Step::Remove { columns, .. })
             | Some(Step::Trim { columns, .. })
-            | Some(Step::Dedupe { columns, .. }) => columns.iter().any(|c| c.eq_ignore_ascii_case(name)),
+            | Some(Step::Dedupe { columns, .. })
+            | Some(Step::FillDown { columns, .. })
+            | Some(Step::Replace { columns, .. }) => columns.iter().any(|c| c.eq_ignore_ascii_case(name)),
             _ => false,
         }
     }
@@ -436,16 +593,103 @@ impl RecipeBuilder {
                     columns.insert(name, next.into());
                 }
             }
-            (EditorRow::Column { .. }, Step::Rename { .. }) => {
+            (EditorRow::Column { .. }, Step::Rename { .. })
+            | (EditorRow::Total { part: TotalPart::Name, .. }, _)
+            | (EditorRow::NamesTo | EditorRow::ValuesTo, _) => {
                 self.text_selected = true;
                 return;
+            }
+            (EditorRow::GroupBy { name, present }, Step::Group { by: list, .. })
+            | (EditorRow::Keep { name, present }, Step::Unpivot { keep: list, .. }) => {
+                if let Some(i) = list.iter().position(|c| c.eq_ignore_ascii_case(&name)) {
+                    list.remove(i);
+                } else if present {
+                    list.push(name);
+                }
+            }
+            (EditorRow::Total { index, part }, Step::Group { totals, .. }) => {
+                let Some(t) = totals.get_mut(index) else { return };
+                // A name still matching its default follows the function and
+                // column; one the user typed stays
+                let was_default = t.name == t.func.default_name(&t.column);
+                match part {
+                    TotalPart::Func => t.func = cycle(&TotalFn::ALL, t.func, back),
+                    TotalPart::Column => {
+                        if !step_columns.is_empty() {
+                            let i = step_columns.iter().position(|c| c.eq_ignore_ascii_case(&t.column));
+                            let n = step_columns.len();
+                            let next = match (i, back) {
+                                (None, _) => 0,
+                                (Some(i), false) => (i + 1) % n,
+                                (Some(i), true) => (i + n - 1) % n,
+                            };
+                            t.column = step_columns[next].clone();
+                        }
+                    }
+                    TotalPart::Remove => {
+                        totals.remove(index);
+                        self.editor_focus = index.saturating_sub(1);
+                        self.changed();
+                        return;
+                    }
+                    TotalPart::Name => return,
+                }
+                if t.func != TotalFn::CountRows && t.column.is_empty() {
+                    t.column = step_columns.first().cloned().unwrap_or_default();
+                }
+                if was_default {
+                    t.name = t.func.default_name(&t.column);
+                }
+            }
+            (EditorRow::AddTotal, Step::Group { totals, .. }) => {
+                let column = step_columns.iter().rev().next().cloned().unwrap_or_default();
+                totals.push(Total { func: TotalFn::Sum, name: TotalFn::Sum.default_name(&column), column });
+            }
+            (EditorRow::DropEmpty, Step::Unpivot { drop_empty, .. }) => *drop_empty = !*drop_empty,
+            // Not sorted → ascending → descending → not sorted; the order the
+            // columns were added decides which comes first
+            (EditorRow::SortBy { name, present }, Step::Sort { by, .. }) => {
+                match by.iter().position(|k| k.column.eq_ignore_ascii_case(&name)) {
+                    None if present => by.push(SortKey { column: name, descending: back }),
+                    None => return,
+                    Some(i) => match (by[i].descending, back) {
+                        (false, false) => by[i].descending = true,
+                        (true, true) => by[i].descending = false,
+                        _ => {
+                            by.remove(i);
+                        }
+                    },
+                }
+            }
+            (EditorRow::ReplacePart, Step::Replace { part, .. }) => *part = !*part,
+            (EditorRow::ReplaceCase, Step::Replace { match_case, .. }) => *match_case = !*match_case,
+            (EditorRow::SplitColumn, Step::Split { column, .. }) => {
+                if !step_columns.is_empty() {
+                    let i = step_columns.iter().position(|c| c.eq_ignore_ascii_case(column));
+                    let n = step_columns.len();
+                    let next = match (i, back) {
+                        (None, _) => 0,
+                        (Some(i), false) => (i + 1) % n,
+                        (Some(i), true) => (i + n - 1) % n,
+                    };
+                    *column = step_columns[next].clone();
+                }
+            }
+            (EditorRow::ReplaceFind | EditorRow::ReplaceWith | EditorRow::SplitBy | EditorRow::SplitInto { .. }, _) => {
+                self.text_selected = true;
+                return;
+            }
+            (EditorRow::AddSplitPiece, Step::Split { column, into, .. }) => {
+                into.push(format!("{column} {}", into.len() + 1));
             }
             (EditorRow::Column { name, present }, step) => {
                 let list = match step {
                     Step::Select { columns, .. }
                     | Step::Remove { columns, .. }
                     | Step::Trim { columns, .. }
-                    | Step::Dedupe { columns, .. } => columns,
+                    | Step::Dedupe { columns, .. }
+                    | Step::FillDown { columns, .. }
+                    | Step::Replace { columns, .. } => columns,
                     _ => return,
                 };
                 if let Some(i) = list.iter().position(|c| c.eq_ignore_ascii_case(&name)) {
@@ -466,6 +710,13 @@ impl RecipeBuilder {
                 Some(columns.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()).unwrap_or_default())
             }
             (EditorRow::FilterValue, Step::Filter { value, .. }) => Some(value.clone()),
+            (EditorRow::Total { index, part: TotalPart::Name }, Step::Group { totals, .. }) => totals.get(*index).map(|t| t.name.clone()),
+            (EditorRow::NamesTo, Step::Unpivot { names_to, .. }) => Some(names_to.clone()),
+            (EditorRow::ValuesTo, Step::Unpivot { values_to, .. }) => Some(values_to.clone()),
+            (EditorRow::ReplaceFind, Step::Replace { find, .. }) => Some(find.clone()),
+            (EditorRow::ReplaceWith, Step::Replace { with, .. }) => Some(with.clone()),
+            (EditorRow::SplitBy, Step::Split { by, .. }) => Some(by.clone()),
+            (EditorRow::SplitInto { index }, Step::Split { into, .. }) => into.get(*index).cloned(),
             _ => None,
         }
     }
@@ -481,6 +732,26 @@ impl RecipeBuilder {
                 }
             }
             (EditorRow::FilterValue, Some(Step::Filter { value, .. })) => *value = text,
+            (EditorRow::Total { index, part: TotalPart::Name }, Some(Step::Group { totals, .. })) => match totals.get_mut(*index) {
+                Some(t) => t.name = text,
+                None => return,
+            },
+            (EditorRow::NamesTo, Some(Step::Unpivot { names_to, .. })) => *names_to = text,
+            (EditorRow::ValuesTo, Some(Step::Unpivot { values_to, .. })) => *values_to = text,
+            (EditorRow::ReplaceFind, Some(Step::Replace { find, .. })) => *find = text,
+            (EditorRow::ReplaceWith, Some(Step::Replace { with, .. })) => *with = text,
+            (EditorRow::SplitBy, Some(Step::Split { by, .. })) => *by = text,
+            // Clearing a third or later name removes that column
+            (EditorRow::SplitInto { index }, Some(Step::Split { into, .. })) => {
+                if text.is_empty() && into.len() > 2 && *index < into.len() {
+                    into.remove(*index);
+                    self.text_selected = false;
+                } else if let Some(name) = into.get_mut(*index) {
+                    *name = text;
+                } else {
+                    return;
+                }
+            }
             _ => return,
         }
         self.changed();
@@ -503,7 +774,43 @@ impl RecipeBuilder {
                 value: String::new(),
                 missing: Missing::Fail,
             },
-            _ => Step::Dedupe { columns: Vec::new(), missing: Missing::Fail },
+            6 => Step::Dedupe { columns: Vec::new(), missing: Missing::Fail },
+            // Group by the first column, counting rows: a useful start
+            7 => Step::Group {
+                by: cols.first().cloned().into_iter().collect(),
+                totals: vec![Total { func: TotalFn::CountRows, column: String::new(), name: "Rows".into() }],
+                missing: Missing::Fail,
+            },
+            8 => Step::Unpivot {
+                keep: cols.first().cloned().into_iter().collect(),
+                names_to: "Attribute".into(),
+                values_to: "Value".into(),
+                drop_empty: true,
+                missing: Missing::Fail,
+            },
+            9 => Step::Sort {
+                by: cols.first().map(|c| SortKey { column: c.clone(), descending: false }).into_iter().collect(),
+                missing: Missing::Fail,
+            },
+            10 => Step::FillDown { columns: Vec::new(), missing: Missing::Fail },
+            // Replaces empty cells with nothing until a value is typed
+            11 => Step::Replace {
+                columns: Vec::new(),
+                find: String::new(),
+                with: String::new(),
+                part: false,
+                match_case: false,
+                missing: Missing::Fail,
+            },
+            _ => {
+                let column = cols.first().cloned().unwrap_or_default();
+                Step::Split {
+                    by: ",".into(),
+                    into: vec![format!("{column} 1"), format!("{column} 2")],
+                    column,
+                    missing: Missing::Fail,
+                }
+            }
         };
         let at = self.selected.map_or(0, |i| i + 1);
         self.recipe.steps.insert(at, step);
@@ -567,17 +874,53 @@ impl RecipeBuilder {
 
     /// Left/Right/Space on a source setting.
     pub fn change_source(&mut self, row: usize, back: bool) {
-        if row == 1 {
+        let name = self.source_rows().get(row).copied().unwrap_or("");
+        if name == "Each refresh reads" {
             return self.toggle_pattern();
         }
-        let src = source_mut(&mut self.recipe);
-        match row {
-            2 => {
+        if let Source::Xlsx(src) = &mut self.recipe.source {
+            match name {
+                "Sheet" if !self.tables.is_empty() => {
+                    let i = self.tables.iter().position(|t| t.eq_ignore_ascii_case(&src.sheet)).unwrap_or(0);
+                    let n = self.tables.len();
+                    src.sheet = self.tables[if back { (i + n - 1) % n } else { (i + 1) % n }].clone();
+                    src.columns.clear();
+                }
+                "Header row" => {
+                    src.header_row = if back { src.header_row.saturating_sub(1) } else { (src.header_row + 1).min(50) };
+                }
+                _ => return,
+            }
+            self.changed();
+            return;
+        }
+        if name == "Table" {
+            if let Source::Duckdb(src) = &mut self.recipe.source {
+                if self.tables.is_empty() {
+                    return;
+                }
+                let i = self.tables.iter().position(|t| t.eq_ignore_ascii_case(&src.table));
+                let n = self.tables.len();
+                let next = match (i, back) {
+                    (None, _) => 0,
+                    (Some(i), false) => (i + 1) % n,
+                    (Some(i), true) => (i + n - 1) % n,
+                };
+                src.table = self.tables[next].clone();
+                // The saved column list was for the other table
+                src.columns.clear();
+                self.changed();
+            }
+            return;
+        }
+        let Some(src) = csv_mut(&mut self.recipe) else { return };
+        match name {
+            "Delimiter" => {
                 let all: [Option<&str>; 5] = [None, Some(","), Some(";"), Some("tab"), Some("|")];
                 let current = all.iter().position(|d| delimiter_value(&d.map(String::from)) == delimiter_value(&src.delimiter)).unwrap_or(0);
                 src.delimiter = cycle(&[0usize, 1, 2, 3, 4], current, back).pipe(|i| all[i].map(String::from));
             }
-            3 => {
+            "Encoding" => {
                 let all: [Option<&str>; 4] = [None, Some("utf-8"), Some("windows-1252"), Some("utf-16")];
                 let current = all
                     .iter()
@@ -585,10 +928,10 @@ impl RecipeBuilder {
                     .unwrap_or(0);
                 src.encoding = cycle(&[0usize, 1, 2, 3], current, back).pipe(|i| all[i].map(String::from));
             }
-            4 => {
+            "Header line" => {
                 src.header_row = if back { src.header_row.saturating_sub(1) } else { (src.header_row + 1).min(50) };
             }
-            5 => src.decimal_comma = !src.decimal_comma,
+            "Decimal mark" => src.decimal_comma = !src.decimal_comma,
             _ => return,
         }
         self.changed();
@@ -596,9 +939,18 @@ impl RecipeBuilder {
 
     /// Switch between reading this file and the newest file like it
     /// (`export-2026-09.csv` <-> `export-*-*.csv`, in the same folder).
+    /// This file only → Newest match → All matching files (Append folder,
+    /// not for DuckDB) → This file only.
     pub fn toggle_pattern(&mut self) {
-        let stored = source(&self.recipe).path.clone();
+        let stored = self.recipe.source.path().to_string();
         let current = Path::new(&stored);
+        let can_append = !matches!(self.recipe.source, Source::Duckdb(_));
+        if self.recipe.source_is_pattern() && !self.recipe.source.combine() && can_append {
+            self.recipe.source.set_combine(true);
+            self.reload();
+            self.changed();
+            return;
+        }
         let name = if self.recipe.source_is_pattern() {
             self.source_path.file_name().and_then(|n| n.to_str()).map(str::to_string)
         } else {
@@ -608,16 +960,55 @@ impl RecipeBuilder {
             self.error = Some("This file's name has no date or number to match next month's by.".into());
             return;
         };
-        source_mut(&mut self.recipe).path = current.with_file_name(name).display().to_string();
+        self.recipe.source.set_combine(false);
+        self.recipe.source.set_path(current.with_file_name(name).display().to_string());
+        self.reload();
         self.changed();
     }
 
     /// What a source setting shows, and a hint below it.
     pub fn source_value(&self, row: usize) -> (String, String) {
-        let src = source(&self.recipe);
         let info = self.info.as_ref();
-        match row {
-            0 => {
+        let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Xlsx(src) = &self.recipe.source {
+            match name {
+                "Sheet" => {
+                    let shown = if src.sheet.is_empty() { self.tables.first().cloned().unwrap_or_else(|| "First sheet".into()) } else { src.sheet.clone() };
+                    let hint = match self.tables.len() {
+                        0 => "Can't list this workbook's sheets.".to_string(),
+                        1 => "The only sheet in this workbook.".to_string(),
+                        n => format!("{n} sheets in this workbook. Saved by name, so reordering them is safe."),
+                    };
+                    return (shown, hint);
+                }
+                "Header row" => {
+                    return if src.header_row == 0 {
+                        ("None".into(), "No header; columns are named by letter.".into())
+                    } else if src.header_row == 1 {
+                        ("Row 1".into(), String::new())
+                    } else {
+                        (format!("Row {}", src.header_row), format!("Rows 1–{} skipped.", src.header_row - 1))
+                    };
+                }
+                _ => {}
+            }
+        }
+        if let Source::Duckdb(src) = &self.recipe.source {
+            if name == "Table" {
+                let hint = match self.tables.len() {
+                    0 => "Can't list this database's tables.".to_string(),
+                    1 => "The only table in this database.".to_string(),
+                    n => format!("{n} tables in this database."),
+                };
+                let table = if src.table.is_empty() { "None chosen".into() } else { src.table.clone() };
+                return (table, hint);
+            }
+        }
+        let path_shown = self.recipe.source.path().to_string();
+        let csv_default = CsvSource { path: String::new(), delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: Vec::new(), combine: false };
+        let src = csv(&self.recipe).unwrap_or(&csv_default);
+        match name {
+            "File" => {
                 let dir = self.source_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
                 let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
                 let dir = match dir.strip_prefix(&home) {
@@ -626,10 +1017,16 @@ impl RecipeBuilder {
                 };
                 (self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(), dir)
             }
-            1 => {
+            "Each refresh reads" => {
                 let file = self.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if self.recipe.source_is_pattern() {
-                    let pattern = Path::new(&src.path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                let pattern = Path::new(&path_shown).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                if self.recipe.source.combine() && self.recipe.source_is_pattern() {
+                    let n = self.snapshot.as_ref().map_or(0, |s| s.file_count());
+                    (
+                        "All matching files".into(),
+                        format!("Appends every {pattern}, with a Source file column. Now {n} file{}.", if n == 1 { "" } else { "s" }),
+                    )
+                } else if self.recipe.source_is_pattern() {
                     ("Newest match".into(), format!("The newest {pattern}, so next month's export is picked up by itself. Now: {file}."))
                 } else {
                     match recipe::suggest_pattern(file) {
@@ -638,15 +1035,15 @@ impl RecipeBuilder {
                     }
                 }
             }
-            2 => match delimiter_value(&src.delimiter) {
+            "Delimiter" => match delimiter_value(&src.delimiter) {
                 None => (format!("Detected · {}", info.map_or("Comma", |i| delimiter_name(i.delimiter))), "Read from the header line down.".into()),
                 Some(d) => (delimiter_name(d).into(), String::new()),
             },
-            3 => match src.encoding.as_deref() {
+            "Encoding" => match src.encoding.as_deref() {
                 None => (format!("Detected · {}", info.map_or("UTF-8", |i| i.encoding.label())), String::new()),
                 Some(e) => (Encoding::parse(e).map_or(e, |e| e.label()).to_string(), String::new()),
             },
-            4 => {
+            "Header line" => {
                 if src.header_row == 0 {
                     ("None".into(), "No header; columns are named by letter.".into())
                 } else {
@@ -661,13 +1058,14 @@ impl RecipeBuilder {
                     (format!("Line {}", src.header_row), hint)
                 }
             }
-            _ => {
+            "Decimal mark" => {
                 if src.decimal_comma {
                     ("Comma · 1.234,56".into(), String::new())
                 } else {
                     ("Point · 1,234.56".into(), String::new())
                 }
             }
+            _ => (String::new(), String::new()),
         }
     }
 
@@ -740,6 +1138,31 @@ impl Spreadsheet {
     /// it was opened with some.
     pub fn new_recipe_from_file(&mut self, csv_path: &Path, options: Option<&CsvOptions>, cx: &mut Context<Self>) {
         let csv_path = std::path::absolute(csv_path).unwrap_or_else(|_| csv_path.to_path_buf());
+        // Parquet and DuckDB carry their own column names and types: no
+        // source settings to guess (a DuckDB recipe starts on its first table)
+        let lower = csv_path.to_string_lossy().to_lowercase();
+        let excel = [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e));
+        if lower.ends_with(".parquet") || lower.ends_with(".duckdb") || excel {
+            // DuckDB starts on its first table; Excel on its first sheet, kept
+            // by name, with the header row guessed below any title rows
+            let table = if excel {
+                recipe::xlsx_sheet_names(&csv_path).ok().and_then(|names| names.into_iter().next())
+            } else {
+                lower.ends_with(".duckdb").then(|| duckdb_tables(&csv_path).into_iter().next().unwrap_or_default())
+            };
+            let mut source = Source::for_file(csv_path.display().to_string(), table);
+            if let (Source::Xlsx(src), Ok(snap)) = (&mut source, Snapshot::read(&csv_path)) {
+                src.header_row = recipe::guess_xlsx_header_row(&snap, &src.sheet);
+            }
+            let recipe = Recipe { version: RECIPE_VERSION, source, steps: Vec::new() };
+            self.recipe_builder = Some(RecipeBuilder::new(recipe, None, csv_path, None));
+            if let Some(b) = self.recipe_builder.as_mut() {
+                b.dirty = true;
+            }
+            self.mode = Mode::RecipeBuilder;
+            cx.notify();
+            return;
+        }
         let mut src = CsvSource {
             path: csv_path.display().to_string(),
             delimiter: None,
@@ -747,6 +1170,7 @@ impl Spreadsheet {
             header_row: 1,
             decimal_comma: false,
             columns: Vec::new(),
+            combine: false,
         };
         let mut steps = Vec::new();
         if let Some(o) = options {
@@ -831,9 +1255,10 @@ impl Spreadsheet {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(b) = this.recipe_builder.as_mut() {
                             let recipe_dir = b.recipe_path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
-                            source_mut(&mut b.recipe).path = stored_source_path(&path, recipe_dir.as_deref());
-                            b.snapshot = Snapshot::read(&path);
+                            b.recipe.source.set_path(stored_source_path(&path, recipe_dir.as_deref()));
                             b.source_path = path;
+                            b.reload();
+                            b.refresh_tables();
                             b.changed();
                         }
                         cx.notify();
@@ -877,9 +1302,9 @@ impl Spreadsheet {
         // A recipe not yet named stores its source relative to where it lands
         if b.recipe_path.as_ref() != Some(&path) {
             let stored = stored_source_path(&b.source_path, path.parent());
-            source_mut(&mut b.recipe).path = if b.recipe.source_is_pattern() {
+            let new_path = if b.recipe.source_is_pattern() {
                 // Keep the pattern; only where it is looked for changes
-                let pattern = Path::new(&source(&b.recipe).path).file_name().map(|n| n.to_os_string());
+                let pattern = Path::new(b.recipe.source.path()).file_name().map(|n| n.to_os_string());
                 match pattern {
                     Some(p) => Path::new(&stored).with_file_name(p).display().to_string(),
                     None => stored,
@@ -887,10 +1312,11 @@ impl Spreadsheet {
             } else {
                 stored
             };
+            b.recipe.source.set_path(new_path);
         }
         // The columns drift is checked against next time
         if !b.file_columns.is_empty() {
-            source_mut(&mut b.recipe).columns = b.file_columns.clone();
+            *b.recipe.source.columns_mut() = b.file_columns.clone();
         }
         if let Err(e) = b.recipe.save(&path) {
             b.error = Some(format!("Couldn't save the recipe: {e}"));
@@ -947,7 +1373,11 @@ impl Spreadsheet {
                 "up" => b.add_menu = Some(i.saturating_sub(1)),
                 "down" => b.add_menu = Some((i + 1).min(ADD_KINDS.len() - 1)),
                 "enter" | "space" => b.add_step(i),
-                k if k.len() == 1 && ('1'..='7').contains(&k.chars().next().unwrap()) => {
+                // 1-9, then a b c d for the rest
+                k if k.len() == 1 && ('a'..='d').contains(&k.chars().next().unwrap()) => {
+                    b.add_step(9 + (k.as_bytes()[0] - b'a') as usize)
+                }
+                k if k.len() == 1 && ('1'..='9').contains(&k.chars().next().unwrap()) => {
                     b.add_step(k.parse::<usize>().unwrap() - 1)
                 }
                 _ => {}
@@ -995,7 +1425,7 @@ impl Spreadsheet {
         match b.pane {
             Pane::Source => match key.key.as_str() {
                 "up" => b.source_focus = b.source_focus.saturating_sub(1),
-                "down" => b.source_focus = (b.source_focus + 1).min(SOURCE_ROWS.len() - 1),
+                "down" => b.source_focus = (b.source_focus + 1).min(b.source_rows().len() - 1),
                 "enter" | "space" if b.source_focus == 0 => {
                     self.recipe_builder_choose_file(cx);
                     return;
@@ -1111,6 +1541,7 @@ mod tests {
                 header_row: 1,
                 decimal_comma: false,
                 columns: vec![],
+                combine: false,
             }),
             steps,
         };
@@ -1179,15 +1610,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("export-2026-09.csv");
         std::fs::write(&file, "ID\n1\n").unwrap();
+        let other = dir.path().join("export-2026-08.csv");
+        std::fs::write(&other, "ID\n2\n").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        for f in [&file, &other] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(old).unwrap();
+        }
         b.source_path = file.clone();
-        b.recipe.source = Source::Csv(CsvSource { path: file.display().to_string(), delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: vec![] });
+        b.recipe.source = Source::Csv(CsvSource { path: file.display().to_string(), delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: vec![], combine: false });
         b.change_source(1, false);
         assert!(b.recipe.source_is_pattern());
         assert_eq!(b.source_value(1).0, "Newest match");
         assert!(b.source_value(1).1.contains("export-*-*.csv"));
+        // Third state: Append folder, previewing every matching file
+        b.change_source(1, false);
+        assert!(b.recipe.source.combine());
+        assert_eq!(b.source_value(1).0, "All matching files");
+        assert_eq!(b.snapshot.as_ref().unwrap().file_count(), 2);
+        assert_eq!(b.preview.as_ref().unwrap().total_rows, 2);
+        assert!(b.file_columns.iter().any(|c| c == "Source file"));
         b.change_source(1, false);
         assert!(!b.recipe.source_is_pattern());
-        assert_eq!(super::source(&b.recipe).path, file.display().to_string());
+        assert!(!b.recipe.source.combine());
+        assert_eq!(b.recipe.source.path(), file.display().to_string());
     }
 
     #[test]
@@ -1200,5 +1645,90 @@ mod tests {
         assert_eq!(stored_source_path(Path::new("/e/x.csv"), Some(Path::new("/d"))), "/e/x.csv");
         assert_eq!(cli_line(Some(Path::new("/d/my orders.recipe.toml")), Path::new("x.csv")), "vgrid recipe run 'my orders.recipe.toml' -o 'my orders.csv'");
         assert_eq!(cli_line(None, Path::new("/d/export-09.csv")), "vgrid recipe run export-09.recipe.toml -o export-09-clean.csv");
+    }
+
+    #[test]
+    fn group_and_unpivot_editors() {
+        use super::TotalPart;
+        let mut b = builder("Region,Jan,Feb\nWest,1,2\nEast,3,4\nWest,5,6\n", vec![]);
+        b.add_step(8); // Unpivot: keep the first column
+        assert!(matches!(b.step(), Some(Step::Unpivot { keep, .. }) if keep == &vec!["Region".to_string()]));
+        assert_eq!(b.preview.as_ref().unwrap().total_rows, 6);
+        // Rename the value column by typing
+        let values = b.editor_rows().iter().position(|r| *r == EditorRow::ValuesTo).unwrap();
+        b.editor_focus = values;
+        b.text_selected = true;
+        for ch in ["S", "a", "l", "e", "s"] {
+            b.type_text(&Keystroke { key: ch.into(), key_char: Some(ch.into()), modifiers: Modifiers::default(), ..Default::default() }, None);
+        }
+        assert_eq!(b.preview.as_ref().unwrap().columns[2].name, "Sales");
+
+        b.add_step(7); // Group by: Region, counting rows
+        let p = b.preview.as_ref().unwrap();
+        assert_eq!(p.rows, vec![vec!["West", "4"], vec!["East", "2"]]);
+        // Add a total: a sum of the last column (Sales), named by default
+        let add = b.editor_rows().iter().position(|r| *r == EditorRow::AddTotal).unwrap();
+        b.activate_row(add, false);
+        let p = b.preview.as_ref().unwrap();
+        assert_eq!(p.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Region", "Rows", "Total Sales"]);
+        assert_eq!(p.rows[0], vec!["West", "4", "14"]);
+        // Cycle its function: the default name follows
+        let func = b.editor_rows().iter().position(|r| *r == EditorRow::Total { index: 1, part: TotalPart::Func }).unwrap();
+        b.activate_row(func, false); // sum -> count
+        assert_eq!(b.preview.as_ref().unwrap().columns[2].name, "Count of Sales");
+        let remove = b.editor_rows().iter().position(|r| *r == EditorRow::Total { index: 1, part: TotalPart::Remove }).unwrap();
+        b.activate_row(remove, false);
+        assert_eq!(b.preview.as_ref().unwrap().columns.len(), 2);
+    }
+
+    fn type_into(b: &mut RecipeBuilder, row: EditorRow, text: &str) {
+        b.editor_focus = b.editor_rows().iter().position(|r| *r == row).unwrap();
+        b.text_selected = true;
+        for ch in text.chars() {
+            let ch = ch.to_string();
+            b.type_text(&Keystroke { key: ch.clone(), key_char: Some(ch), modifiers: Modifiers::default(), ..Default::default() }, None);
+        }
+    }
+
+    #[test]
+    fn sort_fill_replace_and_split_editors() {
+        let mut b = builder("Name,Region,Amount\n\"Doe, Jane\",West,9\n\"Roe, Rick\",,10\n\"Poe, Ed\",East,n/a\n", vec![]);
+        b.add_step(9); // Sort: by the first column, ascending
+        assert_eq!(b.preview.as_ref().unwrap().rows[0][0], "Doe, Jane");
+        let amount = EditorRow::SortBy { name: "Amount".into(), present: true };
+        let at = b.editor_rows().iter().position(|r| *r == amount).unwrap();
+        b.activate_row(at, false); // Amount ascending, after Name
+        b.activate_row(at, false); // descending
+        assert!(matches!(b.step(), Some(Step::Sort { by, .. }) if by.len() == 2 && by[1].descending));
+        b.activate_row(at, false); // off again
+        assert!(matches!(b.step(), Some(Step::Sort { by, .. }) if by.len() == 1));
+
+        b.add_step(10); // Fill down: nothing checked, nothing changes
+        let region = b.editor_rows().iter().position(|r| *r == EditorRow::Column { name: "Region".into(), present: true }).unwrap();
+        b.activate_row(region, false);
+        assert_eq!(b.preview.as_ref().unwrap().rows.iter().map(|r| r[1].as_str()).collect::<Vec<_>>(), ["West", "East", "East"]);
+
+        b.add_step(11); // Replace: empty cells with nothing, a no-op
+        type_into(&mut b, EditorRow::ReplaceFind, "n/a");
+        type_into(&mut b, EditorRow::ReplaceWith, "0");
+        assert_eq!(b.preview.as_ref().unwrap().rows[1][2], "0");
+        assert!(b.editor_rows().contains(&EditorRow::ReplaceCase));
+
+        b.add_step(12); // Split the first column at ","
+        type_into(&mut b, EditorRow::SplitBy, ", ");
+        type_into(&mut b, EditorRow::SplitInto { index: 0 }, "Last");
+        type_into(&mut b, EditorRow::SplitInto { index: 1 }, "First");
+        let p = b.preview.as_ref().unwrap();
+        assert_eq!(p.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Last", "First", "Region", "Amount"]);
+        assert_eq!(p.rows[0], vec!["Doe", "Jane", "West", "9"]);
+        // A third column, then clearing its name removes it again
+        let add = b.editor_rows().iter().position(|r| *r == EditorRow::AddSplitPiece).unwrap();
+        b.activate_row(add, false);
+        assert_eq!(b.preview.as_ref().unwrap().columns.len(), 5);
+        b.editor_focus = b.editor_rows().iter().position(|r| *r == EditorRow::SplitInto { index: 2 }).unwrap();
+        b.text_selected = true;
+        b.type_text(&Keystroke { key: "backspace".into(), key_char: None, modifiers: Modifiers::default(), ..Default::default() }, None);
+        assert_eq!(b.preview.as_ref().unwrap().columns.len(), 4);
+        assert_eq!(super::step_kind(b.step().unwrap()), "Split column");
     }
 }

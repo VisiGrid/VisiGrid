@@ -723,7 +723,8 @@ fn calculate_selection_stats(app: &Spreadsheet, cx: &App) -> Vec<Div> {
         ];
     }
 
-    let sum: f64 = values.iter().sum();
+    // The same compensated sum as =SUM, so the two always agree
+    let sum = visigrid_engine::numeric::sum(&values);
     let avg = sum / values.len() as f64;
     let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);

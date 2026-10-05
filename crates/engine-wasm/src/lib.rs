@@ -86,6 +86,53 @@ pub fn function_names() -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// Whether the engine can compute each formula: the functions it would not
+/// recognise, and any syntax it cannot parse. Takes `["=SUM(A1:A3)", ...]`
+/// (formulas with their leading `=`; anything else is a literal and always
+/// supported) and returns `[{ supported, unknown_functions, parse_error? }]`
+/// in the same order.
+///
+/// This is the per-workbook gate for making the engine authoritative: a
+/// function-name list alone cannot tell `f(3)` inside
+/// `LET(f, LAMBDA(x, x*2), f(3))` from an unknown function `F`, and cannot
+/// see syntax the parser rejects. The analysis is the engine's own.
+#[wasm_bindgen]
+pub fn check_formulas(input: JsValue) -> Result<JsValue, JsValue> {
+    let formulas: Vec<String> =
+        serde_wasm_bindgen::from_value(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&check_formulas_core(&formulas)).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub(crate) struct FormulaSupport {
+    pub(crate) supported: bool,
+    pub(crate) unknown_functions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parse_error: Option<String>,
+}
+
+pub(crate) fn check_formulas_core(formulas: &[String]) -> Vec<FormulaSupport> {
+    use visigrid_engine::formula::{analyze, parser};
+    formulas
+        .iter()
+        .map(|raw| {
+            if !raw.starts_with('=') {
+                return FormulaSupport { supported: true, unknown_functions: Vec::new(), parse_error: None };
+            }
+            match parser::parse(raw) {
+                Err(e) => FormulaSupport { supported: false, unknown_functions: Vec::new(), parse_error: Some(e) },
+                Ok(expr) => {
+                    let mut counts = std::collections::HashMap::new();
+                    analyze::tally_unknown_functions(&expr, &mut counts);
+                    let mut unknown: Vec<String> = counts.into_keys().collect();
+                    unknown.sort();
+                    FormulaSupport { supported: unknown.is_empty(), unknown_functions: unknown, parse_error: None }
+                }
+            }
+        })
+        .collect()
+}
+
 /// Build a workbook from raw input sheets and recompute it (shared by every
 /// export). Cells are written directly onto sheets, so the dependency graph
 /// is rebuilt before the ordered recompute (io::json::import_any pattern).
@@ -695,3 +742,44 @@ mod stamp_tests {
         println!("STAMP={stamp}");
     }
 }
+
+#[cfg(test)]
+mod check_formulas_tests {
+    use super::*;
+
+    fn check(f: &str) -> FormulaSupport {
+        check_formulas_core(&[f.to_string()]).remove(0)
+    }
+
+    #[test]
+    fn known_functions_let_names_and_constants_are_supported() {
+        for f in [
+            "=SUM(A1:A3)",
+            "=LARGE(A1:A9,2)+MINIFS(B1:B9,C1:C9,\">1\")",
+            "=LET(f,LAMBDA(x,x*2),f(3))",
+            "=LAMBDA(x,x+1)(2)",
+            "=SUM({1,2;3,4})",
+            "=TEXTSPLIT(A1,\",\")",
+            "plain text",
+            "42",
+        ] {
+            assert!(check(f).supported, "{f}: {:?}", check(f));
+        }
+    }
+
+    #[test]
+    fn unknown_functions_are_named() {
+        let got = check("=BYROW(A1:A3,LAMBDA(r,SUM(r)))+MAP(1,2)");
+        assert!(!got.supported);
+        assert_eq!(got.unknown_functions, vec!["BYROW".to_string(), "MAP".to_string()]);
+        assert_eq!(got.parse_error, None);
+    }
+
+    #[test]
+    fn unparseable_formulas_are_unsupported_with_the_reason() {
+        let got = check("=SUM(1,");
+        assert!(!got.supported);
+        assert!(got.parse_error.is_some());
+    }
+}
+

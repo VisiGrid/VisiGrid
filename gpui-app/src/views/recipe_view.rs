@@ -4,7 +4,6 @@
 //! State and actions live in `recipe_ui.rs`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -102,7 +101,7 @@ pub(crate) fn render_recipe_strip(app: &Spreadsheet, cx: &mut Context<Spreadshee
         .recipe_blocked
         .as_ref()
         .is_some_and(|b| b.target == RecipeTarget::Table(table.id));
-    let recipe_path = PathBuf::from(&source.recipe);
+    let recipe_path = app.recipe_link_path(&source.recipe);
     let detail = match &source.refreshed {
         Some(s) if blocked_here => format!(
             "last good refresh {} from {} · {} rows · the latest refresh didn't publish",
@@ -252,7 +251,7 @@ fn problems(b: &RecipeBlocked, c: &Colors, cx: &mut Context<Spreadsheet>) -> Vec
                     actions.push(
                         action(
                             format!("recipe-use-{}-{name}", step.index),
-                            if is_primary { format!("Use {new}  ↵") } else { format!("Use {new}") },
+                            if is_primary { format!("Use {new}  Ctrl+↵") } else { format!("Use {new}") },
                             true,
                             c,
                             cx,
@@ -297,7 +296,14 @@ fn problems(b: &RecipeBlocked, c: &Colors, cx: &mut Context<Spreadsheet>) -> Vec
         };
         let count = if capped_single { b.report.error_count } else { errors.len() };
         let reason = errors[0].reason.clone();
-        let examples: Vec<String> = errors.iter().take(3).map(|e| format!("line {} \"{}\"", e.line, e.value)).collect();
+        let examples: Vec<String> = errors
+            .iter()
+            .take(3)
+            .map(|e| {
+                let file = if e.file.is_empty() { String::new() } else { format!("{} ", e.file) };
+                format!("{file}line {} \"{}\"", e.line, e.value)
+            })
+            .collect();
         out.push(Problem {
             title: format!(
                 "{count} value{} in {} {} {reason} (step {step}, {})",

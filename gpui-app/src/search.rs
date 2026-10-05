@@ -176,6 +176,7 @@ pub enum CommandId {
     RefreshRecipeTable,
     EditRecipe,
     NewRecipe,
+    UnlinkRecipe,
     PrintPreview,
     ExportTsv,
     ExportJson,
@@ -414,6 +415,7 @@ impl CommandId {
             Self::RefreshRecipeTable => "Refresh Table from Recipe",
             Self::EditRecipe => "Edit Import Recipe",
             Self::NewRecipe => "New Import Recipe…",
+            Self::UnlinkRecipe => "Unlink Table from Recipe",
             Self::PrintPreview => "Print",
             Self::ExportTsv => "Export as TSV",
             Self::ExportJson => "Export as JSON",
@@ -708,6 +710,7 @@ impl CommandId {
             Self::RefreshRecipeTable => "recipe import refresh reload query power query update table next month export",
             Self::EditRecipe => "recipe import edit steps toml power query transform",
             Self::NewRecipe => "recipe import new create csv clean shape steps power query transform get data",
+            Self::UnlinkRecipe => "recipe unlink detach disconnect table stop refreshing source",
             Self::PrintPreview => "printer print preview copies pages paper",
             Self::ExportTsv => "save tab separated",
             Self::ExportJson => "save array",
@@ -906,6 +909,7 @@ impl CommandId {
             Self::RefreshRecipeTable,
             Self::EditRecipe,
             Self::NewRecipe,
+            Self::UnlinkRecipe,
             Self::PrintPreview,
             Self::ExportTsv,
             Self::ExportJson,
@@ -1028,6 +1032,7 @@ impl CommandId {
             | Self::RefreshRecipeTable
             | Self::EditRecipe
             | Self::NewRecipe
+            | Self::UnlinkRecipe
             | Self::ExportCsv
             | Self::ExportTsv
             | Self::ExportJson

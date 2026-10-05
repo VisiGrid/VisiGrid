@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use visigrid_engine::cell::{CellFormat, ValueRef};
-use visigrid_engine::sheet::SheetId;
+use visigrid_engine::sheet::{SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::table::{self, RefreshStamp, TableId, TableRange, TableSource};
 use visigrid_engine::workbook::Workbook;
 
@@ -48,7 +48,16 @@ pub fn new_workbook(output: &RecipeOutput, table_name: &str, link: TableSource) 
         end_row: output.rows.len(),
         end_col: output.columns.len() - 1,
     };
-    let id = wb.create_table(sheet_id, range, table_name)?.table_id();
+    // The recipe's file name may be a function's (sum, date, db) or
+    // otherwise not usable as a Table name: fall back rather than fail
+    let mut created = Err(String::new());
+    for name in [table_name.to_string(), format!("{table_name}_table"), "Table1".to_string()] {
+        created = wb.create_table(sheet_id, range, &name);
+        if created.is_ok() {
+            break;
+        }
+    }
+    let id = created?.table_id();
     wb.set_table_source(id, Some(link))?;
     wb.rebuild_dep_graph();
     wb.recompute_full_ordered();
@@ -140,6 +149,18 @@ pub fn refresh_table(
             sheet.clear_cell(row, col);
         }
     }
+    // A sheet made from a recipe is sized to its first result; a larger
+    // refresh needs room before the Table can grow into it
+    if range.end_row >= NUM_ROWS || range.end_col >= NUM_COLS {
+        return Err(format!(
+            "The new result needs {} rows × {} columns from {}, more than a sheet holds",
+            output.rows.len() + 1,
+            width,
+            visigrid_engine::formula::parser::column_letters_pub(c0)
+        ));
+    }
+    sheet.rows = sheet.rows.max(range.end_row + 1);
+    sheet.cols = sheet.cols.max(range.end_col + 1);
     // resize_table names added columns from the header cells beside the Table
     for (c, name) in names.iter().enumerate().skip(old.columns.len()) {
         sheet.set_text(r0, c0 + c, name);
@@ -278,6 +299,37 @@ columns = { Amount = "number" }
     }
 
     #[test]
+    fn a_recipe_beside_the_workbook_is_saved_relative_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, report) = result("ID,Amount\n1,10\n");
+        let recipe = dir.path().join("recipes").join("orders.recipe.toml");
+        let link = TableSource { recipe: recipe.display().to_string(), refreshed: Some(stamp(&report, Path::new("orders.csv"))) };
+        let wb = new_workbook(&out, "orders", link).unwrap();
+        let stored = |path: &Path| -> String {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0)).unwrap()
+        };
+        let path = dir.path().join("book.sheet");
+        crate::native::save_workbook(&wb, &path).unwrap();
+        assert!(stored(&path).contains(r#""recipe":"recipes/orders.recipe.toml""#), "{}", stored(&path));
+        // The workbook in memory keeps its absolute link
+        assert_eq!(table(&wb).1.source.unwrap().recipe, recipe.display().to_string());
+        // Loading resolves it against the workbook's folder, wherever that now is
+        let moved = tempfile::tempdir().unwrap();
+        std::fs::copy(&path, moved.path().join("book.sheet")).unwrap();
+        let back = crate::native::load_workbook(&moved.path().join("book.sheet")).unwrap();
+        assert_eq!(Path::new(&table(&back).1.source.unwrap().recipe), moved.path().join("recipes/orders.recipe.toml"));
+        // Save As elsewhere keeps pointing at the same recipe: a recipe
+        // outside the new folder stays absolute
+        let back = crate::native::load_workbook(&path).unwrap();
+        let far = tempfile::tempdir().unwrap();
+        let path = far.path().join("book.sheet");
+        crate::native::save_workbook(&back, &path).unwrap();
+        let back = crate::native::load_workbook(&path).unwrap();
+        assert_eq!(Path::new(&table(&back).1.source.unwrap().recipe), recipe);
+    }
+
+    #[test]
     fn recipe_link_survives_native_save_as_catalog_v4() {
         let (out, report) = result("ID,Amount\n1,10\n");
         let wb = new_workbook(&out, "orders", link(&report)).unwrap();
@@ -287,6 +339,34 @@ columns = { Amount = "number" }
         crate::native::save_workbook(&wb, &path).unwrap();
         let back = crate::native::load_workbook(&path).unwrap();
         let (_, t) = table(&back);
+        // Kept as written on every platform: on Windows `/data/…` has no drive,
+        // and must not be moved under the workbook's
         assert_eq!(t.source.unwrap().recipe, "/data/orders.recipe.toml");
+    }
+
+    #[test]
+    fn a_recipe_named_like_a_function_still_gets_a_table() {
+        let (out, report) = result("ID,Amount\n1,10\n");
+        for name in ["db", "sum", "date"] {
+            let wb = new_workbook(&out, name, link(&report)).unwrap();
+            assert_eq!(table(&wb).1.name, format!("{name}_table"));
+        }
+    }
+
+    #[test]
+    fn refresh_grows_past_the_sheet_size_the_first_result_gave_it() {
+        let (out, report) = result("ID,Amount\n1,10\n");
+        let mut wb = new_workbook(&out, "orders", link(&report)).unwrap();
+        let (sheet_id, t) = table(&wb);
+        let before = wb.sheet_by_id(sheet_id).unwrap().rows;
+        let mut csv = String::from("ID,Amount\n");
+        for i in 0..before + 500 {
+            csv.push_str(&format!("{i},{i}\n"));
+        }
+        let (out, report) = result(&csv);
+        refresh_table(&mut wb, t.id, &out, link(&report)).unwrap();
+        let (_, t) = table(&wb);
+        assert_eq!(t.range.end_row, before + 500);
+        assert_eq!(wb.sheet_by_id(sheet_id).unwrap().get_display(before + 500, 0), (before + 499).to_string());
     }
 }

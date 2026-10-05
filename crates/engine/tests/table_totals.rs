@@ -88,6 +88,54 @@ fn native_book() -> (Workbook, visigrid_engine::table::TableId) {
 }
 
 #[test]
+fn table_subtotals_share_compensated_summation_with_sum_and_average() {
+    let mut wb = book();
+    for (row, value) in ["10000000000000000", "1", "-10000000000000000"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, row + 1, 1, value);
+        wb.set_cell_value_tracked(0, row + 1, 0, "West");
+    }
+    let (sid, table) = wb.tables().next().unwrap();
+    let mut spec = TableViewSpec::new(table.id);
+    spec.filters.push(TableFilter {
+        column: table.columns[0].id,
+        criteria: ColumnFilter {
+            selected: Some([NormalizedFilterKey::Text("west".into())].into()),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_computed_value(4, 1).to_number().unwrap(), 1.0);
+    for (formula, expected) in [
+        ("=SUM(Sales[Amount])", 1.0),
+        ("=SUBTOTAL(9,Sales[Amount])", 1.0),
+        ("=SUBTOTAL(109,Sales[Amount])", 1.0),
+        ("=AVERAGE(Sales[Amount])", 1.0 / 3.0),
+        ("=SUBTOTAL(1,Sales[Amount])", 1.0 / 3.0),
+        ("=SUBTOTAL(101,Sales[Amount])", 1.0 / 3.0),
+    ] {
+        wb.set_cell_value_tracked(0, 0, 4, formula);
+        assert_eq!(wb.sheet(0).unwrap().get_computed_value(0, 4).to_number().unwrap(), expected, "{formula}");
+    }
+    wb.set_cell_value_tracked(0, 2, 0, "East");
+    assert_eq!(wb.sheet(0).unwrap().get_computed_value(4, 1).to_number().unwrap(), 0.0);
+}
+
+#[test]
+fn cycle_cache_can_mark_protected_totals_without_replacing_the_formula() {
+    let mut wb = book();
+    let sheet = wb.sheet_mut(0).unwrap();
+    let formula = sheet.get_raw(4, 1);
+    let generation = sheet.edit_generation();
+    sheet.set_cycle_error(4, 1);
+    assert!(sheet.is_cycle_error(4, 1));
+    assert_eq!(sheet.get_display(4, 1), "#CYCLE!");
+    assert_eq!(sheet.get_raw(4, 1), formula);
+    assert_eq!(sheet.edit_generation(), generation);
+    wb.recompute_full_ordered();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "60");
+}
+
+#[test]
 fn append_moves_footer_values_format_and_comments_in_one_replayable_commit() {
     use visigrid_engine::cell::{CellComment, NumberFormat};
     let (mut wb, id) = native_book();

@@ -257,7 +257,7 @@ pub fn structure_target_sheet(op: &StructureOp, active: usize) -> usize {
         | StructureOp::DeleteCols { sheet, .. }
         | StructureOp::RenameSheet { sheet, .. }
         | StructureOp::CreatePivot { sheet, .. } => sheet.unwrap_or(active),
-        StructureOp::AddSheet { .. } | StructureOp::RefreshPivot { .. } => active,
+        StructureOp::AddSheet { .. } | StructureOp::RefreshPivot { .. } | StructureOp::RefreshRecipeTable { .. } => active,
     }
 }
 
@@ -386,7 +386,9 @@ pub fn validate_structure_op(
 ) -> Option<(&'static str, String, Option<String>)> {
     let sheet_count = wb.sheets().len();
     let target = structure_target_sheet(op, wb.active_sheet_index());
-    if !matches!(op, StructureOp::AddSheet { .. } | StructureOp::RefreshPivot { .. }) && target >= sheet_count {
+    if !matches!(op, StructureOp::AddSheet { .. } | StructureOp::RefreshPivot { .. } | StructureOp::RefreshRecipeTable { .. })
+        && target >= sheet_count
+    {
         return Some((
             "sheet_not_found",
             format!("sheet index {} does not exist (workbook has {} sheet{})",
@@ -473,6 +475,8 @@ pub fn validate_structure_op(
         StructureOp::RefreshPivot { pivot } => {
             resolve_refresh_pivots(pivot.as_deref(), wb).err().map(|(c, m)| (c, m, None))
         }
+        // The desktop host resolves the Table and the recipe itself
+        StructureOp::RefreshRecipeTable { .. } => None,
     }
 }
 
@@ -577,6 +581,9 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
                 rows,
                 cols
             )
+        }
+        StructureOp::RefreshRecipeTable { .. } => {
+            return Err("refreshing a recipe-linked Table needs the VisiGrid desktop app (recipes are approved there); run the recipe with `vgrid recipe run` instead".into());
         }
         StructureOp::RefreshPivot { pivot } => {
             let ids = resolve_refresh_pivots(pivot.as_deref(), wb).map_err(|(_, m)| m)?;
@@ -1555,5 +1562,14 @@ mod validation_tests {
         let err = apply_structure(&mut wb, &StructureOp::RefreshPivot { pivot: None }).unwrap_err();
         assert!(err.starts_with("PivotTable2:"), "{err}");
         assert!(err.ends_with("(already refreshed: PivotTable1 (2 × 1))"), "{err}");
+    }
+
+    #[test]
+    fn a_headless_host_refuses_to_refresh_a_recipe_table() {
+        // Running a recipe reads files the user approved in the app; a headless
+        // host has no approval to check, so it says where to do it instead.
+        let mut wb = Workbook::new();
+        let err = apply_structure(&mut wb, &StructureOp::RefreshRecipeTable { table: None }).unwrap_err();
+        assert!(err.contains("VisiGrid desktop app"), "{err}");
     }
 }

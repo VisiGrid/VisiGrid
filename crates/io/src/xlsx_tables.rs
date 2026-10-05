@@ -500,26 +500,33 @@ fn read_sheet_tables(
     }
     let rels = relationships(&part(zip, &links)?, path)?;
     if !rels.values().any(|rel| rel.kind.ends_with("/table")) { return Ok(()); }
-    let xml = part(zip, path).map_err(|error| {
+    // Worksheet XML includes all cells and is not Table metadata. Stream it
+    // without the metadata part-size limit, while bounding collected Table ids.
+    let (ids, skipped) = (|| {
+        let file = zip.by_name(path).map_err(|e| format!("Missing XLSX part {path}: {e}"))?;
+        let mut reader = Reader::from_reader(std::io::BufReader::new(file));
+        let mut buf = Vec::new();
+        let mut ids = Vec::new();
+        let mut skipped = 0usize;
+        loop {
+            match reader.read_event_into(&mut buf).map_err(|e| e.to_string())? {
+                Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"tablePart" => {
+                    if budget.attempts == MAX_TABLES { skipped += 1; }
+                    else {
+                        budget.attempts += 1;
+                        ids.push(attr(&e, b"id")?.ok_or("Missing Table relationship")?);
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        Ok::<_, String>((ids, skipped))
+    })().map_err(|error| {
         result.tables_skipped += rels.values().filter(|rel| rel.kind.ends_with("/table")).count();
         error
     })?;
-    let mut reader = Reader::from_str(&xml);
-    let mut ids = Vec::new();
-    let mut skipped = 0usize;
-    loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"tablePart" => {
-                if budget.attempts == MAX_TABLES { skipped += 1; }
-                else {
-                    budget.attempts += 1;
-                    ids.push(attr(&e, b"id")?.ok_or("Missing Table relationship")?);
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
     if skipped > 0 {
         result.tables_skipped += skipped;
         result.warnings.push(format!("{skipped} Excel Table definitions on {name} exceeded the workbook limit of {MAX_TABLES}. Cells were kept; formulas referencing skipped Tables may show errors."));

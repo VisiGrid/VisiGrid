@@ -25,7 +25,7 @@ fn structural_span(op: &visigrid_protocol::StructureOp) -> Option<(usize, usize,
         S::DeleteRows { at, count, .. } => Some((*at, *count, true, true)),
         S::InsertCols { at, count, .. } => Some((*at, *count, false, false)),
         S::DeleteCols { at, count, .. } => Some((*at, *count, true, false)),
-        S::AddSheet { .. } | S::RenameSheet { .. } | S::CreatePivot { .. } | S::RefreshPivot { .. } => None,
+        S::AddSheet { .. } | S::RenameSheet { .. } | S::CreatePivot { .. } | S::RefreshPivot { .. } | S::RefreshRecipeTable { .. } => None,
     }
 }
 

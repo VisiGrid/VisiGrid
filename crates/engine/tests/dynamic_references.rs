@@ -10,6 +10,41 @@ use visigrid_engine::{
 };
 
 #[test]
+fn let_and_lambda_keep_dynamic_dependencies_and_spill_updates() {
+    let mut wb = Workbook::new();
+    let other = wb.add_sheet_named("Options").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "2");
+    wb.set_cell_value_tracked(other, 1, 0, "1");
+    wb.define_name_for_range("Choices", other, 0, 0, 1, 0).unwrap();
+    wb.set_cell_value_tracked(0, 0, 5, "=LET(values,Choices,SUM(values))");
+    wb.set_cell_value_tracked(0, 1, 5, "=LET(values,Choices,SUM(OFFSET(values,1,0,1)))");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "3");
+    assert_eq!(wb.sheet(0).unwrap().get_display(1, 5), "1");
+    wb.set_cell_value_tracked(0, 0, 0, "Choices");
+    wb.set_cell_value_tracked(0, 0, 1, "=LET(values,INDIRECT(A1),SUM(values))");
+    wb.set_cell_value_tracked(0, 0, 2, "=LET(read,LAMBDA(target,SUM(INDIRECT(target))),read(A1))");
+    wb.set_cell_value_tracked(0, 0, 3, "=LET(values,INDIRECT(A1),SORTBY(values,values))");
+    for col in [1, 2] {
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, col), "3");
+    }
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 3), "1");
+    wb.set_cell_value_tracked(other, 1, 0, "4");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "6");
+    assert_eq!(wb.sheet(0).unwrap().get_display(1, 5), "4");
+    for col in [1, 2] {
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, col), "6");
+    }
+    assert_eq!(wb.sheet(0).unwrap().get_display(1, 3), "4");
+    wb.set_cell_value_tracked(0, 0, 0, "Options!A1");
+    for col in [1, 2] {
+        assert_eq!(wb.sheet(0).unwrap().get_display(0, col), "2");
+    }
+    assert_eq!(wb.sheet(0).unwrap().get_display(1, 3), "");
+    wb.recompute_full_ordered();
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 2), "2");
+}
+
+#[test]
 fn nested_dynamic_cells_recalculate_cross_sheet_values_and_spills() {
     let mut wb = Workbook::new();
     let other = wb.add_sheet_named("Options! O'Brien").unwrap();
@@ -109,11 +144,13 @@ fn retargeting_updates_dependencies_and_downstream_values_in_one_batch() {
     }
     wb.set_cell_value_tracked(0, 0, 5, "8");
     assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "48");
-    let unrelated = wb.set_cell_value_tracked(0, 0, 1, "999");
-    assert!(
-        unrelated.cells().unwrap().is_empty(),
-        "retired target must lose its subscription"
-    );
+    wb.set_cell_value_tracked(0, 0, 1, "999");
+    let sheet = wb.active_sheet_id();
+    assert!(!wb.dep_graph().dependents(visigrid_engine::cell_id::CellId::new(sheet, 0, 1))
+        .any(|cell| cell.col == 3), "retired target must lose its subscription");
+    // Main's Excel-compatible volatility still recalculates INDIRECT on an
+    // unrelated edit; its runtime subscription must nevertheless be current.
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 4), "48");
 }
 
 #[test]

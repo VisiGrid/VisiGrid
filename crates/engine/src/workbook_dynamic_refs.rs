@@ -64,6 +64,7 @@ impl Workbook {
         handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
     ) -> RecalcReport {
         let _recalc_scope = crate::custom_fns::recalc_scope();
+        let _clock = crate::timing::ClockGuard::install(self.recalc_clock);
         let start = crate::timing::Instant::now();
         let mut work = (0, 0, 0, 0, 0);
         for pass in 0..MAX_REFERENCE_PASSES {
@@ -112,6 +113,7 @@ impl Workbook {
 
     pub(super) fn recalc_dirty_set(&mut self, changed: &[CellId]) -> Recalculated {
         let _recalc_scope = crate::custom_fns::recalc_scope();
+        let _clock = crate::timing::ClockGuard::install(self.recalc_clock);
         #[cfg(test)]
         self.recalc_count.set(self.recalc_count.get() + 1);
         let first = self.recalc_dirty_pass(changed);

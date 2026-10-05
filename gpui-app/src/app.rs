@@ -863,6 +863,8 @@ pub struct Spreadsheet {
     pub recipe_run_in_progress: bool,
     pub recipe_builder: Option<crate::recipe_builder::RecipeBuilder>,
     pub recipe_confirm: Option<crate::recipe_ui::RecipeConfirm>,
+    /// The workbook revision when a recipe started opening.
+    pub recipe_open_revision: Option<u64>,
     /// The CSV import settings dialog, while open.
     pub csv_dialog: Option<crate::csv_import_ui::CsvDialogState>,
     /// A CSV whose rows did not all fit, and how many were left out: no save
@@ -1506,6 +1508,7 @@ impl Spreadsheet {
             recipe_run_in_progress: false,
             recipe_builder: None,
             recipe_confirm: None,
+            recipe_open_revision: None,
             csv_dialog: None,
             csv_protected_source: None,
             csv_activation_subscription: Some(csv_activation_subscription),
@@ -2493,14 +2496,21 @@ impl Spreadsheet {
                     cx.notify();
                 }
             }
+            CommandId::UnlinkRecipe => self.unlink_recipe_table(cx),
             CommandId::NewRecipe => match self.current_csv().map(|d| (d.path.clone(), d.options.clone())) {
                 // From the open CSV, with the settings it was imported with
                 Some((path, options)) => self.new_recipe_from_file(&path, Some(&options), cx),
-                None => self.new_recipe_prompt(cx),
+                // From an open Parquet or Excel file, which carry their own types
+                None => match self.current_file.clone().filter(|p| {
+                    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["parquet", "xlsx", "xlsm", "xls"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+                }) {
+                    Some(path) => self.new_recipe_from_file(&path, None, cx),
+                    None => self.new_recipe_prompt(cx),
+                },
             },
             CommandId::EditRecipe => match self.recipe_strip_table(cx) {
                 Some(t) => {
-                    let path = std::path::PathBuf::from(&t.source.as_ref().unwrap().recipe);
+                    let path = self.recipe_link_path(&t.source.as_ref().unwrap().recipe);
                     self.open_recipe_builder(&path, Some(t.id), cx)
                 }
                 None => {

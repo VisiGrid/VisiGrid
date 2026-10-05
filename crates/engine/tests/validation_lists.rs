@@ -243,6 +243,36 @@ fn source_fingerprint_includes_truncation_even_when_visible_choices_match() {
 }
 
 #[test]
+fn new_array_functions_keep_dropdown_context_and_allocation_limits() {
+    let mut wb = book();
+    for formula in [
+        "=LET(values,INDIRECT(\"A1:A3\"),SORTBY(values,values))",
+        "=LET(read,LAMBDA(target,SORT(INDIRECT(target))),read(\"A1:A3\"))",
+        "=TEXTSPLIT(\"Blue,Green,Red\",\",\")",
+        "={\"Blue\",\"Green\",\"Red\"}",
+    ] {
+        source(&mut wb, formula);
+        assert_eq!(items(&wb), ["Blue", "Green", "Red"], "{formula}");
+    }
+    // Each individual allocation is permitted, but the nested sorts together
+    // must share the validation budget rather than reset it at LET boundaries.
+    let mut formula = "SEQUENCE(100000)".to_string();
+    for _ in 0..12 {
+        formula = format!("LET(values,{formula},SORTBY(values,values))");
+    }
+    source(&mut wb, &format!("={formula}"));
+    let result = wb.get_list_items(0, 0, 4).unwrap();
+    assert!(result.source_error.as_deref().is_some_and(|e| e.contains("array limit")), "{:?}", result.source_error);
+
+    wb.set_cell_text_tracked(0, 0, 1, &"x,".repeat(100_001));
+    source(&mut wb, "=TEXTSPLIT(B1,\",\")");
+    let result = wb.get_list_items(0, 0, 4).unwrap();
+    assert!(result.source_error.as_deref().is_some_and(|e| e.contains("array limit")), "{:?}", result.source_error);
+    source(&mut wb, "=TEXTSPLIT(\"Blue,Green\",\",\")");
+    assert_eq!(items(&wb), ["Blue", "Green"]);
+}
+
+#[test]
 fn namespaced_functions_evaluate_without_changing_literals_or_stored_source() {
     let mut wb = book();
     let source_text = "=_xlfn._xlws.SORT(_xlfn.UNIQUE(A1:A3))";

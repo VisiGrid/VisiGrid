@@ -15,7 +15,12 @@ use visigrid_io::recipe::{self, OnError, Recipe, RecipeOutput, RunReport, Snapsh
 use visigrid_io::recipe_table;
 
 use crate::app::Spreadsheet;
+use crate::mode::Mode;
 use crate::history::MutationSource;
+
+/// Largest refresh (cells before plus after) kept as sparse cell history;
+/// the guarded batch refuses past 100,000 changed cells.
+const SPARSE_REFRESH_CELLS: usize = 90_000;
 
 /// Height of the strip above a linked Table's sheet.
 pub(crate) const RECIPE_STRIP_HEIGHT: f32 = 30.0;
@@ -80,29 +85,22 @@ fn run_job(recipe_path: &Path, recipe: Option<Recipe>, snapshot: Option<Snapshot
         None => Recipe::load(recipe_path)?,
     };
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
-    let source_path = match &snapshot {
-        Some(s) => s.path.clone(),
-        None => match recipe.resolve_source(dir, None) {
-            Ok(p) => p,
+    // One file, or every file an appending recipe matches, read once
+    let snapshot = match snapshot {
+        Some(s) => s,
+        None => match recipe.read_snapshot(dir, None) {
+            Ok(s) => s,
             Err(e) => {
+                // Unreadable source: a failed run with nothing to retry against
                 let report = RunReport::unreadable(&recipe.source_path(dir, None), e);
                 return Ok(RunOutcome { recipe, snapshot: None, output: RecipeOutput::empty(), report, source_path: dir.to_path_buf() });
             }
         },
     };
-    let snapshot = match snapshot {
-        Some(s) => Some(s),
-        None => match Snapshot::read(&source_path) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                // Unreadable source: a failed run with nothing to retry against
-                let report = RunReport::unreadable(&source_path, e);
-                return Ok(RunOutcome { recipe, snapshot: None, output: RecipeOutput::empty(), report, source_path });
-            }
-        },
-    };
-    let result = recipe::run(&recipe, snapshot.as_ref().unwrap());
-    Ok(RunOutcome { recipe, snapshot, output: result.output, report: result.report, source_path })
+    // What the stamp says it read: the file, or the pattern it appended
+    let source_path = if snapshot.more.is_empty() { snapshot.path.clone() } else { recipe.source_path(dir, None) };
+    let result = recipe::run(&recipe, &snapshot);
+    Ok(RunOutcome { recipe, snapshot: Some(snapshot), output: result.output, report: result.report, source_path })
 }
 
 /// The rename the banner suggests first: a missing column, in the earliest
@@ -159,6 +157,18 @@ impl Spreadsheet {
         self.start_recipe_run(RecipeTarget::NewWorkbook, path, None, None, cx);
     }
 
+    /// The recipe a Table links to, as a path: a relative link (how a saved
+    /// workbook stores a recipe beside it) resolves against the workbook's
+    /// folder.
+    pub(crate) fn recipe_link_path(&self, recipe: &str) -> PathBuf {
+        let path = Path::new(recipe);
+        match self.current_file.as_ref().and_then(|f| f.parent()) {
+            // A rooted path without a drive (Windows `/data/x`) is not relative
+            Some(dir) if path.is_relative() && !path.has_root() => dir.join(path),
+            _ => path.to_path_buf(),
+        }
+    }
+
     /// Alt+F5 on a recipe-backed Table, the strip's Refresh button, and the
     /// palette command. Returns false when there is no linked Table here.
     pub fn refresh_recipe_table(&mut self, cx: &mut Context<Self>) -> bool {
@@ -167,7 +177,8 @@ impl Spreadsheet {
             return true;
         }
         let source = table.source.clone().unwrap();
-        self.start_recipe_run(RecipeTarget::Table(table.id), PathBuf::from(&source.recipe), None, None, cx);
+        let recipe_path = self.recipe_link_path(&source.recipe);
+        self.start_recipe_run(RecipeTarget::Table(table.id), recipe_path, None, None, cx);
         true
     }
 
@@ -206,6 +217,9 @@ impl Spreadsheet {
             }
         };
         self.recipe_run_in_progress = true;
+        // Opening replaces the window's workbook: note its revision, so edits
+        // made while the recipe runs are not thrown away
+        self.recipe_open_revision = (target == RecipeTarget::NewWorkbook).then(|| self.wb(cx).revision());
         self.status_message = Some(format!("Running {}…", file_name(&recipe_path.display().to_string())));
         cx.notify();
         let started = Instant::now();
@@ -267,6 +281,12 @@ impl Spreadsheet {
         };
         let ms = started.elapsed().as_millis();
         match target {
+            RecipeTarget::NewWorkbook if self.recipe_open_revision.take().is_some_and(|r| r != self.wb(cx).revision()) && self.is_dirty() => {
+                self.status_message = Some(format!(
+                    "You edited this workbook while {} ran, so it was not replaced. Save your work, then open the recipe again.",
+                    file_name(&recipe_path.display().to_string())
+                ));
+            }
             RecipeTarget::NewWorkbook => match recipe_table::new_workbook(&output, &table_name, link) {
                 Ok(wb) => {
                     self.recipe_blocked = None;
@@ -283,12 +303,23 @@ impl Spreadsheet {
             },
             RecipeTarget::Table(id) => {
                 let mut candidate = self.wb(cx).clone();
-                let refreshed = recipe_table::refresh_table(&mut candidate, id, &output, link)
-                    .and_then(|r| Ok((r, self.wb(cx).capture_guarded_batch(&candidate)?)));
+                let width = output.columns.len().max(table.as_ref().map_or(0, |t| t.columns.len()));
+                let refreshed = recipe_table::refresh_table(&mut candidate, id, &output, link);
                 match refreshed {
-                    Ok((r, commit)) => {
+                    Ok(r) => {
                         let description = format!("Refresh {table_name}");
-                        match self.publish_table_batch(candidate, commit, description, MutationSource::Human, cx) {
+                        // Sparse cell history while it stays small (most monthly
+                        // files); past its limit, one whole-workbook undo step
+                        // rather than refusing the refresh
+                        let changed = (r.rows_before + r.rows_after + 1) * width;
+                        let published = if changed <= SPARSE_REFRESH_CELLS {
+                            self.wb(cx)
+                                .capture_guarded_batch(&candidate)
+                                .and_then(|commit| self.publish_table_batch(candidate, commit, description, MutationSource::Human, cx))
+                        } else {
+                            self.publish_workbook_snapshot(candidate, description, cx)
+                        };
+                        match published {
                             Ok(()) => {
                                 self.recipe_blocked = None;
                                 let delta = r.rows_after as i64 - r.rows_before as i64;
@@ -298,10 +329,14 @@ impl Spreadsheet {
                                     d => format!("{d}"),
                                 };
                                 self.status_message = Some(format!(
-                                    "Refreshed {table_name}: {} rows ({since}) from {} · all {} steps ran{}",
+                                    "Refreshed {table_name}: {} rows ({since}) from {} · {}{}",
                                     r.rows_after,
                                     file_name(&report.source),
-                                    report.steps.len(),
+                                    match report.steps.len() {
+                                        0 => "no steps".to_string(),
+                                        1 => "its step ran".to_string(),
+                                        n => format!("all {n} steps ran"),
+                                    },
                                     if r.columns_changed { " · columns changed" } else { "" }
                                 ));
                             }
@@ -394,11 +429,10 @@ impl Spreadsheet {
                     && chosen.file_name().and_then(|n| n.to_str()).zip(pattern_path.file_name().and_then(|n| n.to_str()))
                         .is_some_and(|(n, p)| recipe::wildcard_match(p, n));
                 if !matches_pattern {
-                    let visigrid_io::recipe::Source::Csv(src) = &mut recipe.source;
-                    src.path = match chosen.parent() {
+                    recipe.source.set_path(match chosen.parent() {
                         Some(p) if p == dir => chosen.file_name().unwrap().to_string_lossy().into_owned(),
                         _ => chosen.display().to_string(),
-                    };
+                    });
                     if let Err(e) = recipe.save(&recipe_path) {
                         this.status_message = Some(format!("Couldn't save the recipe: {e}"));
                         cx.notify();
@@ -451,6 +485,8 @@ impl Spreadsheet {
     /// While the confirmation is open it takes every key: Ctrl+Enter loads,
     /// Esc cancels, nothing else reaches the grid. Plain Enter does not load,
     /// so a keypress meant for the sheet cannot approve reading a file.
+    /// With the blocked banner showing, Ctrl+Enter takes its suggested
+    /// rename; other keys pass through.
     pub(crate) fn intercept_recipe_confirm_keys(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         let this = cx.entity().downgrade();
         let handle = window.window_handle();
@@ -460,8 +496,12 @@ impl Spreadsheet {
             }
             let Some(this) = this.upgrade() else { return };
             let handled = this.update(cx, |this, cx| {
+                let k = &event.keystroke;
+                let ctrl_enter = k.key == "enter" && (k.modifiers.control || k.modifiers.platform);
+                // The blocked banner's suggested rename is a guess: it takes
+                // Ctrl+Enter, never the Enter that moves down the sheet
                 if this.recipe_confirm.is_none() {
-                    return false;
+                    return ctrl_enter && this.mode == Mode::Navigation && this.recipe_primary_fix(cx);
                 }
                 let k = &event.keystroke;
                 if k.key == "escape" {
@@ -482,6 +522,182 @@ impl Spreadsheet {
             self.status_message = Some("Nothing was loaded".into());
             cx.notify();
         }
+    }
+
+    /// Why an agent may not change the workbook right now, as (code, message).
+    fn agent_refresh_blocker(&self, cx: &App) -> Option<(String, String)> {
+        if self.review_mode.is_some() {
+            return Some(crate::session_adapter::plan_under_review_error());
+        }
+        if self.recovery_warning.is_some() {
+            return Some(("read_only_recovery".into(), "this window is a read-only recovery; it can't be changed".into()));
+        }
+        if self.is_previewing() || self.mode.is_editing() {
+            return Some(("busy".into(), "the user is previewing history or editing a cell; try again when they're done".into()));
+        }
+        if crate::table_filter_ui::has_table_criteria(self.workbook.read(cx)) {
+            return Some(("table_view_active".into(), crate::table_filter_ui::TABLE_VIEW_EDIT_MESSAGE.into()));
+        }
+        None
+    }
+
+    /// A refresh asked for over the session protocol (MCP `refresh_table`):
+    /// the same run and publish as Alt+F5, with the outcome sent to `reply`
+    /// when it is done. Never asks: a recipe source the user hasn't approved
+    /// in the app is refused, so an agent can't make the app read a file the
+    /// user never agreed to. What blocks Alt+F5 blocks an agent too: never
+    /// under a plan the user is reviewing, a read-only recovery, a rewind
+    /// preview or a filtered Table view. The recipe runs in the background,
+    /// like Alt+F5, so the window stays responsive while a big file is read.
+    pub(crate) fn start_agent_refresh(
+        &mut self,
+        table: Option<String>,
+        client: Option<String>,
+        reply: crate::session_server::bridge::oneshot::Sender<crate::session_server::StructureOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let (target, recipe_path, recipe) = match self.prepare_agent_refresh(table.as_deref(), cx) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply.send(self.structure_outcome(Err(error), cx));
+                return;
+            }
+        };
+        self.recipe_run_in_progress = true;
+        self.status_message = Some(format!("Refreshing {} for {}…", target.name, client.as_deref().unwrap_or("an agent")));
+        cx.notify();
+        let started = Instant::now();
+        let job_path = recipe_path.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx.background_executor().spawn(async move { run_job(&job_path, Some(recipe), None) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.recipe_run_in_progress = false;
+                let result = this.finish_agent_refresh(&target, recipe_path, outcome, started, client, cx);
+                let _ = reply.send(this.structure_outcome(result, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Everything checked before an agent's refresh reads anything: the
+    /// window allows edits, the Table exists and is linked, nothing else is
+    /// running, and the user approved what the recipe reads.
+    fn prepare_agent_refresh(&mut self, table: Option<&str>, cx: &mut Context<Self>) -> Result<(DataTable, PathBuf, Recipe), (String, String)> {
+        if let Some(blocked) = self.agent_refresh_blocker(cx) {
+            return Err(blocked);
+        }
+        let linked: Vec<DataTable> = self.wb(cx).tables().filter(|(_, t)| t.source.is_some()).map(|(_, t)| t.clone()).collect();
+        let names = || linked.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ");
+        let target = match table {
+            Some(name) => linked.iter().find(|t| t.name.eq_ignore_ascii_case(name)).cloned().ok_or_else(|| {
+                ("table_not_found".to_string(), format!("no recipe-linked Table named {name}; linked Tables: {}", if linked.is_empty() { "none".into() } else { names() }))
+            })?,
+            None => match linked.len() {
+                1 => linked[0].clone(),
+                0 => return Err(("table_not_found".into(), "this workbook has no recipe-linked Table".into())),
+                _ => return Err(("ambiguous".into(), format!("name the Table to refresh: {}", names()))),
+            },
+        };
+        if self.recipe_run_in_progress {
+            return Err(("busy".into(), "a recipe is already running in this window".into()));
+        }
+        let recipe_path = self.recipe_link_path(&target.source.as_ref().unwrap().recipe);
+        let recipe = Recipe::load(&recipe_path).map_err(|e| ("recipe_invalid".to_string(), e))?;
+        if !crate::recipe_trust::is_approved(&recipe_path, &recipe) {
+            return Err((
+                "needs_approval".into(),
+                format!(
+                    "the user hasn't approved what {} reads; ask them to refresh {} once in VisiGrid (Alt+F5) and confirm the file",
+                    file_name(&recipe_path.display().to_string()),
+                    target.name
+                ),
+            ));
+        }
+        Ok((target, recipe_path, recipe))
+    }
+
+    /// Publish an agent's finished run, unless the window changed while it
+    /// ran: the user may have opened a plan to review, the Table may be gone.
+    fn finish_agent_refresh(
+        &mut self,
+        target: &DataTable,
+        recipe_path: PathBuf,
+        outcome: Result<RunOutcome, String>,
+        started: Instant,
+        client: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<String, (String, String)> {
+        let outcome = outcome.map_err(|e| ("recipe_failed".to_string(), e))?;
+        if let Some((code, message)) = self.agent_refresh_blocker(cx) {
+            self.status_message = Some(format!("{} was not refreshed: the window changed while its recipe ran", target.name));
+            return Err((code, format!("{message} (the recipe ran, but nothing was changed)")));
+        }
+        if self.wb(cx).table(target.id).is_none() {
+            return Err(("table_not_found".into(), format!("{} was removed while its recipe ran; nothing changed", target.name)));
+        }
+        let summary = outcome.report.summary();
+        let revision = self.wb(cx).revision();
+        self.finish_recipe_run(RecipeTarget::Table(target.id), recipe_path, outcome, started, cx);
+        // A refresh that didn't publish leaves the banner up for the user,
+        // and the Table as it was
+        if let Some(b) = self.recipe_blocked.as_ref().filter(|b| b.target == RecipeTarget::Table(target.id)) {
+            return Err((
+                "recipe_blocked".into(),
+                match &b.refused {
+                    Some(reason) => format!("{} was not refreshed: {reason}", target.name),
+                    None => format!("{} was not refreshed; it keeps its last good result.\n{summary}", target.name),
+                },
+            ));
+        }
+        if let (Some(client), true) = (client, self.wb(cx).revision() != revision) {
+            self.history.retag_last_source(crate::history::MutationSource::Agent { client });
+        }
+        Ok(self.status_message.clone().unwrap_or_else(|| format!("Refreshed {}", target.name)))
+    }
+
+    /// A session reply for an agent's refresh, with the workbook as it is now.
+    fn structure_outcome(&self, result: Result<String, (String, String)>, cx: &App) -> crate::session_server::StructureOutcome {
+        let wb = self.workbook.read(cx);
+        let (description, error) = match result {
+            Ok(d) => (d, None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        crate::session_server::StructureOutcome {
+            description,
+            revision: wb.revision(),
+            sheet_count: wb.sheets().len(),
+            active_sheet: wb.active_sheet_index(),
+            error,
+        }
+    }
+
+    /// Palette "Unlink Table from Recipe": the Table keeps its records and
+    /// becomes an ordinary Table. One undo step relinks it.
+    pub fn unlink_recipe_table(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.recipe_strip_table(cx) else {
+            self.status_message = Some("No recipe-backed Table on this sheet".into());
+            cx.notify();
+            return;
+        };
+        if self.block_if_previewing(cx) || self.block_read_only_recovery(cx) {
+            return;
+        }
+        let recipe = table.source.as_ref().map(|s| file_name(&s.recipe)).unwrap_or_default();
+        // Metadata only: a Table commit, like changing its banding, not a
+        // cell-by-cell comparison of the whole sheet
+        let result = self.workbook.update(cx, |wb, _| wb.set_table_source(table.id, None));
+        self.status_message = Some(match result {
+            Ok(commit) => {
+                self.record_table_commit(commit, format!("Unlink {} from its recipe", table.name), cx);
+                if self.recipe_blocked.as_ref().is_some_and(|b| b.target == RecipeTarget::Table(table.id)) {
+                    self.recipe_blocked = None;
+                }
+                format!("{} is no longer linked to {recipe}; its records stay. Ctrl+Z relinks it.", table.name)
+            }
+            Err(e) => format!("Couldn't unlink {}: {e}", table.name),
+        });
+        cx.notify();
     }
 
     /// Open the recipe file in the system's editor for TOML.

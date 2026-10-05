@@ -1,5 +1,5 @@
 // Lookup/reference functions: VLOOKUP, XLOOKUP, HLOOKUP, INDEX, MATCH,
-// ROW, COLUMN, ROWS, COLUMNS
+// ROW, COLUMN, ROWS, COLUMNS, LOOKUP
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
 use super::eval_helpers::{read_cell_value, get_typed_for_sheet, get_text_for_sheet, wildcard_match};
@@ -830,6 +830,66 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     EvalResult::Error(e) => EvalResult::Error(e),
                     _ => EvalResult::Number(1.0),
                 },
+            }
+        }
+        "LOOKUP" => {
+            // LOOKUP(lookup_value, lookup_vector, [result_vector]), and the
+            // array form LOOKUP(lookup_value, array): approximate match only.
+            // The answer is the LAST value <= lookup_value of the same type
+            // (numbers with numbers, text with text, case-insensitively),
+            // skipping errors and blanks — which is what Excel's binary search
+            // gives on sorted data, and what makes LOOKUP(2, 1/(cond), range)
+            // find the last row meeting cond. The array form searches the first
+            // column of a tall or square array (returning from the last
+            // column), or the first row of a wide one (returning from the last
+            // row). Nothing <= the value is #N/A.
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error("LOOKUP requires 2 or 3 arguments".to_string()));
+            }
+            let key = evaluate(&args[0], lookup);
+            if let EvalResult::Error(e) = key {
+                return Some(EvalResult::Error(e));
+            }
+            let key = match key {
+                EvalResult::Array(a) => EvalResult::from_value(&a.top_left()),
+                other => other,
+            };
+            let source = match super::eval_helpers::arg_values(&args[1], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            if source.values.is_empty() {
+                return Some(EvalResult::Error("#N/A".to_string()));
+            }
+            let (search, results): (Vec<Value>, Vec<Value>) = if args.len() == 3 {
+                if source.rows != 1 && source.cols != 1 {
+                    return Some(EvalResult::Error("#N/A".to_string()));
+                }
+                let result = match super::eval_helpers::arg_values(&args[2], lookup) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                if result.rows != 1 && result.cols != 1 {
+                    return Some(EvalResult::Error("#N/A".to_string()));
+                }
+                (source.values, result.values)
+            } else if source.cols > source.rows {
+                let first: Vec<Value> = source.values[..source.cols].to_vec();
+                let last: Vec<Value> = source.values[(source.rows - 1) * source.cols..].to_vec();
+                (first, last)
+            } else {
+                let first = (0..source.rows).map(|r| source.values[r * source.cols].clone()).collect();
+                let last = (0..source.rows).map(|r| source.values[r * source.cols + source.cols - 1].clone()).collect();
+                (first, last)
+            };
+            let found = search.iter().enumerate().rev().find(|(_, v)| {
+                matches!(compare_values(&EvalResult::from_value(v), &key), Some(Ordering::Less | Ordering::Equal))
+                    || matches!((v, &key), (Value::Boolean(a), EvalResult::Boolean(b)) if a <= b)
+            });
+            match found.and_then(|(i, _)| results.get(i)) {
+                Some(Value::Empty) => EvalResult::Number(0.0),
+                Some(v) => EvalResult::from_value(v),
+                None => EvalResult::Error("#N/A".to_string()),
             }
         }
         _ => return None,

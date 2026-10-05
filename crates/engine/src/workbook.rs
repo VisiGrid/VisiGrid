@@ -127,6 +127,27 @@ pub struct Workbook {
     #[serde(skip)]
     pub(crate) batch_format_changed: Vec<CellId>,
 
+    /// Spill receivers a write inside the current batch emptied (the old
+    /// extent of an anchor that was rewritten or cleared). Their readers are
+    /// recalculated through `batch_changed`; these are reported as changed
+    /// cells when the batch closes, since they hold no formula of their own.
+    #[serde(skip)]
+    pub(crate) batch_vacated: Vec<CellId>,
+
+    /// Formula cells that call a volatile function (NOW, TODAY, RAND,
+    /// RANDBETWEEN, INDIRECT, OFFSET). Every incremental recalc re-evaluates
+    /// them and their dependents, as Excel does — an INDIRECT that resolves
+    /// to a cell the graph cannot see would otherwise go stale (#88). Kept in
+    /// step with the dependency graph; empty in most workbooks, so an
+    /// ordinary edit pays one emptiness check.
+    #[serde(skip)]
+    volatile_cells: FxHashSet<CellId>,
+
+    /// Clock and seed for volatile functions, for replicas that must agree
+    /// (collaboration). `None` reads the machine, as the desktop always has.
+    #[serde(skip)]
+    recalc_clock: Option<crate::timing::RecalcClock>,
+
     /// Maps to `CalculationMode` from document settings:
     ///   `true`  = `CalculationMode::Automatic` — recalc on every edit (default)
     ///   `false` = `CalculationMode::Manual`    — recalc only on F9
@@ -190,6 +211,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
+            batch_vacated: Vec::new(),
+            volatile_cells: FxHashSet::default(),
+            recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
             iterative_max_iters: 100,
@@ -528,6 +552,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
+            batch_vacated: Vec::new(),
+            volatile_cells: FxHashSet::default(),
+            recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
             iterative_max_iters: 100,
@@ -558,6 +585,9 @@ impl Workbook {
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
+            batch_vacated: Vec::new(),
+            volatile_cells: FxHashSet::default(),
+            recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
             iterative_max_iters: 100,
@@ -786,6 +816,7 @@ impl Workbook {
     pub fn rebuild_dep_graph(&mut self) {
         self.pending_dynamic_refs.get_mut().clear();
         self.dep_graph = Arc::default();
+        self.volatile_cells.clear();
 
         // Iterate all sheets and cells
         for sheet in &self.sheets {
@@ -810,6 +841,9 @@ impl Workbook {
                     // Formulas inside these ranges are ordered first through
                     // the range index, whenever they are registered.
                     Arc::make_mut(&mut self.dep_graph).set_ranges(formula_cell, ranges);
+                    if crate::formula::analyze::is_volatile(ast) {
+                        self.volatile_cells.insert(formula_cell);
+                    }
                 }
             }
         }
@@ -839,16 +873,42 @@ impl Workbook {
             // out of the dep graph and never evaluated by recompute. Register it as a leaf
             // formula so it is always recomputed.
             Arc::make_mut(&mut self.dep_graph).register_leaf_formula(cell_id);
-        } else if self.dep_graph.has_own_deps(cell_id) {
-            // No longer a formula: clear its edges. A value that never was a
-            // formula leaves the graph alone, so a clone keeps sharing it.
-            Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
+            if crate::formula::analyze::is_volatile(&ast) {
+                self.volatile_cells.insert(cell_id);
+            } else {
+                self.volatile_cells.remove(&cell_id);
+            }
+        } else {
+            self.volatile_cells.remove(&cell_id);
+            if self.dep_graph.has_own_deps(cell_id) {
+                // No longer a formula: clear its edges. A value that never was a
+                // formula leaves the graph alone, so a clone keeps sharing it.
+                Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
+            }
         }
+    }
+
+    /// Supply the clock and random seed volatile functions read, or `None`
+    /// for the machine's (the default). Replicas of one document that must
+    /// agree install the same clock before each recalculation.
+    pub fn set_recalc_clock(&mut self, clock: Option<crate::timing::RecalcClock>) {
+        self.recalc_clock = clock;
+    }
+
+    pub fn recalc_clock(&self) -> Option<crate::timing::RecalcClock> {
+        self.recalc_clock
+    }
+
+    /// Number of formula cells calling a volatile function (for tests and
+    /// diagnostics).
+    pub fn volatile_cell_count(&self) -> usize {
+        self.volatile_cells.len()
     }
 
     /// Clear dependencies for a cell (e.g., when the cell is deleted or cleared).
     pub fn clear_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
         let cell_id = CellId::new(sheet_id, row, col);
+        self.volatile_cells.remove(&cell_id);
         if self.dep_graph.has_own_deps(cell_id) {
             Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
         }
@@ -981,9 +1041,8 @@ impl Workbook {
         // the index (each node once) rather than expanding every cell's
         // ranges from scratch, which is quadratic up a running total.
         self.dep_graph.any_upstream(CellId::new(sheet_id, row, col), |current| {
-            self.sheet_by_id(current.sheet).is_some_and(|sheet|
-                matches!(sheet.get_cached_value(current.row, current.col), Some(Value::Error(e)) if e == "#CYCLE!")
-                || sheet.get_cell_opt(current.row, current.col).is_some_and(|cell| cell.value().is_cycle_error()))
+            self.sheet_by_id(current.sheet)
+                .is_some_and(|sheet| sheet.is_cycle_error(current.row, current.col))
         })
     }
 
@@ -1162,15 +1221,22 @@ impl Workbook {
                 levels = lv;
                 (order, Vec::new())
             }
-            Err(cycle) => {
+            Err(_) => {
                 report.had_cycles = true;
-                let cycle_cells = cycle.cells.clone();
+                // Kahn's remainder also contains downstream readers. Only
+                // strongly connected components are actual cycle members.
+                let cycle_cells: Vec<_> = self.dep_graph.find_cycle_sccs()
+                    .into_iter().flatten().collect();
+                let cycle_set: FxHashSet<_> = cycle_cells.iter().copied().collect();
                 let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
                 let non_cycle: Vec<CellId> = all_formula_cells
                     .into_iter()
-                    .filter(|c| !cycle_cells.contains(c))
+                    .filter(|c| !cycle_set.contains(c))
                     .collect();
-                (non_cycle, cycle_cells)
+                let non_cycle_set = non_cycle.iter().copied().collect();
+                let order = self.dep_graph.topo_order_subset(&non_cycle_set)
+                    .unwrap_or(non_cycle);
+                (order, cycle_cells)
             }
         };
         report.phase_topo_sort_us = phase_start.elapsed().as_micros() as u64;
@@ -1403,16 +1469,13 @@ impl Workbook {
                 if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
                     // A runtime cycle can disappear when its selector changes.
                     // Keep the authored formula and report the cycle as a cache value.
-                    sheet.cache_computed(cell_id.row, cell_id.col, Value::Error("#CYCLE!".into()));
+                    sheet.set_cycle_error(cell_id.row, cell_id.col);
                     if sheet.get_cell_opt(cell_id.row, cell_id.col).is_some_and(|c| c.spill_info().is_some()) {
                         sheet.record_pending_spill(cell_id.row, cell_id.col, crate::formula::eval::Array2D::new(0, 0));
                     }
                 }
             }
-            // Use Tarjan SCC membership as the canonical cycle count (not Kahn's
-            // remainder, which can include downstream false positives).
-            let sccs = self.dep_graph.find_cycle_sccs();
-            report.cycle_cells = sccs.iter().map(|scc| scc.len()).sum();
+            report.cycle_cells = cycle_cells.len();
 
             let known_deps_order = order;
             let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
@@ -1535,17 +1598,13 @@ impl Workbook {
         // (INDIRECT, OFFSET) have no edge from the receivers they read, so
         // the graph cannot find them. They are re-evaluated in every round
         // that placed something, the same way Phase 3 evaluates them last.
-        let dynamic_readers: Vec<CellId> = self
-            .dep_graph
-            .formula_cells()
-            .filter(|cell_id| {
-                self.sheet_by_id(cell_id.sheet)
-                    .and_then(|sheet| sheet.get_cell_opt(cell_id.row, cell_id.col))
-                    .and_then(|cell| cell.value().formula_ast())
-                    .map(crate::formula::analyze::has_dynamic_deps)
-                    .unwrap_or(false)
-            })
-            .collect();
+        //
+        // Found lazily, on the first round that placed or cleared something.
+        // Finding them reads every formula in the workbook, and most calls
+        // place nothing: an ordinary edit with no array in reach used to pay
+        // that scan anyway, which was 60 ms of a one-dependent edit on 200k
+        // formulas (the ordering itself was already confined to the dirty set).
+        let mut dynamic_readers: Option<Vec<CellId>> = None;
         // What each cell was given this recalc. A dynamic formula is
         // re-evaluated every round, and one that returns an array queues that
         // array every time; placing the same array again is not a change, and
@@ -1652,6 +1711,18 @@ impl Workbook {
             // formulas the graph cannot see.
             // The dynamic readers are seeds, not an afterthought: what reads
             // an INDIRECT that just changed is as stale as the INDIRECT.
+            let dynamic_readers: &Vec<CellId> = dynamic_readers.get_or_insert_with(|| {
+                self.dep_graph
+                    .formula_cells()
+                    .filter(|cell_id| {
+                        self.sheet_by_id(cell_id.sheet)
+                            .and_then(|sheet| sheet.get_cell_opt(cell_id.row, cell_id.col))
+                            .and_then(|cell| cell.value().formula_ast())
+                            .map(crate::formula::analyze::has_dynamic_deps)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            });
             let mut readers: FxHashSet<CellId> = dynamic_readers.iter().copied().collect();
             let mut stack: Vec<CellId> = touched.into_iter().chain(dynamic_readers.iter().copied()).collect();
             while let Some(cell) = stack.pop() {
@@ -1741,6 +1812,7 @@ impl Workbook {
             .ok_or_else(|| format!("Cell not found: {:?}", cell_id))?;
 
         if let Some(ast) = cell.value().formula_ast() {
+            let _random_cell = crate::timing::RandomCellGuard::enter(cell_id.sheet.0, cell_id.row, cell_id.col);
             let bound = bind_expr(ast, |name| self.sheet_id_by_name(name));
             let lookup = match custom_fn_handler {
                 Some(handler) => WorkbookLookup::with_custom_functions(
@@ -1797,10 +1869,11 @@ impl Workbook {
         if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
             return Recalculated::Cells(Vec::new());
         }
+        let spill = self.spill_effects_of_write(sheet_index, row, col);
         self.sheets[sheet_index].set_value(row, col, value);
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
-        self.note_cell_changed(cell_id)
+        self.note_write_with_spills(cell_id, spill)
     }
 
     /// Write literal text with dependency tracking, without interpreting formulas
@@ -1815,9 +1888,10 @@ impl Workbook {
         let Some(sheet) = self.sheets.get_mut(sheet_index) else { return Recalculated::Cells(Vec::new()); };
         if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
         let sheet_id = sheet.id;
-        sheet.set_text_exact(row, col, text);
+        let spill = self.spill_effects_of_write(sheet_index, row, col);
+        self.sheets[sheet_index].set_text_exact(row, col, text);
         self.update_cell_deps(sheet_id, row, col);
-        self.note_cell_changed(CellId::new(sheet_id, row, col))
+        self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
     }
 
     /// Restore a sparse history image with dependency tracking. Callers must
@@ -1848,10 +1922,72 @@ impl Workbook {
         if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
             return Recalculated::Cells(Vec::new());
         }
+        let spill = self.spill_effects_of_write(sheet_index, row, col);
         self.sheets[sheet_index].clear_cell(row, col);
         self.update_cell_deps(sheet_id, row, col);
         let cell_id = CellId::new(sheet_id, row, col);
-        self.note_cell_changed(cell_id)
+        self.note_write_with_spills(cell_id, spill)
+    }
+
+    /// What a write at (row, col) does to spills besides the cell itself,
+    /// read BEFORE the write (the sheet forgets an anchor's extent as soon as
+    /// it is overwritten):
+    ///
+    /// - `vacated`: if the cell is a spill parent, every receiver it fills.
+    ///   They change value (to empty, unless the new content spills over
+    ///   them again) and whatever reads them is stale.
+    /// - `anchors`: formulas whose spill the write can block or unblock — the
+    ///   parent of a receiver being written into (it must turn #SPILL!), and
+    ///   any anchor already #SPILL! whose refused extent covers the cell
+    ///   (clearing the obstruction must let it spill again).
+    fn spill_effects_of_write(&self, sheet_index: usize, row: usize, col: usize) -> SpillEffects {
+        let sheet = &self.sheets[sheet_index];
+        let id = sheet.id;
+        let (row, col) = sheet.merge_origin_coord(row, col);
+        let vacated = sheet
+            .spill_receivers_of(row, col)
+            .into_iter()
+            .map(|(r, c)| CellId::new(id, r, c))
+            .collect();
+        let mut anchors: Vec<CellId> = Vec::new();
+        if let Some((pr, pc)) = sheet.get_cell_opt(row, col).and_then(|c| c.spill_parent()) {
+            if (pr, pc) != (row, col) {
+                anchors.push(CellId::new(id, pr, pc));
+            }
+        }
+        for (ar, ac) in sheet.blocked_spill_anchors_covering(row, col) {
+            let anchor = CellId::new(id, ar, ac);
+            if !anchors.contains(&anchor) {
+                anchors.push(anchor);
+            }
+        }
+        SpillEffects { vacated, anchors }
+    }
+
+    /// `note_cell_changed` for a write that may have moved spills: the anchors
+    /// it can block or unblock are re-evaluated, the receivers it vacated are
+    /// recalculated for their readers, and the vacated cells themselves are
+    /// reported as changed (they hold no formula, so the recalc would not
+    /// list them).
+    fn note_write_with_spills(&mut self, cell_id: CellId, spill: SpillEffects) -> Recalculated {
+        if spill.vacated.is_empty() && spill.anchors.is_empty() {
+            return self.note_cell_changed(cell_id);
+        }
+        if !self.auto_recalc {
+            return Recalculated::Cells(Vec::new());
+        }
+        let mut seeds = Vec::with_capacity(1 + spill.vacated.len() + spill.anchors.len());
+        seeds.push(cell_id);
+        seeds.extend(spill.vacated.iter().copied());
+        seeds.extend(spill.anchors.iter().copied());
+        if self.batch_depth > 0 {
+            self.batch_changed.extend(seeds);
+            self.batch_vacated.extend(spill.vacated);
+            return Recalculated::Cells(Vec::new());
+        }
+        let recalculated = self.recalc_dirty_set(&seeds);
+        self.increment_revision();
+        with_reported(recalculated, &spill.vacated)
     }
 
     /// Create an RAII batch guard. Calls begin_batch() on creation, end_batch() on Drop.
@@ -1903,8 +2039,9 @@ impl Workbook {
         if self.batch_depth == 0 {
             let mut changed = std::mem::take(&mut self.batch_changed);
             let format_changed = std::mem::take(&mut self.batch_format_changed);
+            let vacated = std::mem::take(&mut self.batch_vacated);
             let recalculated = if !changed.is_empty() {
-                self.recalc_dirty_set(&changed)
+                with_reported(self.recalc_dirty_set(&changed), &vacated)
             } else {
                 Recalculated::Cells(Vec::new())
             };
@@ -2002,6 +2139,9 @@ impl Workbook {
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
             let sheet = &mut self.sheets[sheet_index];
+            // Spill receivers are keyed by absolute position and would not
+            // move with their anchors; the full recompute below re-places them.
+            sheet.retire_all_spills();
             match (is_row, delete) {
                 (true, false) => sheet.insert_rows(at, count),
                 (true, true) => sheet.delete_rows(at, count),
@@ -2296,6 +2436,14 @@ impl Workbook {
                 }
             }
         }
+        // Volatile formulas are recalculated on every recalc, whatever
+        // changed (Excel's rule): their inputs are the clock, the generator, or
+        // cells resolved at evaluation time that no edge leads to.
+        for &cell_id in &self.volatile_cells {
+            if dirty_set.insert(cell_id) {
+                queue.push_back(cell_id);
+            }
+        }
         while let Some(cell) = queue.pop_front() {
             for dep in self.dep_graph.dependents(cell) {
                 if dirty_set.insert(dep) {
@@ -2503,6 +2651,31 @@ impl Workbook {
 // BatchGuard - RAII batch scope for Workbook
 // =============================================================================
 
+/// Spill side effects of one write; see `Workbook::spill_effects_of_write`.
+struct SpillEffects {
+    vacated: Vec<CellId>,
+    anchors: Vec<CellId>,
+}
+
+/// Add cells that changed without being re-evaluated (vacated receivers) to a
+/// recalc's report, after what it already lists, each once.
+fn with_reported(recalculated: Recalculated, extra: &[CellId]) -> Recalculated {
+    match recalculated {
+        Recalculated::Cells(mut cells) => {
+            if !extra.is_empty() {
+                let mut seen: FxHashSet<CellId> = cells.iter().copied().collect();
+                for cell in extra {
+                    if seen.insert(*cell) {
+                        cells.push(*cell);
+                    }
+                }
+            }
+            Recalculated::Cells(cells)
+        }
+        all => all,
+    }
+}
+
 /// What a tracked edit re-evaluated.
 ///
 /// The engine has always known this — `recalc_dirty_set` collects exactly the
@@ -2669,6 +2842,10 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
             SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
             SheetRef::RefError { .. } => None,
         }.is_some_and(|s| s.subtotal_excluded(row, col, ignore_hidden))
+    }
+
+    fn sheet_id_by_name(&self, name: &str) -> Option<SheetId> {
+        self.workbook.sheet_id_by_name(name)
     }
 
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) {
@@ -3180,6 +3357,25 @@ mod tests {
         wb.rebuild_dep_graph();
         wb.recompute_full_ordered_with_custom_fns(&spill_handler);
         assert_eq!(wb.active_sheet().get_display(0, 2), "3");
+    }
+
+    /// The incremental path finds dynamic readers lazily (only once a round
+    /// places something). An edit that grows a spill must still reach a cell
+    /// that reads a new receiver through INDIRECT, and its dependents.
+    #[test]
+    fn test_incremental_edit_settles_dynamic_reader_of_a_grown_spill() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 1, "2");
+        wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(B1)");
+        wb.set_cell_value_tracked(0, 0, 2, "=INDIRECT(\"A3\")");
+        wb.set_cell_value_tracked(0, 0, 3, "=C1*10");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "", "A3 is empty while the array has two rows");
+        wb.set_cell_value_tracked(0, 0, 1, "3");
+        assert_eq!(wb.active_sheet().get_display(2, 0), "3", "the array grew");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "3", "INDIRECT sees the new receiver");
+        assert_eq!(wb.active_sheet().get_display(0, 3), "30", "and its dependent follows");
+        wb.set_cell_value_tracked(0, 0, 1, "1");
+        assert_eq!(wb.active_sheet().get_display(0, 2), "", "shrinking clears the receiver it read");
     }
 
     #[test]
@@ -6276,8 +6472,227 @@ mod tests {
 // which is considerably more work. The split says which.
 // ============================================================================
 #[cfg(test)]
+mod volatile_tests {
+    //! #88: formulas whose inputs the dependency graph cannot see.
+    use super::*;
+    use crate::timing::RecalcClock;
+
+    fn display(wb: &Workbook, sheet: usize, row: usize, col: usize) -> String {
+        wb.sheets()[sheet].get_display(row, col)
+    }
+
+    #[test]
+    fn indirect_follows_an_edit_to_the_cell_it_resolves_to() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 2, "5"); // C1
+        wb.set_cell_value_tracked(0, 4, 1, "1"); // B5
+        wb.set_cell_value_tracked(0, 0, 0, "=INDIRECT(\"B\"&C1)"); // A1
+        wb.set_cell_value_tracked(0, 0, 3, "=A1*10"); // D1 reads A1
+        assert_eq!(display(&wb, 0, 0, 0), "1");
+
+        wb.set_cell_value_tracked(0, 4, 1, "2"); // edit B5 only
+        assert_eq!(display(&wb, 0, 0, 0), "2", "INDIRECT must not go stale");
+        assert_eq!(display(&wb, 0, 0, 3), "20", "nor what reads it");
+    }
+
+    #[test]
+    fn indirect_across_sheets_follows_the_target() {
+        let mut wb = Workbook::new();
+        let second = wb.add_sheet_named("Data").unwrap();
+        wb.set_cell_value_tracked(second, 4, 1, "1");
+        wb.set_cell_value_tracked(0, 0, 0, "=INDIRECT(\"Data!B5\")");
+        assert_eq!(display(&wb, 0, 0, 0), "1");
+        wb.set_cell_value_tracked(second, 4, 1, "3");
+        assert_eq!(display(&wb, 0, 0, 0), "3");
+    }
+
+    #[test]
+    fn indirect_resolves_quoted_sheet_names_and_refuses_unknown_ones() {
+        let mut wb = Workbook::new();
+        let other = wb.add_sheet_named("My Data").unwrap();
+        wb.set_cell_value_tracked(other, 0, 0, "4");
+        wb.set_cell_value_tracked(other, 1, 0, "6");
+        wb.set_cell_value_tracked(0, 0, 0, "=SUM(INDIRECT(\"'My Data'!A1:A2\"))");
+        wb.set_cell_value_tracked(0, 1, 0, "=INDIRECT(\"Nope!A1\")");
+        assert_eq!(display(&wb, 0, 0, 0), "10");
+        assert_eq!(display(&wb, 0, 1, 0), "#REF!");
+        wb.set_cell_value_tracked(other, 1, 0, "16");
+        assert_eq!(display(&wb, 0, 0, 0), "20");
+    }
+
+    #[test]
+    fn offset_follows_an_edit_inside_its_result() {
+        let mut wb = Workbook::new();
+        for (r, v) in [(0, "1"), (1, "2"), (2, "3")] {
+            wb.set_cell_value_tracked(0, r, 0, v);
+        }
+        wb.set_cell_value_tracked(0, 0, 1, "=SUM(OFFSET(A1,1,0,2,1))");
+        assert_eq!(display(&wb, 0, 0, 1), "5");
+        wb.set_cell_value_tracked(0, 2, 0, "10");
+        assert_eq!(display(&wb, 0, 0, 1), "12");
+    }
+
+    #[test]
+    fn the_volatile_index_follows_the_formulas() {
+        let mut wb = Workbook::new();
+        assert_eq!(wb.volatile_cell_count(), 0);
+        wb.set_cell_value_tracked(0, 0, 0, "=A2+1");
+        assert_eq!(wb.volatile_cell_count(), 0, "an ordinary formula is not volatile");
+        wb.set_cell_value_tracked(0, 0, 1, "=NOW()");
+        wb.set_cell_value_tracked(0, 0, 2, "=OFFSET(A1,0,0)");
+        assert_eq!(wb.volatile_cell_count(), 2);
+        wb.set_cell_value_tracked(0, 0, 1, "7");
+        wb.clear_cell_tracked(0, 0, 2);
+        assert_eq!(wb.volatile_cell_count(), 0);
+
+        wb.sheets_mut()[0].set_value_deferred(3, 3, "=RAND()");
+        wb.rebuild_dep_graph();
+        assert_eq!(wb.volatile_cell_count(), 1, "a rebuild finds volatile formulas too");
+    }
+
+    #[test]
+    fn now_and_today_read_an_installed_clock_and_refresh_on_any_edit() {
+        let mut wb = Workbook::new();
+        // 2026-10-03 12:00:00 UTC.
+        let noon = 1_791_028_800_000_i64;
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(noon), utc_offset_seconds: Some(0), seed: None }));
+        wb.set_cell_value_tracked(0, 0, 0, "=NOW()");
+        wb.set_cell_value_tracked(0, 0, 1, "=TODAY()");
+        let serial = |wb: &Workbook, col| match wb.sheets()[0].get_computed_value(0, col) {
+            crate::formula::eval::Value::Number(n) => n,
+            other => panic!("{other:?}"),
+        };
+        let day = (noon / 86_400_000) as f64 + 25569.0;
+        assert_eq!(serial(&wb, 1), day);
+        assert!((serial(&wb, 0) - (day + 0.5)).abs() < 1e-9);
+
+        // An unrelated edit recalculates NOW against the new clock.
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(noon + 3_600_000), utc_offset_seconds: Some(0), seed: None }));
+        wb.set_cell_value_tracked(0, 9, 9, "x");
+        assert!((serial(&wb, 0) - (day + 0.5 + 1.0 / 24.0)).abs() < 1e-9);
+
+        // A local offset moves TODAY's day.
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(noon), utc_offset_seconds: Some(14 * 3600), seed: None }));
+        wb.set_cell_value_tracked(0, 9, 9, "y");
+        assert_eq!(serial(&wb, 1), day + 1.0);
+    }
+
+    #[test]
+    fn a_seed_makes_rand_identical_across_replicas_and_cells_independent() {
+        let build = |seed| {
+            let mut wb = Workbook::new();
+            wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(0), utc_offset_seconds: Some(0), seed: Some(seed) }));
+            // Written in different orders on purpose: replicas apply edits
+            // in their own order before the server's arrives.
+            for (r, c) in [(0, 0), (1, 0), (0, 1)] {
+                wb.set_cell_value_tracked(0, r, c, "=RAND()");
+            }
+            wb.set_cell_value_tracked(0, 2, 0, "=RANDBETWEEN(1,1000000)");
+            wb.recompute_full_ordered();
+            (0..3).map(|r| wb.sheets()[0].get_display(r, 0)).chain([wb.sheets()[0].get_display(0, 1)]).collect::<Vec<_>>()
+        };
+        let a = build(42);
+        assert_eq!(a, build(42), "same seed, same values");
+        assert_ne!(a, build(43), "a different seed draws differently");
+        assert_ne!(a[0], a[1], "neighbouring cells are independent");
+    }
+}
+
+#[cfg(test)]
 mod spill_placement_tests {
     use super::*;
+
+    fn number(wb: &Workbook, row: usize, col: usize) -> String {
+        wb.sheets()[0].get_display(row, col)
+    }
+
+    /// #91: the desktop's typing path. A value typed into a spilled cell
+    /// turns the anchor into #SPILL! and empties the rest of its extent, and
+    /// readers of the vacated cells see them empty; clearing the value lets
+    /// the anchor spill again.
+    #[test]
+    fn typing_into_a_spill_blocks_it_and_clearing_respills() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(3)");
+        wb.set_cell_value_tracked(0, 0, 1, "=A3");
+        assert_eq!(number(&wb, 2, 0), "3");
+
+        wb.set_cell_value_tracked(0, 1, 0, "x");
+        assert!(wb.sheets()[0].has_spill_error(0, 0), "anchor is #SPILL!");
+        assert_eq!(number(&wb, 1, 0), "x", "the typed value stays");
+        assert_eq!(number(&wb, 2, 0), "", "the rest of the extent is empty");
+        assert!(!wb.sheets()[0].is_spill_receiver(2, 0));
+
+        wb.clear_cell_tracked(0, 1, 0);
+        assert!(!wb.sheets()[0].has_spill_error(0, 0), "unblocked");
+        assert_eq!((number(&wb, 1, 0), number(&wb, 2, 0)), ("2".to_string(), "3".to_string()));
+        assert_eq!(number(&wb, 0, 1), "3", "the reader follows the re-spill");
+    }
+
+    /// #91: rewriting an anchor reports the receivers it vacated, so a mirror
+    /// (the browser session) can clear them, and recalculates their readers.
+    #[test]
+    fn rewriting_an_anchor_reports_and_recalculates_its_vacated_receivers() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(4)");
+        wb.set_cell_value_tracked(0, 0, 1, "=A4");
+        let id = wb.sheets()[0].id;
+        let Recalculated::Cells(cells) = wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(2)") else {
+            panic!("no cycle here");
+        };
+        for row in 2..4 {
+            assert!(cells.contains(&CellId::new(id, row, 0)), "A{} vacated: {cells:?}", row + 1);
+        }
+        assert!(cells.contains(&CellId::new(id, 0, 1)), "the reader of A4 is recalculated");
+        assert_eq!(number(&wb, 0, 1), "", "A4 is empty now");
+    }
+
+    /// #91: an anchor blocked by a cell that is later cleared re-spills even
+    /// when the block happened at load (a full recompute), not on an edit.
+    #[test]
+    fn a_blocked_anchor_from_load_respills_when_its_blocker_is_cleared() {
+        let mut wb = Workbook::new();
+        wb.sheets_mut()[0].set_value_deferred(0, 0, "=SEQUENCE(3)");
+        wb.sheets_mut()[0].set_value_deferred(2, 0, "block");
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+        assert!(wb.sheets()[0].has_spill_error(0, 0));
+        wb.clear_cell_tracked(0, 2, 0);
+        assert!(!wb.sheets()[0].has_spill_error(0, 0));
+        assert_eq!(number(&wb, 2, 0), "3");
+    }
+
+    /// A row or column inserted before a spill anchor moves the whole spill:
+    /// receivers are keyed by position and used to stay behind, so the moved
+    /// anchor displayed a stale receiver value and the rest went blank.
+    #[test]
+    fn structural_edits_move_spills_with_their_anchor() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 1, "=SEQUENCE(1,3)");
+        wb.structural_edit(0, crate::structural::Axis::Col, 0, 1, false).unwrap();
+        let row: Vec<String> = (0..6).map(|c| number(&wb, 0, c)).collect();
+        assert_eq!(row, ["", "", "1", "2", "3", ""]);
+        wb.set_cell_value_tracked(0, 2, 2, "=SEQUENCE(2)");
+        wb.structural_edit(0, crate::structural::Axis::Row, 0, 2, false).unwrap();
+        assert_eq!((number(&wb, 4, 2), number(&wb, 5, 2)), ("1".to_string(), "2".to_string()));
+        assert_eq!(number(&wb, 2, 2), "1", "the first spill moved down too");
+        wb.structural_edit(0, crate::structural::Axis::Row, 0, 2, true).unwrap();
+        assert_eq!((number(&wb, 2, 2), number(&wb, 3, 2)), ("1".to_string(), "2".to_string()));
+    }
+
+    /// Batches: the receivers a rewritten anchor vacates are reported when the
+    /// batch closes.
+    #[test]
+    fn a_batch_reports_vacated_receivers() {
+        let mut wb = Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(3)");
+        let id = wb.sheets()[0].id;
+        wb.begin_batch();
+        wb.set_cell_value_tracked(0, 0, 0, "1");
+        let outcome = wb.end_batch_outcome();
+        let Recalculated::Cells(cells) = outcome.recalculated else { panic!() };
+        assert!(cells.contains(&CellId::new(id, 1, 0)) && cells.contains(&CellId::new(id, 2, 0)), "{cells:?}");
+    }
 
     /// An eager caller must not be able to corrupt the result.
     ///

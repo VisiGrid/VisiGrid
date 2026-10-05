@@ -1,4 +1,4 @@
-// Array/spill functions: SEQUENCE, TRANSPOSE, FILTER, UNIQUE, SORT, SPARKLINE
+// Array/spill functions: SEQUENCE, TRANSPOSE, FILTER, UNIQUE, SORT, SORTBY, SPARKLINE
 
 use super::eval::{evaluate, CellLookup, EvalResult, Value, Array2D};
 use super::eval_helpers::{collect_numbers, read_cell_value, value_compare};
@@ -314,6 +314,71 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
         }
 
+        "SORTBY" => {
+            // SORTBY(array, by_array1, [sort_order1], [by_array2, sort_order2],
+            // ...): sort array's rows by one or more key columns (each as tall
+            // as array), or its columns by key rows (each as wide). Orders are
+            // 1 (ascending, the default) or -1. Stable, so equal keys keep
+            // their order, and keys compare as SORT's do. Keys of the wrong
+            // shape, or mixed orientations, are #VALUE!.
+            if args.len() < 2 {
+                return Some(EvalResult::Error("SORTBY requires an array and at least one by_array".to_string()));
+            }
+            let (rows, cols, data) = match grid_values(&args[0], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let mut keys: Vec<(Vec<Value>, bool)> = Vec::new();
+            let mut by_rows: Option<bool> = None;
+            for pair in args[1..].chunks(2) {
+                let (kr, kc, kd) = match grid_values(&pair[0], lookup) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                let orientation = if kc == 1 && kr == rows {
+                    true
+                } else if kr == 1 && kc == cols {
+                    false
+                } else {
+                    return Some(EvalResult::Error("#VALUE!".to_string()));
+                };
+                if by_rows.is_some_and(|o| o != orientation) {
+                    return Some(EvalResult::Error("#VALUE!".to_string()));
+                }
+                by_rows = Some(orientation);
+                let descending = match pair.get(1).filter(|a| !matches!(a, Expr::Empty)).map(|a| evaluate(a, lookup)) {
+                    None => false,
+                    Some(EvalResult::Number(1.0)) => false,
+                    Some(EvalResult::Number(-1.0)) => true,
+                    Some(EvalResult::Error(e)) => return Some(EvalResult::Error(e)),
+                    Some(_) => return Some(EvalResult::Error("#VALUE!".to_string())),
+                };
+                let flat: Vec<Value> = kd.into_iter().flatten().collect();
+                keys.push((flat, descending));
+            }
+            let by_rows = by_rows.unwrap_or(true);
+            let n = if by_rows { rows } else { cols };
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                for (key, descending) in &keys {
+                    let ord = value_compare(&key[a], &key[b]);
+                    let ord = if *descending { ord.reverse() } else { ord };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            if let Err(error) = super::eval_budget::array(rows, cols) { return Some(EvalResult::Error(error)); }
+            let mut array = Array2D::new(rows, cols);
+            for r in 0..rows {
+                for c in 0..cols {
+                    let (sr, sc) = if by_rows { (order[r], c) } else { (r, order[c]) };
+                    array.set(r, c, data[sr][sc].clone());
+                }
+            }
+            EvalResult::Array(array)
+        }
         _ => return None,
     };
     Some(result)

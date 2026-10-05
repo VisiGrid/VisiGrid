@@ -19,7 +19,7 @@ pub trait CellLookup {
     /// lookups keep cross-sheet references as explicit reference errors.
     fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> {
         super::parser::parse(&format!("={}", text.trim().trim_start_matches('=')))
-            .map(|expr| super::parser::bind_expr_same_sheet(&expr))
+            .map(|expr| super::parser::bind_expr(&expr, |name| self.sheet_id_by_name(name)))
     }
 
     /// SUBTOTAL excludes filtered records and nested subtotal formulas.
@@ -28,6 +28,9 @@ pub trait CellLookup {
     /// Exclusive data bounds on the requested sheet. Empty lookups default
     /// to no data; real sheet lookups include formulas and spill receivers.
     fn data_bounds(&self, _sheet: &SheetRef) -> (usize, usize) { (0, 0) }
+    /// Resolve a sheet name typed at run time (INDIRECT's "Sheet!A1").
+    /// Lookups without a workbook cannot, so cross-sheet INDIRECT is #REF!.
+    fn sheet_id_by_name(&self, _name: &str) -> Option<crate::sheet::SheetId> { None }
 
     /// Optional data-view offset for CLI header exclusion. Cell formulas use 0.
     fn whole_column_start(&self) -> usize { 0 }
@@ -1084,6 +1087,11 @@ fn eval_function_args<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<Eval
 }
 
 fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
+    // LET and LAMBDA bind names and must see their arguments unprocessed:
+    // a LET name is not a table to resolve or a value to lift.
+    if let Some(result) = super::eval_let::try_evaluate(name, args, lookup) {
+        return result;
+    }
     // Reference producers need the original geometry, before whole columns
     // are clipped to occupied data for value-consuming functions.
     if matches!(name, "OFFSET" | "INDIRECT") {
@@ -1270,6 +1278,29 @@ mod tests {
     // Compat tests for newly implemented functions (SUMIFS, COUNTIFS, IFNA, TEXTJOIN, XLOOKUP)
     // These ensure Excel-compatible behavior for common import scenarios
     // =========================================================================
+
+    #[test]
+    fn sums_of_many_decimals_do_not_drift() {
+        // 0.1 × 10 and 0.1 + 0.2 + 0.3: a plain running sum gives
+        // 0.9999999999999999 and 0.6000000000000001
+        let mut lookup = TestLookup::new();
+        for r in 0..10 {
+            lookup.set(r, 0, "0.1");
+            lookup.set(r, 1, "x");
+        }
+        for (r, v) in ["0.1", "0.2", "0.3"].iter().enumerate() {
+            lookup.set(r, 2, v);
+        }
+        for (formula, want) in [
+            ("=SUM(A1:A10)", 1.0),
+            ("=SUM(C1:C3)", 0.6),
+            ("=AVERAGE(A1:A10)", 0.1),
+            (r#"=SUMIF(B1:B10, "x", A1:A10)"#, 1.0),
+            (r#"=SUMIFS(A1:A10, B1:B10, "x")"#, 1.0),
+        ] {
+            assert_eq!(evaluate(&parse_and_bind(formula), &lookup), EvalResult::Number(want), "{formula}");
+        }
+    }
 
     #[test]
     fn test_sumifs_single_criteria() {

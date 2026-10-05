@@ -372,11 +372,22 @@ impl SessionClient {
         &mut self,
         op: visigrid_protocol::StructureOp,
     ) -> Result<visigrid_protocol::StructureResultMessage, SessionError> {
+        // A recipe refresh may run for minutes: wait past the host's limit
+        // for this one reply, then go back to the usual 30 seconds
+        let wait = op.host_timeout() + Duration::from_secs(15);
         let msg = ClientMessage::Structure(visigrid_protocol::StructureMessage {
             id: self.next_request_id(), op,
         });
         self.send(&msg)?;
-        match self.receive()? {
+        let longer = wait > Duration::from_secs(30);
+        if longer {
+            let _ = self.reader.get_ref().set_read_timeout(Some(wait));
+        }
+        let reply = self.receive();
+        if longer {
+            let _ = self.reader.get_ref().set_read_timeout(Some(Duration::from_secs(30)));
+        }
+        match reply? {
             ServerMessage::StructureResult(r) => {
                 self.revision = r.revision;
                 Ok(r)

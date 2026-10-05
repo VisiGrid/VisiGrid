@@ -146,3 +146,75 @@ fn recipe_xlsx_output_uses_shared_headless_writer() {
     assert_eq!(wb.active_sheet().get_raw(1, 1), "120.5");
     assert_eq!(wb.active_sheet().get_raw(2, 0), "");
 }
+
+/// An appending recipe reads every matching file, and later steps can use
+/// the Source file column it adds.
+#[test]
+fn recipe_run_appends_a_folder_and_groups_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for (name, body) in [("sales-01.csv", "Region,Amount\nWest,1\nEast,2\n"), ("sales-02.csv", "Region,Amount\nWest,3\n")] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+    }
+    std::fs::write(
+        dir.path().join("sales.recipe.toml"),
+        "version = 1\n[source]\nkind = \"csv\"\npath = \"sales-*.csv\"\ncombine = true\n[[step]]\nop = \"group\"\nby = [\"Region\"]\ntotals = [{ fn = \"sum\", column = \"Amount\", as = \"Total\" }, { fn = \"distinct\", column = \"Source file\", as = \"Files\" }]\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vgrid"))
+        .args(["recipe", "run", "sales.recipe.toml", "-q"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let csv = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(csv.lines().collect::<Vec<_>>(), ["Region,Total,Files", "West,4,2", "East,2,1"]);
+}
+
+#[test]
+fn recipe_run_fills_replaces_splits_and_sorts() {
+    let d = dir("shape");
+    // A report-style export: the region printed once per group, n/a for no
+    // amount, "Last, First" names
+    std::fs::write(d.join("report.csv"), "Region,Rep,Amount\nWest,\"Doe, Jane\",9\n,\"Roe, Rick\",n/a\nEast,\"Poe, Ed\",10\n").unwrap();
+    std::fs::write(
+        d.join("report.recipe.toml"),
+        r#"version = 1
+[source]
+kind = "csv"
+path = "report.csv"
+
+[[step]]
+op = "fill_down"
+columns = ["Region"]
+
+[[step]]
+op = "replace"
+columns = ["Amount"]
+find = "n/a"
+with = "0"
+
+[[step]]
+op = "split"
+column = "Rep"
+by = ", "
+into = ["Last", "First"]
+
+[[step]]
+op = "sort"
+by = [{ column = "Amount", descending = true }]
+"#,
+    )
+    .unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("report.recipe.toml"))]);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(),
+        ["Region,Last,First,Amount", "East,Poe,Ed,10", "West,Doe,Jane,9", "West,Roe,Rick,0"]
+    );
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.contains("Fill down Region") && stderr.contains("filled 1 empty cell"), "{stderr}");
+    assert!(stderr.contains("Sort by Amount (descending)"), "{stderr}");
+}

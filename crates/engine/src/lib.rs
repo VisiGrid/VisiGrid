@@ -1,4 +1,5 @@
 mod timing;
+pub use timing::RecalcClock;
 pub mod cell;
 pub mod cell_id;
 pub mod cond_format;
@@ -8,6 +9,7 @@ pub mod events;
 pub mod filter;
 pub mod formula;
 pub mod named_range;
+pub mod numeric;
 pub mod operation_plan;
 pub mod pivot;
 pub mod provenance;

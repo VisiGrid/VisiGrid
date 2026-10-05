@@ -104,7 +104,7 @@ fn run<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Result<EvalResult, Stri
         }
     }
     let n = nums.len();
-    let sum: f64 = nums.iter().sum();
+    let sum = crate::numeric::sum(&nums);
     let result = match code {
         1 if n == 0 => return Err("#DIV/0!".into()),
         1 => sum / n as f64,

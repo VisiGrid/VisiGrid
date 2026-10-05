@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::app::{PairingPrompt, Problem, Spreadsheet};
 
-fn plan_under_review_error() -> (String, String) {
+pub(crate) fn plan_under_review_error() -> (String, String) {
     (
         "plan_under_review".to_string(),
         "this workbook has a plan under review; wait for the user to apply or dismiss it"
@@ -87,6 +87,12 @@ impl Spreadsheet {
                         current_revision: self.workbook.read(cx).revision(),
                     });
                 }
+                // A recipe refresh replies when its background run is done
+                SessionRequest::Structure {
+                    op: visigrid_protocol::StructureOp::RefreshRecipeTable { table },
+                    client,
+                    reply,
+                } => self.start_agent_refresh(table, client, reply, cx),
                 SessionRequest::Structure { op, client, reply } => {
                     let outcome = self.handle_session_structure(&op, client, cx);
                     let _ = reply.send(outcome);
@@ -738,8 +744,9 @@ impl Spreadsheet {
             let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).collect();
             coords.sort_unstable();
             for (row, col) in coords {
-                // Computed errors surface as Value::Error; cycle-marked cells
-                // store the literal text "#CYCLE!" instead (see set_cycle_error).
+                // Computed errors surface as Value::Error; cycle members carry
+                // the "#CYCLE!" marker as their computed text (see
+                // set_cycle_error), and so do files saved before #95.
                 let error = match sheet.get_computed_value(row, col) {
                     Value::Error(e) => Some(e),
                     Value::Text(t) if t == "#CYCLE!" => Some(t),
@@ -945,6 +952,7 @@ impl Spreadsheet {
             ..Default::default()
         };
 
+
         if crate::table_filter_ui::has_table_criteria(self.wb(cx))
             && !matches!(
                 op,
@@ -1078,6 +1086,12 @@ impl Spreadsheet {
                         return out;
                     }
                 }
+            }
+            // Answered by start_agent_refresh, in the background; never reaches here
+            StructureOp::RefreshRecipeTable { .. } => {
+                self.suppress_repeat_capture = false;
+                out.error = Some(("invalid_op".to_string(), "recipe refresh was not handled".to_string()));
+                return out;
             }
             StructureOp::RefreshPivot { pivot } => {
                 let ids = visigrid_session_host::resolve_refresh_pivots(

@@ -301,7 +301,9 @@ fn build_versus_recompute() {
 // the workbook — on every edit, however small the change, which cost 78 ms for
 // a ONE-dependent edit on 200k formulas. It now orders only the dirty subgraph
 // (`dep_graph::topo_order_subset`), and the same edit is ~0.002 ms and flat
-// across sizes. A one-dependent edit is the measurement that keeps it honest:
+// across sizes. (It regressed to 42 ms at 200k when spill settlement began
+// scanning every formula for INDIRECT/OFFSET readers on every call; that scan
+// is now lazy, done only when a round actually places an array.) A one-dependent edit is the measurement that keeps it honest:
 // the dirty set is 1, so anything the edit costs beyond trivial is ordering
 // work that should not be happening.
 //
@@ -414,5 +416,39 @@ fn single_cell_edit_on_a_resident_workbook() {
          A narrow edit should be flat across sizes. When it instead tracks the\n\
          workbook, the ordering is being done over every formula rather than\n\
          over the dirty set (the defect fixed in dep_graph::topo_order_subset)."
+    );
+}
+
+// #88: volatile formulas (NOW, TODAY, RAND, RANDBETWEEN, INDIRECT, OFFSET) are
+// recalculated on every edit, as in Excel. A workbook without any must keep
+// the one-dependent edit flat (the first test above); this one shows what a
+// workbook WITH them pays: every edit re-evaluates each volatile cell and
+// whatever reads it, however unrelated the edit.
+#[test]
+#[ignore = "measurement, not an assertion — run explicitly with --ignored --nocapture"]
+fn single_cell_edit_with_volatile_formulas() {
+    let n = 200_000;
+    let mut cells = fixture(n, Shape::Cheap);
+    // Far right of the fixture: one INDIRECT with a reader, and 100 NOWs.
+    let col = 2 * n.div_ceil(ROWS_PER_PAIR) + 1;
+    cells.push((0, col, "=INDIRECT(\"A2\")".into()));
+    cells.push((1, col, format!("={}1+1", col_name(col))));
+    for r in 0..100 {
+        cells.push((r + 2, col, "=NOW()".into()));
+    }
+    let mut wb = built(&cells);
+    assert_eq!(wb.volatile_cell_count(), 101);
+    let mut samples = Vec::new();
+    for i in 0..=11 {
+        let v = format!("{}", 1000 + i);
+        let t = Instant::now();
+        wb.set_cell_value_tracked(0, 0, 0, &v);
+        if i > 0 {
+            samples.push(ms(t.elapsed()));
+        }
+    }
+    println!(
+        "\nformulas={n} cheap + 1 INDIRECT (+1 reader) + 100 NOW: one-dependent edit median {:.3}ms",
+        median(samples)
     );
 }
