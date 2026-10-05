@@ -1,19 +1,19 @@
 // File I/O operations
 
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "recipes"))]
 pub mod csv;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "recipes"))]
 pub mod csv_import;
 #[cfg(feature = "native")]
 pub mod duckdb;
 pub mod json;
 #[cfg(feature = "native")]
 pub mod native;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "recipes"))]
 pub mod parquet;
 #[cfg(feature = "native")]
 pub mod parquet_export;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "recipes"))]
 pub mod recipe;
 #[cfg(feature = "native")]
 pub mod recipe_table;

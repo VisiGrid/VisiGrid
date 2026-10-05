@@ -38,12 +38,15 @@ pub enum CellContent {
     /// Formula text, starting with `=`.
     Formula(String),
     Clear,
+    /// Literal text, never read as a number, date or formula ("007", an ID
+    /// that looks numeric): what an import's text columns write.
+    Text(String),
 }
 
 impl CellContent {
     pub fn raw(&self) -> &str {
         match self {
-            CellContent::Value(s) | CellContent::Formula(s) => s,
+            CellContent::Value(s) | CellContent::Formula(s) | CellContent::Text(s) => s,
             CellContent::Clear => "",
         }
     }

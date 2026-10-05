@@ -850,6 +850,12 @@ impl Sheet {
     /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
     pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
+        self.set_text_at(row, col, text);
+    }
+
+    /// `set_text` at exactly (`row`, `col`), even inside a merge (see
+    /// `set_value_at`).
+    pub fn set_text_at(&mut self, row: usize, col: usize, text: &str) {
         if !self.accept_value_write(row, col) {
             return;
         }

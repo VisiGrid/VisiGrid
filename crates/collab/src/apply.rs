@@ -95,7 +95,7 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             // goes, the cell's format stays. The engine's clear_cell removes
             // the whole cell including its format, which would not commute
             // with a concurrent format change.
-            let r = wb.set_cell_value_tracked_at(idx, *row, *col, content.raw());
+            let r = write_content(wb, idx, *row, *col, content);
             if let Some(ch) = changes.as_deref_mut() {
                 ch.cells.push((*sheet, *row, *col));
                 ch.recalculated(r);
@@ -270,7 +270,7 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             let idx = index_of(wb, *sheet)?;
             for (dr, line) in values.iter().enumerate() {
                 for (dc, content) in line.iter().enumerate() {
-                    let r = wb.set_cell_value_tracked_at(idx, row + dr, col + dc, content.raw());
+                    let r = write_content(wb, idx, row + dr, col + dc, content);
                     if let Some(ch) = changes.as_deref_mut() {
                         ch.cells.push((*sheet, row + dr, col + dc));
                         ch.recalculated(r);
@@ -606,4 +606,12 @@ pub fn first_difference(a: &Fingerprint, b: &Fingerprint) -> Option<String> {
         }
     }
     None
+}
+
+/// One cell write: text as text, anything else as typed input.
+fn write_content(wb: &mut Workbook, idx: usize, row: usize, col: usize, content: &crate::op::CellContent) -> visigrid_engine::workbook::Recalculated {
+    match content {
+        crate::op::CellContent::Text(t) => wb.set_cell_text_tracked_at(idx, row, col, t),
+        other => wb.set_cell_value_tracked_at(idx, row, col, other.raw()),
+    }
 }

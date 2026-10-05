@@ -2224,6 +2224,18 @@ impl Workbook {
         self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
     }
 
+    /// `set_cell_text_tracked` at exactly (`row`, `col`), even inside a merge
+    /// (collaboration writes; see `set_cell_value_tracked_at`).
+    pub fn set_cell_text_tracked_at(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
+        let Some(sheet) = self.sheets.get(sheet_index) else { return Recalculated::Cells(Vec::new()); };
+        if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
+        let sheet_id = sheet.id;
+        let spill = self.spill_effects_of_write(sheet_index, row, col);
+        self.sheets[sheet_index].set_text_at(row, col, text);
+        self.update_cell_deps(sheet_id, row, col);
+        self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
+    }
+
     /// Restore a sparse history image with dependency tracking. Callers must
     /// validate the whole batch on a candidate before publishing it.
     pub fn restore_cell_tracked(&mut self, sheet_index: usize, row: usize, col: usize, image: Option<crate::cell::Cell>) -> Result<(), String> {

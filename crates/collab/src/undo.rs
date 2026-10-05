@@ -86,6 +86,16 @@ fn content_of(raw: String) -> CellContent {
     }
 }
 
+/// What a cell holds, as the write that puts it back: text stays text, so
+/// undoing over "007" restores the text, never the number 7.
+fn content_at(s: &visigrid_engine::sheet::Sheet, row: usize, col: usize) -> CellContent {
+    let raw = s.get_raw(row, col);
+    if !raw.is_empty() && matches!(s.get_cell(row, col).value, visigrid_engine::cell::CellValue::Text(_)) {
+        return CellContent::Text(raw);
+    }
+    content_of(raw)
+}
+
 fn index_of(wb: &Workbook, sheet: SheetKey) -> Option<usize> {
     wb.idx_for_sheet_id(visigrid_engine::sheet::SheetId(sheet))
 }
@@ -95,7 +105,7 @@ fn hex(c: [u8; 4]) -> String {
 }
 
 /// An engine number format as the Excel code `FormatProps` carries.
-fn number_format_code(nf: &NumberFormat) -> Option<String> {
+pub fn number_format_code(nf: &NumberFormat) -> Option<String> {
     let decimals = |d: u8| if d == 0 { String::new() } else { format!(".{}", "0".repeat(d as usize)) };
     Some(match nf {
         NumberFormat::General => return None,
@@ -328,7 +338,7 @@ fn per_cell_formats(sheet: SheetKey, mut cells: Vec<(usize, usize, FormatProps)>
 
 /// Ops that put back every cell (content and carried format properties)
 /// listed in `cells`, on a sheet named `sheet_name`.
-fn restore_cells(sheet: SheetKey, sheet_name: &str, cells: Vec<(usize, usize, String, CellFormat)>) -> Vec<CollabOp> {
+fn restore_cells(s: &visigrid_engine::sheet::Sheet, sheet: SheetKey, sheet_name: &str, cells: Vec<(usize, usize, String, CellFormat)>) -> Vec<CollabOp> {
     let default = CellFormat::default();
     let mut out = Vec::new();
     let mut formats = Vec::new();
@@ -339,7 +349,7 @@ fn restore_cells(sheet: SheetKey, sheet_name: &str, cells: Vec<(usize, usize, St
                 sheet_name: sheet_name.to_string(),
                 row: r,
                 col: c,
-                content: content_of(raw),
+                content: content_at(s, r, c),
             });
         }
         if fmt != default {
@@ -406,7 +416,7 @@ pub fn apply_recording(
                         sheet_name: sheet_name.clone(),
                         row: *row,
                         col: *col,
-                        content: content_of(scratch.sheets()[idx].get_raw(*row, *col)),
+                        content: content_at(&scratch.sheets()[idx], *row, *col),
                     });
                 }
             }
@@ -428,7 +438,7 @@ pub fn apply_recording(
                                 sheet_name: s.name.clone(),
                                 row: row + dr,
                                 col: col + dc,
-                                content: content_of(s.get_raw(row + dr, col + dc)),
+                                content: content_at(s, row + dr, col + dc),
                             });
                         }
                     }
@@ -450,7 +460,7 @@ pub fn apply_recording(
                             crate::op::Axis::Row => s.occupied_cells_in_rows(*at, *count),
                             crate::op::Axis::Col => s.occupied_cells_in_cols(*at, *count),
                         };
-                        inv.extend(restore_cells(*sheet, &s.name, cells));
+                        inv.extend(restore_cells(s, *sheet, &s.name, cells));
                     }
                 }
             }
@@ -500,7 +510,7 @@ pub fn apply_recording(
                         .collect();
                     let mut cells = cells;
                     cells.sort_by_key(|(r, c, ..)| (*r, *c));
-                    inv.extend(restore_cells(*sheet, &s.name, cells));
+                    inv.extend(restore_cells(s, *sheet, &s.name, cells));
                 }
             }
         }
@@ -514,7 +524,7 @@ pub fn apply_recording(
                         sheet_name: sheet_name.clone(),
                         row: *row,
                         col: *col,
-                        content: content_of(scratch.sheets()[idx].get_raw(*row, *col)),
+                        content: content_at(&scratch.sheets()[idx], *row, *col),
                     });
                 }
             }
@@ -529,7 +539,7 @@ pub fn apply_recording(
                                 sheet_name: name.clone(),
                                 row: row + dr,
                                 col: col + dc,
-                                content: content_of(s.get_raw(row + dr, col + dc)),
+                                content: content_at(s, row + dr, col + dc),
                             });
                         }
                     }

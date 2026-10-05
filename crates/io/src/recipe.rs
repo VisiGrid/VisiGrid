@@ -19,7 +19,33 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+
+/// Step timing. `Instant` panics in the browser (wasm32-unknown-unknown has
+/// no clock); there a step reports 0 ms.
+#[cfg(not(target_arch = "wasm32"))]
+struct Stopwatch(Instant);
+#[cfg(not(target_arch = "wasm32"))]
+impl Stopwatch {
+    fn start() -> Self {
+        Stopwatch(Instant::now())
+    }
+    fn millis(&self) -> u128 {
+        self.0.elapsed().as_millis()
+    }
+}
+#[cfg(target_arch = "wasm32")]
+struct Stopwatch;
+#[cfg(target_arch = "wasm32")]
+impl Stopwatch {
+    fn start() -> Self {
+        Stopwatch
+    }
+    fn millis(&self) -> u128 {
+        0
+    }
+}
 
 use serde::{Deserialize, Serialize};
 use visigrid_engine::cell::{interchange_number, DateStyle, NumberFormat};
@@ -1441,8 +1467,12 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
     let read_one = |snap: &Snapshot| match &recipe.source {
         Source::Csv(src) => read_csv(src, snap),
         Source::Parquet(_) => read_parquet(snap),
+        #[cfg(feature = "native")]
         Source::Duckdb(src) => read_duckdb(src, snap),
+        #[cfg(feature = "native")]
         Source::Xlsx(src) => read_xlsx(src, snap),
+        #[cfg(not(feature = "native"))]
+        Source::Duckdb(_) | Source::Xlsx(_) => Err("DuckDB and Excel sources are read by the desktop app or the server import".to_string()),
     };
     let read = if snapshot.more.is_empty() {
         read_one(snapshot)
@@ -1487,7 +1517,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
     report.drift = drift(recipe.source.columns(), &frame.columns);
 
     for (index, step) in recipe.steps.iter().enumerate() {
-        let started = Instant::now();
+        let started = Stopwatch::start();
         let rows_in = frame.rows.len();
         let mut skipped = false;
         let mut note = None;
@@ -1553,7 +1583,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
             description: step.describe(),
             rows_in,
             rows_out: frame.rows.len(),
-            millis: started.elapsed().as_millis(),
+            millis: started.millis(),
             // A step that failed the run is not "skipped": it failed
             skipped: skipped && missing.is_empty() && report.failures.len() == failures_before,
             note,
@@ -1644,6 +1674,7 @@ pub fn guess_header_row(snapshot: &Snapshot) -> usize {
 
 /// The snapshot's bytes as a file, for readers that need a path. The
 /// snapshot stays the only copy of the source a run reads.
+#[cfg(feature = "native")]
 fn snapshot_file(snapshot: &Snapshot, ext: &str) -> Result<(tempfile::TempDir, PathBuf), String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = dir.path().join(format!("source.{ext}"));
@@ -1652,10 +1683,10 @@ fn snapshot_file(snapshot: &Snapshot, ext: &str) -> Result<(tempfile::TempDir, P
 }
 
 fn read_parquet(snapshot: &Snapshot) -> Result<Frame, String> {
-    let (_dir, path) = snapshot_file(snapshot, "parquet")?;
-    frame_from_import(crate::parquet::import(&path)?)
+    frame_from_import(crate::parquet::import_bytes(snapshot.bytes.as_slice().to_vec())?)
 }
 
+#[cfg(feature = "native")]
 fn read_duckdb(src: &DuckdbSource, snapshot: &Snapshot) -> Result<Frame, String> {
     if src.table.trim().is_empty() {
         return Err("the recipe names no DuckDB table; set source.table".into());
@@ -1735,6 +1766,7 @@ fn frame_from_sheet(sheet: &Sheet, header: Option<usize>, count: usize, width: u
 }
 
 /// An Excel workbook's sheet names, in order, without importing it.
+#[cfg(feature = "native")]
 pub fn xlsx_sheet_names(path: &Path) -> Result<Vec<String>, String> {
     use calamine::Reader as _;
     let workbook = calamine::open_workbook_auto(path).map_err(|e| e.to_string())?;
@@ -1744,6 +1776,7 @@ pub fn xlsx_sheet_names(path: &Path) -> Result<Vec<String>, String> {
 /// The row of `sheet` (counting from 1) that most likely holds the column
 /// names: the same rule as for CSV, applied to the sheet's rows. 1 when
 /// nothing stands out.
+#[cfg(feature = "native")]
 pub fn guess_xlsx_header_row(snapshot: &Snapshot, sheet: &str) -> usize {
     let probe = XlsxSource { path: String::new(), sheet: sheet.to_string(), header_row: 0, columns: Vec::new(), combine: false };
     let Ok(frame) = read_xlsx(&probe, snapshot) else { return 1 };
@@ -1758,6 +1791,7 @@ pub fn guess_xlsx_header_row(snapshot: &Snapshot, sheet: &str) -> usize {
     counts.iter().take(10).position(|c| *c == widest).map_or(1, |i| i + 1)
 }
 
+#[cfg(feature = "native")]
 fn read_xlsx(src: &XlsxSource, snapshot: &Snapshot) -> Result<Frame, String> {
     // The reader picks the format from the extension
     let ext = snapshot.path.extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_lowercase();
@@ -2810,61 +2844,79 @@ impl RecipeOutput {
     /// Write one value of column `col` at (`row`, `at_col`), typed the way
     /// [`to_sheet`](Self::to_sheet) types it. An empty value writes nothing.
     pub(crate) fn write_value(&self, sheet: &mut Sheet, row: usize, at_col: usize, col: usize, value: &str) {
-        if value.is_empty() {
-            return;
-        }
-        let (dr, c) = (row, at_col);
-        match self.columns[col].kind {
-            ValueKind::Plain => {}
-            // As the Parquet importer writes it, so a recipe changes nothing
-            // about a value it doesn't touch
-            ValueKind::Number => return sheet.set_value_deferred(dr, c, value),
-            ValueKind::DateTime => {
-                return match parse_iso_datetime(value) {
-                    Some(serial) => {
-                        sheet.set_value_deferred(dr, c, &interchange_number(serial));
-                        sheet.set_number_format(dr, c, NumberFormat::DateTime);
-                    }
-                    None => sheet.set_text(dr, c, value),
-                }
-            }
-            ValueKind::Time => {
-                return match parse_iso_time(value) {
-                    Some(fraction) => {
-                        sheet.set_value_deferred(dr, c, &interchange_number(fraction));
-                        sheet.set_number_format(dr, c, NumberFormat::Time);
-                    }
-                    None => sheet.set_text(dr, c, value),
-                }
-            }
-        }
-        match self.columns[col].rule {
-            ColumnRule::Text | ColumnRule::Skip => sheet.set_text(dr, c, value),
-            ColumnRule::Number => match parse_number(value, self.decimal_comma) {
-                Some(n) => sheet.set_value_deferred(dr, c, &interchange_number(n)),
-                None => sheet.set_text(dr, c, value), // reported; kept as text
-            },
-            ColumnRule::Date(order) => match parse_date(value, order) {
-                Some(serial) => {
-                    sheet.set_value_deferred(dr, c, &interchange_number(serial));
-                    sheet.set_number_format(dr, c, NumberFormat::Date { style: DateStyle::Iso });
-                }
-                None => sheet.set_text(dr, c, value),
-            },
-            ColumnRule::Auto => {
-                if keep_as_text(value, false).is_some() {
-                    sheet.set_text(dr, c, value);
-                } else if self.decimal_comma {
-                    match parse_decimal_comma(value) {
-                        Some(n) => sheet.set_value_deferred(dr, c, &interchange_number(n)),
-                        None => sheet.set_value_deferred(dr, c, value),
-                    }
-                } else {
-                    sheet.set_value_deferred(dr, c, value);
+        match self.landed(col, value) {
+            (Landed::Empty, _) => {}
+            (Landed::Text(t), _) => sheet.set_text(row, at_col, &t),
+            (Landed::Input(v), format) => {
+                sheet.set_value_deferred(row, at_col, &v);
+                if let Some(f) = format {
+                    sheet.set_number_format(row, at_col, f);
                 }
             }
         }
     }
+
+    /// How one value of column `col` lands in a cell: typed input (with the
+    /// number format a date or time needs), literal text, or nothing. One
+    /// rule for [`to_sheet`](Self::to_sheet), the desktop's tables and the
+    /// web's import operations.
+    pub fn landed(&self, col: usize, value: &str) -> (Landed, Option<NumberFormat>) {
+        if value.is_empty() {
+            return (Landed::Empty, None);
+        }
+        let text = || (Landed::Text(value.to_string()), None);
+        match self.columns[col].kind {
+            ValueKind::Plain => {}
+            // As the Parquet importer writes it, so a recipe changes nothing
+            // about a value it doesn't touch
+            ValueKind::Number => return (Landed::Input(value.to_string()), None),
+            ValueKind::DateTime => {
+                return match parse_iso_datetime(value) {
+                    Some(serial) => (Landed::Input(interchange_number(serial)), Some(NumberFormat::DateTime)),
+                    None => text(),
+                }
+            }
+            ValueKind::Time => {
+                return match parse_iso_time(value) {
+                    Some(fraction) => (Landed::Input(interchange_number(fraction)), Some(NumberFormat::Time)),
+                    None => text(),
+                }
+            }
+        }
+        match self.columns[col].rule {
+            ColumnRule::Text | ColumnRule::Skip => text(),
+            ColumnRule::Number => match parse_number(value, self.decimal_comma) {
+                Some(n) => (Landed::Input(interchange_number(n)), None),
+                None => text(), // reported; kept as text
+            },
+            ColumnRule::Date(order) => match parse_date(value, order) {
+                Some(serial) => (Landed::Input(interchange_number(serial)), Some(NumberFormat::Date { style: DateStyle::Iso })),
+                None => text(),
+            },
+            ColumnRule::Auto => {
+                if keep_as_text(value, false).is_some() {
+                    text()
+                } else if self.decimal_comma {
+                    match parse_decimal_comma(value) {
+                        Some(n) => (Landed::Input(interchange_number(n)), None),
+                        None => (Landed::Input(value.to_string()), None),
+                    }
+                } else {
+                    (Landed::Input(value.to_string()), None)
+                }
+            }
+        }
+    }
+}
+
+/// See [`RecipeOutput::landed`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Landed {
+    Empty,
+    /// Written as typed input (numbers, and dates as serials).
+    Input(String),
+    /// Written as literal text, never re-read as a number.
+    Text(String),
 }
 
 impl RunReport {

@@ -164,7 +164,8 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
     let op = if roll < 45 {
         let row = rng.gen_range(0..HOT_ROWS);
         let content = match rng.gen_range(0..10) {
-            0..=4 => CellContent::Value(value(rng)),
+            0..=3 => CellContent::Value(value(rng)),
+            4 => CellContent::Text(value(rng)),
             5..=8 if row > 0 => CellContent::Formula(formula(rng, wb, row)),
             5..=8 => CellContent::Value(value(rng)),
             _ => CellContent::Clear,
@@ -237,7 +238,11 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
     } else {
         let (h, w) = (rng.gen_range(1..=3), rng.gen_range(1..=2));
         let values = (0..h)
-            .map(|_| (0..w).map(|_| CellContent::Value(value(rng))).collect())
+            .map(|_| {
+                (0..w)
+                    .map(|_| if rng.gen_range(0..4) == 0 { CellContent::Text(value(rng)) } else { CellContent::Value(value(rng)) })
+                    .collect()
+            })
             .collect();
         CollabOp::ReplaceRange {
             sheet,

@@ -126,7 +126,23 @@ pub fn import_with_limits(
 
 fn import_inner(path: &Path, max_data_rows: usize, max_cells: Option<usize>) -> Result<ParquetImport, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
-    let reader = SerializedFileReader::new(file)
+    import_from(file, max_data_rows, max_cells)
+}
+
+/// [`import`] from bytes already in memory (no file: the WASM engine worker).
+pub fn import_bytes(data: Vec<u8>) -> Result<ParquetImport, String> {
+    match catch_unwind(AssertUnwindSafe(|| import_from(bytes::Bytes::from(data), MAX_ROWS - 1, None))) {
+        Ok(result) => result,
+        Err(_) => Err("This Parquet file uses a column type VisiGrid can't read yet".into()),
+    }
+}
+
+fn import_from<R: parquet::file::reader::ChunkReader + 'static>(
+    source: R,
+    max_data_rows: usize,
+    max_cells: Option<usize>,
+) -> Result<ParquetImport, String> {
+    let reader = SerializedFileReader::new(source)
         .map_err(|e| format!("Not a readable Parquet file: {}", e))?;
 
     let metadata = reader.metadata().file_metadata();
