@@ -7,10 +7,12 @@
 //! - [`server`]: the in-memory per-workbook sequencer.
 //! - [`client`]: a replica with optimistic local edits and rebase.
 //! - [`undo`]: per-user undo as inverse operations.
+//! - [`copy`]: a whole sheet as operations (import into a live workbook, duplicate a tab).
 //! - [`sim`]: the headless convergence simulator; [`gen`]: its op generator.
 
 pub mod apply;
 pub mod client;
+pub mod copy;
 #[cfg(feature = "sim")]
 pub mod gen;
 pub mod op;

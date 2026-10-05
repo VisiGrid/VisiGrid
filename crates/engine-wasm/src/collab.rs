@@ -369,6 +369,92 @@ impl CollabCore {
         Ok(doc)
     }
 
+    /// A sheet key no sheet has, in [2^40, 2^52) like the grid's own fresh
+    /// keys (exact in JS numbers, and unlikely to meet another client's).
+    fn fresh_key(&self, taken: &[SheetKey]) -> SheetKey {
+        loop {
+            let k = (1u64 << 40) + (new_op_id().as_u64_pair().1 % ((1u64 << 52) - (1u64 << 40)));
+            if !taken.contains(&k) && self.client.wb.idx_for_sheet_id(SheetId(k)).is_none() {
+                return k;
+            }
+        }
+    }
+
+    /// `name`, or "name (2)", "name (3)", … the first no sheet has (and no
+    /// name in `also`).
+    fn free_name(&self, name: &str, also: &[String]) -> String {
+        let norm = visigrid_engine::sheet::normalize_sheet_name;
+        let taken = |n: &str| {
+            self.client.wb.sheets().iter().any(|s| norm(&s.name) == norm(n)) || also.iter().any(|a| norm(a) == norm(n))
+        };
+        if !taken(name) {
+            return name.to_string();
+        }
+        (2..).map(|i| format!("{name} ({i})")).find(|n| !taken(n)).expect("a free name")
+    }
+
+    /// The ops that add every sheet of `document` (visigrid-json, as the
+    /// server's converter returns it) after the existing tabs, as one change:
+    /// `{ops, sheets: [{key, name}], dropped: [line, …]}`. `dropped` says, in
+    /// plain language, what the file has that the workbook cannot take, so
+    /// the page can ask before importing.
+    pub(crate) fn import_ops(&self, document: &Value) -> Result<Value, String> {
+        let (wb, layouts, _) = visigrid_io::json::import_any(&document.to_string())?;
+        let mut ops = Vec::new();
+        let mut sheets = Vec::new();
+        let mut keys = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut dropped = Vec::new();
+        let base = self.client.wb.sheets().len();
+        for (i, src) in wb.sheets().iter().enumerate() {
+            let mut src = src.clone();
+            if let Some(l) = layouts.get(i) {
+                src.layout = l.line_layout();
+            }
+            let key = self.fresh_key(&keys);
+            let name = self.free_name(&src.name, &names);
+            if name != src.name {
+                dropped.push(format!(
+                    "{}: renamed \"{name}\" because this workbook already has a sheet by that name; the file's formulas that name \"{}\" will read this workbook's sheet",
+                    src.name, src.name
+                ));
+            }
+            let (sheet_ops, lost) = visigrid_collab::copy::sheet_ops(&src, key, &name, base + i);
+            if let Some(l) = layouts.get(i) {
+                let charts = l.charts.as_ref().and_then(|c| c.as_array()).map_or(0, |c| c.len());
+                if charts > 0 {
+                    dropped.push(format!("{}: {charts} chart{}", src.name, if charts == 1 { "" } else { "s" }));
+                }
+                if l.filter.is_some() {
+                    dropped.push(format!("{}: its filter and sort settings (the rows are kept)", src.name));
+                }
+            }
+            ops.extend(sheet_ops);
+            dropped.extend(lost);
+            sheets.push(json!({"key": key, "name": name}));
+            keys.push(key);
+            names.push(name);
+        }
+        let named = wb.list_named_ranges().len();
+        if named > 0 {
+            dropped.push(format!("{named} named range{} (formulas that use {} show #NAME?)", if named == 1 { "" } else { "s" }, if named == 1 { "it" } else { "them" }));
+        }
+        Ok(json!({"ops": visigrid_collab::op::ops_to_json(&ops), "sheets": sheets, "dropped": dropped}))
+    }
+
+    /// The ops that copy sheet `sheet` into a new tab right after it, named
+    /// "Name (2)" (Excel's convention): `{ops, key, name, dropped}`.
+    pub(crate) fn duplicate_ops(&self, sheet: SheetKey) -> Result<Value, String> {
+        let wb = &self.client.wb;
+        let idx = wb.idx_for_sheet_id(SheetId(sheet)).ok_or("no such sheet")?;
+        let src = &wb.sheets()[idx];
+        let key = self.fresh_key(&[]);
+        let base = src.name.rsplit_once(" (").filter(|(_, n)| n.trim_end_matches(')').parse::<u32>().is_ok()).map_or(src.name.as_str(), |(b, _)| b);
+        let name = self.free_name(base, &[]);
+        let (ops, dropped) = visigrid_collab::copy::sheet_ops(src, key, &name, idx + 1);
+        Ok(json!({"ops": visigrid_collab::op::ops_to_json(&ops), "key": key, "name": name, "dropped": dropped}))
+    }
+
     pub(crate) fn checksum(&self) -> String {
         collab_checksum(&self.client.confirmed)
     }
@@ -801,6 +887,18 @@ impl CollabClient {
         self.core.pending()
     }
 
+    /// The ops that import `document` (visigrid-json) as new tabs, and what
+    /// will not survive: `{ops, sheets, dropped}`. Nothing is applied.
+    pub fn import_ops(&self, document: JsValue) -> Result<JsValue, JsValue> {
+        to_js(&self.core.import_ops(&from_js(document)?).map_err(js_err)?)
+    }
+
+    /// The ops that duplicate a sheet into the tab after it:
+    /// `{ops, key, name, dropped}`. Nothing is applied.
+    pub fn duplicate_ops(&self, sheet: f64) -> Result<JsValue, JsValue> {
+        to_js(&self.core.duplicate_ops(sheet as SheetKey).map_err(js_err)?)
+    }
+
     /// The optimistic document (visigrid-json v2 with `collab_sheet_ids`).
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         to_js(&self.core.snapshot().map_err(js_err)?)
@@ -1231,6 +1329,65 @@ mod tests {
                 c["display"].as_str());
         }
         assert_eq!(fresh.display(99, 0, 0), None);
+    }
+
+    #[test]
+    fn a_file_imports_as_new_tabs_in_one_change_and_one_undo() {
+        let mut room = Room::new(2);
+        let mut clients = [CollabCore::new(&doc(), 0).unwrap(), CollabCore::new(&doc(), 0).unwrap()];
+        let file = json!({"format": "visigrid-json", "version": 2, "sheets": [
+            {"name": "Sheet1", "cells": [{"row": 0, "col": 0, "value": "Qty", "fmt": {"bold": true}},
+                {"row": 1, "col": 0, "value": 4}, {"row": 2, "col": 0, "formula": "=A2*3"}],
+             "col_widths": {"0": 90.0}, "frozen_rows": 1, "hidden_cols": [3],
+             "merges": [{"start_row": 5, "start_col": 0, "end_row": 5, "end_col": 1}]},
+            {"name": "Notes", "cells": [{"row": 0, "col": 0, "value": "hello"}], "charts": [{"kind": "bar"}]}]});
+        let plan = clients[0].import_ops(&file).unwrap();
+        let names: Vec<&str> = plan["sheets"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Sheet1 (2)", "Notes"]);
+        let dropped = plan["dropped"].as_array().unwrap();
+        assert!(dropped.iter().any(|d| d.as_str().unwrap().contains("renamed")), "{dropped:?}");
+        assert!(dropped.iter().any(|d| d.as_str().unwrap().contains("1 chart")), "{dropped:?}");
+        clients[0].local(&plan["ops"]).unwrap();
+        room.settle(&mut clients);
+        for c in &clients {
+            let wb = &c.client.wb;
+            assert_eq!(wb.sheets().len(), 3);
+            let s = &wb.sheets()[1];
+            assert_eq!(s.name, "Sheet1 (2)");
+            assert_eq!(s.get_display(2, 0), "12");
+            assert!(s.get_format(0, 0).bold);
+            assert_eq!(s.layout.frozen_rows, 1);
+            assert_eq!(s.layout.col_widths.get(&0), Some(&90.0));
+            assert!(s.layout.hidden_cols.contains(&3));
+            assert_eq!(s.merged_regions.len(), 1);
+            assert_eq!(wb.sheets()[2].get_raw(0, 0), "hello");
+        }
+        assert_eq!(checksum(&clients[0].client.wb), checksum(&room.server.wb));
+        assert_eq!(clients[0].undo()["undo"]["applied"], true);
+        room.settle(&mut clients);
+        for c in &clients {
+            assert_eq!(c.client.wb.sheets().len(), 1, "one undo removes the whole import");
+        }
+    }
+
+    #[test]
+    fn a_duplicated_tab_follows_its_source_and_is_named_like_excel() {
+        let mut room = Room::new(2);
+        let mut clients = [CollabCore::new(&doc(), 0).unwrap(), CollabCore::new(&doc(), 0).unwrap()];
+        clients[0].local(&set(1, 0, "=A1+1")).unwrap();
+        room.settle(&mut clients);
+        let plan = clients[1].duplicate_ops(1).unwrap();
+        assert_eq!(plan["name"], "Sheet1 (2)");
+        clients[1].local(&plan["ops"]).unwrap();
+        room.settle(&mut clients);
+        let again = clients[0].duplicate_ops(plan["key"].as_u64().unwrap()).unwrap();
+        assert_eq!(again["name"], "Sheet1 (3)", "a copy of a copy counts on from the base name");
+        for c in &clients {
+            let wb = &c.client.wb;
+            assert_eq!(wb.sheets().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Sheet1", "Sheet1 (2)"]);
+            assert_eq!(wb.sheets()[1].get_display(1, 0), "2");
+        }
+        assert_eq!(checksum(&clients[0].client.wb), checksum(&room.server.wb));
     }
 
     #[test]

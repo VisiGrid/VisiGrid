@@ -88,7 +88,7 @@ fn content_of(raw: String) -> CellContent {
 
 /// What a cell holds, as the write that puts it back: text stays text, so
 /// undoing over "007" restores the text, never the number 7.
-fn content_at(s: &visigrid_engine::sheet::Sheet, row: usize, col: usize) -> CellContent {
+pub(crate) fn content_at(s: &visigrid_engine::sheet::Sheet, row: usize, col: usize) -> CellContent {
     let raw = s.get_raw(row, col);
     if !raw.is_empty() && matches!(s.get_cell(row, col).value, visigrid_engine::cell::CellValue::Text(_)) {
         return CellContent::Text(raw);
@@ -318,7 +318,7 @@ fn area(r: &Rect) -> usize {
 }
 
 /// Single-cell format ops, merging horizontal runs with equal props.
-fn per_cell_formats(sheet: SheetKey, mut cells: Vec<(usize, usize, FormatProps)>) -> Vec<CollabOp> {
+pub(crate) fn per_cell_formats(sheet: SheetKey, mut cells: Vec<(usize, usize, FormatProps)>) -> Vec<CollabOp> {
     cells.sort_by_key(|(r, c, _)| (*r, *c));
     let mut out: Vec<CollabOp> = Vec::new();
     for (r, c, props) in cells {
