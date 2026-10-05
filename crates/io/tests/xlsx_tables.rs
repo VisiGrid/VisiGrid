@@ -2035,7 +2035,7 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
             assert!(report
                 .warnings
                 .iter()
-                .any(|w| w.contains("Conditional formatting is not exported")));
+                .any(|w| w.contains("semantic styles")));
         }
         std::fs::write(&file, bytes).unwrap();
         let (loaded, _) = xlsx::import(&file).unwrap();
@@ -2905,7 +2905,7 @@ fn dynamic_footer_references_survive_native_json_and_stored_excel() {
 }
 
 #[test]
-fn moved_footer_rules_survive_native_json_and_excel_validation() {
+fn moved_footer_rules_survive_native_json_and_stored_excel() {
     use visigrid_engine::{cond_format::CondStyle, cell::CellStyle, validation::{CellRange, ValidationRule, ValidationType}};
     let dir = tempfile::tempdir().unwrap();
     let (mut wb, id) = book();
@@ -2922,10 +2922,10 @@ fn moved_footer_rules_survive_native_json_and_excel_validation() {
     let (json, _, _) = visigrid_io::json::import_any(&json).unwrap();
     let path = dir.path().join("footer-rules.xlsx");
     let exported = xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
-    assert!(exported.warnings.iter().any(|w| w.contains("Conditional formatting is not exported")));
+    assert!(exported.warnings.iter().any(|w| w.contains("semantic styles")));
     let (excel, report) = xlsx::import(&path).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-    for (mut loaded, retains_cf) in [(native, true), (json, true), (excel, false)] {
+    for mut loaded in [native, json, excel] {
         let check = |wb: &Workbook, row: usize| {
             let sheet = wb.sheet(0).unwrap();
             let expected = format!("=D{}>0", row + 1);
@@ -2933,8 +2933,7 @@ fn moved_footer_rules_survive_native_json_and_excel_validation() {
             assert_eq!(rule.rule_type, ValidationType::Custom(expected.clone()));
             assert!(!sheet.validations.has_validation(row - 1, 3));
             let predicates: Vec<_> = sheet.cond_formats.iter().filter_map(|r| r.predicate_at(row, 3)).collect();
-            if retains_cf { assert_eq!(predicates, [expected]); }
-            else { assert!(predicates.is_empty(), "Excel export reports its existing CF omission"); }
+            assert_eq!(predicates, [expected]);
             assert!(!sheet.cond_formats.any_rule_covers(row - 1, 3));
         };
         check(&loaded, 9);

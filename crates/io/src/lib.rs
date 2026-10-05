@@ -15,6 +15,7 @@ pub mod table_recovery;
 pub mod truth;
 pub mod xlsx;
 mod xlsx_comments;
+mod xlsx_cond_formats;
 mod xlsx_names;
 mod xlsx_formula_cache;
 mod xlsx_arrays;

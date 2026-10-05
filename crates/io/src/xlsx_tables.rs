@@ -584,12 +584,7 @@ pub(crate) fn export_warnings(
             }
         }
     }
-    if wb.sheets().iter().any(|s| !s.cond_formats.is_empty()) {
-        warnings.push(
-            "Conditional formatting is not exported to Excel. Explicit cell formatting is kept."
-                .into(),
-        );
-    }
+    warnings.extend(crate::xlsx_cond_formats::warnings(wb)?);
     if !wb.pivots().is_empty() {
         warnings.push("Pivot results are exported as cells. Pivot definitions and Table-source bindings are not exported to Excel.".into());
     }

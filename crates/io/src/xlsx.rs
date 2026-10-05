@@ -1548,6 +1548,7 @@ fn export_to_buffer_impl(
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
     let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
     let bytes = crate::xlsx_names::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_cond_formats::finish(bytes, workbook)?;
     let bytes = crate::xlsx_formula_cache::finish(bytes, workbook, &mut result.warnings)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
@@ -1633,6 +1634,7 @@ fn build_export(
         }
 
         crate::xlsx_tables::write(sheet, worksheet, &mut result)?;
+        crate::xlsx_cond_formats::write(sheet, worksheet)?;
 
         // Export cells (skips merge-hidden cells; origin cells overwrite the
         // blank written by merge_range above)
@@ -2824,8 +2826,15 @@ fn build_number_pattern(decimals: u8, thousands: bool) -> String {
 
 /// Apply number format to an Excel Format
 fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
-    match number_format {
-        NumberFormat::General => format,
+    match excel_number_format(number_format) {
+        Some(code) => format.set_num_format(code),
+        None => format,
+    }
+}
+
+pub(crate) fn excel_number_format(number_format: &NumberFormat) -> Option<String> {
+    Some(match number_format {
+        NumberFormat::General => return None,
         NumberFormat::Number { decimals, thousands, negative } => {
             let pos = build_number_pattern(*decimals, *thousands);
             let neg = match negative {
@@ -2835,7 +2844,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
                 visigrid_engine::cell::NegativeStyle::RedParens => format!("[Red]({})", pos),
             };
             let pattern = format!("{};{};{};@", pos, neg, pos);
-            format.set_num_format(&pattern)
+            pattern
         }
         NumberFormat::Currency { decimals, thousands, negative, symbol } => {
             let sym = excel_literal_prefix(symbol.as_deref().unwrap_or("$"));
@@ -2848,7 +2857,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
                 visigrid_engine::cell::NegativeStyle::RedParens => format!("[Red]({})", pos),
             };
             let pattern = format!("{};{};{};@", pos, neg, pos);
-            format.set_num_format(&pattern)
+            pattern
         }
         NumberFormat::Percent { decimals } => {
             let pattern = if *decimals == 0 {
@@ -2856,7 +2865,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
             } else {
                 format!("0.{}%", "0".repeat(*decimals as usize))
             };
-            format.set_num_format(&pattern)
+            pattern
         }
         NumberFormat::Date { style } => {
             let pattern = match style {
@@ -2864,12 +2873,12 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
                 DateStyle::Long => "mmmm d, yyyy",
                 DateStyle::Iso => "yyyy-mm-dd",
             };
-            format.set_num_format(pattern)
+            pattern.to_string()
         }
-        NumberFormat::Time => format.set_num_format("h:mm:ss"),
-        NumberFormat::DateTime => format.set_num_format("m/d/yyyy h:mm:ss"),
-        NumberFormat::Custom(code) => format.set_num_format(code),
-    }
+        NumberFormat::Time => "h:mm:ss".into(),
+        NumberFormat::DateTime => "m/d/yyyy h:mm:ss".into(),
+        NumberFormat::Custom(code) => code.clone(),
+    })
 }
 
 /// Check if a CellFormat has any non-default formatting
@@ -5398,7 +5407,7 @@ fn dxf_to_cond_style(dxf: &xlsx_styles::ParsedDxf) -> visigrid_engine::cond_form
     use visigrid_engine::cell::CellFormatOverride;
     use visigrid_engine::cond_format::CondStyle;
 
-    CondStyle::Inline(CellFormatOverride {
+    let mut style = CellFormatOverride {
         bold: dxf.bold,
         italic: dxf.italic,
         underline: dxf.underline,
@@ -5407,7 +5416,9 @@ fn dxf_to_cond_style(dxf: &xlsx_styles::ParsedDxf) -> visigrid_engine::cond_form
         font_color: dxf.font_color.map(Some),
         background_color: dxf.fill_color.map(Some),
         ..Default::default()
-    })
+    };
+    style.merge_from(&dxf.extra);
+    CondStyle::Inline(style)
 }
 
 /// Apply parsed conditional-formatting rules to a sheet.
@@ -5439,10 +5450,14 @@ fn apply_cond_formats(
         };
 
         let style = match rule.dxf_id.and_then(|id| dxfs.get(id)) {
-            Some(dxf) if !dxf.is_empty() => dxf_to_cond_style(dxf),
+            Some(dxf) => {
+                if dxf.has_unmapped && !unsupported.iter().any(|s| s == "conditional formatting style (unsupported properties)") {
+                    unsupported.push("conditional formatting style (unsupported properties)".into());
+                }
+                dxf_to_cond_style(dxf)
+            }
             _ => {
-                // A rule whose dxf carries nothing we model would render as a
-                // no-op; skip it rather than add an invisible rule.
+                // A missing or invalid style reference cannot be reconstructed.
                 if !unsupported.iter().any(|s| s.starts_with("conditional formatting style")) {
                     unsupported
                         .push("conditional formatting style (no supported properties)".to_string());
@@ -5451,19 +5466,14 @@ fn apply_cond_formats(
             }
         };
 
-        let ranges: Vec<CellRange> = rule
-            .ranges
-            .iter()
-            .map(|&(sr, sc, er, ec)| CellRange {
-                start_row: sr,
-                start_col: sc,
-                end_row: er,
-                end_col: ec,
-            })
-            .collect();
-
-        sheet.cond_formats.add(ranges, predicate, style);
-        imported += 1;
+        // Excel shares the first sqref anchor across the rule; native ranges
+        // have their own anchors. Rebase each range before storing it.
+        for &(sr, sc, er, ec) in &rule.ranges {
+            let source = visigrid_engine::formula::parser::adjust_formula_refs(&predicate,
+                sr as i32 - top_row as i32, sc as i32 - top_col as i32);
+            sheet.cond_formats.add(vec![CellRange::new(sr, sc, er, ec)], source, style.clone());
+            imported += 1;
+        }
     }
 
     imported
