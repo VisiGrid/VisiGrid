@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add and delete worksheets while Table sorting/filtering is active, with atomic recalculation, undo/redo and History rewind. Deleted sheet/Table references become permanent `#REF!` tokens; surviving named ranges keep their original sheet targets, and names on the deleted sheet are removed. Deleting a source used by a PivotTable on another sheet is explicitly refused.
+- Keep sheet identities and pane targets stable through sheet deletion and undo. History retains the removed sheet and sparse changes to surviving sheets, rather than a full workbook snapshot.
+
 - Rename worksheets through active Table sorting and filters without breaking formula references. Cell formulas, calculated-column rules, totals, conditional formatting and validation sources update atomically, with undo/redo and History rewind. Session and browser renames use the same checked behavior; quoted text such as `INDIRECT("OldName!A1")` remains literal.
 
 - Extract Named Range works through Table sorting and filters, targeting canonical visible formulas on the current sheet. The name and formula changes share one atomic undo/redo and History rewind step; stale dialogs and unsafe edits leave the workbook unchanged.

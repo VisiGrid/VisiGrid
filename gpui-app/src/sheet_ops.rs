@@ -662,12 +662,17 @@ impl Spreadsheet {
 
     /// Add a new sheet and switch to it
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        let new_index = self.wb_mut(cx, |wb| wb.add_sheet());
-        self.activate_sheet(new_index, cx);
-        self.clear_selection_state();
-        self.is_modified = true;
-        cx.notify();
+        if self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        self.cancel_sheet_rename(cx);
+        let result = self.wb(cx).prepare_sheet_add(None).and_then(|(mut candidate, commit)| {
+            let index = candidate.sheet_count() - 1;
+            let name = candidate.sheets()[index].name.clone();
+            candidate.set_active_sheet(index);
+            self.publish_table_batch(candidate, commit, format!("Add sheet '{name}'"), crate::history::MutationSource::Human, cx)
+        });
+        if let Err(error) = result { self.status_message = Some(error); cx.notify(); }
     }
 
     /// Clear selection state when switching sheets
@@ -901,16 +906,18 @@ impl Spreadsheet {
 
     /// Delete a sheet
     pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        if self.wb_mut(cx, |wb| wb.delete_sheet(index)) {
-            self.is_modified = true;
-            self.sheet_context_menu = None;
-            self.request_title_refresh(cx);
-        } else {
-            self.status_message = Some(if self.wb(cx).sheet_count() <= 1 { "Cannot delete the last sheet" } else { "Cannot delete this sheet while its Tables are referenced. Convert those Tables to ranges first." }.to_string());
-            self.sheet_context_menu = None;
-            cx.notify();
-        }
+        if self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        self.cancel_sheet_rename(cx);
+        let result = self.wb(cx).sheet(index)
+            .ok_or_else(|| "The sheet no longer exists.".to_string())
+            .and_then(|sheet| self.wb(cx).prepare_sheet_delete(sheet.id).map(|prepared| (prepared, sheet.name.clone())))
+            .and_then(|((candidate, commit), name)| self.publish_table_batch(
+                candidate, commit, format!("Delete sheet '{name}'"), crate::history::MutationSource::Human, cx));
+        self.sheet_context_menu = None;
+        if let Err(error) = result { self.status_message = Some(error); }
+        cx.notify();
     }
 }
 
@@ -1079,3 +1086,7 @@ pub fn install_close_guard(
 #[cfg(test)]
 #[path = "sheet_rename_tests.rs"]
 mod table_sheet_rename_tests;
+
+#[cfg(test)]
+#[path = "sheet_lifecycle_tests.rs"]
+mod sheet_lifecycle_tests;

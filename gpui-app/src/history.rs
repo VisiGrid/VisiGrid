@@ -1792,7 +1792,12 @@ impl History {
                 workbook.apply_table_view_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::TableBatchChanged { commit, .. } => {
+                let ids: Vec<_> = workbook.sheets().iter().map(|s| s.id).collect();
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
+                let mut previous: std::collections::HashMap<_, _> = ids.into_iter()
+                    .zip(std::mem::take(&mut view_state.per_sheet)).collect();
+                view_state.per_sheet = workbook.sheets().iter()
+                    .map(|s| previous.remove(&s.id).unwrap_or_default()).collect();
             }
             UndoAction::TableStructureChanged {
                 sheet_index,

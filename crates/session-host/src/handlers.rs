@@ -439,7 +439,7 @@ pub fn validate_structure_op(
                 None,
             ));
         }
-        let limit = if exclude.is_some() { 31 } else { 64 };
+        let limit = 31;
         if trimmed.chars().count() > limit {
             return Some((
                 "invalid_op",
@@ -494,6 +494,7 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
                 | StructureOp::InsertCols { .. }
                 | StructureOp::DeleteCols { .. }
                 | StructureOp::RenameSheet { .. }
+                | StructureOp::AddSheet { .. }
         )
     {
         return Err("Clear Table criteria before sheet or pivot automation.".into());
@@ -545,13 +546,9 @@ pub fn apply_structure(wb: &mut Workbook, op: &StructureOp) -> Result<String, St
             Err(e) => return Err(e),
         },
         StructureOp::AddSheet { name } => {
-            let idx = match name {
-                Some(n) => wb
-                    .add_sheet_named(n.trim())
-                    .unwrap_or_else(|| wb.add_sheet()),
-                None => wb.add_sheet(),
-            };
-            wb.bump_revision_for_structure();
+            let (candidate, _) = wb.prepare_sheet_add(name.as_deref())?;
+            let idx = candidate.sheet_count() - 1;
+            wb.restore_snapshot_monotonic(&candidate);
             format!("Added sheet \"{}\"", wb.sheets()[idx].name)
         }
         StructureOp::RenameSheet { name, .. } => {
@@ -1105,6 +1102,13 @@ mod tests {
         assert_eq!(wb.sheet(0).unwrap().name, "New Data");
         assert_eq!(wb.sheet(0).unwrap().table_view_spec(), Some(&spec));
         assert_eq!(wb.sheet(summary).unwrap().get_raw(0, 0), "=('New Data'!A2+'New Data'!A3)*2");
+        wb.set_cell_value_tracked(summary, 2, 0, "=IFERROR(New!A1+1,99)");
+        apply_structure(&mut wb, &StructureOp::AddSheet { name: Some("New".into()) }).unwrap();
+        assert_eq!(wb.sheet(summary).unwrap().get_display(2, 0), "1");
+        assert_eq!(wb.sheet(0).unwrap().table_view_spec(), Some(&spec));
+        let count = wb.sheet_count();
+        assert!(apply_structure(&mut wb, &StructureOp::AddSheet { name: Some("New".into()) }).is_err());
+        assert_eq!(wb.sheet_count(), count);
         assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "80");
         let revision = wb.revision();
         apply_structure(&mut wb, &op).unwrap();

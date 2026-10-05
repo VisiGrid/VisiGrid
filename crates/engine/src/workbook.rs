@@ -16,6 +16,8 @@ mod guarded_structure;
 mod automation;
 #[path = "workbook_sheet_rename.rs"]
 mod sheet_rename;
+#[path = "workbook_sheet_lifecycle.rs"]
+mod sheet_lifecycle;
 #[path = "workbook_names.rs"]
 mod names;
 #[path = "workbook_validation.rs"]

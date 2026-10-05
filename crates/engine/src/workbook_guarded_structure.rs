@@ -1,5 +1,6 @@
 //! Atomic structural edits with sparse authored-cell and metadata history.
-//! Temporary candidates are discarded; history never retains a Workbook/Sheet.
+//! Temporary candidates are discarded. Lifecycle history retains only the
+//! added/deleted sheet; survivors use sparse cell and metadata patches.
 use super::Workbook;
 use crate::{
     cell::{Cell, CellFormat, ValueRef},
@@ -109,6 +110,13 @@ struct MetaPatch {
 }
 
 #[derive(Clone, Debug)]
+struct SheetChange {
+    index: usize,
+    sheet: Box<Sheet>,
+    added: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct GuardedStructureCommit {
     pub sheet: SheetId,
     pub steps: Vec<StructureStep>,
@@ -119,6 +127,7 @@ pub struct GuardedStructureCommit {
     after_fingerprint: [u8; 32],
     sheets: Vec<(SheetId, String, usize, usize)>,
     renamed_sheets: Vec<(SheetId, String, String)>,
+    sheet_change: Option<SheetChange>,
     views: Vec<(SheetId, Option<TableViewSpec>)>,
 }
 
@@ -380,20 +389,35 @@ impl Workbook {
         &self,
         candidate: &Workbook,
     ) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false)
+        self.capture_guarded_batch_inner(candidate, false, None)
     }
 
     pub(super) fn capture_sheet_rename(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, true)
+        self.capture_guarded_batch_inner(candidate, true, None)
     }
 
-    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool) -> Result<GuardedStructureCommit, String> {
+    pub(super) fn capture_sheet_change(&self, candidate: &Workbook, index: usize, added: bool) -> Result<GuardedStructureCommit, String> {
+        let source = if added { candidate } else { self };
+        let sheet = source.sheet(index).ok_or("The changed sheet no longer exists.")?;
+        self.capture_guarded_batch_inner(candidate, false, Some(SheetChange {
+            index, sheet: Box::new(sheet.clone()), added,
+        }))
+    }
+
+    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>) -> Result<GuardedStructureCommit, String> {
         self.ensure_writable()?;
-        let before = identity(self);
-        let after = identity(candidate);
+        let mut before = identity(self);
+        let mut after = identity(candidate);
+        let mut before_views = views(self);
+        let mut after_views = views(candidate);
+        if let Some(change) = &sheet_change {
+            let (identities, specs) = if change.added { (&mut after, &mut after_views) } else { (&mut before, &mut before_views) };
+            identities.remove(change.index);
+            specs.remove(change.index);
+        }
         let same_shape = before.len() == after.len() && before.iter().zip(&after)
             .all(|(b, a)| b.0 == a.0 && b.2 == a.2 && b.3 == a.3);
-        if !same_shape || (!allow_rename && before != after) || views(self) != views(candidate) {
+        if !same_shape || (!allow_rename && before != after) || before_views != after_views {
             return Err("A guarded batch cannot change sheets or saved Table criteria.".into());
         }
         let renamed_sheets = before.iter().zip(&after).filter(|(b, a)| b.1 != a.1)
@@ -401,7 +425,8 @@ impl Workbook {
         validate_views(candidate)?;
         let mut cells = Vec::new();
         let mut metadata = Vec::new();
-        for (b, a) in self.sheets.iter().zip(&candidate.sheets) {
+        for b in &self.sheets {
+            let Some(a) = candidate.sheet_by_id(b.id) else { continue; };
             let positions: BTreeSet<_> = b
                 .cells_iter()
                 .map(|(p, _)| p)
@@ -414,6 +439,9 @@ impl Workbook {
                     if cells.len() >= 100_000 {
                         if allow_rename {
                             return Err("Renaming would change more than 100,000 stored cells. Nothing was renamed.".into());
+                        }
+                        if sheet_change.is_some() {
+                            return Err("This sheet change would rewrite more than 100,000 stored cells. Nothing was changed.".into());
                         }
                         return Err("This transaction changes more than 100,000 stored cells. Use a smaller selection or clear Table views first.".into());
                     }
@@ -449,6 +477,7 @@ impl Workbook {
             after_fingerprint: workbook_fingerprint(&candidate),
             sheets: identity(self),
             renamed_sheets,
+            sheet_change,
             views: views(self),
         };
         Ok(commit)
@@ -457,7 +486,7 @@ impl Workbook {
 
 impl GuardedStructureCommit {
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty() && self.metadata.is_empty() && self.names.is_none() && self.renamed_sheets.is_empty()
+        self.cells.is_empty() && self.metadata.is_empty() && self.names.is_none() && self.renamed_sheets.is_empty() && self.sheet_change.is_none()
     }
     pub fn changed_cell_count(&self) -> usize {
         self.cells.len()
@@ -467,12 +496,23 @@ impl GuardedStructureCommit {
     pub fn candidate(&self, wb: &Workbook, undo: bool) -> Result<Workbook, String> {
         wb.ensure_writable()?;
         let mut expected_sheets = self.sheets.clone();
+        let mut expected_views = self.views.clone();
         if undo {
             for (id, _, after) in &self.renamed_sheets {
                 expected_sheets.iter_mut().find(|s| s.0 == *id).unwrap().1 = after.clone();
             }
+            if let Some(change) = &self.sheet_change {
+                let s = &change.sheet;
+                if change.added {
+                    expected_sheets.insert(change.index, (s.id, s.name.clone(), s.rows, s.cols));
+                    expected_views.insert(change.index, (s.id, s.table_view_spec().cloned()));
+                } else {
+                    expected_sheets.remove(change.index);
+                    expected_views.remove(change.index);
+                }
+            }
         }
-        if identity(wb) != expected_sheets || views(wb) != self.views {
+        if identity(wb) != expected_sheets || views(wb) != expected_views {
             return Err("Sheets or Table criteria changed since this structural edit.".into());
         }
         if workbook_fingerprint(wb)
@@ -511,6 +551,17 @@ impl GuardedStructureCommit {
             }
         }
         let mut candidate = wb.clone();
+        if let Some(change) = &self.sheet_change {
+            let active = candidate.active_sheet_id();
+            if change.added != undo {
+                candidate.next_sheet_id = candidate.next_sheet_id.max(change.sheet.id.0.saturating_add(1));
+                candidate.sheets.insert(change.index, *change.sheet.clone());
+            } else {
+                candidate.sheets.remove(change.index);
+            }
+            candidate.active_sheet = candidate.sheet_index_by_id(active)
+                .unwrap_or(change.index.min(candidate.sheets.len() - 1));
+        }
         for (id, before, after) in &self.renamed_sheets {
             candidate.sheet_by_id_mut(*id).unwrap().set_name(if undo { before } else { after });
         }
@@ -538,11 +589,11 @@ impl GuardedStructureCommit {
         candidate.rebuild_dep_graph();
         let report = candidate.recompute_full_ordered();
         if report.had_cycles || report.errors.iter().any(|e| e.error.contains(
-            if self.renamed_sheets.is_empty() { "spill not settled" } else { "not settled" }
+            if self.renamed_sheets.is_empty() && self.sheet_change.is_none() { "spill not settled" } else { "not settled" }
         )) {
             return Err("History replay would create a cycle or an unsettled spill.".into());
         }
-        if !self.renamed_sheets.is_empty() || self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some()) {
+        if self.sheet_change.is_some() || !self.renamed_sheets.is_empty() || self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some()) {
             // A pivot can source an unchanged formula whose result depends on
             // the restored footer or name. Authored-cell patches alone miss
             // that sheet when only a name definition changed.

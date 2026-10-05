@@ -2,6 +2,84 @@
 use super::parser::{parse, Expr, ParsedExpr};
 use crate::sheet::{normalize_sheet_name, UnboundSheetRef};
 
+/// Replace references to a deleted sheet or its Tables with permanent #REF!
+/// tokens, so recreating the old name never silently rebinds those formulas.
+pub fn delete_sheet_references(
+    source: &str,
+    old: &str,
+    tables: &[String],
+) -> Result<String, String> {
+    fn adjust(expr: &mut ParsedExpr, old: &str, tables: &[String]) -> bool {
+        match expr {
+            Expr::CellRef {
+                sheet: UnboundSheetRef::Named(name),
+                ..
+            }
+            | Expr::Range {
+                sheet: UnboundSheetRef::Named(name),
+                ..
+            }
+            | Expr::WholeRange {
+                sheet: UnboundSheetRef::Named(name),
+                ..
+            } if normalize_sheet_name(name) == normalize_sheet_name(old) => {
+                *expr = Expr::RefError;
+                true
+            }
+            Expr::StructuredRef(reference)
+                if reference.table.as_ref().is_some_and(|name| {
+                    tables.iter().any(|table| table.eq_ignore_ascii_case(name))
+                }) =>
+            {
+                *expr = Expr::RefError;
+                true
+            }
+            Expr::Function { args, .. } => args
+                .iter_mut()
+                .fold(false, |changed, arg| adjust(arg, old, tables) | changed),
+            Expr::BinaryOp { left, right, .. } => {
+                adjust(left, old, tables) | adjust(right, old, tables)
+            }
+            _ => false,
+        }
+    }
+    let input = if source.starts_with('=') {
+        source.to_string()
+    } else {
+        format!("={source}")
+    };
+    let mut expr = match parse(&input) {
+        Ok(expr) => expr,
+        Err(_) => {
+            let lower = source.to_ascii_lowercase();
+            if std::iter::once(old)
+                .chain(tables.iter().map(String::as_str))
+                .any(|name| {
+                    lower.contains(&name.to_ascii_lowercase())
+                        || lower.contains(&name.replace('\'', "''").to_ascii_lowercase())
+                })
+            {
+                return Err("A formula referencing this sheet cannot be parsed. Resolve it before deleting the sheet.".into());
+            }
+            return Ok(source.into());
+        }
+    };
+    if !adjust(&mut expr, old, tables) {
+        return Ok(source.into());
+    }
+    let result = super::parser::format_parsed_expr(&expr);
+    if parse(&result).ok().as_ref() != Some(&expr) {
+        return Err(
+            "A deleted sheet reference cannot be rewritten safely. Nothing was deleted.".into(),
+        );
+    }
+    Ok(if source.starts_with('=') {
+        result
+    } else {
+        result.trim_start_matches('=').into()
+    })
+}
+
 fn rename_expr(expr: &mut ParsedExpr, old: &str, new: &str) -> usize {
     match expr {
         Expr::CellRef { sheet, .. }

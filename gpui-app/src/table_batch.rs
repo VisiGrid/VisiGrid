@@ -6,6 +6,25 @@ use crate::{
 use gpui::Context;
 use visigrid_engine::workbook::{GuardedStructureCommit, Workbook};
 
+pub(crate) fn remap_sheet_view(
+    view: &mut crate::workbook_view::WorkbookViewState,
+    before: &[visigrid_engine::sheet::SheetId],
+    after: &Workbook,
+) {
+    let index = before.get(view.active_sheet).and_then(|id| after.sheet_index_by_id(*id));
+    if index.is_none() {
+        let zoom = view.zoom_level;
+        *view = Default::default();
+        view.zoom_level = zoom;
+    }
+    view.active_sheet = index.unwrap_or(after.active_sheet_index());
+    let (rows, cols) = after.sheets()[view.active_sheet].frozen_panes;
+    view.frozen_rows = rows;
+    view.frozen_cols = cols;
+    view.scroll_row = view.scroll_row.max(rows);
+    view.scroll_col = view.scroll_col.max(cols);
+}
+
 /// A rectangular Lua selection must not silently include filtered-out records.
 pub(crate) fn canonical_script_selection(
     rows: &visigrid_engine::filter::RowView,
@@ -41,7 +60,7 @@ impl Spreadsheet {
     ) -> Result<(), String> {
         self.validate_saved_view_layout(&candidate)?;
         let changed = !commit.is_empty();
-        let sheet_index = self.sheet_index(cx);
+        let sheet_index = candidate.active_sheet_index();
         self.install_table_batch(&candidate, cx);
         if changed {
             self.history
@@ -58,11 +77,43 @@ impl Spreadsheet {
     }
 
     pub(crate) fn install_table_batch(&mut self, candidate: &Workbook, cx: &mut Context<Self>) {
-        let (row, col) = self.view_state.selected;
+        let before: Vec<_> = self.wb(cx).sheets().iter().map(|s| s.id).collect();
+        let changed_sheets = before != candidate.sheets().iter().map(|s| s.id).collect::<Vec<_>>();
+        let same_active = self.wb(cx).active_sheet_id() == candidate.active_sheet_id();
+        let (row, col) = self.active_view_state().selected;
         let data_row = self.row_view.view_to_data(row);
         self.workbook
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(candidate));
+        if changed_sheets {
+            if !same_active {
+                self.update_cached_sheet_id(cx);
+                self.row_view = visigrid_engine::filter::RowView::new(crate::app::NUM_ROWS);
+                self.filter_state = Default::default();
+                self.table_view_installed = false;
+            }
+            remap_sheet_view(&mut self.view_state, &before, candidate);
+            if let Some(pane) = &mut self.split_pane {
+                remap_sheet_view(&mut pane.view_state, &before, candidate);
+            }
+            let active = self.active_view_state_mut();
+            active.active_sheet = candidate.active_sheet_index();
+            if !same_active {
+                active.select_cell(0, 0);
+                active.scroll_row = 0;
+                active.scroll_col = 0;
+            }
+            let (rows, cols) = candidate.active_sheet().frozen_panes;
+            active.frozen_rows = rows;
+            active.frozen_cols = cols;
+            active.scroll_row = active.scroll_row.max(rows);
+            active.scroll_col = active.scroll_col.max(cols);
+            self.history_highlight_range = None;
+            self.formula_ref_cell = None;
+            self.formula_ref_end = None;
+        }
         self.sync_table_view(cx);
+        let data_row = if same_active { data_row } else { 0 };
+        let col = if same_active { col } else { 0 };
         let row = self.row_view.data_to_view(data_row).unwrap_or_else(|| {
             self.row_view
                 .visible_rows()
@@ -71,8 +122,8 @@ impl Spreadsheet {
                 .min_by_key(|r| r.abs_diff(row))
                 .unwrap_or(0)
         });
-        self.view_state.select_cell(row, col);
-        self.view_state.additional_selections.clear();
+        self.active_view_state_mut().select_cell(row, col);
+        self.active_view_state_mut().additional_selections.clear();
         self.table_filter_dropdown = None;
         self.table_edit_target = None;
         self.clipboard_visual_range = None;

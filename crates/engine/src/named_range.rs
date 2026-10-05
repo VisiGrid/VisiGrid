@@ -468,6 +468,19 @@ impl NamedRangeStore {
         self.ranges.remove(&name.to_lowercase())
     }
 
+    /// Keep surviving targets on their original sheet when a tab is removed.
+    /// As with deleted row/column targets, names on the removed sheet disappear.
+    pub(crate) fn remove_sheet(&mut self, index: usize) {
+        self.ranges.retain(|_, range| {
+            let sheet = match &mut range.target {
+                NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => sheet,
+            };
+            if *sheet == index { return false; }
+            if *sheet > index { *sheet -= 1; }
+            true
+        });
+    }
+
     /// Update the description of a named range
     pub fn set_description(&mut self, name: &str, description: Option<String>) -> Result<(), String> {
         let key = name.to_lowercase();

@@ -3032,7 +3032,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "add_sheet",
         "delete_sheet",
     ] {
-        assert_guarded(sheets, function);
+        assert_contains_near(sheets, function, "block_if_previewing_only(cx)");
     }
 
     for function in ["start_sheet_rename", "confirm_sheet_rename"] {

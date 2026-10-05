@@ -961,6 +961,7 @@ impl Spreadsheet {
                     | StructureOp::InsertCols { .. }
                     | StructureOp::DeleteCols { .. }
                     | StructureOp::RenameSheet { .. }
+                    | StructureOp::AddSheet { .. }
             )
         {
             out.error = Some((
@@ -973,10 +974,10 @@ impl Spreadsheet {
             out.error = Some(plan_under_review_error());
             return out;
         }
-        if matches!(op, StructureOp::RenameSheet { .. })
+        if matches!(op, StructureOp::RenameSheet { .. } | StructureOp::AddSheet { .. })
             && (self.block_if_previewing_only(cx) || self.mode.is_editing())
         {
-            out.error = Some(("invalid_op".into(), "Finish editing or reviewing before renaming a sheet.".into()));
+            out.error = Some(("invalid_op".into(), "Finish editing or reviewing before changing sheets.".into()));
             return out;
         }
 
@@ -1051,16 +1052,20 @@ impl Spreadsheet {
                 format!("Deleted {} column(s) at column {}", count, at + 1)
             }
             StructureOp::AddSheet { name } => {
-                let idx = self.wb_mut(cx, |wb| match name {
-                    Some(n) => wb
-                        .add_sheet_named(n.trim())
-                        .unwrap_or_else(|| wb.add_sheet()),
-                    None => wb.add_sheet(),
+                let result = self.wb(cx).prepare_sheet_add(name.as_deref()).and_then(|(candidate, commit)| {
+                    let description = format!("Added sheet \"{}\"", candidate.sheets().last().unwrap().name);
+                    let source = client.clone().map(|client| MutationSource::Agent { client }).unwrap_or(MutationSource::Human);
+                    self.publish_table_batch(candidate, commit, description.clone(), source, cx)?;
+                    Ok(description)
                 });
-                let sheet_name = self.workbook.read(cx).sheets()[idx].name.clone();
-                self.is_modified = true;
-                cx.notify();
-                format!("Added sheet \"{}\"", sheet_name)
+                match result {
+                    Ok(description) => description,
+                    Err(message) => {
+                        self.suppress_repeat_capture = false;
+                        out.error = Some(("invalid_op".into(), message));
+                        return out;
+                    }
+                }
             }
             StructureOp::RenameSheet { name, .. } => {
                 let old = self.workbook.read(cx).sheets()[target].name.clone();
