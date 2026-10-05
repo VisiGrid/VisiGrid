@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Create, rename, delete and describe named ranges while Table sorting/filtering is active, with atomic recalculation and undo/redo/rewind. Rename updates references on every sheet, including hidden records, calculated-column rules, dormant totals, conditional formatting and validation. Formula strings and unrelated tokens retain their original text.
+- Native files now retain data-validation rules and exclusions. Missing metadata remains compatible; corrupt, oversized or future validation metadata opens read-only. Older releases can still drop these rules on re-save.
+- Named-range dialogs capture their worksheet targets and refuse stale previews. Impact previews include all sheets and Table rules; Names-panel, F12 and palette navigation resolve the target sheet and visible records instead of treating stored rows as screen positions.
+
 - Freeze and unfreeze panes inside sorted/filtered Tables without clearing criteria. Frozen/body cells and overlays share visible-row geometry; keyboard/wheel/drag scrolling and hit-testing skip hidden rows and columns. Freeze changes support sheet-scoped undo/redo and rewind.
 - Preserve interior freeze boundaries with Table criteria in XLSX import and both export orders. Full-fidelity JSON now restores engine freeze state and retains it on exports without a host layout, using the existing format fields.
 

@@ -10,6 +10,8 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
+#[path = "native_validation.rs"]
+mod native_validation;
 
 // ============================================================================
 // Semantic Verification (persisted expected fingerprint)
@@ -711,6 +713,7 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
     let json = serde_json::to_string(&comments).map_err(|e| e.to_string())?;
     conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('sheet_comments_0', ?1)", params![json]).map_err(|e| e.to_string())?;
     save_cond_formats_sheet(&conn, 0, &sheet.cond_formats)?;
+    native_validation::save(&conn, 0, sheet)?;
     save_print_setup(&conn, 0, &sheet.print_setup)?;
     save_sheet_merges(&conn, 0, sheet)?;
     for row in sheet.manual_hidden_rows() {
@@ -973,6 +976,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
     sheet.print_setup = load_print_setup(&conn, 0)?;
     load_sheet_merges(&conn, 0, 0, &mut sheet)?;
     load_manual_hidden_rows(&conn, 0, &mut sheet)?;
+    if let Some(error) = native_validation::load(&conn, 0, &mut sheet) { sheet.read_only_reason = Some(error); }
     let mut workbook = Workbook::from_sheets(vec![sheet], 0);
     workbook.rebuild_dep_graph();
     workbook.recompute_full_ordered();
@@ -1122,7 +1126,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook) -> Result<(), String> 
         }
     }
 
-    save_cond_formats(&conn, workbook)?;
+    save_sheet_rules(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
     save_tables(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
@@ -1297,7 +1301,7 @@ fn write_workbook_with_metadata(
         }
     }
 
-    save_cond_formats(&conn, workbook)?;
+    save_sheet_rules(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
     save_tables(&conn, workbook)?;
     save_tab_colors(&conn, workbook)?;
@@ -1604,7 +1608,7 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
         }
     }
 
-    load_cond_formats(&conn, &mut workbook);
+    let validation_issues = load_sheet_rules(&conn, &mut workbook);
     load_tab_colors(&conn, &mut workbook);
     load_sheet_defaults(&conn, &mut workbook);
     for i in 0..workbook.sheet_count() {
@@ -1619,6 +1623,9 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
     };
     for index in 0..workbook.sheet_count() {
         load_manual_hidden_rows(&conn, index, workbook.sheet_mut(index).unwrap())?;
+    }
+    for (index, error) in validation_issues {
+        workbook.sheet_mut(index).unwrap().read_only_reason = Some(error);
     }
     if let Some(issue) = &issue {
         crate::table_recovery::finish_recovery(&mut workbook, issue, &cached_formula_values);
@@ -1876,19 +1883,21 @@ fn load_pivots(conn: &Connection, workbook: &mut Workbook) {
     }
 }
 
-fn save_cond_formats(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+fn save_sheet_rules(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
         save_cond_formats_sheet(conn, sheet_idx, &sheet.cond_formats)?;
+        native_validation::save(conn, sheet_idx, sheet)?;
     }
     Ok(())
 }
 
-/// Restore conditional formatting rules from meta blobs. Missing keys or
-/// unparseable blobs (from newer versions) leave the store empty rather
-/// than failing the load.
-fn load_cond_formats(conn: &Connection, workbook: &mut Workbook) {
+/// Restore sheet rules. Validation corruption opens read-only recovery;
+/// conditional formats retain their legacy best-effort loading behavior.
+fn load_sheet_rules(conn: &Connection, workbook: &mut Workbook) -> Vec<(usize, String)> {
+    let mut issues = Vec::new();
     let sheet_count = workbook.sheets().len();
     for sheet_idx in 0..sheet_count {
+        if let Some(error) = native_validation::load(conn, sheet_idx, workbook.sheet_mut(sheet_idx).unwrap()) { issues.push((sheet_idx, error)); }
         let json: Option<String> = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
@@ -1909,6 +1918,7 @@ fn load_cond_formats(conn: &Connection, workbook: &mut Workbook) {
             }
         }
     }
+    issues
 }
 
 /// Load semantic metadata from a .sheet file.
@@ -2866,7 +2876,7 @@ fn write_workbook_full(
 
     save_sheet_defaults(conn, workbook)?;
 
-    save_cond_formats(conn, workbook)?;
+    save_sheet_rules(conn, workbook)?;
     save_pivots(conn, workbook)?;
     save_tables(conn, workbook)?;
 

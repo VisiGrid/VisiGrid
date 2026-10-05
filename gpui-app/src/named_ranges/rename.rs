@@ -3,7 +3,7 @@
 use gpui::{*};
 use visigrid_engine::named_range::is_valid_name;
 use crate::app::Spreadsheet;
-use crate::history::{CellChange, UndoAction};
+use visigrid_engine::workbook::NamedRangeEdit;
 use crate::mode::Mode;
 
 impl Spreadsheet {
@@ -28,7 +28,8 @@ impl Spreadsheet {
             n.to_string()
         } else {
             // Try to find a named range in the current cell's formula
-            let (row, col) = self.view_state.selected;
+            let (view_row, col) = self.view_state.selected;
+            let row = self.row_view.view_to_data(view_row);
             let cell = self.sheet(cx).get_cell(row, col);
             let formula_text = self.get_formula_source(cell.value());
             if let Some(formula) = formula_text {
@@ -48,6 +49,8 @@ impl Spreadsheet {
             return;
         }
 
+        self.name_draft_error = None;
+        self.name_draft = self.wb(cx).get_named_range(&original).cloned().map(|range| super::plan::NameDraft { revision: self.wb(cx).revision(), range });
         self.mode = Mode::RenameSymbol;
         self.rename_original_name = original.clone();
         self.rename_new_name = original;
@@ -59,6 +62,8 @@ impl Spreadsheet {
 
     /// Hide the rename symbol dialog
     pub fn hide_rename_symbol(&mut self, cx: &mut Context<Self>) {
+        self.name_draft_error = None;
+        self.name_draft = None;
         self.mode = Mode::Navigation;
         self.rename_original_name.clear();
         self.rename_new_name.clear();
@@ -119,48 +124,12 @@ impl Spreadsheet {
 
     /// Update the list of affected cells (formulas using the named range)
     fn update_rename_affected_cells(&mut self, cx: &App) {
-        self.rename_affected_cells.clear();
-
-        let name_upper = self.rename_original_name.to_uppercase();
-
-        // Collect cells to check (to avoid borrowing conflict with self.rename_affected_cells)
-        let cells_to_check: Vec<_> = self.sheet(cx).cells_iter()
-            .filter_map(|((row, col), cell)| {
-                self.get_formula_source(cell.value()).map(|formula| (row, col, formula))
-            })
-            .collect();
-
-        // Scan all cells for formulas that reference this named range
-        for (row, col, formula) in cells_to_check {
-            if self.formula_references_name(&formula, &name_upper) {
-                self.rename_affected_cells.push((row, col));
-            }
-        }
+        self.rename_affected_cells = self.wb(cx).named_range_usages(&self.rename_original_name);
     }
 
     /// Check if a formula references a named range (case-insensitive)
     pub(crate) fn formula_references_name(&self, formula: &str, name_upper: &str) -> bool {
-        // Simple check: look for the name as a word boundary
-        // A proper implementation would parse the formula and check the AST
-        let formula_upper = formula.to_uppercase();
-
-        // Check for word boundaries using simple logic
-        let name_len = name_upper.len();
-        for (i, _) in formula_upper.match_indices(name_upper) {
-            // Check if it's a word boundary (not part of a larger identifier)
-            let before_ok = i == 0 || {
-                let c = formula_upper.chars().nth(i - 1).unwrap_or(' ');
-                !c.is_alphanumeric() && c != '_'
-            };
-            let after_ok = i + name_len >= formula_upper.len() || {
-                let c = formula_upper.chars().nth(i + name_len).unwrap_or(' ');
-                !c.is_alphanumeric() && c != '_'
-            };
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        false
+        visigrid_engine::formula::names::references_name(formula, name_upper)
     }
 
     /// Find a named range identifier in a formula string
@@ -179,7 +148,10 @@ impl Spreadsheet {
 
     /// Apply the rename operation
     pub fn confirm_rename_symbol(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_only(cx) { return; }
+        if let Err(error) = self.named_range_draft(cx) {
+            self.rename_validation_error = Some(error); cx.notify(); return;
+        }
         // Validate first
         self.validate_rename_name(cx);
         if self.rename_validation_error.is_some() {
@@ -187,10 +159,10 @@ impl Spreadsheet {
         }
 
         let old_name = self.rename_original_name.clone();
-        let new_name = self.rename_new_name.clone();
+        let new_name = self.rename_new_name.trim().to_string();
 
-        // If names are the same (case-insensitive), just close
-        if old_name.to_lowercase() == new_name.to_lowercase() {
+        // An exact no-op closes without touching history. Case changes are edits.
+        if old_name == new_name {
             self.hide_rename_symbol(cx);
             return;
         }
@@ -201,123 +173,17 @@ impl Spreadsheet {
     }
 
     /// Internal method to apply a rename (called from impact preview)
-    pub(crate) fn apply_rename_internal(&mut self, old_name: &str, new_name: &str, cx: &mut Context<Self>) {
-        // Collect all formula changes for undo
-        let mut changes: Vec<CellChange> = Vec::new();
-        let sheet_index = self.sheet_index(cx);
-        let old_name_upper = old_name.to_uppercase();
-
-        // Find affected cells
-        let affected_cells: Vec<(usize, usize)> = self.sheet(cx).cells_iter()
-            .filter_map(|((row, col), cell)| {
-                let raw = cell.value().raw_display();
-                if raw.starts_with('=') {
-                    let formula_upper = raw.to_uppercase();
-                    let contains_name = formula_upper
-                        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-                        .any(|word| word == old_name_upper);
-                    if contains_name {
-                        return Some((row, col));
-                    }
-                }
-                None
-            })
-            .collect();
-
-        // Update formulas in all affected cells
-        for &(row, col) in &affected_cells {
-            let cell = self.sheet(cx).get_cell(row, col);
-            if let Some(formula) = self.get_formula_source(cell.value()) {
-                let new_formula = self.replace_name_in_formula(&formula, &old_name_upper, new_name);
-
-                changes.push(CellChange {
-                    row,
-                    col,
-                    old_value: formula,
-                    new_value: new_formula,
-                });
-            }
-        }
-
-        // Apply the formula changes
-        self.wb_mut(cx, |wb| wb.begin_batch());
-        for change in &changes {
-            self.set_cell_value(change.row, change.col, &change.new_value, cx);
-        }
-        self.end_batch_and_broadcast(cx);
-
-        // Rename the named range itself
-        if let Err(e) = self.wb_mut(cx, |wb| wb.rename_named_range(old_name, new_name)) {
-            self.status_message = Some(format!("Failed to rename: {}", e));
-            cx.notify();
-            return;
-        }
-
-        // Record undo action
-        if !changes.is_empty() {
-            self.history.record_batch(sheet_index, changes.clone());
-        }
-
-        self.is_modified = true;
-        self.bump_cells_rev();
-
-        // Log the rename
-        let formula_count = changes.len();
-        let impact = if formula_count > 0 {
-            Some(format!("{} formula{} updated", formula_count, if formula_count == 1 { "" } else { "s" }))
-        } else {
-            None
+    pub(crate) fn apply_rename_internal(&mut self, old_name: &str, new_name: &str, cx: &mut Context<Self>) -> bool {
+        let before = match self.named_range_draft(cx) {
+            Ok(before) if before.name.eq_ignore_ascii_case(old_name) => before,
+            _ => { let error = "The named range changed. Reopen the preview and try again.".to_string(); self.name_draft_error = Some(error.clone()); self.status_message = Some(error); cx.notify(); return false; }
         };
-        self.log_refactor(
-            "Renamed named range",
-            &format!("{} → {}", old_name, new_name),
-            impact.as_deref(),
-        );
-
-        // Clear rename state
+        if !self.apply_named_range_edit(NamedRangeEdit::Rename { before, name: new_name.into() }, format!("Rename named range: {old_name} to {new_name}"), cx) { return false; }
+        self.log_refactor("Renamed named range", &format!("{} → {}", old_name, new_name), Some("Workbook references updated, including hidden records and Table rules"));
         self.rename_original_name.clear();
         self.rename_new_name.clear();
         self.rename_affected_cells.clear();
-        cx.notify();
-    }
-
-    /// Replace a named range in a formula with a new name
-    /// Handles case-insensitive matching while preserving surrounding text
-    fn replace_name_in_formula(&self, formula: &str, old_name_upper: &str, new_name: &str) -> String {
-        let mut result = String::with_capacity(formula.len());
-        let formula_chars: Vec<char> = formula.chars().collect();
-        let old_name_len = old_name_upper.len();
-        let mut i = 0;
-
-        while i < formula_chars.len() {
-            // Try to match old name at this position
-            let remaining: String = formula_chars[i..].iter().collect();
-            let remaining_upper = remaining.to_uppercase();
-
-            if remaining_upper.starts_with(old_name_upper) {
-                // Check word boundaries
-                let before_ok = i == 0 || {
-                    let c = formula_chars[i - 1];
-                    !c.is_alphanumeric() && c != '_'
-                };
-                let after_ok = i + old_name_len >= formula_chars.len() || {
-                    let c = formula_chars[i + old_name_len];
-                    !c.is_alphanumeric() && c != '_'
-                };
-
-                if before_ok && after_ok {
-                    // Found a match - replace it
-                    result.push_str(new_name);
-                    i += old_name_len;
-                    continue;
-                }
-            }
-
-            result.push(formula_chars[i]);
-            i += 1;
-        }
-
-        result
+        true
     }
 
     // =========================================================================
@@ -327,6 +193,8 @@ impl Spreadsheet {
     /// Show the edit description modal for a named range
     pub fn show_edit_description(&mut self, name: &str, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
+        self.name_draft_error = None;
+        self.name_draft = self.wb(cx).get_named_range(name).cloned().map(|range| super::plan::NameDraft { revision: self.wb(cx).revision(), range });
         // Get the current description
         let current_description = self.wb(cx).get_named_range(name)
             .and_then(|nr| nr.description.clone());
@@ -341,6 +209,8 @@ impl Spreadsheet {
     /// Hide the edit description modal without saving
     pub fn hide_edit_description(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::Navigation;
+        self.name_draft_error = None;
+        self.name_draft = None;
         self.edit_description_name.clear();
         self.edit_description_value.clear();
         self.edit_description_original = None;
@@ -361,42 +231,21 @@ impl Spreadsheet {
 
     /// Apply the edited description and record undo
     pub fn apply_edit_description(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        let name = self.edit_description_name.clone();
-        let old_description = self.edit_description_original.clone();
-        let new_description = if self.edit_description_value.is_empty() {
-            None
-        } else {
-            Some(self.edit_description_value.clone())
+        if self.block_if_previewing_only(cx) { return; }
+        let before = match self.named_range_draft(cx) {
+            Ok(before) => before,
+            Err(error) => { self.name_draft_error = Some(error.clone()); self.status_message = Some(error); cx.notify(); return; }
         };
-
-        // Only record if there's a change
-        if old_description != new_description {
-            // Apply the change
-            self.wb_mut(cx, |wb| {
-                let _ = wb.named_ranges_mut().set_description(&name, new_description.clone());
-            });
-
-            // Record for undo
-            self.history.record_named_range_action(UndoAction::NamedRangeDescriptionChanged {
-                name: name.clone(),
-                old_description,
-                new_description: new_description.clone(),
-            });
-
-            self.is_modified = true;
-
-            // Log the edit
-            let detail = match &new_description {
-                Some(desc) => format!("{}: \"{}\"", name, desc),
-                None => format!("{}: (cleared)", name),
-            };
-            self.log_refactor("Edited description", &detail, None);
-
-            self.status_message = Some(format!("Updated description for '{}'", name));
+        let name = before.name.clone();
+        let description = (!self.edit_description_value.is_empty()).then(|| self.edit_description_value.clone());
+        let changed = before.description != description;
+        if self.apply_named_range_edit(NamedRangeEdit::Description { before, description }, format!("Edit description: {name}"), cx) {
+            if changed {
+                let detail = format!("{name}: {}", if self.edit_description_value.is_empty() { "(cleared)" } else { &self.edit_description_value });
+                self.log_refactor("Edited description", &detail, None);
+            }
+            self.status_message = Some(format!("Updated description for '{name}'"));
+            self.hide_edit_description(cx);
         }
-
-        // Close the modal
-        self.hide_edit_description(cx);
     }
 }

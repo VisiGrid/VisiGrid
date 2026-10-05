@@ -508,10 +508,14 @@ impl GuardedStructureCommit {
                 );
         }
         candidate.rebuild_dep_graph();
-        candidate.recompute_full_ordered();
-        if candidate.tables().any(|(_, table)| table.totals.is_some()) {
+        let report = candidate.recompute_full_ordered();
+        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("spill not settled")) {
+            return Err("History replay would create a cycle or an unsettled spill.".into());
+        }
+        if self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some()) {
             // A pivot can source an unchanged formula whose result depends on
-            // the restored footer. Authored-cell patches alone miss that sheet.
+            // the restored footer or name. Authored-cell patches alone miss
+            // that sheet when only a name definition changed.
             let changed: Vec<_> = candidate.sheets().iter().filter_map(|sheet| {
                 let before = wb.sheet_by_id(sheet.id)?;
                 sheet.cells_iter().any(|((row, col), cell)| {

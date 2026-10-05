@@ -781,7 +781,7 @@ pub struct Spreadsheet {
     pub rename_original_name: String,      // The named range being renamed
     pub rename_new_name: String,           // User's typed new name
     pub rename_select_all: bool,           // True = typing replaces entire name
-    pub rename_affected_cells: Vec<(usize, usize)>,  // Cells with formulas referencing this name
+    pub rename_affected_cells: Vec<(String, String)>, // Workbook reference locations and sources
     pub rename_validation_error: Option<String>,     // Current validation error (if any)
 
     // Add conditional format state
@@ -803,6 +803,8 @@ pub struct Spreadsheet {
 
     // Create named range state (Ctrl+Shift+N)
     pub create_name_name: String,           // User-typed name
+    pub(crate) name_draft: Option<crate::named_ranges::plan::NameDraft>,
+    pub(crate) name_draft_error: Option<String>,
     pub create_name_description: String,    // Optional description
     pub create_name_target: String,         // Auto-filled from selection (e.g., "A1:B10")
     pub create_name_validation_error: Option<String>,
@@ -1463,6 +1465,8 @@ impl Spreadsheet {
             cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             cf_cache_key: std::cell::Cell::new((0, 0, 0, false)),
             create_name_name: String::new(),
+            name_draft: None,
+            name_draft_error: None,
             create_name_description: String::new(),
             create_name_target: String::new(),
             create_name_validation_error: None,
@@ -2388,8 +2392,8 @@ impl Spreadsheet {
             SearchAction::OpenFile(path) => {
                 self.load_file(&path, cx);
             }
-            SearchAction::JumpToNamedRange { .. } => {
-                // Future: implement named range navigation
+            SearchAction::JumpToNamedRange { name } => {
+                self.jump_to_named_range(&name, cx);
             }
             SearchAction::OpenSetting { key } => {
                 // Copy key to clipboard so user doesn't have to hunt

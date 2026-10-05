@@ -21,10 +21,7 @@ pub(crate) fn render_rename_symbol_dialog(app: &Spreadsheet) -> impl IntoElement
     let cells_preview: Vec<String> = app.rename_affected_cells
         .iter()
         .take(8)
-        .map(|(row, col)| {
-            let col_letter = col_to_letter(*col);
-            format!("{}{}", col_letter, row + 1)
-        })
+        .map(|(location, _)| location.clone())
         .collect();
 
     // Centered dialog overlay
@@ -86,7 +83,7 @@ pub(crate) fn render_rename_symbol_dialog(app: &Spreadsheet) -> impl IntoElement
                         .text_color(text_muted)
                         .text_xs()
                         .child(format!(
-                            "{} formula{} will be updated",
+                            "{} reference{} across the workbook will be updated",
                             affected_count,
                             if affected_count == 1 { "" } else { "s" }
                         ))
@@ -150,6 +147,8 @@ pub(crate) fn render_edit_description_dialog(app: &Spreadsheet) -> impl IntoElem
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("Edit description for '{}'", app.edit_description_name))
                 )
+                .when_some(app.name_draft_error.clone(), |el, error| el.child(
+                    div().text_sm().text_color(app.token(TokenKey::Error)).child(error)))
                 // Input field
                 .child(
                     div()
@@ -255,6 +254,8 @@ pub(crate) fn render_create_named_range_dialog(app: &Spreadsheet, cx: &mut Conte
                                 .child(app.create_name_target.clone())
                         )
                 )
+                .child(div().text_xs().text_color(text_muted)
+                    .child("Worksheet range between these endpoints, including hidden rows."))
                 // Name input
                 .child(
                     div()

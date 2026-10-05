@@ -14,6 +14,9 @@ mod sheet_copy;
 mod guarded_structure;
 #[path = "workbook_automation.rs"]
 mod automation;
+#[path = "workbook_names.rs"]
+mod names;
+pub use names::NamedRangeEdit;
 pub use guarded_structure::{shift_structure_index, GuardedStructureCommit, StructureStep};
 #[path = "workbook_table_view.rs"]
 mod table_view_ops;

@@ -12,6 +12,7 @@ mod rename;
 mod extract;
 mod create;
 mod panel;
+pub(crate) mod plan;
 
 use gpui::*;
 use crate::app::Spreadsheet;

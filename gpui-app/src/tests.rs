@@ -3042,12 +3042,14 @@ fn review_mode_workbook_mutators_are_guarded() {
     assert_contains_near(find_replace, "replace_next", "block_if_previewing_only(cx)");
     assert_contains_near(find_replace, "replace_all", "block_if_previewing_only(cx)");
     assert_guarded(include_str!("dialogs.rs"), "ask_ai_insert_formula");
-    assert_guarded(include_str!("named_ranges/create.rs"), "confirm_create_named_range");
+    assert_contains_near(include_str!("named_ranges/create.rs"), "confirm_create_named_range", "block_if_previewing_only(cx)");
     assert_guarded(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range");
-    assert_guarded(include_str!("named_ranges/panel.rs"), "delete_named_range");
+    assert_contains_near(include_str!("named_ranges/panel.rs"), "delete_named_range", "block_if_previewing_only(cx)");
+    assert_contains_near(include_str!("named_ranges/plan.rs"), "apply_named_range_edit", "block_if_previewing_only(cx)");
+    assert_contains_near(include_str!("impact_preview.rs"), "apply_impact_preview", "block_if_previewing_only(cx)");
     let rename = include_str!("named_ranges/rename.rs");
-    assert_guarded(rename, "confirm_rename_symbol");
-    assert_guarded(rename, "apply_edit_description");
+    assert_contains_near(rename, "confirm_rename_symbol", "block_if_previewing_only(cx)");
+    assert_contains_near(rename, "apply_edit_description", "block_if_previewing_only(cx)");
 
     let app = include_str!("app.rs");
     for function in [
