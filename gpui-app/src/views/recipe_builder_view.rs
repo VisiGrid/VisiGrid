@@ -9,7 +9,7 @@ use visigrid_io::recipe::Step;
 use crate::app::Spreadsheet;
 use crate::recipe_builder::{
     cli_line, filter_op_label, missing_label, on_error_label, rule_label, step_kind, step_missing, type_label,
-    EditorRow, Pane, RecipeBuilder, ADD_KINDS,
+    EditorRow, Pane, RecipeBuilder, TotalPart, ADD_KINDS,
 };
 use crate::theme::TokenKey;
 use crate::ui::{dialog_header_with_subtitle, modal_overlay, Button, DialogFrame};
@@ -235,9 +235,13 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
     list.push(step_row(
         "recipe-step-source".into(),
         "0".into(),
-        "Read the file".into(),
+        match b.snapshot.as_ref().map_or(1, |s| s.file_count()) {
+            1 => "Read the file".into(),
+            n => format!("Read {n} files and append them"),
+        },
         report.map(|r| format!("{} rows · {} columns", thousands(r.source_rows), b.file_columns.len())).unwrap_or_default(),
-        None,
+        // Appended files missing a column: worth seeing, not a failure
+        report.filter(|r| !r.warnings.is_empty()).map(|r| r.warnings.join(" · ")),
         false,
         on,
         focused,
@@ -331,7 +335,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
                     .text_size(px(12.0))
                     .cursor_pointer()
                     .when(on, |d| d.bg(accent.opacity(0.18)))
-                    .child(div().text_color(text).child(format!("{}  {}", k + 1, label)))
+                    .child(div().text_color(text).child(format!("{}  {}", add_kind_key(k), label)))
                     .child(div().text_color(muted).child(help.to_string()))
                     .on_mouse_down(MouseButton::Left, cx.listener(with_builder(move |b| b.add_step(k)))),
             );
@@ -475,6 +479,12 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
         Step::Trim { .. } => "None checked: every column.",
         Step::Dedupe { .. } => "None checked: rows must match in every column.",
         Step::Filter { .. } => "Rows where the condition holds are kept.",
+        Step::Group { .. } => "One row per group of the checked columns, with the totals below.",
+        Step::Unpivot { .. } => "Checked columns stay; every other column becomes rows, including ones added later.",
+        Step::Sort { .. } => "Click a column to sort by it, again for descending. Earlier columns decide first; empty values go last.",
+        Step::FillDown { .. } => "Empty cells in the checked columns take the value above.",
+        Step::Replace { .. } => "None checked: every column. An empty Find in whole cells replaces empty cells.",
+        Step::Split { .. } => "The new columns replace it. The last one keeps the rest, so nothing is lost.",
     };
     let mut rows = div().flex().flex_col();
     for (r, row) in b.editor_rows().iter().enumerate() {
@@ -499,6 +509,57 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
             (EditorRow::FilterValue, Step::Filter { value, .. }) => ("Value".into(), value.clone(), true),
             (EditorRow::OnError, Step::Types { on_error, .. }) => ("If a value doesn't fit".into(), on_error_label(*on_error).into(), false),
             (EditorRow::Missing, _) => ("If a column is missing".into(), missing_label(step_missing(step)).into(), false),
+            (EditorRow::GroupBy { name, present }, Step::Group { by, .. }) => {
+                checkbox = Some(by.iter().any(|c| c.eq_ignore_ascii_case(name)));
+                (format!("Group by {}", column_label(name, *present)), String::new(), false)
+            }
+            (EditorRow::Keep { name, present }, Step::Unpivot { keep, .. }) => {
+                checkbox = Some(keep.iter().any(|c| c.eq_ignore_ascii_case(name)));
+                (format!("Keep {}", column_label(name, *present)), String::new(), false)
+            }
+            (EditorRow::Total { index, part }, Step::Group { totals, .. }) => {
+                let Some(t) = totals.get(*index) else { continue };
+                match part {
+                    TotalPart::Func => (format!("Total {}", index + 1), t.func.label().to_string(), false),
+                    TotalPart::Column => ("    of column".into(), if t.column.is_empty() { "—".into() } else { t.column.clone() }, false),
+                    TotalPart::Name => ("    named".into(), t.name.clone(), true),
+                    TotalPart::Remove => ("    Remove this total".into(), "Remove".into(), false),
+                }
+            }
+            (EditorRow::AddTotal, _) => ("+ Add a total".into(), "Add".into(), false),
+            (EditorRow::NamesTo, Step::Unpivot { names_to, .. }) => ("Column names go in".into(), names_to.clone(), true),
+            (EditorRow::ValuesTo, Step::Unpivot { values_to, .. }) => ("Their values go in".into(), values_to.clone(), true),
+            (EditorRow::SortBy { name, present }, Step::Sort { by, .. }) => {
+                let place = by.iter().position(|k| k.column.eq_ignore_ascii_case(name));
+                let value = match place {
+                    None => "—".to_string(),
+                    Some(i) => format!("{} · {}", i + 1, if by[i].descending { "Descending" } else { "Ascending" }),
+                };
+                (column_label(name, *present), value, false)
+            }
+            (EditorRow::ReplaceFind, Step::Replace { find, .. }) => ("Find".into(), find.clone(), true),
+            (EditorRow::ReplaceWith, Step::Replace { with, .. }) => ("Replace with".into(), with.clone(), true),
+            (EditorRow::ReplacePart, Step::Replace { part, .. }) => (
+                "Match".into(),
+                if *part { "Text inside cells".into() } else { "Whole cell".into() },
+                false,
+            ),
+            (EditorRow::ReplaceCase, Step::Replace { match_case, .. }) => (
+                "Case".into(),
+                if *match_case { "Must match".into() } else { "Ignored".into() },
+                false,
+            ),
+            (EditorRow::SplitColumn, Step::Split { column, .. }) => ("Column".into(), column.clone(), false),
+            (EditorRow::SplitBy, Step::Split { by, .. }) => ("At each".into(), by.clone(), true),
+            (EditorRow::SplitInto { index }, Step::Split { into, .. }) => {
+                (format!("New column {}", index + 1), into.get(*index).cloned().unwrap_or_default(), true)
+            }
+            (EditorRow::AddSplitPiece, _) => ("+ Add a column".into(), "Add".into(), false),
+            (EditorRow::DropEmpty, Step::Unpivot { drop_empty, .. }) => (
+                "Empty values".into(),
+                if *drop_empty { "Leave out".into() } else { "Keep as empty rows".into() },
+                false,
+            ),
             _ => continue,
         };
         let (accent, border, text, muted) = (c.accent, c.border, c.text, c.muted);
@@ -819,4 +880,9 @@ fn render_footer(app: &Spreadsheet, b: &RecipeBuilder, c: &Colors, cx: &mut Cont
                         })),
                 ),
         )
+}
+
+/// The key that picks add-menu entry `k`: 1-9, then a, b, c, d.
+fn add_kind_key(k: usize) -> char {
+    if k < 9 { (b'1' + k as u8) as char } else { (b'a' + (k - 9) as u8) as char }
 }

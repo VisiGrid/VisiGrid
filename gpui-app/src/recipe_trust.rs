@@ -9,56 +9,32 @@
 //! The engine separately refuses anything but local regular files within a
 //! size cap (`visigrid_io::recipe::read_regular_file`).
 
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use visigrid_io::recipe::Recipe;
-
-fn store_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("visigrid")
-        .join("recipe_sources.json")
-}
-
-/// The recipe file and the source path as the recipe states it (a pattern
-/// stays a pattern), so next month's file under an approved pattern is
-/// covered and a recipe edited to read elsewhere is not.
-pub fn approval_key(recipe_path: &Path, recipe: &Recipe) -> String {
-    let recipe_path = std::path::absolute(recipe_path).unwrap_or_else(|_| recipe_path.to_path_buf());
-    let text = format!("{}\0{}", recipe_path.display(), recipe.source.path());
-    blake3::hash(text.as_bytes()).to_hex()[..32].to_string()
-}
-
-fn load() -> BTreeSet<String> {
-    std::fs::read_to_string(store_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-pub fn is_approved(recipe_path: &Path, recipe: &Recipe) -> bool {
-    load().contains(&approval_key(recipe_path, recipe))
-}
-
-pub fn approve(recipe_path: &Path, recipe: &Recipe) -> Result<(), String> {
-    let mut all = load();
-    if !all.insert(approval_key(recipe_path, recipe)) {
-        return Ok(());
-    }
-    let file = store_path();
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
-    std::fs::write(&file, json).map_err(|e| e.to_string())
-}
+// The approval store itself is shared with the CLI's MCP server
+pub use visigrid_io::recipe_trust::{approve, is_approved};
 
 /// What the confirmation shows about the file a recipe would read: the
 /// file itself, or for a pattern the folder, the pattern and the file it
 /// matches now. Err when it cannot be read at all (then only Cancel).
 pub fn describe_source(recipe_path: &Path, recipe: &Recipe) -> Result<(String, String), String> {
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
+    if recipe.source.combine() && recipe.source_is_pattern() {
+        let files = recipe.resolve_sources(dir, None)?;
+        let pattern = recipe.source_path(dir, None);
+        let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+        return Ok((
+            format!(
+                "every file matching {} in {}; now {} file{}",
+                pattern.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                pattern.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            ),
+            format!("{} KB in all", total / 1024),
+        ));
+    }
     let resolved = recipe.resolve_source(dir, None)?;
     let meta = std::fs::metadata(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?;
     if !meta.is_file() {
@@ -93,7 +69,7 @@ pub fn describe_source(recipe_path: &Path, recipe: &Recipe) -> Result<(String, S
 
 #[cfg(test)]
 mod tests {
-    use super::approval_key;
+    use visigrid_io::recipe_trust::approval_key;
     use std::path::Path;
     use visigrid_io::recipe::Recipe;
 

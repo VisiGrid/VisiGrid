@@ -512,6 +512,16 @@ impl Spreadsheet {
         // CRITICAL: Set save point AFTER load completes
         // This ensures the document starts "clean" (not dirty)
         self.history.mark_saved();
+        self.publish_session_workbook();
+    }
+
+    /// Tell connected tools (the session list, MCP) which document this
+    /// window holds. Written at server start only, it said "Book1" for any
+    /// file opened later, a recipe or a CSV loaded in the background.
+    pub(crate) fn publish_session_workbook(&mut self) {
+        if self.session_server.is_running() {
+            self.session_server.update_workbook(self.current_file.clone(), self.document_meta.display_name.clone());
+        }
     }
 
     /// Finalize document state after saving
@@ -540,6 +550,7 @@ impl Spreadsheet {
         if self.terminal.visible {
             self.terminal.ensure_cwd();
         }
+        self.publish_session_workbook();
     }
 
     // =========================================================================

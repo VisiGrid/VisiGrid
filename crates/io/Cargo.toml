@@ -14,7 +14,7 @@ default = ["native"]
 native = [
     "dep:rusqlite", "dep:csv", "dep:calamine", "dep:rust_xlsxwriter", "dep:encoding_rs",
     "dep:quick-xml", "dep:zip", "dep:regex", "dep:blake3", "dep:uuid",
-    "dep:chrono", "dep:dirs", "dep:toml", "dep:tempfile", "dep:parquet", "dep:libduckdb-sys",
+    "dep:chrono", "dep:dirs", "dep:toml", "dep:toml_edit", "dep:tempfile", "dep:parquet", "dep:libduckdb-sys",
 ]
 
 [dependencies]
@@ -38,6 +38,7 @@ chrono = { version = "0.4", features = ["serde"], optional = true }
 dirs = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
+toml_edit = { version = "0.25", optional = true }
 # Parquet import/export. No Arrow: the record reader and typed writer
 # are enough to fill/export a grid and
 # keeps several large crates out of the build. The codecs are the ones real

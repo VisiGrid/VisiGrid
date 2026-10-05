@@ -18,6 +18,8 @@ pub mod recipe;
 #[cfg(feature = "native")]
 pub mod recipe_table;
 #[cfg(feature = "native")]
+pub mod recipe_trust;
+#[cfg(feature = "native")]
 pub mod scripting;
 pub mod table_recovery;
 #[cfg(feature = "native")]

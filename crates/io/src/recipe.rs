@@ -76,6 +76,9 @@ pub struct XlsxSource {
     /// The column names when the recipe was saved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
+    /// With a pattern path: append the same sheet of every matching workbook.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub combine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +89,9 @@ pub struct ParquetSource {
     /// The column names when the recipe was saved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
+    /// With a pattern path: append every matching file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub combine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +144,26 @@ impl Source {
         }
     }
 
+    /// Whether every matching file is appended (Append folder).
+    pub fn combine(&self) -> bool {
+        match self {
+            Source::Csv(s) => s.combine,
+            Source::Parquet(s) => s.combine,
+            Source::Xlsx(s) => s.combine,
+            Source::Duckdb(_) => false,
+        }
+    }
+
+    /// Turn appending every matching file on or off. DuckDB has no such mode.
+    pub fn set_combine(&mut self, on: bool) {
+        match self {
+            Source::Csv(s) => s.combine = on,
+            Source::Parquet(s) => s.combine = on,
+            Source::Xlsx(s) => s.combine = on,
+            Source::Duckdb(_) => {}
+        }
+    }
+
     /// "CSV", "Parquet", "DuckDB"
     pub fn label(&self) -> &'static str {
         match self {
@@ -153,13 +179,13 @@ impl Source {
     pub fn for_file(path: String, table: Option<String>) -> Source {
         let lower = path.to_lowercase();
         if [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e)) {
-            Source::Xlsx(XlsxSource { path, sheet: table.unwrap_or_default(), header_row: 1, columns: Vec::new() })
+            Source::Xlsx(XlsxSource { path, sheet: table.unwrap_or_default(), header_row: 1, columns: Vec::new(), combine: false })
         } else if lower.ends_with(".parquet") {
-            Source::Parquet(ParquetSource { path, columns: Vec::new() })
+            Source::Parquet(ParquetSource { path, columns: Vec::new(), combine: false })
         } else if lower.ends_with(".duckdb") || table.is_some() {
             Source::Duckdb(DuckdbSource { path, table: table.unwrap_or_default(), columns: Vec::new() })
         } else {
-            Source::Csv(CsvSource { path, delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: Vec::new() })
+            Source::Csv(CsvSource { path, delimiter: None, encoding: None, header_row: 1, decimal_comma: false, columns: Vec::new(), combine: false })
         }
     }
 }
@@ -188,6 +214,10 @@ pub struct CsvSource {
     /// have since gone missing or appeared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
+    /// With a pattern path: read every matching file and append them, rather
+    /// than the newest one. A "Source file" column says where each row came from.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub combine: bool,
 }
 
 fn one() -> usize {
@@ -334,6 +364,182 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "is_default_missing")]
         missing: Missing,
     },
+    /// One row per distinct combination of the `by` columns, with totals.
+    /// Groups appear in the order they first occur. No `by` columns: one
+    /// row totalling everything.
+    Group {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        by: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        totals: Vec<Total>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// "Unpivot other columns": keep these columns, and turn every other
+    /// column into rows of (name, value). A column added to next month's
+    /// file is unpivoted too.
+    Unpivot {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<String>,
+        /// The new column holding the unpivoted columns' names.
+        #[serde(default = "attribute", skip_serializing_if = "is_attribute")]
+        names_to: String,
+        /// The new column holding their values.
+        #[serde(default = "value_name", skip_serializing_if = "is_value_name")]
+        values_to: String,
+        /// Leave out empty values (Power Query does the same).
+        #[serde(default = "yes", skip_serializing_if = "is_true")]
+        drop_empty: bool,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Order the rows by these columns, the first deciding. Each column
+    /// sorts as its type (numbers as numbers, dates as dates, text ignoring
+    /// case); empty values go last either way. Rows that tie keep their
+    /// order.
+    Sort {
+        by: Vec<SortKey>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Fill each empty cell in these columns with the value above it, as in
+    /// a report that prints a group's name only on its first row. Never
+    /// across appended files.
+    FillDown {
+        columns: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Replace `find` with `with` in these columns (none named: every
+    /// column). By default a cell must equal `find` entirely, ignoring case;
+    /// an empty `find` then replaces empty cells. With `part = true`, every
+    /// occurrence inside a cell is replaced.
+    Replace {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        columns: Vec<String>,
+        find: String,
+        #[serde(default)]
+        with: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        part: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        match_case: bool,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+    /// Split a column at a delimiter into the columns named in `into`, which
+    /// take its place. It splits at the first `into.len() - 1` delimiters, so
+    /// the last column keeps the rest and nothing is lost; a value with fewer
+    /// pieces leaves the later columns empty.
+    Split {
+        column: String,
+        by: String,
+        into: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_default_missing")]
+        missing: Missing,
+    },
+}
+
+/// One column of a Sort step: `{ column = "Amount", descending = true }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SortKey {
+    pub column: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub descending: bool,
+}
+
+fn attribute() -> String {
+    "Attribute".into()
+}
+fn is_attribute(s: &String) -> bool {
+    s == "Attribute"
+}
+fn value_name() -> String {
+    "Value".into()
+}
+fn is_value_name(s: &String) -> bool {
+    s == "Value"
+}
+fn yes() -> bool {
+    true
+}
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// One total in a Group step: `{ fn = "sum", column = "Amount", as = "Total" }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Total {
+    #[serde(rename = "fn")]
+    pub func: TotalFn,
+    /// The column it totals; not used by `count_rows`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub column: String,
+    /// The result column's name.
+    #[serde(rename = "as")]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TotalFn {
+    Sum,
+    Average,
+    Min,
+    Max,
+    /// Values that aren't empty.
+    Count,
+    /// Rows in the group, empty or not.
+    CountRows,
+    /// Distinct values that aren't empty.
+    Distinct,
+    First,
+    Last,
+}
+
+impl TotalFn {
+    pub const ALL: [TotalFn; 9] = [
+        TotalFn::Sum,
+        TotalFn::Count,
+        TotalFn::CountRows,
+        TotalFn::Average,
+        TotalFn::Min,
+        TotalFn::Max,
+        TotalFn::Distinct,
+        TotalFn::First,
+        TotalFn::Last,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TotalFn::Sum => "sum",
+            TotalFn::Average => "average",
+            TotalFn::Min => "min",
+            TotalFn::Max => "max",
+            TotalFn::Count => "count",
+            TotalFn::CountRows => "count rows",
+            TotalFn::Distinct => "distinct count",
+            TotalFn::First => "first",
+            TotalFn::Last => "last",
+        }
+    }
+
+    /// A default result name: `Total Amount`, `Rows`.
+    pub fn default_name(self, column: &str) -> String {
+        match self {
+            TotalFn::CountRows => "Rows".into(),
+            TotalFn::Sum => format!("Total {column}"),
+            TotalFn::Average => format!("Average {column}"),
+            TotalFn::Min => format!("Min {column}"),
+            TotalFn::Max => format!("Max {column}"),
+            TotalFn::Count => format!("Count of {column}"),
+            TotalFn::Distinct => format!("Distinct {column}"),
+            TotalFn::First => format!("First {column}"),
+            TotalFn::Last => format!("Last {column}"),
+        }
+    }
 }
 
 impl Step {
@@ -359,6 +565,39 @@ impl Step {
             },
             Step::Dedupe { columns, .. } if columns.is_empty() => "Remove duplicate rows".into(),
             Step::Dedupe { columns, .. } => format!("Remove duplicates by {}", list(columns)),
+            Step::Group { by, totals, .. } => {
+                let totals: Vec<String> = totals
+                    .iter()
+                    .map(|t| match t.func {
+                        TotalFn::CountRows => format!("{} = count of rows", t.name),
+                        f => format!("{} = {} of {}", t.name, f.label(), t.column),
+                    })
+                    .collect();
+                let head = if by.is_empty() { "Total all rows".to_string() } else { format!("Group by {}", list(by)) };
+                if totals.is_empty() { head } else { format!("{head}: {}", totals.join(", ")) }
+            }
+            Step::Unpivot { keep, names_to, values_to, .. } if keep.is_empty() => {
+                format!("Unpivot every column into {names_to}, {values_to}")
+            }
+            Step::Unpivot { keep, names_to, values_to, .. } => {
+                format!("Unpivot all but {} into {names_to}, {values_to}", list(keep))
+            }
+            Step::Sort { by, .. } => {
+                let keys: Vec<String> =
+                    by.iter().map(|k| if k.descending { format!("{} (descending)", k.column) } else { k.column.clone() }).collect();
+                format!("Sort by {}", keys.join(", "))
+            }
+            Step::FillDown { columns, .. } => format!("Fill down {}", list(columns)),
+            Step::Replace { columns, find, with, part, .. } => {
+                let what = match (part, find.is_empty()) {
+                    (false, true) => "empty cells".to_string(),
+                    (false, false) => format!("{find:?}"),
+                    (true, _) => format!("{find:?} inside cells"),
+                };
+                let place = if columns.is_empty() { "every column".to_string() } else { list(columns) };
+                format!("Replace {what} with {with:?} in {place}")
+            }
+            Step::Split { column, by, into, .. } => format!("Split {column} at {by:?} into {}", list(into)),
         }
     }
 
@@ -370,18 +609,35 @@ impl Step {
             | Step::Types { missing, .. }
             | Step::Trim { missing, .. }
             | Step::Filter { missing, .. }
-            | Step::Dedupe { missing, .. } => *missing,
+            | Step::Dedupe { missing, .. }
+            | Step::Group { missing, .. }
+            | Step::Unpivot { missing, .. }
+            | Step::Sort { missing, .. }
+            | Step::FillDown { missing, .. }
+            | Step::Replace { missing, .. }
+            | Step::Split { missing, .. } => *missing,
         }
     }
 
     /// Every column the step names.
     fn named_columns(&self) -> Vec<&str> {
         match self {
-            Step::Select { columns, .. } | Step::Remove { columns, .. } | Step::Trim { columns, .. } | Step::Dedupe { columns, .. } => {
-                columns.iter().map(String::as_str).collect()
-            }
+            Step::Select { columns, .. }
+            | Step::Remove { columns, .. }
+            | Step::Trim { columns, .. }
+            | Step::Dedupe { columns, .. }
+            | Step::FillDown { columns, .. }
+            | Step::Replace { columns, .. } => columns.iter().map(String::as_str).collect(),
             Step::Rename { columns, .. } | Step::Types { columns, .. } => columns.keys().map(String::as_str).collect(),
             Step::Filter { column, .. } => vec![column.as_str()],
+            Step::Group { by, totals, .. } => by
+                .iter()
+                .map(String::as_str)
+                .chain(totals.iter().filter(|t| !t.column.is_empty()).map(|t| t.column.as_str()))
+                .collect(),
+            Step::Unpivot { keep, .. } => keep.iter().map(String::as_str).collect(),
+            Step::Sort { by, .. } => by.iter().map(|k| k.column.as_str()).collect(),
+            Step::Split { column, .. } => vec![column.as_str()],
         }
     }
 }
@@ -407,6 +663,24 @@ impl Recipe {
 
     pub fn to_toml(&self) -> String {
         toml::to_string(self).expect("a recipe always serializes")
+    }
+
+    /// This recipe as `existing` (the file's current text) rewritten with
+    /// only what changed: comments, key order, inline tables and spacing
+    /// survive wherever the structure is the same. A step added or removed
+    /// rewrites the step list. Falls back to a plain rewrite if the result
+    /// would read back as anything other than this recipe.
+    pub fn to_toml_preserving(&self, existing: &str) -> String {
+        let fresh = self.to_toml();
+        let (Ok(mut old), Ok(new)) = (existing.parse::<toml_edit::DocumentMut>(), fresh.parse::<toml_edit::DocumentMut>()) else {
+            return fresh;
+        };
+        merge_toml_table(old.as_table_mut(), new.as_table());
+        let merged = old.to_string();
+        match Recipe::from_toml(&merged) {
+            Ok(r) if r == *self => merged,
+            _ => fresh,
+        }
     }
 
     pub fn load(path: &Path) -> Result<Recipe, String> {
@@ -449,7 +723,27 @@ impl Recipe {
                 Step::Select { columns, .. } => {
                     swap(columns, &mut changed);
                 }
-                Step::Trim { columns, .. } | Step::Dedupe { columns, .. } => swap(columns, &mut changed),
+                Step::Trim { columns, .. }
+                | Step::Dedupe { columns, .. }
+                | Step::FillDown { columns, .. }
+                | Step::Replace { columns, .. } => swap(columns, &mut changed),
+                Step::Sort { by, .. } => {
+                    for k in by.iter_mut().filter(|k| same(&k.column)) {
+                        k.column = new.to_string();
+                        changed = true;
+                    }
+                }
+                Step::Split { column, into, .. } => {
+                    let created = into.iter().any(|n| same(n));
+                    if same(column) {
+                        *column = new.to_string();
+                        changed = true;
+                        break; // split away
+                    }
+                    if created {
+                        break;
+                    }
+                }
                 Step::Types { columns, .. } => swap_keys(columns, &mut changed),
                 Step::Filter { column, .. } => {
                     if same(column) {
@@ -471,6 +765,20 @@ impl Recipe {
                     if renamed_away || created {
                         break;
                     }
+                }
+                // After grouping or unpivoting the source's columns are
+                // gone; later steps name the new ones
+                Step::Group { by, totals, .. } => {
+                    swap(by, &mut changed);
+                    for t in totals.iter_mut().filter(|t| same(&t.column)) {
+                        t.column = new.to_string();
+                        changed = true;
+                    }
+                    break;
+                }
+                Step::Unpivot { keep, .. } => {
+                    swap(keep, &mut changed);
+                    break;
                 }
             }
         }
@@ -496,11 +804,58 @@ impl Recipe {
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("recipe.toml");
         let tmp = dir.join(format!(".{name}.{}.partial", std::process::id()));
-        std::fs::write(&tmp, self.to_toml()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        // An existing recipe keeps its comments and layout: only what changed
+        // is rewritten
+        let text = match read_regular_file(path, MAX_RECIPE_BYTES, "recipe").ok().and_then(|b| String::from_utf8(b).ok()) {
+            Some(existing) => self.to_toml_preserving(&existing),
+            None => self.to_toml(),
+        };
+        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             format!("{}: {e}", path.display())
         })
+    }
+
+    /// The files a run reads: one, or with `combine` every file the pattern
+    /// matches, in name order (skipping downloads in progress, and waiting
+    /// while any changed in the last moments).
+    pub fn resolve_sources(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<Vec<PathBuf>, String> {
+        if over.is_some() || !self.source.combine() || !self.source_is_pattern() {
+            return self.resolve_source(recipe_dir, over).map(|p| vec![p]);
+        }
+        let path = self.source_path(recipe_dir, None);
+        check_local(&path, "source")?;
+        let pattern = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mut files = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !wildcard_match(&pattern, &name) || is_partial_download(&name) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            if let Ok(age) = std::time::SystemTime::now().duration_since(meta.modified().unwrap_or(std::time::UNIX_EPOCH)) {
+                if age < SETTLE_TIME {
+                    return Err(format!("{name} is still being written (it changed a moment ago); refresh again in a few seconds"));
+                }
+            }
+            files.push((name, entry.path()));
+        }
+        if files.is_empty() {
+            return Err(format!("no file in {} matches {pattern}", dir.display()));
+        }
+        files.sort();
+        Ok(files.into_iter().map(|(_, p)| p).collect())
+    }
+
+    /// Read the run's source once: the file, or every file it appends.
+    pub fn read_snapshot(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<Snapshot, String> {
+        Snapshot::read_all(&self.resolve_sources(recipe_dir, over)?)
     }
 
     /// Whether the source names a pattern (`export-*.csv`) rather than a file.
@@ -628,6 +983,99 @@ pub fn suggest_pattern(file_name: &str) -> Option<String> {
     any.then_some(out)
 }
 
+// ============================================================================
+// Rewriting a recipe file without losing its comments
+// ============================================================================
+
+fn merge_toml_table(old: &mut toml_edit::Table, new: &toml_edit::Table) {
+    let gone: Vec<String> = old.iter().map(|(k, _)| k.to_string()).filter(|k| !new.contains_key(k)).collect();
+    for k in gone {
+        old.remove(&k);
+    }
+    for (k, item) in new.iter() {
+        match old.get_mut(k) {
+            Some(existing) => merge_toml_item(existing, item),
+            None => {
+                old.insert(k, item.clone());
+            }
+        }
+    }
+}
+
+fn merge_toml_item(old: &mut toml_edit::Item, new: &toml_edit::Item) {
+    use toml_edit::{Item, Value};
+    match new {
+        Item::Table(nt) => {
+            if let Item::Table(ot) = old {
+                return merge_toml_table(ot, nt);
+            }
+            // The file wrote it inline ({ a = "b" }): keep it inline
+            if let Item::Value(ov @ Value::InlineTable(_)) = old {
+                return merge_toml_value(ov, &Value::InlineTable(nt.clone().into_inline_table()));
+            }
+        }
+        Item::ArrayOfTables(na) => {
+            if let Item::ArrayOfTables(oa) = old {
+                if oa.len() == na.len() {
+                    for (o, n) in oa.iter_mut().zip(na.iter()) {
+                        merge_toml_table(o, n);
+                    }
+                    return;
+                }
+            }
+        }
+        Item::Value(nv) => {
+            if let Item::Value(ov) = old {
+                return merge_toml_value(ov, nv);
+            }
+        }
+        Item::None => {}
+    }
+    *old = new.clone();
+}
+
+fn merge_toml_value(old: &mut toml_edit::Value, new: &toml_edit::Value) {
+    use toml_edit::Value;
+    if same_toml_value(old, new) {
+        return;
+    }
+    if let (Value::InlineTable(oi), Value::InlineTable(ni)) = (&mut *old, new) {
+        let gone: Vec<String> = oi.iter().map(|(k, _)| k.to_string()).filter(|k| !ni.contains_key(k)).collect();
+        let reshaped = !gone.is_empty() || ni.iter().any(|(k, _)| !oi.contains_key(k));
+        for k in gone {
+            oi.remove(&k);
+        }
+        for (k, v) in ni.iter() {
+            match oi.get_mut(k) {
+                Some(existing) => merge_toml_value(existing, v),
+                None => {
+                    oi.insert(k, v.clone());
+                }
+            }
+        }
+        // Keys came or went: tidy the separators (an inline table can't
+        // hold comments, so nothing of the user's is lost)
+        if reshaped {
+            oi.fmt();
+        }
+        return;
+    }
+    // A changed value keeps the comments and spacing around it
+    let decor = old.decor().clone();
+    *old = new.clone();
+    *old.decor_mut() = decor;
+}
+
+/// Equal as TOML values, however they are written ("a" and 'a').
+fn same_toml_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    let plain = |v: &toml_edit::Value| {
+        let mut v = v.clone();
+        v.decor_mut().clear();
+        toml::from_str::<toml::Table>(&format!("v = {v}")).ok().and_then(|mut t| t.remove("v"))
+    };
+    plain(a).is_some() && plain(a) == plain(b)
+}
+
 /// `text`, `number`, `auto`, `date:ymd|dmy|mdy` (or `date`, meaning YMD).
 pub fn parse_type(s: &str) -> Result<ColumnRule, String> {
     Ok(match s.trim().to_ascii_lowercase().as_str() {
@@ -651,13 +1099,19 @@ pub fn parse_type(s: &str) -> Result<ColumnRule, String> {
 pub struct Snapshot {
     pub path: PathBuf,
     pub bytes: Arc<Vec<u8>>,
-    /// blake3 of the bytes (hex, 16 characters).
+    /// blake3 of the bytes (hex, 16 characters); of every file's, appended.
     pub hash: String,
+    /// The other files of an appended source, in name order after `path`.
+    pub more: Vec<Snapshot>,
 }
 
 /// The largest source file a recipe reads. The whole file is held in memory
 /// (once as bytes, once parsed), so this also bounds what a run costs.
 pub const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+/// Appending a folder holds every file at once: at most this many bytes in
+/// all, and this many files.
+pub const MAX_APPEND_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_APPEND_FILES: usize = 1000;
 /// The largest recipe file read. Recipes are a few kilobytes of TOML.
 pub const MAX_RECIPE_BYTES: u64 = 1024 * 1024;
 
@@ -720,7 +1174,55 @@ impl Snapshot {
 
     pub fn from_bytes(path: &Path, bytes: Vec<u8>) -> Snapshot {
         let hash = blake3::hash(&bytes).to_hex()[..16].to_string();
-        Snapshot { path: path.to_path_buf(), bytes: Arc::new(bytes), hash }
+        Snapshot { path: path.to_path_buf(), bytes: Arc::new(bytes), hash, more: Vec::new() }
+    }
+
+    /// Several files read once, for an appended source. The first is the
+    /// snapshot's own; the hash covers them all.
+    pub fn read_all(paths: &[PathBuf]) -> Result<Snapshot, String> {
+        let (first, rest) = paths.split_first().ok_or("no files to read")?;
+        if paths.len() > MAX_APPEND_FILES {
+            return Err(format!(
+                "the pattern matches {} files; a recipe appends at most {MAX_APPEND_FILES}. Narrow the pattern",
+                paths.len()
+            ));
+        }
+        let too_big = |total: u64| {
+            format!(
+                "the matching files hold {} MB; a recipe appends at most {} MB. Narrow the pattern",
+                total / (1024 * 1024),
+                MAX_APPEND_BYTES / (1024 * 1024)
+            )
+        };
+        // Sizes first, so nothing is read when the total is too big; then as
+        // read, in case a file grew
+        let stated: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        if stated > MAX_APPEND_BYTES {
+            return Err(too_big(stated));
+        }
+        let mut snapshot = Snapshot::read(first)?;
+        let mut total = snapshot.bytes.len() as u64;
+        for p in rest {
+            let next = Snapshot::read(p)?;
+            total += next.bytes.len() as u64;
+            if total > MAX_APPEND_BYTES {
+                return Err(too_big(total));
+            }
+            snapshot.more.push(next);
+        }
+        if !snapshot.more.is_empty() {
+            let mut h = blake3::Hasher::new();
+            for s in std::iter::once(&snapshot).chain(snapshot.more.iter()) {
+                h.update(s.hash.as_bytes());
+            }
+            snapshot.hash = h.finalize().to_hex()[..16].to_string();
+        }
+        Ok(snapshot)
+    }
+
+    /// How many files the snapshot holds.
+    pub fn file_count(&self) -> usize {
+        1 + self.more.len()
     }
 }
 
@@ -733,6 +1235,9 @@ impl Snapshot {
 pub struct CellError {
     /// The step that checked it, counting from 1.
     pub step: usize,
+    /// The file it is in, when several files were appended.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub file: String,
     /// Line in the source file, counting from 1.
     pub line: usize,
     pub column: String,
@@ -792,6 +1297,10 @@ pub struct RunReport {
     /// Values that did not fit their type; at most MAX_REPORTED_ERRORS kept.
     pub errors: Vec<CellError>,
     pub error_count: usize,
+    /// Worth knowing, not a failure: appended files that lack a column the
+    /// others have (their rows are empty there).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One output column: its name and the type its values were checked against.
@@ -836,6 +1345,10 @@ struct Frame {
     rows: Vec<Vec<String>>,
     /// Source line of each row (for error reports).
     lines: Vec<usize>,
+    /// The file each row came from: an index into `file_names`. Empty
+    /// unless several files were appended.
+    files: Vec<u32>,
+    file_names: Vec<String>,
     decimal_comma: bool,
 }
 
@@ -881,7 +1394,19 @@ impl Frame {
         self.columns.len() - 1
     }
 
+    /// The file a row came from, when several were appended.
+    fn file_of(&self, row: usize) -> String {
+        self.files.get(row).and_then(|&f| self.file_names.get(f as usize)).cloned().unwrap_or_default()
+    }
+
     fn keep_rows(&mut self, keep: &[bool]) {
+        if !self.files.is_empty() {
+            let mut k = 0;
+            self.files.retain(|_| {
+                k += 1;
+                keep[k - 1]
+            });
+        }
         let mut i = 0;
         self.rows.retain(|_| {
             i += 1;
@@ -910,14 +1435,43 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         failures: Vec::new(),
         errors: Vec::new(),
         error_count: 0,
+        warnings: Vec::new(),
     };
 
-    let read = match &recipe.source {
-        Source::Csv(src) => read_csv(src, snapshot),
-        Source::Parquet(_) => read_parquet(snapshot),
-        Source::Duckdb(src) => read_duckdb(src, snapshot),
-        Source::Xlsx(src) => read_xlsx(src, snapshot),
+    let read_one = |snap: &Snapshot| match &recipe.source {
+        Source::Csv(src) => read_csv(src, snap),
+        Source::Parquet(_) => read_parquet(snap),
+        Source::Duckdb(src) => read_duckdb(src, snap),
+        Source::Xlsx(src) => read_xlsx(src, snap),
     };
+    let read = if snapshot.more.is_empty() {
+        read_one(snapshot)
+    } else {
+        // Append folder: every file read the same way, then stacked
+        let mut parts = Vec::with_capacity(snapshot.file_count());
+        let mut failed = None;
+        for snap in std::iter::once(snapshot).chain(snapshot.more.iter()) {
+            let name = snap.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            match read_one(snap) {
+                Ok(frame) => parts.push((name, frame)),
+                Err(e) => {
+                    failed = Some(format!("{name}: {e}"));
+                    break;
+                }
+            }
+        }
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(append_frames(parts, &mut report.warnings)),
+        }
+    };
+    if !snapshot.more.is_empty() {
+        report.source = format!(
+            "{} files in {}",
+            snapshot.file_count(),
+            snapshot.path.parent().map(|p| p.display().to_string()).unwrap_or_default()
+        );
+    }
     let mut frame = match read {
         Ok(frame) => frame,
         Err(e) => {
@@ -1177,7 +1731,7 @@ fn frame_from_sheet(sheet: &Sheet, header: Option<usize>, count: usize, width: u
     }
     // A record's row number in the sheet (or the file, for Parquet)
     let lines = (first + 1..first + count + 1).collect();
-    Frame { columns, rows, lines, decimal_comma: false }
+    Frame { columns, rows, lines, files: Vec::new(), file_names: Vec::new(), decimal_comma: false }
 }
 
 /// An Excel workbook's sheet names, in order, without importing it.
@@ -1191,7 +1745,7 @@ pub fn xlsx_sheet_names(path: &Path) -> Result<Vec<String>, String> {
 /// names: the same rule as for CSV, applied to the sheet's rows. 1 when
 /// nothing stands out.
 pub fn guess_xlsx_header_row(snapshot: &Snapshot, sheet: &str) -> usize {
-    let probe = XlsxSource { path: String::new(), sheet: sheet.to_string(), header_row: 0, columns: Vec::new() };
+    let probe = XlsxSource { path: String::new(), sheet: sheet.to_string(), header_row: 0, columns: Vec::new(), combine: false };
     let Ok(frame) = read_xlsx(&probe, snapshot) else { return 1 };
     // A header names every column, so it fills as many cells as the widest
     // row near the top; title rows above it don't. Unlike CSV, empty data
@@ -1433,6 +1987,8 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
         columns: names.into_iter().map(|name| OutColumn { name, rule: ColumnRule::Auto, kind: ValueKind::Plain }).collect(),
         rows,
         lines,
+        files: Vec::new(),
+        file_names: Vec::new(),
         decimal_comma: src.decimal_comma,
     })
 }
@@ -1440,8 +1996,21 @@ fn read_csv(src: &CsvSource, snapshot: &Snapshot) -> Result<Frame, String> {
 /// Every name the step uses must reach exactly one column, and no column
 /// twice.
 fn check_bindings(step: &Step, frame: &Frame) -> Result<(), String> {
+    // A Group may total one column several ways (sum and average): only its
+    // `by` columns must be distinct; every name must still be unambiguous
+    let names: Vec<&str> = match step {
+        Step::Group { by, totals, .. } => {
+            for t in totals.iter().filter(|t| !t.column.is_empty()) {
+                if let Resolve::Many(n) = frame.resolve(&t.column) {
+                    return Err(format!("{n} columns are named {}; rename them in the source so each name is unique", t.column));
+                }
+            }
+            by.iter().map(String::as_str).collect()
+        }
+        _ => step.named_columns(),
+    };
     let mut seen: Vec<(usize, &str)> = Vec::new();
-    for name in step.named_columns() {
+    for name in names {
         match frame.resolve(name) {
             Resolve::Many(n) => {
                 return Err(format!("{n} columns are named {name}; rename them in the source so each name is unique"));
@@ -1526,6 +2095,11 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
                 frame.columns[i].rule = rule;
                 // A declared type replaces what the source said
                 frame.columns[i].kind = ValueKind::Plain;
+                let origins: Vec<String> = if frame.files.is_empty() {
+                    Vec::new()
+                } else {
+                    (0..frame.rows.len()).map(|r| frame.file_of(r)).collect()
+                };
                 for (r, row) in frame.rows.iter_mut().enumerate() {
                     let value = &row[i];
                     if value.trim().is_empty() {
@@ -1544,6 +2118,7 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
                     if report.errors.len() < MAX_REPORTED_ERRORS {
                         report.errors.push(CellError {
                             step: 0, // set by run()
+                            file: origins.get(r).cloned().unwrap_or_default(),
                             line: frame.lines[r],
                             column: frame.columns[i].name.clone(),
                             value: value.clone(),
@@ -1616,7 +2191,503 @@ fn apply(step: &Step, frame: &mut Frame, report: &mut RunReport) -> Option<Strin
             frame.keep_rows(&keep);
             Some(format!("removed {removed} duplicate row{}", plural(removed)))
         }
+        Step::Group { by, totals, .. } => group(by, totals, frame, report),
+        Step::Unpivot { keep, names_to, values_to, drop_empty, .. } => {
+            unpivot(keep, names_to, values_to, *drop_empty, frame, report)
+        }
+        Step::Sort { by, .. } => sort(by, frame, report),
+        Step::FillDown { columns, .. } => fill_down(columns, frame),
+        Step::Replace { columns, find, with, part, match_case, .. } => replace(columns, find, with, *part, *match_case, frame, report),
+        Step::Split { column, by, into, .. } => split(column, by, into, frame, report),
     }
+}
+
+/// The column appended files get, naming the file each row came from.
+pub const SOURCE_FILE_COLUMN: &str = "Source file";
+
+/// Stack the frames of appended files. Columns line up by name (as steps
+/// resolve them: exact, then ignoring case), in the order they first
+/// appear; a file without a column has empty cells there, and says so in
+/// `warnings`. A column whose type differs between files becomes untyped.
+fn append_frames(parts: Vec<(String, Frame)>, warnings: &mut Vec<String>) -> Frame {
+    let mut columns: Vec<OutColumn> = Vec::new();
+    let position = |columns: &[OutColumn], name: &str| {
+        columns.iter().position(|c| c.name == name).or_else(|| columns.iter().position(|c| c.name.eq_ignore_ascii_case(name)))
+    };
+    for (_, frame) in &parts {
+        for c in &frame.columns {
+            match position(&columns, &c.name) {
+                Some(i) if columns[i].rule != c.rule || columns[i].kind != c.kind => {
+                    columns[i].rule = ColumnRule::Auto;
+                    columns[i].kind = ValueKind::Plain;
+                }
+                Some(_) => {}
+                None => columns.push(c.clone()),
+            }
+        }
+    }
+    let file_names: Vec<String> = parts.iter().map(|(n, _)| n.clone()).collect();
+    let decimal_comma = parts.first().is_some_and(|(_, f)| f.decimal_comma);
+    let mut rows = Vec::new();
+    let mut lines = Vec::new();
+    let mut files = Vec::new();
+    for (f, (name, frame)) in parts.into_iter().enumerate() {
+        let map: Vec<Option<usize>> = columns.iter().map(|c| position(&frame.columns, &c.name)).collect();
+        let absent: Vec<&str> = columns.iter().zip(&map).filter(|(_, m)| m.is_none()).map(|(c, _)| c.name.as_str()).collect();
+        if !absent.is_empty() && !frame.rows.is_empty() {
+            warnings.push(format!("{name} has no column {}; its rows are empty there", absent.join(", ")));
+        }
+        for (row, line) in frame.rows.into_iter().zip(frame.lines) {
+            let mut out: Vec<String> = map.iter().map(|m| m.map_or(String::new(), |i| row[i].clone())).collect();
+            out.push(name.clone());
+            rows.push(out);
+            lines.push(line);
+            files.push(f as u32);
+        }
+    }
+    columns.push(OutColumn { name: SOURCE_FILE_COLUMN.into(), rule: ColumnRule::Text, kind: ValueKind::Plain });
+    Frame { columns, rows, lines, files, file_names, decimal_comma }
+}
+
+/// Fail the run with a step-level reason. Returns None for `apply`.
+fn fail(report: &mut RunReport, reason: String) -> Option<String> {
+    report.ok = false;
+    report.failures.push(reason);
+    None
+}
+
+fn group(by: &[String], totals: &[Total], frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    // Result names must be unique, and a total needs a column to total
+    let mut names: Vec<String> = by.iter().filter_map(|b| frame.find(b)).map(|i| frame.columns[i].name.clone()).collect();
+    for t in totals {
+        if t.name.trim().is_empty() {
+            return fail(report, "every total needs a name (as = \"…\")".into());
+        }
+        if t.func != TotalFn::CountRows && t.column.trim().is_empty() {
+            return fail(report, format!("total {} needs a column to {}", t.name, t.func.label()));
+        }
+        if names.iter().any(|n| n.eq_ignore_ascii_case(&t.name)) {
+            return fail(report, format!("two result columns are named {}", t.name));
+        }
+        names.push(t.name.clone());
+    }
+    let by_idx: Vec<usize> = by.iter().filter_map(|b| frame.find(b)).collect();
+    let total_idx: Vec<Option<usize>> = totals.iter().map(|t| frame.find(&t.column)).collect();
+
+    // Groups in the order they first occur
+    let mut order: Vec<Vec<usize>> = Vec::new();
+    let mut index: std::collections::HashMap<Vec<&str>, usize> = std::collections::HashMap::new();
+    for (r, row) in frame.rows.iter().enumerate() {
+        let key: Vec<&str> = by_idx.iter().map(|&i| row[i].as_str()).collect();
+        let g = *index.entry(key).or_insert_with(|| {
+            order.push(Vec::new());
+            order.len() - 1
+        });
+        order[g].push(r);
+    }
+    // No rows at all: one empty group only when totalling everything
+    if order.is_empty() && by_idx.is_empty() {
+        order.push(Vec::new());
+    }
+
+    let dc = frame.decimal_comma;
+    let mut out_rows: Vec<Vec<String>> = Vec::with_capacity(order.len());
+    let mut errors = 0usize;
+    for members in &order {
+        let mut row: Vec<String> = by_idx.iter().map(|&i| members.first().map_or(String::new(), |&r| frame.rows[r][i].clone())).collect();
+        for (t, col) in totals.iter().zip(&total_idx) {
+            let values: Vec<(usize, &str)> = match col {
+                Some(i) => members.iter().map(|&r| (r, frame.rows[r][*i].as_str())).collect(),
+                None => members.iter().map(|&r| (r, "")).collect(),
+            };
+            let rule = col.map_or(ColumnRule::Auto, |i| frame.columns[i].rule);
+            let filled = || values.iter().filter(|(_, v)| !v.trim().is_empty());
+            let cell = match t.func {
+                TotalFn::CountRows => members.len().to_string(),
+                TotalFn::Count => filled().count().to_string(),
+                TotalFn::Distinct => filled().map(|(_, v)| *v).collect::<HashSet<&str>>().len().to_string(),
+                TotalFn::First => values.first().map_or(String::new(), |(_, v)| v.to_string()),
+                TotalFn::Last => values.last().map_or(String::new(), |(_, v)| v.to_string()),
+                TotalFn::Sum | TotalFn::Average => {
+                    let mut sum = visigrid_engine::numeric::Sum::default();
+                    let mut n = 0usize;
+                    for (r, v) in filled() {
+                        match parse_number(v, dc) {
+                            Some(x) => {
+                                sum += x;
+                                n += 1;
+                            }
+                            None => {
+                                errors += 1;
+                                report.error_count += 1;
+                                if report.errors.len() < MAX_REPORTED_ERRORS {
+                                    report.errors.push(CellError {
+                                        step: 0,
+                                        file: frame.file_of(*r),
+                                        line: frame.lines[*r],
+                                        column: frame.columns[col.unwrap()].name.clone(),
+                                        value: v.to_string(),
+                                        reason: format!("not a number, so it can't be part of a {}", t.func.label()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    match (t.func, n) {
+                        (TotalFn::Average, 0) => String::new(),
+                        (TotalFn::Average, n) => number_text(round_total(sum.value() / n as f64)),
+                        _ => number_text(round_total(sum.value())),
+                    }
+                }
+                TotalFn::Min | TotalFn::Max => {
+                    // Compared as the column's type: numbers as numbers,
+                    // dates as dates, everything else (ISO date-times
+                    // included) as text
+                    let key = |v: &str| -> Option<f64> {
+                        match rule {
+                            ColumnRule::Date(order) => parse_date(v, order),
+                            ColumnRule::Number => parse_number(v, dc),
+                            ColumnRule::Auto if frame.columns[col.unwrap()].kind == ValueKind::Number => parse_number(v, dc),
+                            _ => None,
+                        }
+                    };
+                    let mut best: Option<&str> = None;
+                    for (_, v) in filled() {
+                        let v: &str = v;
+                        let better = match best {
+                            None => true,
+                            Some(b) => {
+                                let ord = match (key(v), key(b)) {
+                                    (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                                    _ => v.cmp(b),
+                                };
+                                if t.func == TotalFn::Min { ord.is_lt() } else { ord.is_gt() }
+                            }
+                        };
+                        if better {
+                            best = Some(v);
+                        }
+                    }
+                    best.unwrap_or("").to_string()
+                }
+            };
+            row.push(cell);
+        }
+        out_rows.push(row);
+    }
+    if errors > 0 {
+        report.ok = false;
+        report.failures.push(format!("{errors} value{} could not be totalled", plural(errors)));
+    }
+
+    let mut columns: Vec<OutColumn> = by_idx.iter().map(|&i| frame.columns[i].clone()).collect();
+    for (t, col) in totals.iter().zip(&total_idx) {
+        let (rule, kind) = match (t.func, col) {
+            (TotalFn::Min | TotalFn::Max | TotalFn::First | TotalFn::Last, Some(i)) => (frame.columns[*i].rule, frame.columns[*i].kind),
+            (TotalFn::Min | TotalFn::Max | TotalFn::First | TotalFn::Last, None) => (ColumnRule::Auto, ValueKind::Plain),
+            _ => (ColumnRule::Number, ValueKind::Number),
+        };
+        columns.push(OutColumn { name: t.name.clone(), rule, kind });
+    }
+    let rows_in = frame.rows.len();
+    frame.lines = order.iter().map(|m| m.first().map_or(0, |&r| frame.lines[r])).collect();
+    if !frame.files.is_empty() {
+        frame.files = order.iter().map(|m| m.first().map_or(0, |&r| frame.files[r])).collect();
+    }
+    frame.columns = columns;
+    frame.rows = out_rows;
+    Some(format!("{rows_in} row{} into {} group{}", plural(rows_in), frame.rows.len(), plural(frame.rows.len())))
+}
+
+/// Sums of decimals pick up binary noise (0.1 + 0.2): round to 9 places,
+/// past anything a currency or quantity export carries.
+/// A total as people write it: 15 significant digits, as many as a number
+/// holds reliably (and as the sheet shows), so 0.1 + 0.2 is 0.3. The digits
+/// beyond are rounding noise, whatever the column's precision; the sum
+/// itself is compensated (see `visigrid_engine::numeric::Sum`), so noise
+/// doesn't grow with the row count.
+fn round_total(x: f64) -> f64 {
+    if !x.is_finite() {
+        return x;
+    }
+    let r: f64 = format!("{x:.14e}").parse().unwrap_or(x);
+    if r == 0.0 { 0.0 } else { r }
+}
+
+fn unpivot(keep: &[String], names_to: &str, values_to: &str, drop_empty: bool, frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    let keep_idx: Vec<usize> = keep.iter().filter_map(|k| frame.find(k)).collect();
+    for name in [names_to, values_to] {
+        if name.trim().is_empty() {
+            return fail(report, "the unpivoted columns need names (names_to, values_to)".into());
+        }
+        if keep_idx.iter().any(|&i| frame.columns[i].name.eq_ignore_ascii_case(name)) {
+            return fail(report, format!("a kept column is already named {name}"));
+        }
+    }
+    if names_to.eq_ignore_ascii_case(values_to) {
+        return fail(report, "names_to and values_to must differ".into());
+    }
+    let others: Vec<usize> = (0..frame.columns.len()).filter(|i| !keep_idx.contains(i)).collect();
+    if others.is_empty() {
+        return Some("nothing to unpivot: every column is kept".into());
+    }
+    // The values keep their type when every unpivoted column agrees
+    // The result is rows × columns: refuse one larger than a sheet before
+    // building it, so a wide, mostly empty file can't exhaust memory
+    let out_rows: u64 = if drop_empty {
+        frame.rows.iter().map(|row| others.iter().filter(|&&j| !row[j].trim().is_empty()).count() as u64).sum()
+    } else {
+        frame.rows.len() as u64 * others.len() as u64
+    };
+    if out_rows >= NUM_ROWS as u64 {
+        return fail(
+            report,
+            format!("unpivoting would make {out_rows} rows; a sheet holds {} below the header row", NUM_ROWS - 1),
+        );
+    }
+    let first = &frame.columns[others[0]];
+    let same = others.iter().all(|&i| frame.columns[i].rule == first.rule && frame.columns[i].kind == first.kind);
+    let (rule, kind) = if same { (first.rule, first.kind) } else { (ColumnRule::Auto, ValueKind::Plain) };
+
+    let mut rows = Vec::new();
+    let mut lines = Vec::new();
+    let mut files = Vec::new();
+    let mut dropped = 0usize;
+    for (r, row) in frame.rows.iter().enumerate() {
+        for &j in &others {
+            if drop_empty && row[j].trim().is_empty() {
+                dropped += 1;
+                continue;
+            }
+            let mut out: Vec<String> = keep_idx.iter().map(|&i| row[i].clone()).collect();
+            out.push(frame.columns[j].name.clone());
+            out.push(row[j].clone());
+            rows.push(out);
+            lines.push(frame.lines[r]);
+            if !frame.files.is_empty() {
+                files.push(frame.files[r]);
+            }
+        }
+    }
+    let mut columns: Vec<OutColumn> = keep_idx.iter().map(|&i| frame.columns[i].clone()).collect();
+    columns.push(OutColumn { name: names_to.to_string(), rule: ColumnRule::Text, kind: ValueKind::Plain });
+    columns.push(OutColumn { name: values_to.to_string(), rule, kind });
+    let n = others.len();
+    frame.columns = columns;
+    frame.rows = rows;
+    frame.lines = lines;
+    frame.files = files;
+    Some(format!(
+        "{n} column{} into rows{}",
+        plural(n),
+        if dropped > 0 { format!("; {dropped} empty value{} left out", plural(dropped)) } else { String::new() }
+    ))
+}
+
+fn sort(by: &[SortKey], frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    if by.is_empty() {
+        return fail(report, "a Sort needs at least one column".into());
+    }
+    let keys: Vec<(usize, bool, ColumnRule)> =
+        by.iter().filter_map(|k| frame.find(&k.column).map(|i| (i, k.descending, frame.columns[i].rule))).collect();
+    let dc = frame.decimal_comma;
+    let mut order: Vec<usize> = (0..frame.rows.len()).collect();
+    // Stable: rows that tie keep their order
+    order.sort_by(|&a, &b| {
+        for &(i, descending, rule) in &keys {
+            let (x, y) = (frame.rows[a][i].trim(), frame.rows[b][i].trim());
+            // Values that fit the column's type, then ones that don't, then
+            // empty values, whichever way the column sorts
+            let class = |v: &str| if v.is_empty() { 2 } else if fits_sort_type(v, rule, dc) { 0 } else { 1 };
+            let ord = class(x).cmp(&class(y)).then_with(|| {
+                let o = if x.is_empty() { std::cmp::Ordering::Equal } else { compare_values(x, y, rule, dc) };
+                if descending { o.reverse() } else { o }
+            });
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    reorder(&mut frame.rows, &order);
+    reorder(&mut frame.lines, &order);
+    if !frame.files.is_empty() {
+        reorder(&mut frame.files, &order);
+    }
+    None
+}
+
+/// Put `v` in the order `order` lists its indexes.
+fn reorder<T>(v: &mut Vec<T>, order: &[usize]) {
+    let mut old: Vec<Option<T>> = std::mem::take(v).into_iter().map(Some).collect();
+    *v = order.iter().map(|&r| old[r].take().expect("each index once")).collect();
+}
+
+/// Whether a value sorts as its column's type (a number in a number or Auto
+/// column, a date in a date column); text always does.
+fn fits_sort_type(v: &str, rule: ColumnRule, decimal_comma: bool) -> bool {
+    match rule {
+        ColumnRule::Number => parse_number(v, decimal_comma).is_some(),
+        ColumnRule::Date(order) => parse_date(v, order).is_some(),
+        ColumnRule::Text | ColumnRule::Skip => true,
+        // In a column of numbers and text, the numbers come first
+        ColumnRule::Auto => keep_as_text(v, false).is_none() && parse_number(v, decimal_comma).is_some(),
+    }
+}
+
+/// Order two non-empty values of the same class (see `fits_sort_type`) as
+/// their column is typed.
+fn compare_values(a: &str, b: &str, rule: ColumnRule, decimal_comma: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let text = || a.to_lowercase().cmp(&b.to_lowercase());
+    let typed = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => text(),
+    };
+    let number = |v: &str| parse_number(v, decimal_comma);
+    match rule {
+        ColumnRule::Number => typed(number(a), number(b)),
+        ColumnRule::Date(order) => match (parse_date(a, order), parse_date(b, order)) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => text(),
+        },
+        ColumnRule::Text | ColumnRule::Skip => text(),
+        // As filters compare: IDs such as 001 stay text
+        ColumnRule::Auto => {
+            let n = |v: &str| if keep_as_text(v, false).is_some() { None } else { number(v) };
+            typed(n(a), n(b))
+        }
+    }
+}
+
+fn fill_down(columns: &[String], frame: &mut Frame) -> Option<String> {
+    let idx: Vec<usize> = columns.iter().filter_map(|c| frame.find(c)).collect();
+    let mut filled = 0usize;
+    for &i in &idx {
+        let mut above: Option<String> = None;
+        for r in 0..frame.rows.len() {
+            // A new file starts with nothing above
+            if r > 0 && !frame.files.is_empty() && frame.files[r] != frame.files[r - 1] {
+                above = None;
+            }
+            if frame.rows[r][i].trim().is_empty() {
+                if let Some(v) = &above {
+                    frame.rows[r][i] = v.clone();
+                    filled += 1;
+                }
+            } else {
+                above = Some(frame.rows[r][i].clone());
+            }
+        }
+    }
+    Some(format!("filled {filled} empty cell{}", plural(filled)))
+}
+
+fn replace(columns: &[String], find: &str, with: &str, part: bool, match_case: bool, frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    if part && find.is_empty() {
+        return fail(report, "Replace inside cells needs text to find".into());
+    }
+    let idx: Vec<usize> = if columns.is_empty() {
+        (0..frame.columns.len()).collect()
+    } else {
+        columns.iter().filter_map(|c| frame.find(c)).collect()
+    };
+    let mut changed = 0usize;
+    for row in &mut frame.rows {
+        for &i in &idx {
+            let cell = &row[i];
+            let next = if !part {
+                let hit = if find.is_empty() {
+                    cell.trim().is_empty()
+                } else if match_case {
+                    cell == find
+                } else {
+                    cell.to_lowercase() == find.to_lowercase()
+                };
+                hit.then(|| with.to_string())
+            } else if match_case {
+                cell.contains(find).then(|| cell.replace(find, with))
+            } else {
+                replace_ignoring_case(cell, find, with)
+            };
+            if let Some(v) = next {
+                if v != *cell {
+                    row[i] = v;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    Some(format!("replaced {changed} value{}", plural(changed)))
+}
+
+/// Every occurrence of `find` in `cell`, ignoring case; None if there is
+/// none. Matches on characters, so a letter whose lowercase form has a
+/// different length can't shift the result.
+fn replace_ignoring_case(cell: &str, find: &str, with: &str) -> Option<String> {
+    let fold = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<Vec<char>>();
+    let (hay, needle) = (cell.chars().collect::<Vec<char>>(), fold(find));
+    let mut out = String::new();
+    let mut found = false;
+    let mut i = 0;
+    while i < hay.len() {
+        let end = i + needle.len();
+        if end <= hay.len() && fold(&hay[i..end].iter().collect::<String>()) == needle {
+            out.push_str(with);
+            found = true;
+            i = end;
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    found.then_some(out)
+}
+
+fn split(column: &str, by: &str, into: &[String], frame: &mut Frame, report: &mut RunReport) -> Option<String> {
+    let i = frame.find(column)?;
+    if by.is_empty() {
+        return fail(report, "Split needs a delimiter (by)".into());
+    }
+    if into.len() < 2 {
+        return fail(report, "Split needs at least two new column names (into)".into());
+    }
+    // Checked before building: every row would grow by this many cells
+    let width = frame.columns.len() - 1 + into.len();
+    if width > NUM_COLS {
+        return fail(report, format!("splitting would make {width} columns; a sheet holds {NUM_COLS}"));
+    }
+    for (n, name) in into.iter().enumerate() {
+        if name.trim().is_empty() {
+            return fail(report, "Split's new columns need names".into());
+        }
+        if into[..n].iter().any(|o| o.eq_ignore_ascii_case(name)) {
+            return fail(report, format!("Split names two new columns {name}"));
+        }
+        if frame.columns.iter().enumerate().any(|(j, c)| j != i && c.name.eq_ignore_ascii_case(name)) {
+            return fail(report, format!("a column is already named {name}"));
+        }
+    }
+    let mut short = 0usize;
+    for row in &mut frame.rows {
+        let value = std::mem::take(&mut row[i]);
+        let mut pieces: Vec<String> = value.splitn(into.len(), by).map(str::to_string).collect();
+        if !value.is_empty() && pieces.len() < into.len() {
+            short += 1;
+        }
+        pieces.resize(into.len(), String::new());
+        row.splice(i..=i, pieces);
+    }
+    let new: Vec<OutColumn> =
+        into.iter().map(|name| OutColumn { name: name.clone(), rule: ColumnRule::Auto, kind: ValueKind::Plain }).collect();
+    frame.columns.splice(i..=i, new);
+    (short > 0).then(|| {
+        format!("{short} value{} had fewer than {} pieces; the rest are empty", plural(short), into.len())
+    })
 }
 
 /// A number as recipes write them: a point for decimals, no thousands
@@ -1811,6 +2882,7 @@ impl RunReport {
             failures: vec![error],
             errors: Vec::new(),
             error_count: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -1848,8 +2920,12 @@ impl RunReport {
         for f in &self.failures {
             out.push_str(&format!("  error: {f}\n"));
         }
+        for w in &self.warnings {
+            out.push_str(&format!("  note: {w}\n"));
+        }
         for e in self.errors.iter().take(20) {
-            out.push_str(&format!("    line {}, {}: {:?} {}\n", e.line, e.column, e.value, e.reason));
+            let file = if e.file.is_empty() { String::new() } else { format!("{} ", e.file) };
+            out.push_str(&format!("    {file}line {}, {}: {:?} {}\n", e.line, e.column, e.value, e.reason));
         }
         if self.error_count > 20 {
             out.push_str(&format!("    … and {} more\n", self.error_count - 20));
@@ -2264,7 +3340,7 @@ columns = { Amount = "number" }
         let s = snap("Acme export\nGenerated 2026-09-30\n\nID,Name,Amount\n1,a,2\n2,b,3\n3,c,4\n");
         assert_eq!(guess_header_row(&s), 4);
         assert_eq!(guess_header_row(&snap("a;b\n1;2\n")), 1);
-        let src = CsvSource { path: "x.csv".into(), delimiter: None, encoding: None, header_row: 4, decimal_comma: false, columns: vec![] };
+        let src = CsvSource { path: "x.csv".into(), delimiter: None, encoding: None, header_row: 4, decimal_comma: false, columns: vec![], combine: false };
         let info = source_info(&src, &s);
         assert_eq!(info.delimiter, b',');
         assert_eq!(info.first_lines[0], "Acme export");
@@ -2561,5 +3637,357 @@ path = "export-*-*.csv"
         assert!(k("0.00\" days\"").is_none());
         assert!(k("[Red]0.00;[Blue]-0.00").is_none());
         assert!(k("mm").is_none());
+    }
+
+    #[test]
+    fn group_by_with_totals_in_first_seen_order() {
+        let text = r#"
+version = 1
+[source]
+kind = "csv"
+path = "x.csv"
+[[step]]
+op = "types"
+columns = { Amount = "number", Day = "date" }
+[[step]]
+op = "group"
+by = ["Customer"]
+totals = [
+  { fn = "sum", column = "Amount", as = "Total" },
+  { fn = "count_rows", as = "Orders" },
+  { fn = "average", column = "Amount", as = "Avg" },
+  { fn = "max", column = "Day", as = "Last order" },
+  { fn = "distinct", column = "Rep", as = "Reps" },
+]
+"#;
+        let r = Recipe::from_toml(text).unwrap();
+        let csv = "Customer,Amount,Day,Rep\nBeta,0.1,2026-09-02,KM\nAlpha,10,2026-09-01,JT\nBeta,0.2,2026-09-10,KM\nAlpha,5.5,2026-09-03,AL\n";
+        let res = run(&r, &snap(csv));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.rows, vec![
+            vec!["Beta", "0.3", "2", "0.15", "2026-09-10", "1"],
+            vec!["Alpha", "15.5", "2", "7.75", "2026-09-03", "2"],
+        ]);
+        assert_eq!(res.output.columns[1].rule, ColumnRule::Number);
+        assert_eq!(res.output.columns[4].rule, ColumnRule::Date(DateOrder::Ymd));
+        assert_eq!(res.report.steps[1].note.as_deref(), Some("4 rows into 2 groups"));
+        assert!(Step::describe(&r.steps[1]).starts_with("Group by Customer: Total = sum of Amount"));
+        // A value that isn't a number fails the run, located
+        let bad = run(&r, &snap("Customer,Amount,Day,Rep\nA,x,2026-09-01,K\n"));
+        assert!(!bad.report.ok);
+        // (the types step catches it first; a Group on an untyped column too)
+        let untyped = text.replace("columns = { Amount = \"number\", Day = \"date\" }", "columns = { Day = \"date\" }");
+        let bad = run(&Recipe::from_toml(&untyped).unwrap(), &snap("Customer,Amount,Day,Rep\nA,x,2026-09-01,K\n"));
+        assert!(!bad.report.ok);
+        assert_eq!(bad.report.errors[0].line, 2);
+        assert!(bad.report.errors[0].reason.contains("sum"), "{:?}", bad.report.errors);
+    }
+
+    #[test]
+    fn group_totals_of_many_amounts_have_no_float_noise() {
+        // 300,000 varied two-decimal amounts: a plain sum ends in …0899984
+        let mut seed = 7u64;
+        let mut csv = String::from("Region,Amount\n");
+        let mut cents = [0i64; 2];
+        for i in 0..300_000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let c = (seed >> 33) as i64 % 500_000;
+            cents[i % 2] += c;
+            csv.push_str(&format!("{},{}.{:02}\n", ["West", "East"][i % 2], c / 100, c % 100));
+        }
+        let r = Recipe::from_toml(
+            "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"group\"\nby = [\"Region\"]\ntotals = [{ fn = \"sum\", column = \"Amount\", as = \"Total\" }, { fn = \"average\", column = \"Amount\", as = \"Avg\" }]\n",
+        )
+        .unwrap();
+        let res = run(&r, &snap(&csv));
+        assert!(res.report.ok, "{}", res.report.summary());
+        let exact = |c: i64| format!("{}.{:02}", c / 100, c % 100).trim_end_matches('0').trim_end_matches('.').to_string();
+        assert_eq!(res.output.rows[0][1], exact(cents[0]));
+        assert_eq!(res.output.rows[1][1], exact(cents[1]));
+        // Short sums stay as written too
+        let small = run(&r, &snap("Region,Amount\nW,0.1\nW,0.2\n"));
+        assert_eq!(small.output.rows[0][1..], ["0.3", "0.15"]);
+    }
+
+    #[test]
+    fn group_without_by_totals_everything_and_names_are_checked() {
+        let base = "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"group\"\n";
+        let r = Recipe::from_toml(&format!("{base}totals = [{{ fn = \"count_rows\", as = \"Rows\" }}]\n")).unwrap();
+        assert_eq!(run(&r, &snap("a\n1\n2\n")).output.rows, vec![vec!["2"]]);
+        let dup = Recipe::from_toml(&format!("{base}by = [\"a\"]\ntotals = [{{ fn = \"count_rows\", as = \"A\" }}]\n")).unwrap();
+        assert!(run(&dup, &snap("a\n1\n")).report.failures[0].contains("named A"));
+        let nocol = Recipe::from_toml(&format!("{base}totals = [{{ fn = \"sum\", as = \"S\" }}]\n")).unwrap();
+        assert!(run(&nocol, &snap("a\n1\n")).report.failures[0].contains("needs a column"));
+    }
+
+    #[test]
+    fn unpivot_other_columns_picks_up_new_columns() {
+        let text = r#"
+version = 1
+[source]
+kind = "csv"
+path = "x.csv"
+[[step]]
+op = "unpivot"
+keep = ["Region"]
+names_to = "Month"
+values_to = "Sales"
+"#;
+        let r = Recipe::from_toml(text).unwrap();
+        let res = run(&r, &snap("Region,Jan,Feb\nWest,1,\nEast,3,4\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Region", "Month", "Sales"]);
+        assert_eq!(res.output.rows, vec![vec!["West", "Jan", "1"], vec!["East", "Jan", "3"], vec!["East", "Feb", "4"]]);
+        assert!(res.report.steps[0].note.as_deref().unwrap().contains("1 empty value left out"));
+        // Next month's file has a new column: unpivoted with no recipe change
+        let res = run(&r, &snap("Region,Jan,Feb,Mar\nWest,1,2,3\n"));
+        assert_eq!(res.output.rows.len(), 3);
+        assert_eq!(res.output.rows[2], vec!["West", "Mar", "3"]);
+        // A kept column can't share the new columns' names
+        let clash = Recipe::from_toml(&text.replace("names_to = \"Month\"", "names_to = \"Region\"")).unwrap();
+        assert!(!run(&clash, &snap("Region,Jan\nW,1\n")).report.ok);
+        // Round trip keeps defaults out of the file
+        let plain = Recipe::from_toml("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"unpivot\"\n").unwrap();
+        assert!(!plain.to_toml().contains("names_to"));
+    }
+
+    fn with_steps(steps: &str) -> Recipe {
+        Recipe::from_toml(&format!("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n{steps}")).unwrap()
+    }
+
+    #[test]
+    fn sort_orders_by_type_with_empty_values_last() {
+        let r = with_steps(
+            "[[step]]\nop = \"sort\"\nby = [{ column = \"Region\" }, { column = \"Amount\", descending = true }]\n",
+        );
+        let res = run(&r, &snap("Region,Amount,ID\nwest,9,001\nEast,10,002\n,5,003\nWest,100,004\neast,2,005\nWest,,006\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        let ids: Vec<&str> = res.output.rows.iter().map(|r| r[2].as_str()).collect();
+        // Text ignores case (East before west); 100 > 9 as numbers; empty last
+        assert_eq!(ids, ["002", "005", "004", "001", "006", "003"]);
+        assert_eq!(r.steps[0].describe(), "Sort by Region, Amount (descending)");
+        // IDs stay text, after the numbers (not all equal as numbers);
+        // typed dates sort as dates
+        let ids = with_steps("[[step]]\nop = \"sort\"\nby = [{ column = \"ID\" }]\n");
+        let res = run(&ids, &snap("ID\n01\n001\n1\n"));
+        assert_eq!(res.output.rows, vec![vec!["1"], vec!["001"], vec!["01"]]);
+        let dates = with_steps(
+            "[[step]]\nop = \"types\"\ncolumns = { Day = \"date:dmy\" }\n[[step]]\nop = \"sort\"\nby = [{ column = \"Day\" }]\n",
+        );
+        let res = run(&dates, &snap("Day\n02/01/2026\n31/12/2025\n01/02/2026\n"));
+        assert_eq!(res.output.rows, vec![vec!["31/12/2025"], vec!["02/01/2026"], vec!["01/02/2026"]]);
+        // Text in a number column stays after the numbers, descending too
+        let desc = with_steps("[[step]]\nop = \"sort\"\nby = [{ column = \"N\", descending = true }]\n");
+        let res = run(&desc, &snap("N,K\nn/a,a\n3,b\n,c\n10,d\n"));
+        assert_eq!(res.output.rows.iter().map(|r| r[1].as_str()).collect::<Vec<_>>(), ["d", "b", "a", "c"]);
+        // Error lines follow their rows
+        let bad = with_steps(
+            "[[step]]\nop = \"sort\"\nby = [{ column = \"N\" }]\n[[step]]\nop = \"types\"\ncolumns = { N = \"number\" }\n",
+        );
+        let res = run(&bad, &snap("N\n5\nx\n1\n"));
+        assert_eq!(res.report.errors[0].line, 3);
+    }
+
+    #[test]
+    fn fill_down_fills_empty_cells_but_not_across_files() {
+        let r = with_steps("[[step]]\nop = \"fill_down\"\ncolumns = [\"Region\"]\n");
+        let res = run(&r, &snap("Region,Amount\n,0\nWest,1\n,2\n  ,3\nEast,4\n,5\n"));
+        assert_eq!(
+            res.output.rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
+            ["", "West", "West", "West", "East", "East"]
+        );
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("filled 3 empty cells"));
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [("a-1.csv", "Region,Amount\nWest,1\n,2\n"), ("a-2.csv", "Region,Amount\n,3\n")] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        }
+        let r = Recipe::from_toml(
+            "version = 1\n[source]\nkind = \"csv\"\npath = \"a-*.csv\"\ncombine = true\n[[step]]\nop = \"fill_down\"\ncolumns = [\"Region\"]\n",
+        )
+        .unwrap();
+        let res = run(&r, &r.read_snapshot(dir.path(), None).unwrap());
+        assert_eq!(res.output.rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(), ["West", "West", ""]);
+    }
+
+    #[test]
+    fn replace_whole_cells_parts_and_empty_cells() {
+        let csv = "Status,Note\nN/A,n/a here\nn/a,\nOpen,N/A\n";
+        let whole = with_steps("[[step]]\nop = \"replace\"\ncolumns = [\"Status\"]\nfind = \"n/a\"\nwith = \"\"\n");
+        let res = run(&whole, &snap(csv));
+        assert_eq!(res.output.rows, vec![vec!["", "n/a here"], vec!["", ""], vec!["Open", "N/A"]]);
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("replaced 2 values"));
+        let cased = with_steps("[[step]]\nop = \"replace\"\nfind = \"N/A\"\nwith = \"-\"\nmatch_case = true\n");
+        let res = run(&cased, &snap(csv));
+        assert_eq!(res.output.rows, vec![vec!["-", "n/a here"], vec!["n/a", ""], vec!["Open", "-"]]);
+        let part = with_steps("[[step]]\nop = \"replace\"\ncolumns = [\"Note\"]\nfind = \"N/A\"\nwith = \"none\"\npart = true\n");
+        let res = run(&part, &snap(csv));
+        assert_eq!(res.output.rows[0][1], "none here");
+        let blanks = with_steps("[[step]]\nop = \"replace\"\ncolumns = [\"Note\"]\nfind = \"\"\nwith = \"0\"\n");
+        assert_eq!(run(&blanks, &snap(csv)).output.rows[1][1], "0");
+        assert_eq!(blanks.steps[0].describe(), "Replace empty cells with \"0\" in Note");
+        let nothing = with_steps("[[step]]\nop = \"replace\"\nfind = \"\"\npart = true\n");
+        assert!(!run(&nothing, &snap(csv)).report.ok);
+        assert_eq!(replace_ignoring_case("Straße STRASSE", "straße", "St"), Some("St STRASSE".into()));
+    }
+
+    #[test]
+    fn split_replaces_the_column_and_keeps_the_rest_in_the_last_piece() {
+        let r = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \", \"\ninto = [\"Last\", \"First\"]\n");
+        let res = run(&r, &snap("ID,Name,Rep\n1,\"Doe, Jane\",KM\n2,Cher,AL\n3,\"Smith, J, Jr\",KM\n4,,KM\n"));
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["ID", "Last", "First", "Rep"]);
+        assert_eq!(res.output.rows[0], vec!["1", "Doe", "Jane", "KM"]);
+        assert_eq!(res.output.rows[1], vec!["2", "Cher", "", "AL"]);
+        assert_eq!(res.output.rows[2], vec!["3", "Smith", "J, Jr", "KM"]);
+        assert_eq!(res.report.steps[0].note.as_deref(), Some("1 value had fewer than 2 pieces; the rest are empty"));
+        // New names can't collide, and the split column can be reused
+        let clash = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"Rep\", \"X\"]\n");
+        assert!(run(&clash, &snap("Name,Rep\na b,K\n")).report.failures[0].contains("already named Rep"));
+        let reuse = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"Name\", \"Rest\"]\n");
+        assert_eq!(run(&reuse, &snap("Name\na b c\n")).output.rows, vec![vec!["a", "b c"]]);
+        let wide: Vec<String> = (0..=NUM_COLS).map(|i| format!("\"c{i}\"")).collect();
+        let wide = with_steps(&format!("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [{}]\n", wide.join(",")));
+        assert!(run(&wide, &snap("Name\na b\n")).report.failures[0].contains("a sheet holds 16384"));
+        let one = with_steps("[[step]]\nop = \"split\"\ncolumn = \"Name\"\nby = \" \"\ninto = [\"A\"]\n");
+        assert!(!run(&one, &snap("Name\na b\n")).report.ok);
+        // Renaming the source column follows into the step
+        let mut renamed = r.clone();
+        assert!(renamed.rename_source_column("Name", "Full name"));
+        assert!(matches!(&renamed.steps[0], Step::Split { column, .. } if column == "Full name"));
+    }
+
+    #[test]
+    fn unpivot_refuses_a_result_larger_than_a_sheet_before_building_it() {
+        // 1,100 rows × 1,000 columns would be 1.1 million rows
+        let mut csv = String::from("K");
+        for c in 0..1000 {
+            csv.push_str(&format!(",c{c}"));
+        }
+        csv.push('\n');
+        let row = format!("k{}\n", ",1".repeat(1000));
+        csv.push_str(&row.repeat(1100));
+        let r = Recipe::from_toml("version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"unpivot\"\nkeep = [\"K\"]\n").unwrap();
+        let res = run(&r, &snap(&csv));
+        assert!(!res.report.ok);
+        assert!(res.report.failures[0].contains("1100000 rows"), "{:?}", res.report.failures);
+    }
+
+    #[test]
+    fn append_folder_caps_the_file_count_and_total_size() {
+        let many: Vec<PathBuf> = (0..=MAX_APPEND_FILES).map(|i| PathBuf::from(format!("f{i}.csv"))).collect();
+        assert!(Snapshot::read_all(&many).unwrap_err().contains("at most 1000"));
+        // Sparse files: their stated size alone is refused, nothing is read
+        let dir = tempfile::tempdir().unwrap();
+        let big: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = dir.path().join(format!("big-{i}.csv"));
+                std::fs::File::create(&p).unwrap().set_len(200 * 1024 * 1024).unwrap();
+                p
+            })
+            .collect();
+        assert!(Snapshot::read_all(&big).unwrap_err().contains("at most 512 MB"));
+    }
+
+    #[test]
+    fn append_folder_stacks_every_matching_file_with_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        };
+        write("sales-02.csv", "Region,Amount\nEast,2\n");
+        write("sales-01.csv", "Region,Amount,Rep\nWest,1,KM\n");
+        write("sales-03.csv.part", "Region,Amount\nNorth,9\n");
+        write("other.csv", "Region,Amount\nSouth,5\n");
+        let text = "version = 1\n[source]\nkind = \"csv\"\npath = \"sales-*.csv\"\ncombine = true\n[[step]]\nop = \"types\"\ncolumns = { Amount = \"number\" }\n";
+        let r = Recipe::from_toml(text).unwrap();
+        assert!(r.source.combine());
+        let files = r.resolve_sources(dir.path(), None).unwrap();
+        assert_eq!(files, vec![dir.path().join("sales-01.csv"), dir.path().join("sales-02.csv")]);
+        let snapshot = r.read_snapshot(dir.path(), None).unwrap();
+        let res = run(&r, &snapshot);
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Region", "Amount", "Rep", "Source file"]);
+        assert_eq!(res.output.rows, vec![vec!["West", "1", "KM", "sales-01.csv"], vec!["East", "2", "", "sales-02.csv"]]);
+        assert!(res.report.warnings[0].contains("sales-02.csv has no column Rep"), "{:?}", res.report.warnings);
+        assert!(res.report.source.starts_with("2 files in"));
+        // Errors say which file
+        write("sales-04.csv", "Region,Amount\nSouth,lots\n");
+        let res = run(&r, &r.read_snapshot(dir.path(), None).unwrap());
+        assert!(!res.report.ok);
+        assert_eq!((res.report.errors[0].file.as_str(), res.report.errors[0].line), ("sales-04.csv", 2));
+        assert!(res.report.summary().contains("sales-04.csv line 2"));
+        // Without combine the same pattern reads only the newest file
+        let one = Recipe::from_toml(&text.replace("combine = true\n", "")).unwrap();
+        assert_eq!(one.resolve_sources(dir.path(), None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fixes_keep_the_recipe_files_comments_and_layout() {
+        let text = r#"# Monthly orders, from the vendor portal
+version = 1
+
+[source]
+kind = "csv"
+path = "export-*-*.csv"   # newest export
+header_row = 3
+columns = ["Order ID", "Customer", "Amount"]
+
+# Keep only what accounting needs
+[[step]]
+op = "select"
+columns = ["Order ID", "Customer", "Amount"]
+
+[[step]]
+op = "rename"
+columns = { "Order ID" = "order_id" }   # our key
+
+[[step]]
+op = "types"
+columns = { Amount = "number" }
+"#;
+        let mut r = Recipe::from_toml(text).unwrap();
+        assert!(r.rename_source_column("Order ID", "Order Number"));
+        r.set_on_error(3, OnError::KeepText).unwrap();
+        let out = r.to_toml_preserving(text);
+        assert_eq!(Recipe::from_toml(&out).unwrap(), r);
+        for kept in ["# Monthly orders, from the vendor portal", "# newest export", "# Keep only what accounting needs", "# our key"] {
+            assert!(out.contains(kept), "lost {kept:?}:\n{out}");
+        }
+        // Inline tables stay inline, and only the changed values changed
+        assert!(out.contains(r#"columns = { "Order Number" = "order_id" }"#), "{out}");
+        assert!(!out.contains(" ,"), "{out}");
+        assert!(out.contains("on_error = \"keep_text\""), "{out}");
+        assert!(out.contains(r#"columns = ["Order Number", "Customer", "Amount"]"#), "{out}");
+
+        // A key renamed inside a multi-key inline table: tidy separators
+        let two = "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"types\"\ncolumns = { ID = \"text\", Amount = \"number\" }   # keep zeros\n";
+        let mut r2 = Recipe::from_toml(two).unwrap();
+        r2.rename_source_column("ID", "Order ID");
+        let out2 = r2.to_toml_preserving(two);
+        assert!(out2.contains("# keep zeros") && !out2.contains(" ,"), "{out2}");
+
+        // Unchanged: byte for byte
+        let same = Recipe::from_toml(text).unwrap();
+        assert_eq!(same.to_toml_preserving(text), text);
+
+        // A removed step rewrites the step list, but the header comment stays
+        let mut fewer = Recipe::from_toml(text).unwrap();
+        fewer.steps.pop();
+        let out = fewer.to_toml_preserving(text);
+        assert_eq!(Recipe::from_toml(&out).unwrap(), fewer);
+        assert!(out.contains("# Monthly orders"));
+
+        // And save() uses it
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orders.recipe.toml");
+        std::fs::write(&path, text).unwrap();
+        r.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# our key"));
     }
 }

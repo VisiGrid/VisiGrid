@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- Fixed the window freezing while an AI agent refreshed a large recipe-linked Table (MCP `refresh_table`): the recipe now runs in the background, as Alt+F5 does, and nothing is published if you open a plan to review before it finishes. ([#106](https://github.com/VisiGrid/VisiGrid/pull/106))
+- Fixed Group by totals showing float noise on large files (`186318331.08999842` instead of `186318331.09`; since 0.48.0). Group by, SUM, AVERAGE, SUMIF(S), AVERAGEIF(S), pivot totals and the status bar's Sum now add without drift and agree with each other, so `=SUM(...)` equals the exact total. Recipe totals keep 15 significant digits, as the sheet shows them and as Excel does, so a 16-digit integer total (an ID column summed by mistake) loses its last digit. ([#108](https://github.com/VisiGrid/VisiGrid/pull/108))
+- An AI agent's recipe refresh that runs past its 10-minute wait now reports that it may still finish (`still_running`) instead of a communication failure, since the refresh still updates the Table when it's done. ([#109](https://github.com/VisiGrid/VisiGrid/pull/109))
+
+## 0.49.0
+
+### Import recipes
+
+- **Sort rows** step: order rows by one or more columns, ascending or descending. Each column sorts as its type (numbers as numbers, dates as dates, text ignoring case; IDs such as `007` stay text); values that don't fit, then empty values, go last either way, and ties keep their order. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+- **Fill down** step: empty cells take the value above, for reports that print a group's name once. Never fills across appended files. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+- **Replace values** step: replace a whole cell (ignoring case by default; an empty Find fills empty cells, such as with 0) or text inside cells, in chosen columns or all of them. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+- **Split column** step: split a column at a delimiter into named columns that take its place; the last keeps the rest of the value, so nothing is lost. A split wider than a sheet is refused before it runs. ([#104](https://github.com/VisiGrid/VisiGrid/pull/104))
+
+## 0.48.0
+
+### Import recipes
+
+- **Append a folder of files.** Set **Each refresh reads** to **All matching files** to read every file a pattern matches and stack them, columns lined up by name, with a **Source file** column. A file missing a column is noted, not dropped, and errors name the file as well as the line. CSV, Excel and Parquet sources; at most 1,000 files and 512 MB in all. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+- **Group by** step: one row per group with named totals (sum, count, count rows, average, min, max, distinct count, first, last). A sum of something that isn't a number fails the run and says where. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+- **Unpivot** step: keep some columns and turn every other column into rows, so a column added to next month's file is unpivoted too. A result too large for a sheet is refused before it is built. ([#101](https://github.com/VisiGrid/VisiGrid/pull/101))
+- **Agents can run recipes.** Two MCP tools: `run_recipe` runs a recipe headlessly and returns a preview and the run report (and writes `output`, a new file only, if every check passes); `refresh_table` refreshes a recipe-linked Table in an open window, as one undo step. Both refuse a recipe whose source you haven't approved in VisiGrid, and a refresh waits while you review a plan. ([#103](https://github.com/VisiGrid/VisiGrid/pull/103))
+- Fixes saved into a recipe (from the blocked banner, Choose file or the builder) keep the file's comments and layout; only what changed is rewritten. ([#102](https://github.com/VisiGrid/VisiGrid/pull/102))
+- A workbook saves a linked recipe's path relative to itself when the recipe is in the same folder or below, so they can be moved together; Save As to another folder keeps the link. ([#102](https://github.com/VisiGrid/VisiGrid/pull/102))
+- Fixed the session list (MCP, `vgrid session`) naming documents opened after start-up "Book1" with no path. ([#102](https://github.com/VisiGrid/VisiGrid/pull/102))
+
 ## 0.47.0
 
 ### Import recipes
