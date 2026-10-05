@@ -1076,6 +1076,20 @@ fn handle_message(
                         retry_after_ms: None,
                     }),
                 },
+                // A recipe refresh runs in the background and publishes when
+                // it's done, even after the wait for its reply ran out
+                Err(crate::bridge::BridgeError::TimedOut) => ServerMessage::Error(ErrorMessage {
+                    id: Some(st.id),
+                    code: "still_running".to_string(),
+                    message: match st.op {
+                        visigrid_protocol::StructureOp::RefreshRecipeTable { .. } => format!(
+                            "VisiGrid didn't finish the refresh within {} minutes; it may still finish and update the Table. Check the Table before refreshing again",
+                            visigrid_protocol::RECIPE_REFRESH_TIMEOUT_SECS / 60
+                        ),
+                        _ => "VisiGrid didn't answer in time; the change may still be applied. Read the workbook before retrying".to_string(),
+                    },
+                    retry_after_ms: None,
+                }),
                 Err(_) => ServerMessage::Error(ErrorMessage {
                     id: Some(st.id),
                     code: "internal_error".to_string(),
