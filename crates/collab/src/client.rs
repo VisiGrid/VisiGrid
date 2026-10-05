@@ -168,12 +168,17 @@ impl Client {
 
     /// Transform every undo and redo entry past ops just applied to `wb`.
     fn shift_history(&mut self, ops: &[CollabOp]) {
-        if ops.is_empty() {
+        // Only structure and sheet ops move or drop a later op; cell, format,
+        // line, freeze and merge ops leave it as it is (see `transform` with
+        // `Order::Later`). Skipping them keeps a large paste from costing
+        // history x paste transforms.
+        let movers: Vec<CollabOp> = ops.iter().filter(|op| moves_others(op)).cloned().collect();
+        if movers.is_empty() {
             return;
         }
         for e in self.undo_stack.iter_mut().chain(self.redo_stack.iter_mut()) {
-            e.inverse = e.inverse.iter().flat_map(|x| permissive(x, ops)).collect();
-            e.expect = e.expect.iter().flat_map(|x| permissive(x, ops)).collect();
+            e.inverse = e.inverse.iter().flat_map(|x| permissive(x, &movers)).collect();
+            e.expect = e.expect.iter().flat_map(|x| permissive(x, &movers)).collect();
         }
     }
 
@@ -666,6 +671,14 @@ fn rebase(entry: &[CollabOp], inverse: &[CollabOp]) -> (Vec<CollabOp>, Vec<Colla
         inv = next_inv;
     }
     (out, inv)
+}
+
+/// Whether `op` can change another op transformed past it as the later one.
+fn moves_others(op: &CollabOp) -> bool {
+    matches!(
+        op,
+        CollabOp::Structural { .. } | CollabOp::AddSheet { .. } | CollabOp::DeleteSheet { .. } | CollabOp::RenameSheet { .. } | CollabOp::MoveSheet { .. }
+    )
 }
 
 /// `a` past every op of `bs` in turn; V1 conflicts keep `a`. A rename is
