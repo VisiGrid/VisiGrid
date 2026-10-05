@@ -84,3 +84,18 @@ fn layout_edits_cannot_masquerade_as_original_copies() {
     layouts[0].hidden_rows.insert(42);
     assert!(export_workbook(&workbook, &layouts, active).is_err());
 }
+
+#[test]
+fn unsupported_extensions_restore_stored_results_after_projection_checks() {
+    let source = r#"{"format":"visigrid-json","version":2,"future":false,"sheets":[{"name":"Cached","cells":[{"row":0,"col":0,"formula":"=1+1","value":123}]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        workbook.active_sheet().get_computed_value(0, 0),
+        visigrid_engine::formula::eval::Value::Number(123.0)
+    );
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        source
+    );
+}
