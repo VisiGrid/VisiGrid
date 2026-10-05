@@ -221,7 +221,7 @@ fn frozen_formula_sources_convert_without_changing_their_cached_text() {
 }
 
 #[test]
-fn referenced_rule_metadata_refuses_instead_of_losing_its_binding() {
+fn referenced_rule_metadata_converts_and_undo_restores_its_binding() {
     use visigrid_engine::{
         cond_format::CondStyle,
         validation::{CellRange, ValidationRule},
@@ -240,16 +240,24 @@ fn referenced_rule_metadata_refuses_instead_of_losing_its_binding() {
                 ValidationRule::list_range("Sales[Amount]"),
             );
         }
-        let revision = wb.revision();
-        let error = wb.remove_table(id).unwrap_err();
-        assert!(error.contains(if conditional {
-            "conditional-format"
-        } else {
-            "validation"
-        }));
-        assert_eq!(wb.revision(), revision);
-        assert!(wb.table(id).is_some());
+        let before = serde_json::to_value((
+            &wb.active_sheet().cond_formats,
+            wb.active_sheet().validations.iter().collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        let commit = wb.remove_table(id).unwrap();
+        assert!(wb.table(id).is_none());
         assert_eq!(wb.active_sheet().manual_hidden_rows(), [2, 4].into());
+        wb.apply_table_commit(&commit, true).unwrap();
+        assert_eq!(
+            serde_json::to_value((
+                &wb.active_sheet().cond_formats,
+                wb.active_sheet().validations.iter().collect::<Vec<_>>()
+            ))
+            .unwrap(),
+            before
+        );
+        wb.apply_table_commit(&commit, false).unwrap();
     }
 }
 

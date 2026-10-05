@@ -138,6 +138,7 @@ enum Token {
     SheetPrefix(String),
     /// The `#REF!` literal (a reference whose target was deleted)
     RefError,
+    ErrorLiteral(String),
     Ident(String),
     StructuredRef(super::structured::StructuredReference),
     Plus,
@@ -390,24 +391,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 tokens.push(Token::Number(num, num_str.bytes().all(|c| c.is_ascii_digit())));
             }
-            // Error literals: only #REF! is representable in the AST — it is
-            // what a structural edit writes over a dead reference.
+            // Keep authored/generated errors as values in expressions, so
+            // IFERROR and error inspection retain their normal semantics.
             '#' => {
-                let mut lit = String::new();
-                while let Some(&ch) = chars.peek() {
-                    lit.push(ch);
-                    chars.next();
-                    if ch == '!' {
-                        break;
-                    }
-                    if lit.len() > 12 {
-                        break;
-                    }
-                }
-                if lit.eq_ignore_ascii_case("#REF!") {
+                let ahead: String = chars.clone().take(8).collect();
+                let lit = ["#REF!", "#VALUE!", "#NAME?", "#DIV/0!", "#N/A", "#NUM!", "#NULL!", "#SPILL!", "#CALC!"]
+                    .into_iter().find(|error| ahead.get(..error.len()).is_some_and(|s| s.eq_ignore_ascii_case(error)))
+                    .ok_or_else(|| format!("Unsupported error literal: {ahead}"))?;
+                for _ in 0..lit.len() { chars.next(); }
+                if lit == "#REF!" {
                     tokens.push(Token::RefError);
                 } else {
-                    return Err(format!("Unsupported error literal: {}", lit));
+                    tokens.push(Token::ErrorLiteral(lit.into()));
                 }
             }
             _ => return Err(format!("Unexpected character: {}", c)),
@@ -818,6 +813,7 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
         Token::StructuredRef(r) => Ok((Expr::StructuredRef(r.clone()), pos + 1)),
         Token::Number(n, _) => Ok((Expr::Number(*n), pos + 1)),
         Token::RefError => Ok((Expr::RefError, pos + 1)),
+        Token::ErrorLiteral(error) => Ok((Expr::ReferenceError(error.clone()), pos + 1)),
         Token::StringLit(s) => Ok((Expr::Text(s.clone()), pos + 1)),
         Token::SheetPrefix(sheet_name) => {
             // Sheet prefix must be followed by a cell reference

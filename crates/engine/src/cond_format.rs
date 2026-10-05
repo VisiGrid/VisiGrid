@@ -29,7 +29,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::cell::{CellFormat, CellFormatOverride, CellStyle};
-use crate::formula::eval::{evaluate, CellLookup};
+use crate::formula::eval::{evaluate, CellLookup, LookupWithContext};
 use crate::formula::parser::{bind_expr_same_sheet, parse, Expr, ParsedExpr};
 use crate::validation::CellRange;
 
@@ -183,7 +183,7 @@ impl CondFormatRule {
         };
 
         let bound = bind_expr_same_sheet(&shifted);
-        evaluate(&bound, lookup).to_bool().unwrap_or(false)
+        evaluate(&bound, &LookupWithContext::new(lookup, row, col)).to_bool().unwrap_or(false)
     }
 }
 

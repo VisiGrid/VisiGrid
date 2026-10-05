@@ -1033,6 +1033,15 @@ mod tests {
         let sid = before.sheet(other).unwrap().id;
         let id = before.create_table(sid, TableRange { start_row: 0, end_row: 3, start_col: 0, end_col: 0 }, "ConvertMe").unwrap().table_id();
         before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.sheet_mut(other).unwrap().cond_formats.add(
+            vec![visigrid_engine::validation::CellRange::new(1, 0, 3, 0)],
+            "=[@Amount]>15",
+            visigrid_engine::cond_format::CondStyle::Named(visigrid_engine::cell::CellStyle::Warning),
+        );
+        before.sheet_mut(other).unwrap().validations.set(
+            visigrid_engine::validation::CellRange::single(7, 0),
+            visigrid_engine::validation::ValidationRule::list_range("ConvertMe[Amount]"),
+        );
         let (before, _) = before.prepare_table_row_visibility(sid, [2, 4].into()).unwrap();
         let mut after = before.clone();
         let commit = after.remove_table(id).unwrap();
@@ -1049,6 +1058,9 @@ mod tests {
             assert_eq!(preview.workbook.sheet(other).unwrap().tables().is_empty(), end == 1);
             assert_eq!(preview.workbook.sheet(other).unwrap().manual_hidden_rows(), [2, 4].into());
             assert_eq!(preview.workbook.sheet(other).unwrap().get_display(4, 0), "40");
+            assert!(!preview.workbook.sheet(other).unwrap().has_cond_format(1, 0));
+            assert!(preview.workbook.sheet(other).unwrap().has_cond_format(2, 0));
+            assert_eq!(preview.workbook.get_list_items(other, 7, 0).unwrap().items, ["10", "20", "30"]);
             assert_eq!(preview.workbook.active_sheet().table_view_spec(), spec.as_ref());
         }
     }

@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+- Preserve conditional formatting and validation when converting Tables to ranges, including this-row references and dropdown sources. Evaluate conditional-format rules in their target cell context, and support standard error literals inside formulas so converted rules retain error handling.
+
 - Add or restore Table totals in a manually hidden row while preserving worksheet visibility. Report the hidden footer row in desktop status, retain totals settings and history, and keep existing collision checks.
 
-- Convert Tables with manually hidden rows to ordinary ranges without losing visibility or changing which rows their totals include. Preserve frozen formula sources, add guarded atomic undo/redo/rewind, and allow conversion while unrelated Tables have active criteria. Referenced conditional-format/validation rules now refuse conversion explicitly instead of losing their Table binding.
+- Convert Tables with manually hidden rows to ordinary ranges without losing visibility or changing which rows their totals include. Preserve frozen formula sources, add guarded atomic undo/redo/rewind, and allow conversion while unrelated Tables have active criteria. Referenced conditional-format/validation rules retain their Table binding through A1 rewrites, including per-record references, origins and overlapping-rule precedence.
 
 - Append and resize Tables whose totals row is manually hidden, or whose new footer position is hidden. Keep worksheet visibility flags in place, preserve totals and undo/redo, and keep Add row/Tab focus on visible records when the appended row stays hidden.
 
