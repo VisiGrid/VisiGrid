@@ -1,6 +1,7 @@
 // Configuration loading
 
 pub mod ai;
+pub mod secrets;
 pub mod theme;
 pub mod keybindings;
 pub mod omarchy;

@@ -26,6 +26,7 @@ mod signing;
 mod tui;
 mod util;
 mod verify;
+mod visibooks_cmd;
 use convert::*;
 
 use visigrid_cli::diff;
@@ -182,6 +183,10 @@ Examples:
     /// Run saved import recipes (source + steps) without the app
     #[command(subcommand)]
     Recipe(RecipeCommands),
+
+    /// The VisiBooks API key that recipes reading VisiBooks reports use
+    #[command(subcommand)]
+    Visibooks(VisibooksCommands),
 
     /// List all supported functions
     ListFunctions,
@@ -1433,6 +1438,38 @@ Examples:
     },
 }
 
+/// VisiBooks subcommands: the API key and the entities it reaches.
+#[derive(Subcommand)]
+enum VisibooksCommands {
+    /// Save the API key in the system keychain (read from stdin)
+    #[command(after_help = "\
+Create a read-only key in VisiBooks (Settings > API keys) and grant it the
+entities to read. The key is stored in the system keychain for exactly this
+server, never in a recipe or workbook. For headless runs (CI), set
+VISIBOOKS_API_KEY instead (and VISIBOOKS_API_SERVER for another server).
+
+Examples:
+  vgrid visibooks key
+  pass show visibooks | vgrid visibooks key
+  vgrid visibooks key --delete")]
+    Key {
+        /// VisiBooks server (default https://api.visiapi.com)
+        #[arg(long)]
+        server: Option<String>,
+
+        /// Remove the saved key
+        #[arg(long)]
+        delete: bool,
+    },
+
+    /// List the entities the saved key can read, with the ids recipes use
+    Entities {
+        /// VisiBooks server (default https://api.visiapi.com)
+        #[arg(long)]
+        server: Option<String>,
+    },
+}
+
 /// Scripts subcommands for listing and running Lua scripts.
 #[derive(Subcommand)]
 enum ScriptsCommands {
@@ -1911,6 +1948,8 @@ fn main() -> ExitCode {
         Some(Commands::Recipe(RecipeCommands::Run { recipe, source, output, report, quiet })) => {
             recipe_cmd::cmd_recipe_run(recipe, source, output, report, quiet)
         }
+        Some(Commands::Visibooks(VisibooksCommands::Key { server, delete })) => visibooks_cmd::cmd_key(server, delete),
+        Some(Commands::Visibooks(VisibooksCommands::Entities { server })) => visibooks_cmd::cmd_entities(server),
         Some(Commands::Convert {
             input,
             from,

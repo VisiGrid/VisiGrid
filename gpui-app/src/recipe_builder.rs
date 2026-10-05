@@ -35,6 +35,13 @@ pub const CSV_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Enc
 const PARQUET_ROWS: [&str; 2] = ["File", "Each refresh reads"];
 const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
 const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
+const VISIBOOKS_DATE_ROWS: [&str; 5] = ["Report", "Entity", "As of", "Basis", "Server"];
+const VISIBOOKS_PERIOD_ROWS: [&str; 6] = ["Report", "Entity", "From", "To", "Basis", "Server"];
+/// Dates a VisiBooks source cycles through: relative words, so one recipe
+/// serves every month. A date typed into the recipe by hand is kept until
+/// changed here.
+const AS_OF_WORDS: [&str; 5] = ["today", "month_end", "last_month_end", "year_end", "last_year_end"];
+const FROM_WORDS: [&str; 4] = ["month_start", "last_month_start", "year_start", "last_year_start"];
 
 /// The kinds of step "Add step" offers, in menu order.
 pub const ADD_KINDS: [(&str, &str); 13] = [
@@ -319,6 +326,12 @@ pub fn cli_line(recipe_path: Option<&Path>, source_path: &Path) -> String {
 
 /// `export-2026-09.csv` -> `export-2026-09.recipe.toml`.
 pub fn default_recipe_name(source_path: &Path) -> String {
+    // A VisiBooks source: visibooks-42-trial_balance.recipe.toml
+    if let Some(rest) = source_path.to_str().and_then(|p| p.strip_prefix("visibooks:")) {
+        let mut parts = rest.rsplitn(3, '/');
+        let (report, entity) = (parts.next().unwrap_or("report"), parts.next().unwrap_or(""));
+        return format!("visibooks-{entity}-{report}.recipe.toml");
+    }
     let stem = source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("import");
     format!("{stem}.recipe.toml")
 }
@@ -337,6 +350,9 @@ fn stored_source_path(source: &Path, recipe_dir: Option<&Path>) -> String {
 /// What the builder previews: the file, or every file an appending recipe
 /// reads (the same files a run would).
 fn read_snapshot(recipe: &Recipe, recipe_path: Option<&Path>, source_path: &Path) -> Result<Snapshot, String> {
+    if recipe.source.is_remote() {
+        return recipe.read_snapshot(Path::new("."), None);
+    }
     if recipe.source.combine() && recipe.source_is_pattern() {
         let base = recipe_path.and_then(Path::parent).or_else(|| source_path.parent()).unwrap_or(Path::new("."));
         recipe.read_snapshot(base, None)
@@ -388,6 +404,11 @@ impl RecipeBuilder {
         self.tables = match &self.recipe.source {
             Source::Duckdb(_) => duckdb_tables(&self.source_path),
             Source::Xlsx(_) => recipe::xlsx_sheet_names(&self.source_path).unwrap_or_default(),
+            // The entities the saved key reaches, as "id · name"
+            Source::Visibooks(src) => recipe::visibooks::origin(&src.server)
+                .and_then(|o| recipe::visibooks::entities(&o))
+                .map(|list| list.into_iter().map(|(id, name)| format!("{id} · {name}")).collect())
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
     }
@@ -399,6 +420,8 @@ impl RecipeBuilder {
             Source::Parquet(_) => &PARQUET_ROWS,
             Source::Duckdb(_) => &DUCKDB_ROWS,
             Source::Xlsx(_) => &XLSX_ROWS,
+            Source::Visibooks(src) if src.report.is_period() => &VISIBOOKS_PERIOD_ROWS,
+            Source::Visibooks(_) => &VISIBOOKS_DATE_ROWS,
         }
     }
 
@@ -873,8 +896,61 @@ impl RecipeBuilder {
     }
 
     /// Left/Right/Space on a source setting.
+    /// Whether a source row is the file (which opens a file picker).
+    pub fn source_row_is_file(&self, row: usize) -> bool {
+        row == 0 && !self.recipe.source.is_remote()
+    }
+
     pub fn change_source(&mut self, row: usize, back: bool) {
         let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Visibooks(src) = &mut self.recipe.source {
+            let step = |list: &[&str], current: &str| -> String {
+                let n = list.len();
+                match list.iter().position(|w| *w == current) {
+                    None => list[0].to_string(),
+                    Some(i) => list[if back { (i + n - 1) % n } else { (i + 1) % n }].to_string(),
+                }
+            };
+            match name {
+                "Report" => {
+                    src.report = cycle(&recipe::visibooks::Report::ALL, src.report, back);
+                    // Each report has its own columns
+                    src.columns.clear();
+                }
+                "Entity" if !self.tables.is_empty() => {
+                    let ids: Vec<&str> = self.tables.iter().map(|t| t.split(" · ").next().unwrap_or("")).collect();
+                    let i = ids.iter().position(|id| *id == src.entity.trim());
+                    let n = ids.len();
+                    src.entity = ids[match (i, back) {
+                        (None, _) => 0,
+                        (Some(i), false) => (i + 1) % n,
+                        (Some(i), true) => (i + n - 1) % n,
+                    }]
+                    .to_string();
+                }
+                "As of" => src.as_of = step(&AS_OF_WORDS, if src.as_of.is_empty() { "today" } else { &src.as_of }),
+                "From" => src.from = step(&FROM_WORDS, if src.from.is_empty() { "month_start" } else { &src.from }),
+                "To" => src.to = step(&AS_OF_WORDS, if src.to.is_empty() { "today" } else { &src.to }),
+                "Basis" => {
+                    let all = ["", "accrual", "cash"];
+                    src.basis = step(&all, src.basis.as_str());
+                }
+                _ => return,
+            }
+            // A date word that means the default is the default: keep the file short
+            if src.as_of == "today" {
+                src.as_of.clear();
+            }
+            if src.to == "today" {
+                src.to.clear();
+            }
+            if src.from == "month_start" {
+                src.from.clear();
+            }
+            self.reload();
+            self.changed();
+            return;
+        }
         if name == "Each refresh reads" {
             return self.toggle_pattern();
         }
@@ -970,6 +1046,56 @@ impl RecipeBuilder {
     pub fn source_value(&self, row: usize) -> (String, String) {
         let info = self.info.as_ref();
         let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Visibooks(src) = &self.recipe.source {
+            let today = chrono::Local::now().date_naive();
+            let date = |word: &str, default: &str| {
+                let word = if word.trim().is_empty() { default } else { word.trim() };
+                let shown = word.replace('_', " ");
+                match recipe::visibooks::resolve_date(word, today) {
+                    Ok(d) => (shown, format!("Now {d}; moves with the calendar.")),
+                    Err(e) => (shown, e),
+                }
+            };
+            return match name {
+                "Report" => (src.report.label().to_string(), String::new()),
+                "Entity" => {
+                    let shown = self
+                        .tables
+                        .iter()
+                        .find(|t| t.split(" · ").next() == Some(src.entity.trim()))
+                        .cloned()
+                        .unwrap_or_else(|| src.entity.clone());
+                    let hint = if self.tables.is_empty() {
+                        "Can't list entities: save a key with `vgrid visibooks key`.".to_string()
+                    } else {
+                        match self.tables.len() {
+                            1 => "The only entity this key can read.".to_string(),
+                            n => format!("{n} entities this key can read."),
+                        }
+                    };
+                    (shown, hint)
+                }
+                "As of" => date(&src.as_of, "today"),
+                "From" => date(&src.from, "month_start"),
+                "To" => date(&src.to, "today"),
+                "Basis" => match src.basis.as_str() {
+                    "" => ("Entity default".into(), String::new()),
+                    b => (format!("{}{}", b[..1].to_uppercase(), &b[1..]), String::new()),
+                },
+                "Server" => match recipe::visibooks::origin(&src.server) {
+                    Ok(origin) => {
+                        let hint = if recipe::visibooks::api_key(&origin).is_ok() {
+                            "Read-only, with the key saved for this server."
+                        } else {
+                            "No key saved for this server yet: run `vgrid visibooks key`."
+                        };
+                        (origin, hint.into())
+                    }
+                    Err(e) => (src.server.clone(), e),
+                },
+                _ => (String::new(), String::new()),
+            };
+        }
         if let Source::Xlsx(src) = &self.recipe.source {
             match name {
                 "Sheet" => {
@@ -1224,6 +1350,28 @@ impl Spreadsheet {
     }
 
     /// Palette "New Import Recipe…": choose the file first.
+    /// "New Recipe from VisiBooks…": the builder on a VisiBooks trial balance
+    /// of the first entity the saved key reads. Nothing is read until the
+    /// builder previews, which the user asked for by opening it.
+    pub fn new_visibooks_recipe(&mut self, cx: &mut Context<Self>) {
+        use recipe::visibooks::{self, Report, VisibooksSource, DEFAULT_SERVER};
+        let entity = visibooks::entities(DEFAULT_SERVER)
+            .ok()
+            .and_then(|list| list.into_iter().next())
+            .map(|(id, _)| id)
+            .unwrap_or_default();
+        let source = Source::Visibooks(VisibooksSource::new(entity, Report::TrialBalance));
+        let identity = PathBuf::from(source.identity());
+        let recipe = Recipe { version: RECIPE_VERSION, source, steps: Vec::new() };
+        self.recipe_builder = Some(RecipeBuilder::new(recipe, None, identity, None));
+        if let Some(b) = self.recipe_builder.as_mut() {
+            b.dirty = true;
+            b.pane = Pane::Source;
+        }
+        self.mode = Mode::RecipeBuilder;
+        cx.notify();
+    }
+
     pub fn new_recipe_prompt(&mut self, cx: &mut Context<Self>) {
         let future = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1426,7 +1574,7 @@ impl Spreadsheet {
             Pane::Source => match key.key.as_str() {
                 "up" => b.source_focus = b.source_focus.saturating_sub(1),
                 "down" => b.source_focus = (b.source_focus + 1).min(b.source_rows().len() - 1),
-                "enter" | "space" if b.source_focus == 0 => {
+                "enter" | "space" if b.source_row_is_file(b.source_focus) => {
                     self.recipe_builder_choose_file(cx);
                     return;
                 }

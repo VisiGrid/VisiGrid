@@ -30,9 +30,18 @@ pub(crate) fn cmd_recipe_run(
     for source_path in &sources {
         check_paths(&recipe_path, source_path, output.as_deref(), report_path.as_deref())?;
     }
-    let snapshot = Snapshot::read_all(&sources).map_err(|e| {
-        CliError::io(e).with_hint("the path is relative to the recipe file; pass --source to read another file")
-    })?;
+    let snapshot = if recipe.source.is_remote() {
+        // A VisiBooks report: read over the network, with the key from the
+        // keychain (or VISIBOOKS_API_KEY in CI)
+        check_paths(&recipe_path, &recipe.source_path(recipe_dir, None), output.as_deref(), report_path.as_deref())?;
+        recipe.read_snapshot(recipe_dir, None).map_err(|e| {
+            CliError::io(e).with_hint("save the key with `vgrid visibooks key`, or set VISIBOOKS_API_KEY")
+        })?
+    } else {
+        Snapshot::read_all(&sources).map_err(|e| {
+            CliError::io(e).with_hint("the path is relative to the recipe file; pass --source to read another file")
+        })?
+    };
 
     let result = recipe::run(&recipe, &snapshot);
     if let Some(path) = &report_path {

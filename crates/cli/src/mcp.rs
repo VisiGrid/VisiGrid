@@ -625,7 +625,11 @@ impl McpServer {
         for source in &sources {
             crate::recipe_cmd::check_paths(&recipe_path, source, output.as_deref(), None).map_err(|e| e.message)?;
         }
-        let snapshot = recipe::Snapshot::read_all(&sources)?;
+        let snapshot = if recipe.source.is_remote() {
+            recipe.read_snapshot(dir, None)?
+        } else {
+            recipe::Snapshot::read_all(&sources)?
+        };
         let result = recipe::run(&recipe, &snapshot);
         let report = &result.report;
         let written = match (&output, report.ok) {
@@ -1318,7 +1322,7 @@ fn tool_definitions() -> Value {
             "name": "run_recipe",
             "title": "Run an import recipe",
             "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
-            "description": "Run a .recipe.toml without a window, like `vgrid recipe run`: read its source (the newest or every matching file for a pattern), apply its steps and checks, and return the result's columns, a preview and the run report. With `output`, also write the result to a new file (.csv, .tsv, .json, .xlsx, .sheet), only if every check passes; an existing file is never replaced. Only for a recipe whose source the user has approved in VisiGrid.",
+            "description": "Run a .recipe.toml without a window, like `vgrid recipe run`: read its source (a file, the newest or every matching file for a pattern, or a VisiBooks report with the key saved in the keychain), apply its steps and checks, and return the result's columns, a preview and the run report. With `output`, also write the result to a new file (.csv, .tsv, .json, .xlsx, .sheet), only if every check passes; an existing file is never replaced. Only for a recipe whose source the user has approved in VisiGrid.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

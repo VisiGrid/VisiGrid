@@ -20,6 +20,17 @@ pub use visigrid_io::recipe_trust::{approve, is_approved};
 /// matches now. Err when it cannot be read at all (then only Cancel).
 pub fn describe_source(recipe_path: &Path, recipe: &Recipe) -> Result<(String, String), String> {
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
+    // A VisiBooks report: name the server, entity and report, and whether a
+    // key for that server is saved (the key itself never leaves the keychain)
+    if let visigrid_io::recipe::Source::Visibooks(src) = &recipe.source {
+        let origin = visigrid_io::recipe::visibooks::origin(&src.server)?;
+        let key = match visigrid_io::recipe::visibooks::api_key(&origin) {
+            Ok(_) => "an API key for this server is saved".to_string(),
+            Err(_) => "no API key for this server is saved yet; run `vgrid visibooks key`".to_string(),
+        };
+        let transport = if origin.starts_with("https://") { "over https" } else { "on this computer" };
+        return Ok((src.describe(), format!("read-only, {transport} · {key}")));
+    }
     if recipe.source.combine() && recipe.source_is_pattern() {
         let files = recipe.resolve_sources(dir, None)?;
         let pattern = recipe.source_path(dir, None);
