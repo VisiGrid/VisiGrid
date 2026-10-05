@@ -11,6 +11,17 @@ pub enum NamedRangeResolution {
 }
 
 pub trait CellLookup {
+    /// Runtime reference targets, for workbook dependency tracking. Validation
+    /// and standalone lookups can leave this as a no-op.
+    fn record_dynamic_reference(&self, _sheet: &SheetRef, _r0: usize, _c0: usize, _r1: usize, _c1: usize) {}
+
+    /// Parse reference text in this lookup's sheet namespace. Standalone
+    /// lookups keep cross-sheet references as explicit reference errors.
+    fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> {
+        super::parser::parse(&format!("={}", text.trim().trim_start_matches('=')))
+            .map(|expr| super::parser::bind_expr_same_sheet(&expr))
+    }
+
     /// SUBTOTAL excludes filtered records and nested subtotal formulas.
     fn subtotal_skip_cell(&self, _sheet: &SheetRef, _row: usize, _col: usize, _ignore_hidden: bool) -> bool { false }
 
@@ -189,6 +200,10 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> LookupWithN
 
 impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup for LookupWithNamedRanges<'a, L, F> {
     fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool { self.inner.subtotal_skip_cell(sheet, row, col, ignore_hidden) }
+    fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> { self.inner.bind_reference_text(text) }
+    fn record_dynamic_reference(&self, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize) {
+        self.inner.record_dynamic_reference(sheet, r0, c0, r1, c1)
+    }
     fn whole_column_start(&self) -> usize { self.inner.whole_column_start() }
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
 
@@ -285,6 +300,10 @@ impl<'a, L: CellLookup> LookupWithContext<'a, L> {
 
 impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
     fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool { self.inner.subtotal_skip_cell(sheet, row, col, ignore_hidden) }
+    fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> { self.inner.bind_reference_text(text) }
+    fn record_dynamic_reference(&self, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize) {
+        self.inner.record_dynamic_reference(sheet, r0, c0, r1, c1)
+    }
     fn whole_column_start(&self) -> usize { self.column_start.unwrap_or_else(|| self.inner.whole_column_start()) }
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
 
@@ -1065,6 +1084,11 @@ fn eval_function_args<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<Eval
 }
 
 fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) -> EvalResult {
+    // Reference producers need the original geometry, before whole columns
+    // are clipped to occupied data for value-consuming functions.
+    if matches!(name, "OFFSET" | "INDIRECT") {
+        return super::reference::evaluate_reference(&Expr::Function { name: name.into(), args: args.to_vec() }, lookup);
+    }
     // Keep open ranges in the stored AST. Only the arguments being consumed
     // are bounded, so nested/lazy functions still evaluate through this path.
     let table_args;

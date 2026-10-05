@@ -265,3 +265,83 @@ fn namespaced_functions_evaluate_without_changing_literals_or_stored_source() {
         .is_invalid());
     assert_eq!(wb.sheet(0).unwrap().get_raw(0, 4), "");
 }
+
+#[test]
+fn computed_lists_share_named_cross_sheet_and_composed_reference_resolution() {
+    let mut wb = book();
+    let other = wb.add_sheet_named("Options! O'Brien").unwrap();
+    for (r, text) in ["West", "East", "West"].iter().enumerate() {
+        wb.set_cell_value_tracked(other, r, 0, text);
+    }
+    wb.define_name_for_range("Regions", other, 0, 0, 2, 0)
+        .unwrap();
+    for formula in [
+        "=SORT(UNIQUE(INDIRECT(\"Regions\")))",
+        "=SORT(UNIQUE(INDIRECT(\"'Options! O''Brien'!A1:A3\")))",
+        "=SORT(UNIQUE(OFFSET(INDIRECT(\"Regions\"),0,0)))",
+        "=SORT(UNIQUE(OFFSET(IF(TRUE,Regions,A1),0,0)))",
+        "=SORT(UNIQUE(OFFSET(CHOOSE(2,A1,Regions),0,0)))",
+        "=SORT(OFFSET(INDEX(Regions,0,1),0,0,2))",
+    ] {
+        source(&mut wb, formula);
+        assert_eq!(items(&wb), ["East", "West"], "{formula}");
+    }
+    wb.set_cell_value_tracked(other, 0, 0, "North");
+    assert_eq!(items(&wb), ["East", "North"]);
+    assert!(wb.validate_cell_input(0, 0, 4, "North").is_valid());
+    assert!(wb.validate_cell_input(0, 0, 4, "West").is_invalid());
+}
+
+#[test]
+fn computed_lists_resolve_indirect_table_columns_and_current_record_context() {
+    let mut wb = book();
+    wb.create_table(
+        wb.active_sheet_id(),
+        TableRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 2,
+            end_col: 0,
+        },
+        "Colors",
+    )
+    .unwrap();
+    for formula in [
+        "=SORT(INDIRECT(\"Colors[Red]\"))",
+        "=SORT(OFFSET(INDIRECT(\"Colors[Red]\"),0,0))",
+        "=SORT(OFFSET(Colors[Red],0,0))",
+    ] {
+        source(&mut wb, formula);
+        assert_eq!(items(&wb), ["Blue", "Green"], "{formula}");
+    }
+    source(&mut wb, "=SORT(OFFSET(INDIRECT(\"A1:A3\"),ROW(),0,2))");
+    assert_eq!(items(&wb), ["Blue", "Green"]);
+    assert_eq!(
+        wb.sheet(0).unwrap().get_list_items(0, 4).unwrap().items,
+        ["Blue", "Green"]
+    );
+}
+
+#[test]
+fn nested_reference_failures_keep_errors_and_array_limits() {
+    let mut wb = book();
+    for formula in [
+        "=SORT(INDIRECT(\"A1:A3\",FALSE))",
+        "=SORT(INDIRECT(\"Missing!A1:A3\"))",
+        "=SORT(INDIRECT(\"SUM(A1:A3)\"))",
+        "=SORT(INDIRECT(\"[External.xlsx]Sheet1!A1\"))",
+        "=SORT(OFFSET(INDIRECT(\"A1:A3\"),-1,0))",
+        "=SORT(OFFSET(A:A,1,0))",
+        "=SORT(OFFSET(INDIRECT(\"A1:A3\"),0,0,1048576))",
+    ] {
+        source(&mut wb, formula);
+        let result = wb.get_list_items(0, 0, 4).unwrap();
+        assert!(result.source_error.is_some(), "{formula}: {result:?}");
+        assert!(
+            wb.validate_cell_input(0, 0, 4, "Red").is_invalid(),
+            "{formula}"
+        );
+    }
+    source(&mut wb, "=SORT(INDIRECT(\"A1:A3\"))");
+    assert_eq!(items(&wb), ["Blue", "Green", "Red"]);
+}

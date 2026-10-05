@@ -18,6 +18,8 @@ mod automation;
 mod names;
 #[path = "workbook_validation.rs"]
 mod validation_eval;
+#[path = "workbook_dynamic_refs.rs"]
+mod dynamic_refs;
 pub use names::NamedRangeEdit;
 pub use guarded_structure::{shift_structure_index, GuardedStructureCommit, StructureStep};
 #[path = "workbook_table_view.rs"]
@@ -101,6 +103,9 @@ pub struct Workbook {
     /// keeps a clone of the workbook, and most edits change only values.
     #[serde(skip)]
     dep_graph: Arc<DepGraph>,
+    /// Captured during immutable cell evaluation, applied between recalc passes.
+    #[serde(skip)]
+    pending_dynamic_refs: std::cell::RefCell<FxHashMap<CellId, Vec<crate::dep_graph::RangeRef>>>,
     /// Settlement failures from incremental recalcs, which have no report to
     /// carry them. Taken by whoever surfaces recalc problems (the status
     /// line, a session log); never persisted.
@@ -180,6 +185,7 @@ impl Workbook {
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
             dep_graph: Arc::default(),
+            pending_dynamic_refs: Default::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -517,6 +523,7 @@ impl Workbook {
             named_ranges,
             style_table: Vec::new(),
             dep_graph: Arc::default(),
+            pending_dynamic_refs: Default::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -546,6 +553,7 @@ impl Workbook {
             named_ranges,
             style_table: Vec::new(),
             dep_graph: Arc::default(),
+            pending_dynamic_refs: Default::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
@@ -776,6 +784,7 @@ impl Workbook {
     /// Call this after loading a workbook to populate the graph.
     /// Iterates all formula cells and extracts their references.
     pub fn rebuild_dep_graph(&mut self) {
+        self.pending_dynamic_refs.get_mut().clear();
         self.dep_graph = Arc::default();
 
         // Iterate all sheets and cells
@@ -972,9 +981,9 @@ impl Workbook {
         // the index (each node once) rather than expanding every cell's
         // ranges from scratch, which is quadratic up a running total.
         self.dep_graph.any_upstream(CellId::new(sheet_id, row, col), |current| {
-            self.sheet_by_id(current.sheet)
-                .and_then(|sheet| sheet.get_cell_opt(current.row, current.col))
-                .is_some_and(|cell| cell.value().is_cycle_error())
+            self.sheet_by_id(current.sheet).is_some_and(|sheet|
+                matches!(sheet.get_cached_value(current.row, current.col), Some(Value::Error(e)) if e == "#CYCLE!")
+                || sheet.get_cell_opt(current.row, current.col).is_some_and(|cell| cell.value().is_cycle_error()))
         })
     }
 
@@ -1122,11 +1131,10 @@ impl Workbook {
     /// Core recompute implementation, optionally with custom function handler.
     /// Bracketed by the custom-function hooks so a handler can scope a memo
     /// to this one recalculation.
-    fn recompute_full_ordered_inner(
+    fn recompute_full_ordered_pass(
         &mut self,
         custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
     ) -> crate::recalc::RecalcReport {
-        let _recalc_scope = crate::custom_fns::recalc_scope();
         use crate::formula::analyze::has_dynamic_deps;
         use crate::formula::eval::Value;
         use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
@@ -1190,39 +1198,20 @@ impl Workbook {
             let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
             let mut eval_order: usize = 0;
 
-            // Separate known-deps and unknown-deps among non-cycle cells
-            let mut known_deps_order = Vec::new();
-            let mut unknown_deps_cells = Vec::new();
-            for cell_id in &non_cycle_cells {
-                if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.get_cell_opt(cell_id.row, cell_id.col) {
-                        if let Some(ast) = cell.value().formula_ast() {
-                            if has_dynamic_deps(ast) {
-                                unknown_deps_cells.push(*cell_id);
-                            } else {
-                                known_deps_order.push(*cell_id);
-                            }
-                        } else {
-                            known_deps_order.push(*cell_id);
-                        }
-                    }
+            // Runtime references now participate in ordering. Keep dynamic
+            // producers before their readers even alongside iterative SCCs.
+            let non_cycle_set: FxHashSet<_> = non_cycle_cells.iter().copied().collect();
+            let known_deps_order = self.dep_graph.topo_order_subset(&non_cycle_set)
+                .unwrap_or(non_cycle_cells);
+            let mut downstream_set = cycle_set.clone();
+            let mut pending: std::collections::VecDeque<_> = cycle_set.iter().copied().collect();
+            while let Some(cell) = pending.pop_front() {
+                for dependent in self.dep_graph.dependents(cell) {
+                    if downstream_set.insert(dependent) { pending.push_back(dependent); }
                 }
             }
-
-            // Partition non-cycle cells into upstream (no cycle deps) and downstream
-            let mut downstream_known = Vec::new();
-            let mut upstream_known = Vec::new();
-            for cell_id in known_deps_order {
-                // Check transitive dependency on cycle cells
-                let depends_on_cycle = self.dep_graph.ordering_precedents(cell_id)
-                    .iter()
-                    .any(|p| cycle_set.contains(p));
-                if depends_on_cycle {
-                    downstream_known.push(cell_id);
-                } else {
-                    upstream_known.push(cell_id);
-                }
-            }
+            let (downstream_known, upstream_known): (Vec<_>, Vec<_>) = known_deps_order.into_iter()
+                .partition(|cell| downstream_set.contains(cell));
 
             // Evaluate upstream non-cycle cells
             for cell_id in &upstream_known {
@@ -1408,33 +1397,16 @@ impl Workbook {
                 report.cells_recomputed += 1;
             }
 
-            // Phase 4: Unknown-deps formulas (after everything else)
-            unknown_deps_cells.sort_by(|a, b| {
-                a.sheet.raw().cmp(&b.sheet.raw())
-                    .then(a.row.cmp(&b.row))
-                    .then(a.col.cmp(&b.col))
-            });
-            for cell_id in &unknown_deps_cells {
-                let cell_depth = report.max_depth + 1;
-                depths.insert(*cell_id, cell_depth);
-                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
-                    if report.errors.len() < 100 {
-                        report.errors.push(RecalcError::new(*cell_id, e));
-                    }
-                }
-                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, true));
-                eval_order += 1;
-                report.cells_recomputed += 1;
-                report.unknown_deps_recomputed += 1;
-            }
-            if !unknown_deps_cells.is_empty() {
-                report.max_depth += 1;
-            }
         } else {
             // No iteration: original path (mark cycles as #CYCLE!, eval non-cycle)
             for cell_id in &cycle_cells {
                 if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
-                    sheet.set_cycle_error(cell_id.row, cell_id.col);
+                    // A runtime cycle can disappear when its selector changes.
+                    // Keep the authored formula and report the cycle as a cache value.
+                    sheet.cache_computed(cell_id.row, cell_id.col, Value::Error("#CYCLE!".into()));
+                    if sheet.get_cell_opt(cell_id.row, cell_id.col).is_some_and(|c| c.spill_info().is_some()) {
+                        sheet.record_pending_spill(cell_id.row, cell_id.col, crate::formula::eval::Array2D::new(0, 0));
+                    }
                 }
             }
             // Use Tarjan SCC membership as the canonical cycle count (not Kahn's
@@ -1442,24 +1414,7 @@ impl Workbook {
             let sccs = self.dep_graph.find_cycle_sccs();
             report.cycle_cells = sccs.iter().map(|scc| scc.len()).sum();
 
-            let mut known_deps_order = Vec::new();
-            let mut unknown_deps_cells = Vec::new();
-            for cell_id in order {
-                if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.get_cell_opt(cell_id.row, cell_id.col) {
-                        if let Some(ast) = cell.value().formula_ast() {
-                            if has_dynamic_deps(ast) {
-                                unknown_deps_cells.push(cell_id);
-                            } else {
-                                known_deps_order.push(cell_id);
-                            }
-                        } else {
-                            known_deps_order.push(cell_id);
-                        }
-                    }
-                }
-            }
-
+            let known_deps_order = order;
             let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
             let mut eval_order: usize = 0;
 
@@ -1484,34 +1439,26 @@ impl Workbook {
                         report.errors.push(RecalcError::new(*cell_id, e));
                     }
                 }
-                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, false));
+                let dynamic = self.sheet_by_id(cell_id.sheet)
+                    .and_then(|s| s.get_cell_opt(cell_id.row, cell_id.col))
+                    .and_then(|c| c.value().formula_ast())
+                    .is_some_and(has_dynamic_deps);
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, dynamic));
+                report.unknown_deps_recomputed += usize::from(dynamic);
                 eval_order += 1;
                 report.cells_recomputed += 1;
             }
 
-            unknown_deps_cells.sort_by(|a, b| {
-                a.sheet.raw().cmp(&b.sheet.raw())
-                    .then(a.row.cmp(&b.row))
-                    .then(a.col.cmp(&b.col))
-            });
-            for cell_id in &unknown_deps_cells {
-                let cell_depth = report.max_depth + 1;
-                depths.insert(*cell_id, cell_depth);
-                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
-                    if report.errors.len() < 100 {
-                        report.errors.push(RecalcError::new(*cell_id, e));
-                    }
-                }
-                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, true));
-                eval_order += 1;
-                report.cells_recomputed += 1;
-                report.unknown_deps_recomputed += 1;
-            }
-            if !unknown_deps_cells.is_empty() {
-                report.max_depth += 1;
-            }
+
         }
 
+        report.unknown_deps_recomputed = 0;
+        for (cell, info) in &mut report.cell_info {
+            info.has_unknown_deps = self.sheet_by_id(cell.sheet)
+                .and_then(|s| s.get_cell_opt(cell.row, cell.col))
+                .and_then(|c| c.value().formula_ast()).is_some_and(has_dynamic_deps);
+            report.unknown_deps_recomputed += usize::from(info.has_unknown_deps);
+        }
         report.phase_eval_us = phase_start.elapsed().as_micros() as u64;
 
         let _ = self.settle_pending_spills(custom_fn_handler, &mut report);
@@ -1804,6 +1751,9 @@ impl Workbook {
                 ),
             };
             let result = evaluate(&bound, &lookup);
+            if crate::formula::analyze::has_dynamic_deps(ast) {
+                self.pending_dynamic_refs.borrow_mut().insert(cell_id, lookup.dynamic_references.into_inner());
+            }
 
             // An array answer is noted, not placed. Placing it here would mean
             // spilling into a sheet whose other cells may not be evaluated yet,
@@ -2300,13 +2250,8 @@ impl Workbook {
     /// evaluate it in dependency order — ordering only that subgraph, so the
     /// cost follows the size of the change rather than the size of the
     /// workbook.
-    fn recalc_dirty_set(&mut self, changed: &[CellId]) -> Recalculated {
-        let _recalc_scope = crate::custom_fns::recalc_scope();
+    fn recalc_dirty_pass(&mut self, changed: &[CellId]) -> Recalculated {
         use std::collections::VecDeque;
-
-        // Test instrumentation: count recalc calls
-        #[cfg(test)]
-        self.recalc_count.set(self.recalc_count.get() + 1);
 
         // 1. BFS forward from all changed cells to collect dirty set
         let mut dirty_set = FxHashSet::default();
@@ -2431,7 +2376,9 @@ impl Workbook {
                 // it had nothing to do with the edit. A cycle outside the dirty
                 // set cannot affect these cells — whatever it computed to is
                 // still cached and still correct to read.
-                self.recompute_full_ordered();
+                let report = self.recompute_full_ordered();
+                self.incremental_errors.extend(report.errors.into_iter().filter(|e|
+                    e.error.starts_with("spill not settled") || e.error.starts_with("dynamic references not settled")));
                 Recalculated::All
             }
         }
@@ -2503,6 +2450,7 @@ impl Workbook {
                 let sheet_id = sheet.id;
                 let lookup = WorkbookLookup::with_cell_context(self, sheet_id, row, col);
                 let result = evaluate(&bound, &lookup);
+
 
                 match result {
                     EvalResult::Number(n) => CellValue::format_number(n, &cell.format.number_format),
@@ -2653,6 +2601,7 @@ pub struct WorkbookLookup<'a> {
     workbook: &'a Workbook,
     current_sheet_id: SheetId,
     current_cell: Option<(usize, usize)>,
+    dynamic_references: std::cell::RefCell<Vec<crate::dep_graph::RangeRef>>,
     custom_fn_handler: Option<&'a dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
 }
 
@@ -2663,6 +2612,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: None,
+            dynamic_references: Default::default(),
             custom_fn_handler: None,
         }
     }
@@ -2673,6 +2623,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: Some((row, col)),
+            dynamic_references: Default::default(),
             custom_fn_handler: None,
         }
     }
@@ -2689,6 +2640,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: Some((row, col)),
+            dynamic_references: Default::default(),
             custom_fn_handler: Some(handler),
         }
     }
@@ -2700,6 +2652,17 @@ impl<'a> WorkbookLookup<'a> {
 }
 
 impl<'a> CellLookup for WorkbookLookup<'a> {
+    fn record_dynamic_reference(&self, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize) {
+        let sheet = match sheet {
+            SheetRef::Current => self.current_sheet_id,
+            SheetRef::Id(id) => *id,
+            SheetRef::RefError { .. } => return,
+        };
+        self.dynamic_references.borrow_mut().push(crate::dep_graph::RangeRef {
+            sheet, start_row: r0, start_col: c0, end_row: r1, end_col: c1,
+        });
+    }
+
     fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool {
         match sheet {
             SheetRef::Current => self.current_sheet(),
@@ -2795,6 +2758,12 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
                 }
             }
         })
+    }
+
+    fn bind_reference_text(&self, text: &str) -> Result<crate::formula::parser::BoundExpr, String> {
+        use crate::formula::parser::{parse, bind_expr};
+        parse(&format!("={}", text.trim().trim_start_matches('=')))
+            .map(|expr| bind_expr(&expr, |name| self.workbook.sheet_id_by_name(name)))
     }
 
     fn resolve_named_reference(&self, name: &str) -> Option<crate::formula::parser::BoundExpr> {
@@ -4111,8 +4080,9 @@ mod tests {
 
         let report = wb.recompute_full_ordered();
 
-        assert_eq!(report.cells_recomputed, 1);
-        assert_eq!(report.unknown_deps_recomputed, 1);
+        // One discovery pass and one pass using the resolved runtime edge.
+        assert_eq!(report.cells_recomputed, 2);
+        assert_eq!(report.unknown_deps_recomputed, 2);
     }
 
     #[test]

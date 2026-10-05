@@ -2524,9 +2524,8 @@ impl Sheet {
     }
 
     fn resolve_validation_list_at(&self, row: usize, col: usize, source: &str) -> super::validation::ResolvedList {
-        use crate::formula::{eval::LookupWithContext, parser::{parse, bind_expr_same_sheet}};
+        use crate::formula::eval::LookupWithContext;
         crate::validation::list_source::resolve(source, &LookupWithContext::new(self, row, col),
-            |source| parse(&format!("={}", source.trim().trim_start_matches('='))).map(|expr| bind_expr_same_sheet(&expr)),
             |target, range| match target {
                 SheetRef::Current => self.resolve_list_cells(range),
                 _ => super::validation::ResolvedList::failed("#REF! List source requires workbook context"),

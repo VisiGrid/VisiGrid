@@ -157,10 +157,6 @@ impl Workbook {
         crate::validation::list_source::resolve(
             source,
             &WorkbookLookup::with_cell_context(self, id, row, col),
-            |source| {
-                parse(&format!("={}", source.trim().trim_start_matches('=')))
-                    .map(|expr| bind_expr(&expr, |name| self.sheet_id_by_name(name)))
-            },
             |target, range| {
                 let target = match target {
                     crate::sheet::SheetRef::Current => Some(id),

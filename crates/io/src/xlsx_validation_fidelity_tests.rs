@@ -600,7 +600,7 @@ fn formula_list_sources_keep_anchors_and_choices_through_all_file_formats() {
     let xml = r#"<worksheet><dataValidations>
       <dataValidation type="list" sqref="C2:C3"><formula1>OFFSET($A$2,B2-1,0,1,1)</formula1></dataValidation>
       <dataValidation type="list" sqref="D2"><formula1>INDIRECT("Colors")</formula1></dataValidation>
-      <dataValidation type="list" sqref="E2"><formula1>SORT(UNIQUE($A$2:$A$3))</formula1></dataValidation>
+      <dataValidation type="list" sqref="E2"><formula1>SORT(UNIQUE(INDIRECT("Colors")))</formula1></dataValidation>
     </dataValidations></worksheet>"#;
     let mut wb = Workbook::new();
     wb.set_cell_value_tracked(0, 1, 0, "Red");

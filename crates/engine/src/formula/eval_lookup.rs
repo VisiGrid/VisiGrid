@@ -832,74 +832,6 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 },
             }
         }
-        "OFFSET" => {
-            // OFFSET(reference, rows, cols, [height], [width]) — returns a range shifted
-            // from `reference`, optionally resized. Reads the target and returns a scalar
-            // for a 1x1 result or an Array for a multi-cell result.
-            if args.len() < 3 || args.len() > 5 {
-                return Some(EvalResult::Error("OFFSET requires 3 to 5 arguments".to_string()));
-            }
-            let (base_row, base_col, base_h, base_w, sheet): (usize, usize, usize, usize, SheetRef) =
-                match &args[0] {
-                    Expr::CellRef { sheet, row, col, .. } => (*row, *col, 1, 1, sheet.clone()),
-                    Expr::Range { sheet, start_row, start_col, end_row, end_col, .. } => {
-                        let sr = (*start_row).min(*end_row);
-                        let sc = (*start_col).min(*end_col);
-                        let h = (*start_row).max(*end_row) - sr + 1;
-                        let w = (*start_col).max(*end_col) - sc + 1;
-                        (sr, sc, h, w, sheet.clone())
-                    }
-                    _ => {
-                        return Some(EvalResult::Error(
-                            "OFFSET requires a cell or range reference".to_string(),
-                        ))
-                    }
-                };
-            let rows_off = match evaluate(&args[1], lookup).to_number() {
-                Ok(n) => n.trunc() as i64,
-                Err(e) => return Some(EvalResult::Error(e)),
-            };
-            let cols_off = match evaluate(&args[2], lookup).to_number() {
-                Ok(n) => n.trunc() as i64,
-                Err(e) => return Some(EvalResult::Error(e)),
-            };
-            let height = match args.get(3) {
-                Some(a) => match evaluate(a, lookup).to_number() {
-                    Ok(n) if n >= 1.0 => n.trunc() as usize,
-                    Ok(_) => return Some(EvalResult::Error("#REF!".to_string())),
-                    Err(e) => return Some(EvalResult::Error(e)),
-                },
-                None => base_h,
-            };
-            let width = match args.get(4) {
-                Some(a) => match evaluate(a, lookup).to_number() {
-                    Ok(n) if n >= 1.0 => n.trunc() as usize,
-                    Ok(_) => return Some(EvalResult::Error("#REF!".to_string())),
-                    Err(e) => return Some(EvalResult::Error(e)),
-                },
-                None => base_w,
-            };
-            let Some(new_row) = (base_row as i64).checked_add(rows_off) else { return Some(EvalResult::Error("#REF!".into())); };
-            let Some(new_col) = (base_col as i64).checked_add(cols_off) else { return Some(EvalResult::Error("#REF!".into())); };
-            if new_row < 0 || new_col < 0 {
-                return Some(EvalResult::Error("#REF!".to_string()));
-            }
-            range_to_result(lookup, &sheet, new_row as usize, new_col as usize, height, width)
-        }
-        "INDIRECT" => {
-            // INDIRECT(ref_text, [a1]) — resolves an A1-style text reference on the current
-            // sheet. Cross-sheet ("Sheet!A1") and R1C1 style are not yet supported (#REF!).
-            if args.is_empty() || args.len() > 2 {
-                return Some(EvalResult::Error("INDIRECT requires 1 or 2 arguments".to_string()));
-            }
-            let ref_text = evaluate(&args[0], lookup).to_text();
-            match parse_a1_ref(&ref_text) {
-                Some((sr, sc, er, ec)) => {
-                    range_to_result(lookup, &SheetRef::Current, sr, sc, er - sr + 1, ec - sc + 1)
-                }
-                None => EvalResult::Error("#REF!".to_string()),
-            }
-        }
         _ => return None,
     };
     Some(result)
@@ -907,7 +839,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
 
 /// Materialize a rectangular region into an EvalResult: a scalar for 1x1, else an Array.
-fn range_to_result<L: CellLookup>(
+pub(crate) fn range_to_result<L: CellLookup>(
     lookup: &L,
     sheet: &SheetRef,
     start_row: usize,
@@ -933,51 +865,6 @@ fn range_to_result<L: CellLookup>(
         rows_vec.push(row_vec);
     }
     EvalResult::Array(Array2D::from_vec(rows_vec))
-}
-
-/// Parse a single A1 cell reference like "A1" or "$B$2" into 0-based (row, col).
-fn parse_a1_cell(s: &str) -> Option<(usize, usize)> {
-    let clean: String = s.trim().chars().filter(|c| *c != '$').collect();
-    let bytes = clean.as_bytes();
-    let mut split = 0;
-    while split < bytes.len() && bytes[split].is_ascii_alphabetic() {
-        split += 1;
-    }
-    if split == 0 || split == bytes.len() {
-        return None;
-    }
-    let (col_part, row_part) = clean.split_at(split);
-    if !row_part.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let mut col: usize = 0;
-    for c in col_part.chars() {
-        col = col.checked_mul(26)?.checked_add(c.to_ascii_uppercase() as usize - 'A' as usize + 1)?;
-    }
-    let col = col.checked_sub(1)?;
-    let row = row_part.parse::<usize>().ok()?.checked_sub(1)?;
-    if row >= crate::sheet::NUM_ROWS || col >= crate::sheet::NUM_COLS { return None; }
-    Some((row, col))
-}
-
-/// Parse an A1 reference ("A1" or "A1:B3") into a normalized 0-based
-/// (start_row, start_col, end_row, end_col). Returns None for cross-sheet or malformed refs.
-fn parse_a1_ref(s: &str) -> Option<(usize, usize, usize, usize)> {
-    let s = s.trim();
-    if s.is_empty() || s.contains('!') {
-        return None;
-    }
-    match s.split_once(':') {
-        Some((a, b)) => {
-            let (r1, c1) = parse_a1_cell(a)?;
-            let (r2, c2) = parse_a1_cell(b)?;
-            Some((r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)))
-        }
-        None => {
-            let (r, c) = parse_a1_cell(s)?;
-            Some((r, c, r, c))
-        }
-    }
 }
 
 #[cfg(test)]

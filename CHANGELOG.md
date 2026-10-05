@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Support nested named, cross-sheet and Table references in formula-backed dropdowns and worksheet `INDIRECT`/`OFFSET` expressions. Share reference bounds and geometry checks across both paths.
+- Track runtime reference targets so source edits and retargeting update formulas, downstream cells and spills. Recalculate changed bindings in dependency order and report targets that fail to settle.
+- Preserve formula text when recalculation detects a cycle, allowing formulas to recover after the cycle is fixed. Keep cached cycle diagnostics in the inspector and XLSX import report.
+
 - Resolve formula-backed validation dropdowns from dynamic ranges, names and Table columns, including `OFFSET`, A1 `INDIRECT`, `IF`, `CHOOSE`, `INDEX` and supported one-dimensional array results. Formula sources retain commas and imported relative-reference origins through editing and file round trips.
 - Full-workbook JSON now preserves named ranges and descriptions, fixing named formulas and dropdown sources after reopening. Files containing names use JSON v5; older readers reject that version instead of silently losing definitions. Name-free exports keep their existing version.
 - Report broken dropdown sources instead of silently treating them as permissive empty lists. Include spilled source values, track source errors/truncation and snapshot dropdown choices until the captured workbook state changes, avoiding formula evaluation on every render. Bound temporary validation arrays before allocation while retaining sparse whole-column reference lists.
