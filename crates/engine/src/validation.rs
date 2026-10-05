@@ -16,6 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+mod edit;
+pub use edit::{ValidationEdit, ValidationPatch};
+
 /// Maximum number of items in a resolved list. Prevents UI freeze on huge ranges.
 pub const MAX_LIST_ITEMS: usize = 10_000;
 
@@ -707,7 +710,7 @@ impl Ord for CellRange {
 /// Cells can be excluded from validation entirely. Exclusions take precedence
 /// over all rules - if a cell is in an exclusion range, no validation applies.
 /// This enables "apply rule to column except these rows" workflows.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ValidationStore {
     /// Map from cell range to validation rule.
     rules: BTreeMap<CellRange, ValidationRule>,

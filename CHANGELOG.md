@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Full-fidelity JSON now retains data-validation exclusions, including on sheets with no current rules. Invalid validation ranges, duplicate rule ranges and excessive range counts are refused on import. Older readers may drop exclusions on re-save.
+
 - Create, rename, delete and describe named ranges while Table sorting/filtering is active, with atomic recalculation and undo/redo/rewind. Rename updates references on every sheet, including hidden records, calculated-column rules, dormant totals, conditional formatting and validation. Formula strings and unrelated tokens retain their original text.
 - Native files now retain data-validation rules and exclusions. Missing metadata remains compatible; corrupt, oversized or future validation metadata opens read-only. Older releases can still drop these rules on re-save.
 - Named-range dialogs capture their worksheet targets and refuse stale previews. Impact previews include all sheets and Table rules; Names-panel, F12 and palette navigation resolve the target sheet and visible records instead of treating stored rows as screen positions.

@@ -52,6 +52,65 @@ mod tests {
     use visigrid_engine::sheet::SheetId;
 
     #[test]
+    fn full_json_preserves_validation_exclusions_after_exact_range_edits() {
+        use visigrid_engine::{validation::{CellRange, ValidationEdit, ValidationRule}, workbook::Workbook};
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
+        let store = &mut wb.active_sheet_mut().validations;
+        store.set(CellRange::new(0, 0, 20, 0), ValidationRule::list_inline(vec!["Yes".into(), "No".into()]));
+        store.exclude(CellRange::new(3, 0, 9, 0));
+        let patch = store.plan_edit(&[CellRange::single(5, 0)], ValidationEdit::ClearExclusions, 30, 10).unwrap();
+        patch.apply(store, true).unwrap();
+        for json in [export_full(wb.active_sheet()).unwrap(), export_workbook(&wb, &[], 0).unwrap()] {
+            assert!(json.contains("validation_exclusions"));
+            let mut loaded = import_any(&json).unwrap().0;
+            assert_eq!(loaded.active_sheet().validations, wb.active_sheet().validations);
+            assert!(loaded.active_sheet().validations.get(4, 0).is_none());
+            assert!(loaded.active_sheet().validations.get(5, 0).is_some());
+            assert!(loaded.active_sheet().validations.get(6, 0).is_none());
+            patch.apply(&mut loaded.active_sheet_mut().validations, false).unwrap();
+            assert!(loaded.active_sheet().validations.get(5, 0).is_none());
+        }
+        // Exclusions are meaningful metadata even if there are currently no rules.
+        wb.active_sheet_mut().validations.clear();
+        let json = export_full(wb.active_sheet()).unwrap();
+        assert!(!json.contains("\"validations\""));
+        assert_eq!(import_any(&json).unwrap().0.active_sheet().validations, wb.active_sheet().validations);
+        let empty = export_full(&Sheet::new(SheetId(1), 30, 10)).unwrap();
+        assert!(!empty.contains("validation_exclusions"));
+        assert!(import_any(&empty).unwrap().0.active_sheet().validations.exclusions_is_empty());
+    }
+
+    #[test]
+    fn full_json_rejects_invalid_validation_ranges_and_duplicate_rules() {
+        use visigrid_engine::validation::{CellRange, ValidationRule};
+        let blank = serde_json::json!({"format":"visigrid-json", "version":1, "cells":[]});
+        for range in [
+            CellRange::single(visigrid_engine::sheet::NUM_ROWS, 0),
+            CellRange::single(0, visigrid_engine::sheet::NUM_COLS),
+            CellRange { start_row: 5, end_row: 1, start_col: 0, end_col: 0 },
+            CellRange { start_row: 0, end_row: 1, start_col: 2, end_col: 0 },
+        ] {
+            for excluded in [false, true] {
+                let mut doc = blank.clone();
+                if excluded {
+                    doc["validation_exclusions"] = serde_json::json!([range]);
+                } else {
+                    doc["validations"] = serde_json::json!([{"range":range, "rule":ValidationRule::list_inline(vec!["Y".into()])}]);
+                }
+                let error = import_any(&doc.to_string()).err().unwrap();
+                assert!(error.contains("validation range"), "{error}");
+            }
+        }
+        let mut doc = blank.clone();
+        let entry = serde_json::json!({"range":CellRange::single(0,0), "rule":ValidationRule::list_inline(vec!["Y".into()])});
+        doc["validations"] = serde_json::json!([entry, entry]);
+        assert!(import_any(&doc.to_string()).err().unwrap().contains("duplicate"));
+        doc = blank;
+        doc["validation_exclusions"] = serde_json::json!(vec![CellRange::single(0, 0); 100_001]);
+        assert!(import_any(&doc.to_string()).err().unwrap().contains("range limit"));
+    }
+
+    #[test]
     fn full_json_freeze_state_uses_engine_defaults_and_explicit_host_overrides() {
         let mut wb = visigrid_engine::workbook::Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
         wb.active_sheet_mut().frozen_panes = (5, 2);
@@ -475,6 +534,9 @@ struct SheetBody {
     cond_formats: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     validations: Vec<ValidationSpec>,
+    /// Explicit opt-outs from validation; exclusions take precedence over rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    validation_exclusions: Vec<visigrid_engine::validation::CellRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     filter: Option<FilterSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -856,6 +918,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
             .iter()
             .map(|(range, rule)| ValidationSpec { range: *range, rule: rule.clone() })
             .collect(),
+        validation_exclusions: sheet.validations.exclusions_iter().copied().collect(),
         filter: layout.filter.clone(),
         charts: layout.charts.clone(),
         pivots: None,
@@ -1189,8 +1252,25 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         store.reparse_all();
         sheet.cond_formats = store;
     }
+    if body.validations.len().saturating_add(body.validation_exclusions.len()) > 100_000 {
+        return Err("Validation metadata exceeds the supported range limit.".into());
+    }
+    for range in body.validations.iter().map(|v| &v.range).chain(&body.validation_exclusions) {
+        if range.start_row > range.end_row || range.start_col > range.end_col
+            || range.end_row >= sheet.rows || range.end_col >= sheet.cols
+        {
+            return Err("A validation range is outside the worksheet.".into());
+        }
+    }
+    let mut validation_ranges = BTreeSet::new();
     for v in &body.validations {
+        if !validation_ranges.insert(v.range) {
+            return Err("Validation metadata contains duplicate rule ranges.".into());
+        }
         sheet.validations.set(v.range, v.rule.clone());
+    }
+    for range in &body.validation_exclusions {
+        sheet.validations.exclude(*range);
     }
 
     sheet.set_manual_hidden_rows(body.hidden_rows.iter().copied().collect())?;
