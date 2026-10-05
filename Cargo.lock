@@ -8147,6 +8147,7 @@ dependencies = [
  "dirs 5.0.1",
  "encoding_rs",
  "libduckdb-sys",
+ "miniz_oxide",
  "parquet",
  "quick-xml 0.38.4",
  "regex",
