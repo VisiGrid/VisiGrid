@@ -9,6 +9,7 @@
 ### Import recipes
 
 - **VisiBooks reports as a source.** A recipe can read the trial balance, general ledger, or AR/AP aging of a VisiBooks entity into a Table that Refresh updates, with dates that move with the calendar (last month end, year start). The read-only API key is saved in the system keychain for one server with `vgrid visibooks key`, never in the recipe or workbook; `vgrid visibooks entities` lists what it can read. Run **New Recipe from VisiBooks…**. ([#118](https://github.com/VisiGrid/VisiGrid/pull/118))
+- **Merge step.** Join the rows so far with another recipe's result on key columns (left, inner, full, or only the rows with no match), like Merge Queries or a VLOOKUP over a whole column. Keys compare as their columns are typed, a key twice in the other table fails the run instead of multiplying rows, and every run counts what matched. In the builder: **Merge with a recipe**. ([#119](https://github.com/VisiGrid/VisiGrid/pull/119))
 
 ## 0.49.2
 
