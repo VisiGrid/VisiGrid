@@ -641,31 +641,17 @@ fn parse_list_source(formula1: &str) -> Option<ListSource> {
         return None;
     }
 
-    // Inline list: starts and ends with quotes, comma-separated
-    // e.g., "Yes,No,Maybe" or "\"Yes\",\"No\""
-    if formula1.starts_with('"') && formula1.ends_with('"') {
-        if formula1.len() < 2 {
-            return None;
-        }
-        let inner = &formula1[1..formula1.len() - 1];
-        let items: Vec<String> = inner.split(',').map(|s| s.replace("\"\"", "\"")).collect();
-        return Some(ListSource::Inline(items));
+    // Parse the expression instead of guessing from punctuation. A formula
+    // with commas is a formula source, and a Table name is resolved at runtime.
+    let expr = visigrid_engine::formula::parser::parse(&format!("={}", formula1.trim_start_matches('='))).ok()?;
+    match expr {
+        // Only a complete string literal is an inline list. An expression
+        // like "Red"&"Blue" must remain a formula, even though it starts and
+        // ends with quotes. The parser has already decoded doubled quotes.
+        visigrid_engine::formula::parser::Expr::Text(text) => Some(ListSource::Inline(text.split(',').map(str::to_owned).collect())),
+        visigrid_engine::formula::parser::Expr::NamedRange(_) => Some(ListSource::NamedRange(formula1.trim_start_matches('=').to_string())),
+        _ => Some(ListSource::Range(format!("={}", formula1.trim_start_matches('=')))),
     }
-
-    // Range reference: contains $ or : or !
-    // e.g., $A$1:$A$10, Sheet2!$B$1:$B$20
-    if parse_cell_ref(formula1).is_some()
-        || formula1.contains('$')
-        || formula1.contains(':')
-        || formula1.contains('!')
-    {
-        // Prepend = for VisiGrid's Range format
-        return Some(ListSource::Range(format!("={}", formula1)));
-    }
-
-    // Named range: simple identifier
-    // e.g., StatusOptions
-    Some(ListSource::NamedRange(formula1.to_string()))
 }
 
 /// Parse numeric constraint from attributes and formulas

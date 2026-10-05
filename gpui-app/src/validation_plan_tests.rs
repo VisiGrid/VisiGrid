@@ -617,3 +617,27 @@ fn visible_failure_navigation_uses_display_order_and_skips_hidden_cells() {
     .unwrap();
     assert_eq!(last.0, 3);
 }
+
+#[test]
+fn formula_list_editor_preserves_commas_and_table_sources() {
+    let mut state = ValidationDialogState::default();
+    state.validation_type = ValidationTypeOption::List;
+    for source in [
+        "=OFFSET(A1,0,0,3,1)",
+        "=IF(B1=1,A1:A3,C1:C3)",
+        "=INDIRECT(B1)",
+        "Sales[Region]",
+    ] {
+        state.list_source = source.into();
+        let rule = state.build_rule().unwrap().unwrap();
+        assert_eq!(
+            rule.rule_type,
+            ValidationType::List(ListSource::Range(source.into()))
+        );
+    }
+    state.list_source = "Yes,No".into();
+    assert_eq!(
+        state.build_rule().unwrap().unwrap().rule_type,
+        ValidationType::List(ListSource::Inline(vec!["Yes".into(), "No".into()]))
+    );
+}

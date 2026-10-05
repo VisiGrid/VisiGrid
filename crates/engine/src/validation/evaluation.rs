@@ -126,7 +126,13 @@ pub(crate) fn validate_rule(
         }
         ValidationType::List(source) => {
             let list = list(source);
-            return if list.items.is_empty() || list.contains(list_text.trim()) {
+            if let Some(error) = &list.source_error {
+                return invalid(rule, format!("Validation list source error: {error}"));
+            }
+            return if list.items.is_empty()
+                || list.contains(list_text.trim())
+                || matches!(value, Value::Number(_)) && list.contains(&value.to_text())
+            {
                 ValidationResult::Valid
             } else {
                 let preview: Vec<_> = list.items.iter().take(5).map(String::as_str).collect();

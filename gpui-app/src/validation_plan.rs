@@ -29,6 +29,7 @@ pub(crate) struct DropdownTarget {
     pub sheet_id: SheetId,
     pub revision: u64,
     pub cell: (usize, usize),
+    source_generations: Vec<(SheetId, u64)>,
 }
 impl DropdownTarget {
     pub fn capture(
@@ -40,6 +41,11 @@ impl DropdownTarget {
             sheet_id: wb.active_sheet_id(),
             revision: wb.revision(),
             cell: (rows.view_to_data(view.0), view.1),
+            source_generations: wb
+                .sheets()
+                .iter()
+                .map(|s| (s.id, s.edit_generation()))
+                .collect(),
         }
     }
     pub fn is_current(
@@ -50,6 +56,11 @@ impl DropdownTarget {
     ) -> bool {
         self.sheet_id == wb.active_sheet_id()
             && self.revision == wb.revision()
+            && self
+                .source_generations
+                .iter()
+                .copied()
+                .eq(wb.sheets().iter().map(|s| (s.id, s.edit_generation())))
             && rows.data_to_view(self.cell.0) == Some(selected.0)
             && self.cell.1 == selected.1
             && !wb

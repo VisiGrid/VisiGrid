@@ -879,8 +879,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 },
                 None => base_w,
             };
-            let new_row = base_row as i64 + rows_off;
-            let new_col = base_col as i64 + cols_off;
+            let Some(new_row) = (base_row as i64).checked_add(rows_off) else { return Some(EvalResult::Error("#REF!".into())); };
+            let Some(new_col) = (base_col as i64).checked_add(cols_off) else { return Some(EvalResult::Error("#REF!".into())); };
             if new_row < 0 || new_col < 0 {
                 return Some(EvalResult::Error("#REF!".to_string()));
             }
@@ -915,12 +915,15 @@ fn range_to_result<L: CellLookup>(
     height: usize,
     width: usize,
 ) -> EvalResult {
-    if height == 0 || width == 0 {
+    if height == 0 || width == 0
+        || start_row.checked_add(height).is_none_or(|end| end > crate::sheet::NUM_ROWS)
+        || start_col.checked_add(width).is_none_or(|end| end > crate::sheet::NUM_COLS) {
         return EvalResult::Error("#REF!".to_string());
     }
     if height == 1 && width == 1 {
         return EvalResult::from_value(&read_cell_value(lookup, sheet, start_row, start_col));
     }
+    if let Err(error) = super::eval_budget::array(height, width) { return EvalResult::Error(error); }
     let mut rows_vec: Vec<Vec<Value>> = Vec::with_capacity(height);
     for r in 0..height {
         let mut row_vec = Vec::with_capacity(width);
@@ -949,10 +952,11 @@ fn parse_a1_cell(s: &str) -> Option<(usize, usize)> {
     }
     let mut col: usize = 0;
     for c in col_part.chars() {
-        col = col * 26 + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
+        col = col.checked_mul(26)?.checked_add(c.to_ascii_uppercase() as usize - 'A' as usize + 1)?;
     }
     let col = col.checked_sub(1)?;
     let row = row_part.parse::<usize>().ok()?.checked_sub(1)?;
+    if row >= crate::sheet::NUM_ROWS || col >= crate::sheet::NUM_COLS { return None; }
     Some((row, col))
 }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Resolve formula-backed validation dropdowns from dynamic ranges, names and Table columns, including `OFFSET`, A1 `INDIRECT`, `IF`, `CHOOSE`, `INDEX` and supported one-dimensional array results. Formula sources retain commas and imported relative-reference origins through editing and file round trips.
+- Full-workbook JSON now preserves named ranges and descriptions, fixing named formulas and dropdown sources after reopening. Files containing names use JSON v5; older readers reject that version instead of silently losing definitions. Name-free exports keep their existing version.
+- Report broken dropdown sources instead of silently treating them as permissive empty lists. Include spilled source values, track source errors/truncation and snapshot dropdown choices until the captured workbook state changes, avoiding formula evaluation on every render. Bound temporary validation arrays before allocation while retaining sparse whole-column reference lists.
+
 - Evaluate date/time validation, custom formulas and formula-based numeric/text-length bounds with target-cell, named-range, cross-sheet and structured-reference context. Formula errors and non-scalar results are reported instead of silently passing.
 - Check existing cells and bounds using typed values, fixing validation of formatted percentages, dates and rounded numbers. Proposed-input checks privately recalculate dependent formulas and spills; desktop marker refresh avoids per-cell workbook copies. Validation remains advisory, and host custom functions are not executed by these checks.
 

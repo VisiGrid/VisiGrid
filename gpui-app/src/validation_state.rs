@@ -532,7 +532,7 @@ impl ValidationDialogState {
                     if source.is_empty() && original_source.is_none() { return Err("List source is required".into()); }
                     let unchanged_source = original_source.is_some();
                     let source = original_source.unwrap_or_else(|| {
-                        if source.contains('!') || source.contains(':') {
+                        if source.starts_with('=') || source.contains('!') || source.contains(':') || source.contains('[') {
                             ListSource::Range(source.into())
                         } else if source.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && !source.contains(',') {
                             ListSource::NamedRange(source.into())

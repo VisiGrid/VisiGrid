@@ -593,3 +593,74 @@ fn imported_date_time_and_custom_formulas_are_evaluated_after_xlsx_roundtrip() {
         assert!(book.validate_cell_input(0, 2, 4, "0.101").is_invalid());
     }
 }
+
+#[test]
+fn formula_list_sources_keep_anchors_and_choices_through_all_file_formats() {
+    use visigrid_engine::workbook::Workbook;
+    let xml = r#"<worksheet><dataValidations>
+      <dataValidation type="list" sqref="C2:C3"><formula1>OFFSET($A$2,B2-1,0,1,1)</formula1></dataValidation>
+      <dataValidation type="list" sqref="D2"><formula1>INDIRECT("Colors")</formula1></dataValidation>
+      <dataValidation type="list" sqref="E2"><formula1>SORT(UNIQUE($A$2:$A$3))</formula1></dataValidation>
+    </dataValidations></worksheet>"#;
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 1, 0, "Red");
+    wb.set_cell_value_tracked(0, 2, 0, "Green");
+    wb.set_cell_value_tracked(0, 1, 1, "1");
+    wb.set_cell_value_tracked(0, 2, 1, "2");
+    wb.define_name_for_range("Colors", 0, 1, 0, 2, 0).unwrap();
+    for entry in parse_validations_from_xml(xml).unwrap() {
+        assert!(matches!(
+            &entry.rule.rule_type,
+            ValidationType::List(ListSource::Range(_))
+        ));
+        assert!(entry.rule.reference_origin.is_some());
+        wb.sheet_mut(0)
+            .unwrap()
+            .validations
+            .set(entry.range, entry.rule);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("formula-lists.xlsx");
+    let report = crate::xlsx::export(&wb, &path, None).unwrap();
+    assert_eq!(
+        (report.validations_exported, report.validations_skipped),
+        (3, 0)
+    );
+    let (loaded, _) = crate::xlsx::import(&path).unwrap();
+    let native_path = dir.path().join("formula-lists.sheet");
+    crate::native::save_workbook(&wb, &native_path).unwrap();
+    let native = crate::native::load_workbook(&native_path).unwrap();
+    let json = crate::json::export_workbook(&wb, &[], 0).unwrap();
+    let json = crate::json::import_any(&json).unwrap().0;
+    for (format, book) in [("original", &wb), ("xlsx", &loaded), ("native", &native), ("json", &json)] {
+        for (r, c, choices) in [
+            (1, 2, vec!["Red"]),
+            (2, 2, vec!["Green"]),
+            (1, 3, vec!["Red", "Green"]),
+            (1, 4, vec!["Green", "Red"]),
+        ] {
+            let list = book.get_list_items(0, r, c).unwrap();
+            assert_eq!(list.items, choices, "{format} {r},{c}: {:?}", list.source_error);
+            assert!(list.source_error.is_none());
+        }
+        assert!(book.validate_cell_input(0, 2, 2, "Green").is_valid());
+        assert!(book.validate_cell_input(0, 2, 2, "Red").is_invalid());
+    }
+}
+
+#[test]
+fn quoted_list_expressions_are_not_mistaken_for_inline_lists() {
+    assert_eq!(
+        parse_list_source("\"Red\"&\"Blue\""),
+        Some(ListSource::Range("=\"Red\"&\"Blue\"".into()))
+    );
+    assert_eq!(
+        parse_list_source("\"Red, Blue,\"\"Quoted\"\"\""),
+        Some(ListSource::Inline(vec![
+            "Red".into(),
+            " Blue".into(),
+            "\"Quoted\"".into()
+        ]))
+    );
+    assert!(parse_list_source("\"unterminated").is_none());
+}

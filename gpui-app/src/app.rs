@@ -1811,6 +1811,11 @@ impl Spreadsheet {
         // Priority 1: Check for list validation
         let resolved = self.wb(cx).get_list_items(sheet_index, target.cell.0, col);
         match resolved {
+            Some(list) if list.source_error.is_some() => {
+                self.status_message = Some(format!("Validation list source error: {}", list.source_error.unwrap()));
+                cx.notify();
+                return;
+            }
             Some(list) if !list.items.is_empty() => {
                 // Open validation dropdown
                 self.validation_dropdown = ValidationDropdownState::open(
@@ -1848,8 +1853,8 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Check if the validation dropdown source has changed (fingerprint mismatch).
-    /// Call this during render or update cycle to detect stale data.
+    /// Keep the captured choices while the workbook and source generations are
+    /// unchanged. Do not re-evaluate formula sources on every render.
     pub fn check_dropdown_staleness(&mut self, cx: &mut Context<Self>) {
         use crate::validation_dropdown::DropdownCloseReason;
 
@@ -1863,19 +1868,6 @@ impl Spreadsheet {
         };
         if !target.is_current(self.wb(cx), &self.row_view, self.view_state.selected) || self.is_col_hidden(target.cell.1) {
             self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
-        }
-        let (row, col) = target.cell;
-        let stored_fingerprint = open_state.source_fingerprint;
-        let sheet_index = self.sheet_index(cx);
-
-        // Get current fingerprint from source
-        if let Some(current_list) = self.wb(cx).get_list_items(sheet_index, row, col) {
-            if current_list.source_fingerprint != stored_fingerprint {
-                self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
-            }
-        } else {
-            // Source no longer exists - close dropdown
-            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
         }
     }
 

@@ -215,6 +215,7 @@ fn per_element(values: &[EvalResult], f: impl Fn(&[Value]) -> EvalResult) -> Eva
         dims.iter().map(pick).fold(1, |acc, d| if acc == 1 { d } else if d == 1 { acc } else { acc.max(d) })
     };
     let (rows, cols) = (size(|d| d.0), size(|d| d.1));
+    if let Err(error) = super::eval_budget::array(rows, cols) { return EvalResult::Error(error); }
     let mut out = Array2D::new(rows, cols);
     for r in 0..rows {
         for c in 0..cols {

@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 mod edit;
 pub(crate) mod evaluation;
 mod references;
-pub(crate) use references::parse_list_range;
+pub(crate) mod list_source;
 pub use edit::{ValidationEdit, ValidationPatch};
 
 /// Maximum number of items in a resolved list. Prevents UI freeze on huge ranges.
@@ -268,7 +268,7 @@ impl From<i64> for ConstraintValue {
 pub enum ListSource {
     /// Inline list of allowed values.
     Inline(Vec<String>),
-    /// Range reference (e.g., "=A1:A10" or "=Sheet2!B1:B20").
+    /// Range or formula source (e.g., "=A1:A10" or "=OFFSET(A1,0,0,5)").
     Range(String),
     /// Named range (e.g., "StatusOptions").
     NamedRange(String),
@@ -575,6 +575,8 @@ pub struct ResolvedList {
     /// Fingerprint of the source data. Changes when source cells change.
     /// Used to detect stale dropdowns.
     pub source_fingerprint: u64,
+    /// A broken source is distinct from a valid range containing no choices.
+    pub source_error: Option<String>,
 }
 
 impl ResolvedList {
@@ -592,12 +594,13 @@ impl ResolvedList {
             items.truncate(MAX_LIST_ITEMS);
         }
 
-        let source_fingerprint = Self::compute_fingerprint(&items);
+        let source_fingerprint = Self::compute_fingerprint(&items, is_truncated);
 
         Self {
             items,
             is_truncated,
             source_fingerprint,
+            source_error: None,
         }
     }
 
@@ -607,13 +610,21 @@ impl ResolvedList {
             items: Vec::new(),
             is_truncated: false,
             source_fingerprint: 0,
+            source_error: None,
         }
     }
 
-    /// Compute a fingerprint for the list items.
-    fn compute_fingerprint(items: &[String]) -> u64 {
+    pub fn failed(error: impl Into<String>) -> Self {
+        let error = error.into();
         let mut hasher = DefaultHasher::new();
-        items.hash(&mut hasher);
+        ("source error", &error).hash(&mut hasher);
+        Self { items: Vec::new(), is_truncated: false, source_fingerprint: hasher.finish(), source_error: Some(error) }
+    }
+
+    /// Compute a fingerprint for the list items.
+    fn compute_fingerprint(items: &[String], truncated: bool) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (items, truncated).hash(&mut hasher);
         hasher.finish()
     }
 

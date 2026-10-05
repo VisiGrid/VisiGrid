@@ -635,72 +635,11 @@ impl Workbook {
     /// Returns None if the cell has no validation or non-list validation.
     pub fn get_list_items(&self, sheet_index: usize, row: usize, col: usize) -> Option<crate::validation::ResolvedList> {
         use crate::validation::{ValidationType, ListSource, ResolvedList};
-
-        let sheet = self.sheets.get(sheet_index)?;
-        let rule = sheet.validations.get(row, col)?;
-        let resolved_rule = rule.at(row, col);
-        let rule = resolved_rule.as_ref();
-
+        let rule = self.sheets.get(sheet_index)?.validations.get(row, col)?.at(row, col);
         match &rule.rule_type {
-            ValidationType::List(source) => {
-                match source {
-                    ListSource::Inline(values) => {
-                        Some(ResolvedList::from_items(values.clone()))
-                    }
-                    ListSource::Range(range_str) => {
-                        // Parse range string, may include sheet reference
-                        let range_str = range_str.trim_start_matches('=').trim();
-                        Some(self.resolve_range_to_list(sheet_index, range_str))
-                    }
-                    ListSource::NamedRange(name) => {
-                        // Strip leading = if present (UI accepts both forms)
-                        let name = name.trim_start_matches('=');
-                        Some(self.resolve_named_range_to_list(name))
-                    }
-                }
-            }
+            ValidationType::List(ListSource::Inline(values)) => Some(ResolvedList::from_items(values.clone())),
+            ValidationType::List(ListSource::Range(source) | ListSource::NamedRange(source)) => Some(self.resolve_validation_list(sheet_index, row, col, source)),
             _ => None,
-        }
-    }
-
-    /// Resolve a range string (possibly with sheet reference) to list items.
-    fn resolve_range_to_list(&self, current_sheet: usize, range_str: &str) -> crate::validation::ResolvedList {
-        use crate::validation::ResolvedList;
-        let Some((target, range)) = crate::validation::parse_list_range(range_str) else { return ResolvedList::empty(); };
-        let index = match target {
-            crate::sheet::UnboundSheetRef::Current => Some(current_sheet),
-            crate::sheet::UnboundSheetRef::Named(name) => self.sheets.iter().position(|s| s.name.eq_ignore_ascii_case(&name)),
-        };
-        index.and_then(|i| self.sheets.get(i)).map(|s| s.resolve_list_cells(&range)).unwrap_or_else(ResolvedList::empty)
-    }
-
-    /// Resolve a named range to list items.
-    fn resolve_named_range_to_list(&self, name: &str) -> crate::validation::ResolvedList {
-        use crate::validation::ResolvedList;
-        use crate::named_range::NamedRangeTarget;
-
-        let named_range = match self.named_ranges.get(name) {
-            Some(nr) => nr,
-            None => return ResolvedList::empty(),
-        };
-
-        match &named_range.target {
-            NamedRangeTarget::Cell { sheet, row, col } => {
-                if let Some(s) = self.sheets.get(*sheet) {
-                    let display = s.get_display(*row, *col);
-                    if display.is_empty() {
-                        return ResolvedList::empty();
-                    }
-                    return ResolvedList::from_items(vec![display]);
-                }
-                ResolvedList::empty()
-            }
-            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-                if let Some(s) = self.sheets.get(*sheet) {
-                    return s.resolve_list_cells(&crate::validation::CellRange::new(*start_row,*start_col,*end_row,*end_col));
-                }
-                ResolvedList::empty()
-            }
         }
     }
 

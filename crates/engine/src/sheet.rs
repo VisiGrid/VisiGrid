@@ -2486,7 +2486,7 @@ impl Sheet {
             return workbook.validate_cell_input(0, row, col, value);
         }
         validate_rule(&rule, &typed, value, |source| self.validation_formula(row, col, source),
-            |source| self.resolve_list_source(source))
+            |source| self.resolve_list_source_at(row, col, source))
     }
 
     /// Validate the current typed value, without copying or mutating the sheet.
@@ -2494,50 +2494,43 @@ impl Sheet {
         let Some(rule) = self.validations.get(row, col) else { return super::validation::ValidationResult::Valid; };
         crate::validation::evaluation::validate_rule(&rule.at(row, col), &self.get_computed_value(row, col),
             &self.get_display(row, col), |source| self.validation_formula(row, col, source),
-            |source| self.resolve_list_source(source))
+            |source| self.resolve_list_source_at(row, col, source))
     }
 
     fn validation_formula(&self, row: usize, col: usize, source: &str) -> crate::formula::eval::EvalResult {
         use crate::formula::{eval::{evaluate, EvalResult, LookupWithContext}, parser::{parse, bind_expr_same_sheet}};
         let formula = format!("={}", source.trim().trim_start_matches('='));
-        match parse(&formula) {
+        crate::formula::eval_budget::validation(|| match parse(&formula) {
             Ok(expr) => evaluate(&bind_expr_same_sheet(&expr), &LookupWithContext::new(self, row, col)),
             Err(error) => EvalResult::Error(error),
-        }
+        })
     }
 
     /// Resolve a list source to its items.
     ///
     /// Returns a ResolvedList with normalized items (trimmed whitespace).
     /// For range sources, reads cell values. For named ranges, looks up the range first.
-    fn resolve_list_source(&self, source: &super::validation::ListSource) -> super::validation::ResolvedList {
+    fn resolve_list_source_at(&self, row: usize, col: usize, source: &super::validation::ListSource) -> super::validation::ResolvedList {
         use super::validation::{ListSource, ResolvedList};
-
         match source {
-            ListSource::Inline(values) => {
-                ResolvedList::from_items(values.clone())
-            }
-            ListSource::Range(range_str) => {
-                // Parse range string like "A1:A10" or "=A1:A10"
-                let range_str = range_str.trim_start_matches('=').trim();
-                self.resolve_range_to_list(range_str)
-            }
-            ListSource::NamedRange(_name) => {
-                // Named range resolution requires workbook context
-                // This method is called from Sheet, which doesn't have workbook access
-                // The workbook-level method will handle this
-                ResolvedList::empty()
-            }
+            ListSource::Inline(values) => ResolvedList::from_items(values.clone()),
+            ListSource::Range(source) | ListSource::NamedRange(source) => self.resolve_validation_list_at(row, col, source),
         }
     }
 
-    /// Resolve a range string like "A1:A10" to a list of cell values.
-    pub fn resolve_range_to_list(&self, range_str: &str) -> super::validation::ResolvedList {
-        use super::validation::ResolvedList;
-        match super::validation::parse_list_range(range_str) {
-            Some((UnboundSheetRef::Current, range)) => self.resolve_list_cells(&range),
-            _ => ResolvedList::empty(),
-        }
+    /// Resolve a range/formula source without workbook name/cross-sheet context.
+    pub fn resolve_range_to_list(&self, source: &str) -> super::validation::ResolvedList {
+        self.resolve_validation_list_at(0, 0, source)
+    }
+
+    fn resolve_validation_list_at(&self, row: usize, col: usize, source: &str) -> super::validation::ResolvedList {
+        use crate::formula::{eval::LookupWithContext, parser::{parse, bind_expr_same_sheet}};
+        crate::validation::list_source::resolve(source, &LookupWithContext::new(self, row, col),
+            |source| parse(&format!("={}", source.trim().trim_start_matches('='))).map(|expr| bind_expr_same_sheet(&expr)),
+            |target, range| match target {
+                SheetRef::Current => self.resolve_list_cells(range),
+                _ => super::validation::ResolvedList::failed("#REF! List source requires workbook context"),
+            })
     }
 
     pub(crate) fn resolve_list_cells(&self, range: &super::validation::CellRange) -> super::validation::ResolvedList {
@@ -2545,9 +2538,12 @@ impl Sheet {
         // Read occupied cells in worksheet order; never enumerate a whole grid
         // for an imported whole-column or otherwise mostly-empty list source.
         let mut positions = self.cells_in_range(range.start_row, range.end_row, range.start_col, range.end_col);
+        positions.extend(self.spill_values.keys().copied().filter(|&(r,c)| range.contains(r,c)));
         positions.sort_unstable();
+        positions.dedup();
         let mut items = Vec::new();
         for (r,c) in positions {
+            if let Value::Error(error) = self.get_computed_value(r,c) { return ResolvedList::failed(error); }
             let display = self.get_display(r,c);
             if !display.is_empty() {
                 items.push(display);
@@ -2571,7 +2567,7 @@ impl Sheet {
 
         match &rule.rule_type {
             ValidationType::List(source) => {
-                Some(self.resolve_list_source(source))
+                Some(self.resolve_list_source_at(row, col, source))
             }
             _ => None,
         }

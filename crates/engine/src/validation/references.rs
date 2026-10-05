@@ -1,45 +1,6 @@
 use super::{ConstraintValue, ListSource, ValidationRule, ValidationType};
 use std::borrow::Cow;
 
-pub(crate) fn parse_list_range(
-    source: &str,
-) -> Option<(crate::sheet::UnboundSheetRef, super::CellRange)> {
-    use crate::formula::parser::{parse, Expr, RangeAxis};
-    use crate::sheet::{NUM_COLS, NUM_ROWS};
-    let formula = format!("={}", source.trim().trim_start_matches('='));
-    let (sheet, range) = match parse(&formula).ok()? {
-        Expr::CellRef {
-            sheet, row, col, ..
-        } => (sheet, super::CellRange::single(row, col)),
-        Expr::Range {
-            sheet,
-            start_row,
-            start_col,
-            end_row,
-            end_col,
-            ..
-        } => (
-            sheet,
-            super::CellRange::new(start_row, start_col, end_row, end_col),
-        ),
-        Expr::WholeRange {
-            sheet,
-            axis,
-            start,
-            end,
-            ..
-        } => (
-            sheet,
-            match axis {
-                RangeAxis::Row => super::CellRange::new(start, 0, end, NUM_COLS - 1),
-                RangeAxis::Column => super::CellRange::new(0, start, NUM_ROWS - 1, end),
-            },
-        ),
-        _ => return None,
-    };
-    Some((sheet, range))
-}
-
 impl ValidationRule {
     /// Formula-backed imports need a source position even when every A1
     /// component is absolute: those addresses still follow structural edits.

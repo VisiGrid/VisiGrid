@@ -47,7 +47,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
             let found: Vec<String> = match mode {
                 0 => re.find(&text).map(|m| m.as_str().to_string()).into_iter().collect(),
-                1 => re.find_iter(&text).map(|m| m.as_str().to_string()).collect(),
+                1 => re.find_iter(&text).take(super::eval_budget::max_array_cells().saturating_add(1)).map(|m| m.as_str().to_string()).collect(),
                 _ => match re.captures(&text) {
                     // A pattern without groups returns the whole match, as Excel does.
                     Some(c) if c.len() == 1 => vec![c[0].to_string()],
@@ -59,6 +59,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 0 => EvalResult::Error("#N/A".to_string()),
                 1 if mode == 0 => EvalResult::Text(found.into_iter().next().unwrap()),
                 n => {
+                    if let Err(error) = super::eval_budget::array(1, n) { return Some(EvalResult::Error(error)); }
                     let mut row = Array2D::new(1, n);
                     for (i, s) in found.into_iter().enumerate() {
                         row.set(0, i, Value::Text(s));

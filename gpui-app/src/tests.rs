@@ -4295,3 +4295,23 @@ fn grid_size_has_a_single_definition() {
     assert_eq!(crate::app::NUM_ROWS, visigrid_engine::sheet::NUM_ROWS);
     assert_eq!(crate::app::NUM_COLS, visigrid_engine::sheet::NUM_COLS);
 }
+
+#[test]
+fn dropdown_snapshot_detects_untracked_source_writes_on_other_sheets() {
+    let mut wb = crate::table_edit::tests::fixture(true);
+    let other = wb.add_sheet_named("Options").unwrap();
+    let view = wb
+        .active_sheet()
+        .build_saved_table_view(30)
+        .unwrap()
+        .unwrap();
+    let selected = (view.rows().data_to_view(5).unwrap(), 2);
+    let target = crate::validation_ui::plan::DropdownTarget::capture(&wb, view.rows(), selected);
+    assert!(target.is_current(&wb, view.rows(), selected));
+    let revision = wb.revision();
+    // Deliberately bypass tracking in this non-live fixture: the snapshot
+    // must still detect a source value generation change without a revision.
+    wb.sheet_mut(other).unwrap().set_value(0, 0, "new choice");
+    assert_eq!(wb.revision(), revision);
+    assert!(!target.is_current(&wb, view.rows(), selected));
+}

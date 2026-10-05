@@ -17,13 +17,13 @@ impl Workbook {
             return EvalResult::Error("#REF!".into());
         };
         let formula = format!("={}", source.trim().trim_start_matches('='));
-        match parse(&formula) {
+        crate::formula::eval_budget::validation(|| match parse(&formula) {
             Ok(expr) => evaluate(
                 &bind_expr(&expr, |name| self.sheet_id_by_name(name)),
                 &WorkbookLookup::with_cell_context(self, id, row, col),
             ),
             Err(error) => EvalResult::Error(error),
-        }
+        })
     }
 
     /// Resolve a numeric constraint in workbook context. Without a target
@@ -134,11 +134,44 @@ impl Workbook {
         candidate.sheets[sheet].set_value_deferred(row, col, input);
         candidate.rebuild_dep_graph();
         // Validation must not invoke host custom functions while previewing.
-        candidate.recompute_full_ordered_inner(None);
+        crate::formula::eval_budget::validation(|| candidate.recompute_full_ordered_inner(None));
         if formula_input {
             candidate.validate_cell(sheet, row, col)
         } else {
             candidate.validate_typed_value(sheet, row, col, &typed, input)
         }
+    }
+}
+
+impl Workbook {
+    pub(super) fn resolve_validation_list(
+        &self,
+        sheet: usize,
+        row: usize,
+        col: usize,
+        source: &str,
+    ) -> ResolvedList {
+        let Some(id) = self.sheet_id_at_idx(sheet) else {
+            return ResolvedList::failed("#REF! Missing worksheet");
+        };
+        crate::validation::list_source::resolve(
+            source,
+            &WorkbookLookup::with_cell_context(self, id, row, col),
+            |source| {
+                parse(&format!("={}", source.trim().trim_start_matches('=')))
+                    .map(|expr| bind_expr(&expr, |name| self.sheet_id_by_name(name)))
+            },
+            |target, range| {
+                let target = match target {
+                    crate::sheet::SheetRef::Current => Some(id),
+                    crate::sheet::SheetRef::Id(id) => Some(*id),
+                    crate::sheet::SheetRef::RefError { .. } => None,
+                };
+                target
+                    .and_then(|id| self.sheet_by_id(id))
+                    .map(|sheet| sheet.resolve_list_cells(range))
+                    .unwrap_or_else(|| ResolvedList::failed("#REF! Missing list worksheet"))
+            },
+        )
     }
 }

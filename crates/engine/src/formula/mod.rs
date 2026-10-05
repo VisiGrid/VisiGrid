@@ -24,3 +24,6 @@ pub(crate) mod eval_array;
 pub(crate) mod lift;
 
 pub(crate) mod eval_subtotal;
+
+pub(crate) mod eval_budget;
+pub mod excel_namespaces;

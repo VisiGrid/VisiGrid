@@ -51,6 +51,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
 
             // Build the array
+            if let Err(error) = super::eval_budget::array(rows, cols) { return Some(EvalResult::Error(error)); }
             let mut array = Array2D::new(rows, cols);
             let mut val = start;
             for r in 0..rows {
@@ -72,6 +73,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             // it used to come back unchanged.
             match grid_values(&args[0], lookup) {
                 Ok((in_rows, in_cols, rows)) => {
+                    if let Err(error) = super::eval_budget::array(in_cols, in_rows) { return Some(EvalResult::Error(error)); }
                     let mut array = Array2D::new(in_cols, in_rows);
                     for (r, row) in rows.into_iter().enumerate() {
                         for (c, val) in row.into_iter().enumerate() {
@@ -180,6 +182,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
 
             // Build result array
             let out_rows = unique_rows.len();
+            if let Err(error) = super::eval_budget::array(out_rows, in_cols) { return Some(EvalResult::Error(error)); }
             let mut array = Array2D::new(out_rows, in_cols);
             for (r, row) in unique_rows.iter().enumerate() {
                 for (c, val) in row.iter().enumerate() {
@@ -244,6 +247,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             });
 
             // Build result array
+            if let Err(error) = super::eval_budget::array(in_rows, in_cols) { return Some(EvalResult::Error(error)); }
             let mut array = Array2D::new(in_rows, in_cols);
             for (r, row) in rows.iter().enumerate() {
                 for (c, val) in row.iter().enumerate() {
@@ -332,6 +336,7 @@ fn range_values<L: CellLookup>(
     }
     let (r0, r1) = (*start_row.min(end_row), *start_row.max(end_row));
     let (c0, c1) = (*start_col.min(end_col), *start_col.max(end_col));
+    if let Err(error) = super::eval_budget::array(r1 - r0 + 1, c1 - c0 + 1) { return Some(Err(error)); }
     let rows = (r0..=r1)
         .map(|r| (c0..=c1).map(|c| read_cell_value(lookup, sheet, r, c)).collect())
         .collect();
@@ -360,6 +365,7 @@ fn grid_values<L: CellLookup>(
     }
     match evaluate(arg, lookup) {
         EvalResult::Array(a) => {
+            super::eval_budget::array(a.rows(), a.cols())?;
             let data: Vec<Vec<Value>> = (0..a.rows())
                 .map(|r| (0..a.cols()).map(|c| a.get(r, c).cloned().unwrap_or(Value::Empty)).collect())
                 .collect();

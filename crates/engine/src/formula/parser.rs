@@ -110,6 +110,11 @@ pub fn parse(formula: &str) -> Result<ParsedExpr, String> {
         return Err("Formula must start with =".to_string());
     }
 
+    let normalized;
+    let formula = if formula.as_bytes().windows(6).any(|s| s.eq_ignore_ascii_case(b"_xlfn.") || s.eq_ignore_ascii_case(b"_xlws.")) {
+        normalized = super::excel_namespaces::normalize_formula(formula);
+        normalized.as_str()
+    } else { formula };
     let input = &formula[1..]; // Skip the '='
     let tokens = tokenize(input)?;
     if tokens.is_empty() {

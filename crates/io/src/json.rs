@@ -270,6 +270,11 @@ pub const FULL_JSON_WORKBOOK_VERSION: u32 = 2;
 pub const FULL_JSON_TABLE_VERSION: u32 = 3;
 /// Relative validation origins require readers that preserve their semantics.
 pub const FULL_JSON_VALIDATION_VERSION: u32 = 4;
+/// Workbook names must not be silently discarded by older readers.
+pub const FULL_JSON_NAMES_VERSION: u32 = 5;
+
+#[path = "json_names.rs"]
+mod names;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
 /// the web mapper own it). Frozen panes also live in the engine; an explicit
@@ -483,6 +488,8 @@ fn keys_to_usize(m: &BTreeMap<String, f32>) -> BTreeMap<usize, f32> {
 
 #[derive(Serialize, Deserialize)]
 struct FullDoc {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    named_ranges: Vec<visigrid_engine::named_range::NamedRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     table_catalog: Option<serde_json::Value>,
     format: String,
@@ -711,6 +718,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
         version: if sheet.validations.iter().any(|(_, r)| r.reference_origin.is_some()) { FULL_JSON_VALIDATION_VERSION } else if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
         table_catalog: sheet.has_table_history().then(||
             serde_json::to_value(visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()).unwrap()),
+        named_ranges: Vec::new(),
         body: sheet_body(sheet, layout),
         sheets: Vec::new(),
         active_sheet: None,
@@ -746,10 +754,12 @@ pub fn export_workbook(
             body
         })
         .collect();
+    let named_ranges = names::export(wb)?;
     let doc = FullDoc {
         format: FULL_JSON_FORMAT.to_string(),
-        version: if wb.sheets().iter().any(|s| s.validations.iter().any(|(_, r)| r.reference_origin.is_some())) { FULL_JSON_VALIDATION_VERSION } else if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
+        version: if !named_ranges.is_empty() { FULL_JSON_NAMES_VERSION } else if wb.sheets().iter().any(|s| s.validations.iter().any(|(_, r)| r.reference_origin.is_some())) { FULL_JSON_VALIDATION_VERSION } else if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
         table_catalog: wb.has_table_history().then(|| serde_json::to_value(wb.saved_tables()).unwrap()),
+        named_ranges,
         body: SheetBody::default(),
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
@@ -1015,10 +1025,10 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
-    if doc.version > FULL_JSON_VALIDATION_VERSION {
+    if doc.version > FULL_JSON_NAMES_VERSION {
         return Err(format!(
             "visigrid-json version {} is newer than supported ({})",
-            doc.version, FULL_JSON_VALIDATION_VERSION
+            doc.version, FULL_JSON_NAMES_VERSION
         ));
     }
 
@@ -1042,6 +1052,10 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     let active = doc.active_sheet.unwrap_or(0).min(sheets.len() - 1);
     // Recompute formulas (stored values are only a fallback for engine-less consumers)
     let mut wb = Workbook::from_sheets(sheets, active);
+    if !doc.named_ranges.is_empty() && doc.version < FULL_JSON_NAMES_VERSION {
+        return Err("Named ranges require visigrid-json v5.".into());
+    }
+    names::restore(&mut wb, &doc.named_ranges)?;
     // Pivots after cells, so ownership never blocks loading their output.
     for (i, body) in bodies.iter().enumerate() {
         if let Some(p) = &body.pivots {

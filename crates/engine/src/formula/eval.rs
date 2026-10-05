@@ -836,6 +836,9 @@ fn range_array<L: CellLookup>(
     if r0 == r1 && c0 == c1 {
         return EvalResult::from_value(&super::eval_helpers::read_cell_value(lookup, sheet, r0, c0));
     }
+    if let Err(error) = super::eval_budget::array(r1 - r0 + 1, c1 - c0 + 1) {
+        return EvalResult::Error(error);
+    }
     let data = (r0..=r1)
         .map(|r| (c0..=c1).map(|c| super::eval_helpers::read_cell_value(lookup, sheet, r, c)).collect())
         .collect();
@@ -870,6 +873,7 @@ fn broadcast(op: Op, left: &EvalResult, right: &EvalResult) -> EvalResult {
     }
     let (ld, rd) = (dims(left), dims(right));
     let (rows, cols) = (size(ld.0, rd.0), size(ld.1, rd.1));
+    if let Err(error) = super::eval_budget::array(rows, cols) { return EvalResult::Error(error); }
     let mut out = Array2D::new(rows, cols);
     for r in 0..rows {
         for c in 0..cols {
