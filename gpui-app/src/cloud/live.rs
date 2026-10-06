@@ -81,13 +81,12 @@ fn run(
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let base = reqwest::Url::parse(&auth.api_base).map_err(|_| "Invalid API origin")?;
-    if !matches!(base.scheme(), "http" | "https") {
-        return Err("Unsupported API origin".into());
-    }
+    visigrid_collab::socket::validate_api_origin(&auth.api_base).map_err(|error| error.to_string())?;
     let pid = uuid::Uuid::parse_str(&pid)
         .map_err(|_| "A Go workbook UUID is required for live editing")?
         .to_string();
     let http = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| "Could not create API client")?;
@@ -117,6 +116,7 @@ fn run(
             "ws"
         })
         .map_err(|_| "Invalid collaboration scheme")?;
+    let mut backoff = visigrid_collab::socket::ReconnectBackoff::default();
     let snapshot_path = format!("/api/sheets/{pid}/snapshot");
     while !stop.load(Ordering::Relaxed) {
         let _ = events.send(Event::State {
@@ -129,22 +129,14 @@ fn run(
             Err(message) => {
                 // Authentication and protocol refusals need user action;
                 // transient connection failures must preserve pending edits.
-                if message == "Sign in again to resume collaboration"
-                    || message == "The server refused live workbook access"
-                    || message == "The server did not accept the collaboration protocol"
-                    || message == "Invalid authentication token"
-                    || message == "Invalid collaboration URL"
-                    || message == "Unsupported collaboration transport"
-                {
-                    return Err(message);
-                }
+                if message.is_fatal() { return Err(message.to_string()); }
                 replica.disconnect();
                 let _ = events.send(Event::State {
                     ready: false,
                     writable,
                     message: "Service unavailable — reconnecting to shared workbook…".into(),
                 });
-                reconnect_pause(stop);
+                reconnect_pause(stop, &mut backoff);
                 continue;
             }
         };
@@ -153,7 +145,7 @@ fn run(
             .is_err()
         {
             replica.disconnect();
-            reconnect_pause(stop);
+            reconnect_pause(stop, &mut backoff);
             continue;
         }
         let mut ready = false;
@@ -185,6 +177,7 @@ fn run(
                 Ok(None) => continue,
                 Err(_) => break,
             };
+            if frame["type"] == "welcome" { backoff.reset(); }
             match replica.receive(&frame)? {
                 Received::Snapshot(request) => {
                     let mut url = base
@@ -277,17 +270,31 @@ fn run(
             writable,
             message: "Disconnected — reconnecting to shared workbook…".into(),
         });
-        reconnect_pause(stop);
+        reconnect_pause(stop, &mut backoff);
     }
     Ok(())
 }
 
-fn reconnect_pause(stop: &AtomicBool) {
-    for _ in 0..10 {
-        if stop.load(Ordering::Relaxed) {
-            break;
+fn read_private_live_auth(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Live auth file must be private"));
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    use std::io::Read;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+fn reconnect_pause(stop: &AtomicBool, backoff: &mut visigrid_collab::socket::ReconnectBackoff) {
+    let delay = backoff.next_delay(uuid::Uuid::new_v4().as_u128() as u64);
+    let until = std::time::Instant::now() + delay;
+    while !stop.load(Ordering::Relaxed) {
+        let Some(remaining) = until.checked_duration_since(std::time::Instant::now()) else { break; };
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
     }
 }
 
@@ -314,7 +321,7 @@ impl crate::app::Spreadsheet {
         // the user's saved sign-in. An invalid override must never fall back to
         // production credentials.
         let auth = match std::env::var_os("VISIGRID_LIVE_AUTH_FILE") {
-            Some(path) => std::fs::read_to_string(path)
+            Some(path) => read_private_live_auth(std::path::Path::new(&path))
                 .ok()
                 .and_then(|contents| serde_json::from_str::<AuthCredentials>(&contents).ok()),
             None => crate::hub::auth::load_auth(),

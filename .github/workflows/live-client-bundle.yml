@@ -1,7 +1,5 @@
 name: Live collaboration client bundle
 on:
-  push:
-    branches: [feat/native-web-live-cells]
   workflow_dispatch:
 concurrency:
   group: live-client-bundle-${{ github.ref }}

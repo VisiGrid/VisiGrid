@@ -34,7 +34,7 @@ default = ["sim", "protocol"]
 protocol = ["dep:visigrid-protocol"]
 # The convergence simulator and its op generator. Off for the browser build.
 sim = ["dep:rand"]
-socket = ["dep:tungstenite"]
+socket = ["dep:tungstenite", "dep:url"]
 remote = ["sim", "socket", "dep:url", "dep:visigrid-io"]
 # Long fuzz runs read COLLAB_FUZZ_SEEDS; this feature only exists so CI can
 # opt a job in without an environment variable.
