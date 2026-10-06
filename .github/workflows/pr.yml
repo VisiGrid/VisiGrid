@@ -39,6 +39,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -60,6 +61,14 @@ jobs:
 
       - name: License compatibility with commercial and ordered JSON features
         run: cargo test --locked -p visigrid-license --features commercial,serde_json/preserve_order
+
+      # The workspace build covers the lean browser engine (the default). The
+      # web app's live editing ships the full one, and live-client-bundle.yml
+      # is dispatch-only, so compile both browser builds on every PR.
+      - name: Browser engine, lean and full builds
+        run: |
+          cargo check --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
+          cargo check --locked -p visigrid-engine-wasm --features recipes --target wasm32-unknown-unknown
 
       # A first contribution should not fail on a lint the project has hundreds
       # of already, and it will not: clippy exits 0 when it only has warnings.
