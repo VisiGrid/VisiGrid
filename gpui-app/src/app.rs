@@ -1018,10 +1018,11 @@ pub struct Spreadsheet {
     // Merge cells confirmation dialog
     pub merge_confirm: MergeConfirmState,
     /// Set when a sort or filter is refused because merged titles are in the
-    /// way: (merge origins, cursor at refusal, when). Ctrl+Alt+C converts
-    /// exactly those while the cursor hasn't moved, so the refusal's "press
-    /// Ctrl+Alt+C" never reformats an unrelated cell.
-    pub merge_block_offer: Option<(Vec<(usize, usize)>, (usize, usize), std::time::Instant)>,
+    /// way: (merge origins, cursor at refusal, the refusal message). Ctrl+Alt+C
+    /// converts exactly those while the cursor hasn't moved and the message
+    /// offering it is still showing, so "press Ctrl+Alt+C" always means what
+    /// it says and never reformats an unrelated cell.
+    pub merge_block_offer: Option<(Vec<(usize, usize)>, (usize, usize), String)>,
 
     // Close-window save confirmation dialog
     pub close_confirm_visible: bool,
@@ -3479,6 +3480,30 @@ impl Spreadsheet {
 
     /// Get the nth visible row composing RowView filtering with user-hidden rows.
     /// Returns (view_row, data_row) or None if out of bounds.
+    /// The displayed rows at display positions `start..start + count`, as
+    /// (view_row, data_row), in one pass: the renderer needs each row's
+    /// neighbours too, and `nth_visible_row_with_hidden` walks from the top
+    /// when rows are hidden. Shorter than `count` at the end of the sheet.
+    pub fn displayed_rows(&self, start: usize, count: usize, cx: &gpui::App) -> Vec<(usize, usize)> {
+        if !self.has_hidden_rows() {
+            return (start..start + count).map_while(|i| self.nth_visible_row(i, cx)).collect();
+        }
+        let mut out = Vec::with_capacity(count);
+        let mut shown = 0;
+        let mut idx = 0;
+        while out.len() < count {
+            let Some((view_row, data_row)) = self.nth_visible_row(idx, cx) else { break };
+            if !self.is_row_hidden(data_row) {
+                if shown >= start {
+                    out.push((view_row, data_row));
+                }
+                shown += 1;
+            }
+            idx += 1;
+        }
+        out
+    }
+
     pub fn nth_visible_row_with_hidden(&self, visible_index: usize, cx: &gpui::App) -> Option<(usize, usize)> {
         if !self.has_hidden_rows() {
             return self.nth_visible_row(visible_index, cx);
@@ -4413,11 +4438,12 @@ impl Spreadsheet {
             .map(|m| m.start)
             .collect();
         if convertible.len() == blocking.len() {
-            self.merge_block_offer = Some((convertible, self.view_state.selected, std::time::Instant::now()));
-            self.status_message = Some(format!(
+            let message = format!(
                 "Can't {op_name}: {what} {} merged. Press Ctrl+Alt+C to convert to Center Across Selection: same look, and {op_name} works.",
                 if blocking.len() == 1 { "is" } else { "are" }
-            ));
+            );
+            self.merge_block_offer = Some((convertible, self.view_state.selected, message.clone()));
+            self.status_message = Some(message);
         } else {
             self.merge_block_offer = None;
             self.status_message = Some(format!(
