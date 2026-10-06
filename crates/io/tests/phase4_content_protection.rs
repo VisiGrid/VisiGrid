@@ -56,6 +56,11 @@ fn phase4(names: bool, saved_view: bool) -> Workbook {
             author: "Review".into(),
         }),
     );
+    wb.set_cell_value_tracked(0, 11, 3, "obstruction");
+    wb.set_cell_value_tracked(0, 10, 3, "=SEQUENCE(2)");
+    wb.set_cell_value_tracked(0, 10, 5, "=FILTER(A2:A4,A2:A4>100)");
+    assert_eq!(wb.active_sheet().get_display(10, 3), "#SPILL!");
+    assert_eq!(wb.active_sheet().get_display(10, 5), "#CALC! No matches");
     if names {
         wb.named_ranges_mut()
             .set(NamedRange::cell("Rate", 0, 1, 0))
@@ -82,6 +87,8 @@ fn phase4_json_v4_v5_and_catalog_v5_v6_reopen_editable_without_content_loss() {
                 "{:?}",
                 loaded.read_only_reason()
             );
+            assert_eq!(loaded.active_sheet().get_display(10, 3), "#SPILL!");
+            assert_eq!(loaded.active_sheet().get_display(10, 5), "#CALC! No matches");
             assert_eq!(loaded.active_sheet().manual_hidden_rows(), [2].into());
             assert_eq!(loaded.active_sheet().frozen_panes, (1, 1));
             assert_eq!(

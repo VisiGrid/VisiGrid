@@ -347,14 +347,17 @@ fn interleaved_overlapping_ranges_keep_global_rule_precedence() {
 }
 
 #[test]
-fn row_insert_under_full_column_rules_still_saves_and_reopens_in_every_format() {
+fn refused_row_insert_under_full_column_rules_still_saves_and_reopens_in_every_format() {
     use visigrid_engine::{structural::Axis, validation::{NumericConstraint, ValidationRule}};
     use visigrid_io::{native, json};
     let mut wb = Workbook::new();
     let range = CellRange::new(0, 0, NUM_ROWS - 1, 0);
     wb.active_sheet_mut().validations.set(range, ValidationRule::decimal(NumericConstraint::between(0.0, 10.0)));
     wb.active_sheet_mut().cond_formats.add(vec![range], "=A1>0", CondStyle::Named(CellStyle::Warning));
-    wb.structural_edit(0, Axis::Row, 1, 1, false).unwrap();
+    let before = format!("{wb:?}");
+    let error = wb.structural_edit(0, Axis::Row, 1, 1, false).unwrap_err();
+    assert!(error.contains("conditional format") && error.contains("last row"), "{error}");
+    assert_eq!(format!("{wb:?}"), before);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("full-column.sheet");
     native::save_workbook(&wb, &path).unwrap();

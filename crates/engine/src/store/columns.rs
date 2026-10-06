@@ -464,6 +464,7 @@ struct Formula {
 
 #[derive(Debug, Clone, Default)]
 struct FormulaTable {
+    unparsed: usize,
     entries: Paged<Option<Formula>>,
     free: Vec<FormulaId>,
     /// Each formula's last computed result, by the same id (#18 phase 2).
@@ -475,6 +476,7 @@ struct FormulaTable {
 
 impl FormulaTable {
     fn insert(&mut self, f: Formula) -> FormulaId {
+        self.unparsed += usize::from(f.ast.is_none());
         let id = match self.free.pop() {
             Some(id) => {
                 *self.entries.get_mut(id as usize).expect("freed formula id") = Some(f);
@@ -507,6 +509,7 @@ impl FormulaTable {
             *values.get_mut(id as usize).expect("value slot") = None;
         }
         self.free.push(id);
+        self.unparsed -= usize::from(f.ast.is_none());
         f
     }
 
@@ -631,6 +634,11 @@ pub(crate) struct ColumnStore {
 }
 
 impl ColumnStore {
+    pub fn has_unparsed_formulas(&self) -> bool { self.formulas.unparsed != 0 }
+    pub fn frozen_positions(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.extras.iter().filter(|(_, e)| e.frozen_formula.is_some()).map(|(&(r, c), _)| (r as usize, c as usize))
+    }
+
     /// Number of stored cells (with a value, a format, or metadata).
     pub fn len(&self) -> usize {
         self.len

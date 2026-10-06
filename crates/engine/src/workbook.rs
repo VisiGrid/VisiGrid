@@ -156,6 +156,8 @@ pub struct Workbook {
     /// ordinary edit pays one emptiness check.
     #[serde(skip)]
     volatile_cells: FxHashSet<CellId>,
+    #[serde(skip)]
+    table_readers: FxHashMap<crate::table::TableId, Arc<FxHashSet<CellId>>>,
 
     /// Clock and seed for volatile functions, for replicas that must agree
     /// (collaboration). `None` reads the machine, as the desktop always has.
@@ -228,6 +230,7 @@ impl Workbook {
             batch_format_changed: Vec::new(),
             batch_vacated: Vec::new(),
             volatile_cells: FxHashSet::default(),
+            table_readers: FxHashMap::default(),
             recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
@@ -570,6 +573,7 @@ impl Workbook {
             batch_format_changed: Vec::new(),
             batch_vacated: Vec::new(),
             volatile_cells: FxHashSet::default(),
+            table_readers: FxHashMap::default(),
             recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
@@ -604,6 +608,7 @@ impl Workbook {
             batch_format_changed: Vec::new(),
             batch_vacated: Vec::new(),
             volatile_cells: FxHashSet::default(),
+            table_readers: FxHashMap::default(),
             recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
@@ -832,6 +837,26 @@ impl Workbook {
         (refs, ranges)
     }
 
+    fn table_reader_ids(&self, ast: &crate::formula::parser::ParsedExpr, cell: CellId) -> FxHashSet<crate::table::TableId> {
+        use crate::formula::parser::Expr;
+        fn visit(wb: &Workbook, ast: &crate::formula::parser::ParsedExpr, cell: CellId, ids: &mut FxHashSet<crate::table::TableId>) {
+            let table = match ast {
+                Expr::StructuredRef(reference) => match &reference.table {
+                    Some(name) => wb.table_by_name(name).map(|(_, t)| t),
+                    None => wb.sheet_by_id(cell.sheet).and_then(|s| s.table_at(cell.row, cell.col)),
+                },
+                Expr::NamedRange(name) => wb.table_by_name(name).map(|(_, t)| t),
+                Expr::Function { args, .. } => { for a in args { visit(wb, a, cell, ids); } None },
+                Expr::BinaryOp { left, right, .. } => { visit(wb, left, cell, ids); visit(wb, right, cell, ids); None },
+                _ => None,
+            };
+            if let Some(table) = table { ids.insert(table.id); }
+        }
+        let mut ids = FxHashSet::default();
+        visit(self, ast, cell, &mut ids);
+        ids
+    }
+
     /// Rebuild the dependency graph from scratch.
     ///
     /// Call this after loading a workbook to populate the graph.
@@ -840,6 +865,7 @@ impl Workbook {
         self.pending_dynamic_refs.get_mut().clear();
         self.dep_graph = Arc::default();
         self.volatile_cells.clear();
+        self.table_readers.clear();
 
         // Iterate all sheets and cells
         for sheet in &self.sheets {
@@ -864,6 +890,9 @@ impl Workbook {
                     // Formulas inside these ranges are ordered first through
                     // the range index, whenever they are registered.
                     Arc::make_mut(&mut self.dep_graph).set_ranges(formula_cell, ranges);
+                    for id in self.table_reader_ids(ast, formula_cell) {
+                        Arc::make_mut(self.table_readers.entry(id).or_default()).insert(formula_cell);
+                    }
                     if crate::formula::analyze::is_volatile(ast) {
                         self.volatile_cells.insert(formula_cell);
                     }
@@ -884,7 +913,13 @@ impl Workbook {
         let ast = self.sheet_by_id(sheet_id)
             .and_then(|sheet| sheet.get_cell(row, col).value.formula_ast().cloned());
 
+        for readers in self.table_readers.values_mut() {
+            if readers.contains(&cell_id) { Arc::make_mut(readers).remove(&cell_id); }
+        }
         if let Some(ast) = ast {
+            for id in self.table_reader_ids(&ast, cell_id) {
+                Arc::make_mut(self.table_readers.entry(id).or_default()).insert(cell_id);
+            }
             // Bind and extract references
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
             let (refs, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
@@ -932,6 +967,9 @@ impl Workbook {
     pub fn clear_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
         let cell_id = CellId::new(sheet_id, row, col);
         self.volatile_cells.remove(&cell_id);
+        for readers in self.table_readers.values_mut() {
+            if readers.contains(&cell_id) { Arc::make_mut(readers).remove(&cell_id); }
+        }
         if self.dep_graph.has_own_deps(cell_id) {
             Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
         }
@@ -2294,30 +2332,42 @@ impl Workbook {
         if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
             return Err("Structural edit exceeds the sheet boundary.".into());
         }
+        if !delete {
+            // Inverse deletion cannot restore metadata clipped at the edge.
+            // Refuse the forward edit, including empty merged/formatted ranges.
+            let beyond = |end: usize| end >= at && end.checked_add(count).is_none_or(|v| v >= limit);
+            let mut obstacles = Vec::new();
+            for m in &sheet.merged_regions {
+                if beyond(if is_row { m.end.0 } else { m.end.1 }) {
+                    obstacles.push((m.start, m.end, "merged range"));
+                }
+            }
+            for (r, _) in sheet.validations.iter() {
+                if beyond(if is_row { r.end_row } else { r.end_col }) {
+                    obstacles.push(((r.start_row, r.start_col), (r.end_row, r.end_col), "validation range"));
+                }
+            }
+            for rule in sheet.cond_formats.iter() {
+                for r in &rule.ranges {
+                    if beyond(if is_row { r.end_row } else { r.end_col }) {
+                        obstacles.push(((r.start_row, r.start_col), (r.end_row, r.end_col), "conditional format"));
+                    }
+                }
+            }
+            for ((r, c), cell) in sheet.cells_iter() {
+                if beyond(if is_row { r } else { c }) && !cell.raw_display().is_empty() {
+                    obstacles.push(((r, c), (r, c), "non-empty cell"));
+                }
+            }
+            if let Some((start, end, kind)) = obstacles.into_iter().min() {
+                let label = |(r, c)| CellId::new(sheet.id, r, c).to_string();
+                return Err(format!("Cannot insert {}: {kind} {}:{} would extend past the last {}. Move or resize it first.",
+                    if is_row { "rows" } else { "columns" }, label(start), label(end), if is_row { "row" } else { "column" }));
+            }
+        }
         // The keyed rule store cannot represent two definitions at one exact
         // range. Refuse clipping collisions before changing any cells/layout.
         sheet.validations.clone().shift_for_structural(at, count, delete, is_row)?;
-        // Refuse inserts that would push content off the grid rather than
-        // dropping it (Excel's behavior).
-        if !delete {
-            let sheet = &self.sheets[sheet_index];
-            let limit = if is_row { sheet.rows } else { sheet.cols };
-            let last_used = sheet
-                .cells_iter()
-                .filter(|(_, cell)| !cell.raw_display().is_empty())
-                .map(|((r, c), _)| if is_row { r } else { c })
-                .max();
-            if let Some(last) = last_used {
-                if last >= at && last.checked_add(count).is_none_or(|v| v >= limit) {
-                    return Err(format!(
-                        "inserting {} {}(s) would push data past the end of the sheet",
-                        count,
-                        if is_row { "row" } else { "column" }
-                    ));
-                }
-            }
-        }
-
         // Pivot outputs move as a whole or not at all: an edit that would cut
         // through one is refused before anything changes.
         if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
@@ -3253,7 +3303,7 @@ mod tests {
         wb.sheet_mut(0).unwrap().set_value(last, 0, "edge");
         let before = wb.revision();
         let err = wb.structural_edit(0, Axis::Row, 0, 1, false).unwrap_err();
-        assert!(err.contains("past the end"), "got: {}", err);
+        assert!(err.contains("past the last row"), "got: {}", err);
         assert_eq!(wb.sheets()[0].get_display(last, 0), "edge", "data untouched");
         assert_eq!(wb.revision(), before, "refused edits do not bump the revision");
     }

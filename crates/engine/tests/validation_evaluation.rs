@@ -441,7 +441,7 @@ fn typed_date_and_time_validation_accepts_calendar_text_and_checks_bounds() {
 }
 
 #[test]
-fn structural_edits_keep_full_grid_validation_ranges_and_exclusions_in_bounds() {
+fn structural_insertion_refuses_to_truncate_full_grid_validation() {
     use visigrid_engine::{sheet::{NUM_ROWS, NUM_COLS}, structural::Axis};
     for (axis, range, last) in [
         (Axis::Row, CellRange::new(0, 0, NUM_ROWS - 1, 0), CellRange::single(NUM_ROWS - 1, 2)),
@@ -452,12 +452,12 @@ fn structural_edits_keep_full_grid_validation_ranges_and_exclusions_in_bounds() 
         wb.active_sheet_mut().validations.set(range, rule.clone());
         wb.active_sheet_mut().validations.set(last, rule);
         wb.active_sheet_mut().validations.exclude(last);
-        wb.structural_edit(0, axis, 1, 1, false).unwrap();
+        assert!(wb.structural_edit(0, axis, 1, 1, false).unwrap_err().contains("validation range"));
         let validations = &wb.active_sheet().validations;
         assert!(validations.effective_ranges().is_ok());
-        assert_eq!(validations.len(), 1);
+        assert_eq!(validations.len(), 2);
         assert_eq!(*validations.iter().next().unwrap().0, range);
-        assert_eq!(validations.exclusions_iter().count(), 0);
+        assert_eq!(validations.exclusions_iter().count(), 1);
     }
 }
 
@@ -476,7 +476,9 @@ fn clamping_colliding_validation_rules_refuses_before_any_mutation() {
         wb.active_sheet_mut().validations.exclude(CellRange::single(3, 3));
         wb.set_cell_value_tracked(0, 3, 3, "keep");
         let before = serde_json::json!([wb.active_sheet().validations.iter().collect::<Vec<_>>(), wb.active_sheet().validations.exclusions_iter().collect::<Vec<_>>()]);
-        assert!(wb.structural_edit(0, axis, 1, 1, false).unwrap_err().contains("collapse two validation rules"));
+        assert!(wb.structural_edit(0, axis, 1, 1, false).unwrap_err().contains("validation range"));
+        // The lower-level range transformation also refuses collisions atomically.
+        assert!(wb.active_sheet_mut().validations.shift_for_structural(1, 1, false, axis == Axis::Row).unwrap_err().contains("collapse two validation rules"));
         assert_eq!(serde_json::json!([wb.active_sheet().validations.iter().collect::<Vec<_>>(), wb.active_sheet().validations.exclusions_iter().collect::<Vec<_>>()]), before);
         assert_eq!(wb.active_sheet().get_raw(3, 3), "keep");
     }

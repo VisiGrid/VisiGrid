@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+- Tables Phase 4 (0.51.0): linked-footer appends recalculate affected formulas incrementally and share unchanged dependency snapshots; static append history fingerprints affected sheets while keeping global guards for dynamic references and broader structural transactions.
+- Large Table conversion now warns about the row count, expected wait, frozen window and undo/redo cost. Undo history has an approximate 1 GiB byte budget; oversized conversions report that they cannot be undone.
+- Refuse row/column inserts that would push merges, validation, conditional formatting or non-empty cells off the grid, preserving exact undo semantics. Extend deleted-name and Phase 4 rich-error persistence regressions; remove the unused hidden-row scanner.
+
 - Keep names targeting a deleted sheet as `#REF!` definitions through undo/redo and native, JSON and XLSX saves; reserve their names until explicitly deleted.
-- Extend body-and-totals validation/conditional-format coverage through repeated appends, preserve released body rules when shrinking, and clamp merged ranges at worksheet edges. Refuse structural edits that would collapse distinct validation rules onto the same range; equivalent rules may merge.
+- Extend body-and-totals validation/conditional-format coverage through repeated appends, preserve released body rules when shrinking, and keep merged ranges inside worksheet bounds. Refuse structural edits that would collapse distinct validation rules onto the same range; equivalent rules may merge.
 - Reuse dependency-graph cycle proofs instead of scanning the entire graph twice per guarded history entry. Avoid an extra full recalculation when plain-row undo has already restored the correct hidden-row flags.
 
 - Harden Table release workflows: allow existing cycles through sheet changes, conversion and undo/redo; keep validation and conditional-format ranges within worksheet bounds after insertion; accept valid typed dates and times in date/time validation.

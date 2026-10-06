@@ -81,6 +81,11 @@ impl RangeRef {
 }
 
 /// Positions per tree axis: 2^20 covers both 1,048,576 rows and 16,384 columns.
+#[path = "dep_graph_cow.rs"]
+mod cow;
+use cow::CowMap;
+use std::sync::Arc;
+
 const TREE_BITS: u32 = 20;
 
 /// Canonical segment-tree nodes covering `[lo, hi]` in a tree over
@@ -107,7 +112,7 @@ fn path(p: usize) -> impl Iterator<Item = u32> {
 }
 
 /// One sparse segment tree: node -> formulas whose interval covers it.
-type Tree = FxHashMap<u32, FxHashSet<CellId>>;
+type Tree = CowMap<u32, FxHashSet<CellId>>;
 
 /// Which formulas read which rectangles, queryable by cell in
 /// O(log rows + answers).
@@ -119,9 +124,9 @@ type Tree = FxHashMap<u32, FxHashSet<CellId>>;
 #[derive(Default, Debug, Clone)]
 pub struct RangeIndex {
     /// (sheet, column) -> tree over rows
-    by_col: FxHashMap<(SheetId, u32), Tree>,
+    by_col: CowMap<(SheetId, u32), Tree>,
     /// (sheet, row) -> tree over columns
-    by_row: FxHashMap<(SheetId, u32), Tree>,
+    by_row: CowMap<(SheetId, u32), Tree>,
 }
 
 impl RangeIndex {
@@ -157,7 +162,7 @@ impl RangeIndex {
     }
 
     /// Call `f` once per tree the range is stored in, with its covering nodes.
-    fn visit(&mut self, range: &RangeRef, mut f: impl FnMut(&mut FxHashMap<(SheetId, u32), Tree>, (SheetId, u32), &[u32])) {
+    fn visit(&mut self, range: &RangeRef, mut f: impl FnMut(&mut CowMap<(SheetId, u32), Tree>, (SheetId, u32), &[u32])) {
         let mut nodes = Vec::new();
         if Self::tall(range) {
             cover(range.start_row, range.end_row, &mut nodes);
@@ -298,24 +303,32 @@ pub struct DepGraph {
     cycle_cache: std::sync::OnceLock<Vec<Vec<CellId>>>,
     /// Precedents: for each formula cell B, the cells A it depends on.
     /// B -> {A1, A2, ...}
-    preds: FxHashMap<CellId, FxHashSet<CellId>>,
+    preds: CowMap<CellId, FxHashSet<CellId>>,
 
     /// Dependents: for each referenced cell A, the formula cells B that depend on it.
     /// A -> {B1, B2, ...}
-    succs: FxHashMap<CellId, FxHashSet<CellId>>,
+    succs: CowMap<CellId, FxHashSet<CellId>>,
 
     /// Each formula's range references, as registered in `ranges`.
-    range_refs: FxHashMap<CellId, Vec<RangeRef>>,
+    range_refs: CowMap<CellId, Vec<RangeRef>>,
 
     /// Interval index over every formula's ranges.
     ranges: RangeIndex,
 
     /// Formula cells by sheet and column, to find the formulas inside a
     /// range without walking it.
-    formula_rows: FxHashMap<SheetId, FxHashMap<u32, BTreeSet<u32>>>,
+    formula_rows: FxHashMap<SheetId, FxHashMap<u32, Arc<BTreeSet<u32>>>>,
 }
 
 impl DepGraph {
+    /// The incremental topological pass proved its forward closure acyclic.
+    /// Cycles outside that closure keep their unchanged edges and identities.
+    pub(crate) fn inherit_untouched_cycles(&mut self, before: &Self, dirty: &FxHashSet<CellId>) {
+        let cycles = before.cycle_components().into_iter().filter(|component| !component.iter().any(|c| dirty.contains(c))).collect();
+        self.cycle_cache.take();
+        let _ = self.cycle_cache.set(cycles);
+    }
+
     /// Create an empty dependency graph.
     pub fn new() -> Self {
         Self::default()
@@ -403,18 +416,14 @@ impl DepGraph {
     }
 
     fn index_formula(&mut self, cell: CellId) {
-        self.formula_rows
-            .entry(cell.sheet)
-            .or_default()
-            .entry(cell.col as u32)
-            .or_default()
-            .insert(cell.row as u32);
+        let rows = self.formula_rows.entry(cell.sheet).or_default().entry(cell.col as u32).or_default();
+        if !rows.contains(&(cell.row as u32)) { Arc::make_mut(rows).insert(cell.row as u32); }
     }
 
     fn unindex_formula(&mut self, cell: CellId) {
         if let Some(cols) = self.formula_rows.get_mut(&cell.sheet) {
             if let Some(rows) = cols.get_mut(&(cell.col as u32)) {
-                rows.remove(&(cell.row as u32));
+                Arc::make_mut(rows).remove(&(cell.row as u32));
                 if rows.is_empty() {
                     cols.remove(&(cell.col as u32));
                 }
@@ -657,8 +666,8 @@ impl DepGraph {
             }
         }
 
-        for (formula, ranges) in old_ranges {
-            let Some(formula) = map(formula) else { continue };
+        for (formula, ranges) in &old_ranges {
+            let Some(formula) = map(*formula) else { continue };
             let mapped: Vec<RangeRef> = ranges.iter().filter_map(|r| map_range(r, &map)).collect();
             self.set_ranges(formula, mapped);
         }

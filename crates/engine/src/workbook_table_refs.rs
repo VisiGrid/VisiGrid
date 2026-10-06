@@ -99,6 +99,13 @@ impl Workbook {
         let Some(before) = before else {
             return Ok(Vec::new());
         };
+        // Growing the body preserves every existing structured token and its
+        // local owner. Dependencies are rebound separately after membership changes.
+        if after.is_some_and(|after| before.name == after.name && before.columns == after.columns
+            && before.range.start_row == after.range.start_row && before.range.start_col == after.range.start_col
+            && before.range.end_col == after.range.end_col && after.range.end_row >= before.range.end_row) {
+            return Ok(Vec::new());
+        }
         let mut changes = Vec::new();
         for sheet in self.sheets() {
             for table in sheet.tables().iter().filter(|t| t.id != before.id) {

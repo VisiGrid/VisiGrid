@@ -449,7 +449,14 @@ pub(crate) fn render_table_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshee
                 preview = preview.child(format!("Formula shown at row {}. New rows use this rule; cell edits remain overrides.", d.range.parse::<usize>().unwrap_or(0)+1));
             }
         }
-        TableDialogKind::Convert(_)=>preview=preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding and named saved views are removed; explicit formatting and manual row hiding are kept. You can undo this change.",d.name,d.range)),
+        TableDialogKind::Convert(id) => {
+            preview = preview.child(format!("Convert {} ({}) to ordinary cells? Structured references become fixed cell references. Table banding and named saved views are removed; explicit formatting and manual row hiding are kept.", d.name, d.range));
+            if let Some(warning) = app.wb(cx).table(id).and_then(|(_, table)| crate::table_ui::conversion_warning(table)) {
+                preview = preview.child(warning);
+            } else {
+                preview = preview.child("You can undo this change, subject to the history memory limit.");
+            }
+        },
     }
     let content = div()
         .w(px(if creating { 560.0 } else { 470.0 }))

@@ -57,6 +57,13 @@ pub(super) struct CellPatch {
     change: Change,
 }
 impl CellPatch {
+    pub(super) fn estimated_history_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + match &self.change {
+            Change::Formula { before, after } => before.len().next_multiple_of(16) + after.len().next_multiple_of(16) + 32,
+            Change::Images(images) => crate::history_size::estimated_debug_bytes(images),
+        }
+    }
+
     pub(super) fn capture(
         sheet: SheetId,
         row: usize,

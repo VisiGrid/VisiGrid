@@ -116,8 +116,7 @@ impl Movement {
 
 impl Workbook {
     pub(super) fn validate_footer_relocation(&mut self, before: &Workbook, id: TableId) -> Result<(), String> {
-        let report = self.recompute_full_ordered();
-        let new_cycles = report.had_cycles && {
+        let new_cycles = {
             let mut allowed = before.dep_graph.find_cycle_members();
             if let (Some((sheet, old)), Some((_, new))) = (before.table(id), self.table(id)) {
                 if let (Some(from), Some(to)) = (old.totals_row(), new.totals_row()) {
@@ -133,10 +132,11 @@ impl Workbook {
             }
             !self.dep_graph.find_cycle_members().is_subset(&allowed)
         };
-        if new_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+        if new_cycles || self.incremental_errors.iter().any(|e| e.error.contains("not settled")) {
             return Err("Moving totals would create a cycle or an unsettled calculation. Nothing was changed.".into());
         }
         for sheet in &self.sheets {
+            if before.sheet_by_id(sheet.id).is_some_and(|b| b.edit_generation() == sheet.edit_generation()) { continue; }
             sheet.build_saved_table_view(sheet.rows)?;
         }
         Ok(())
@@ -147,16 +147,16 @@ impl Workbook {
         id: TableId,
         new_end_row: usize,
         owned: Option<&TableCommit>,
-    ) -> Result<bool, String> {
+    ) -> Result<(bool, Vec<crate::cell_id::CellId>), String> {
         let (owner_id, table) = self.table(id).ok_or("Table no longer exists.")?;
         let Some(row) = table.totals_row() else {
-            return Ok(false);
+            return Ok((false, Vec::new()));
         };
         let destination = new_end_row
             .checked_add(1)
             .ok_or("Totals row exceeds the worksheet boundary.")?;
         if destination == row {
-            return Ok(false);
+            return Ok((false, Vec::new()));
         }
         let owner_index = self.sheet_index_by_id(owner_id).unwrap();
         let owner = self.sheet_by_id(owner_id).unwrap();
@@ -181,12 +181,23 @@ impl Workbook {
                     .map(|(cell, _)| (c.sheet_id, cell.row, cell.col))
             })
             .collect();
+        let mut sources: rustc_hash::FxHashSet<_> = self.volatile_cells.iter().copied().chain(self.table_readers.get(&id).into_iter().flat_map(|r| r.iter().copied())).collect();
+        for col in movement.footer.start_col..=movement.footer.end_col {
+            for row in [row, destination] {
+                sources.extend(self.dep_graph.dependents(crate::cell_id::CellId::new(owner_id, row, col)));
+            }
+        }
+        for sheet in &self.sheets {
+            sources.extend(sheet.exceptional_reference_sources().into_iter().map(|(r,c)| crate::cell_id::CellId::new(sheet.id,r,c)));
+        }
         // Update original formulas before the footer moves and new records are
         // authored. Relative/absolute flags and calculated origins are retained.
         for sheet in &mut self.sheets {
             let local = sheet.id == owner_id;
             let mut cells = Vec::new();
-            for ((r, c), cell) in sheet.cells_iter() {
+            for source in sources.iter().filter(|c| c.sheet == sheet.id) {
+                let (r, c) = (source.row, source.col);
+                let Some(cell) = sheet.get_cell_opt(r, c) else { continue; };
                 if owned_cells.contains(&(sheet.id, r, c)) {
                     continue;
                 }
@@ -313,6 +324,6 @@ impl Workbook {
                 self.named_ranges.set(name)?;
             }
         }
-        Ok(guarded)
+        Ok((guarded, sources.into_iter().collect()))
     }
 }

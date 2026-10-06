@@ -102,6 +102,11 @@ pub(crate) struct TableStructureHistory {
     pub(crate) before: StructureLayout,
     pub(crate) after: StructureLayout,
 }
+impl TableStructureHistory {
+    pub(crate) fn estimated_history_bytes(&self) -> usize {
+        self.commit.estimated_history_bytes().saturating_add(visigrid_engine::history_size::estimated_debug_bytes(&(&self.before, &self.after)))
+    }
+}
 /// Resolve selected visible slots once. Deletions are coalesced and performed
 /// bottom-up, so neither hidden records nor newly shifted records are deleted.
 pub(crate) fn selected_row_steps(

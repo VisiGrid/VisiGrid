@@ -68,6 +68,13 @@ pub struct TableCommit {
 }
 
 impl TableCommit {
+    pub fn estimated_history_bytes(&self) -> usize {
+        self.guarded.as_ref().map_or(0, |g| g.estimated_history_bytes())
+            .saturating_add(crate::history_size::estimated_debug_bytes(&(&self.before, &self.after, &self.cells,
+                &self.formulas, &self.rules, &self.footer_move, &self.header_insertion, &self.absent_cells,
+                &self.creation_references, &self.totals_references)))
+    }
+
     pub fn is_conversion(&self) -> bool {
         self.before.table.is_some() && self.after.table.is_none()
     }
@@ -540,7 +547,7 @@ impl Workbook {
     // Only called on a private candidate. Rewrite existing references before
     // filling/applying authored append cells, so new input keeps its coordinates.
     fn resize_table_stage(&mut self, id: TableId, guarded: &mut bool, range: TableRange) -> Result<TableCommit, String> {
-        *guarded |= self.relocate_footer_references(id, range.end_row, None)?;
+        *guarded |= self.relocate_footer_references(id, range.end_row, None)?.0;
         self.resize_table_inner(id, range)
     }
 
@@ -660,21 +667,21 @@ impl Workbook {
         self.ensure_writable()?;
         let (_, old) = self.table(id).ok_or("Table no longer exists.")?;
         if old.totals_row().is_none() {
-            return self.append_table_rows_inner(id, count, writes, infer_rule);
+            return self.append_table_rows_inner(id, count, writes, infer_rule, None);
         }
         let before = old.clone();
         let end = old.range.end_row.checked_add(count).ok_or("Append exceeds the sheet boundary.")?;
         let mut candidate = self.clone();
-        let guarded = candidate.relocate_footer_references(id, end, None)?
-            || writes.iter().any(|(_, _, source)| crate::formula::parser::parse(source)
+        let (reference_guarded, rewritten) = candidate.relocate_footer_references(id, end, None)?;
+        let guarded = reference_guarded || writes.iter().any(|(_, _, source)| crate::formula::parser::parse(source)
                 .is_ok_and(|expr| crate::formula::analyze::has_dynamic_deps(&expr)));
-        let mut commit = candidate.append_table_rows_inner(id, count, writes, infer_rule)?;
+        let mut commit = candidate.append_table_rows_inner(id, count, writes, infer_rule, Some(&rewritten))?;
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Could not recalculate the appended Table: {error:?}"));
         }
         if guarded {
             candidate.validate_footer_relocation(self, id)?;
-            commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?));
+            commit.guarded = Some(Box::new(self.capture_footer_append(&candidate, id)?));
         }
         commit.before.table = Some(before);
         commit.after.table = Some(candidate.table(id).unwrap().1.clone());
@@ -683,7 +690,7 @@ impl Workbook {
     }
 
     fn append_table_rows_inner(
-        &mut self, id: TableId, count: usize, writes: &[(usize, usize, String)], infer_rule: bool,
+        &mut self, id: TableId, count: usize, writes: &[(usize, usize, String)], infer_rule: bool, incremental: Option<&[crate::cell_id::CellId]>,
     ) -> Result<TableCommit, String> {
         if count == 0 {
             return Err("Append at least one row.".into());
@@ -782,7 +789,7 @@ impl Workbook {
         }
         commit.append_region = Some(region);
         self.capture_table_cell_absence(&mut commit);
-        self.apply_table_commit(&commit, false)?;
+        self.apply_table_commit_with_dirty(&commit, false, incremental)?;
         Ok(commit)
     }
 
@@ -1025,6 +1032,10 @@ impl Workbook {
     }
 
     fn apply_table_commit_inner(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
+        self.apply_table_commit_with_dirty(commit, undo, None)
+    }
+
+    fn apply_table_commit_with_dirty(&mut self, commit: &TableCommit, undo: bool, incremental: Option<&[crate::cell_id::CellId]>) -> Result<(), String> {
         let (expected, target) = if undo {
             (&commit.after, &commit.before)
         } else {
@@ -1213,7 +1224,7 @@ impl Workbook {
         }
         // A pivot can source a formula on another sheet that depends on this
         // footer. Recalculation alone doesn't advance that sheet's generation.
-        let totals_dependents: Vec<_> = if commit.is_conversion() || commit.is_totals_change() || commit.footer_move.is_some() || commit.totals_schema_edit || commit.calculated_edit {
+        let totals_dependents: Vec<_> = if incremental.is_none() && (commit.is_conversion() || commit.is_totals_change() || commit.footer_move.is_some() || commit.totals_schema_edit || commit.calculated_edit) {
             self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
                 sheet.cells_iter().filter_map(move |((row, col), cell)| {
                     matches!(cell.value(), ValueRef::Formula { .. })
@@ -1301,8 +1312,29 @@ impl Workbook {
         self.apply_rule_changes(&commit.rules, undo);
         // Membership changes affect symbolic shape dependencies even when no
         // cell was written (including empty -> nonempty bodies).
-        self.rebuild_dep_graph();
-        self.recompute_full_ordered();
+        if let Some(extra) = incremental {
+            let original_graph = self.dep_graph.clone();
+            let mut dirty: rustc_hash::FxHashSet<_> = extra.iter().copied().chain(self.table_readers.get(&commit.id).into_iter().flat_map(|r| r.iter().copied())).collect();
+            dirty.extend(commit.cells.iter().map(|(c, _)| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
+            dirty.extend(commit.formulas.iter().map(|c| c.cell));
+            dirty.extend(target.headers.iter().map(|c| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
+            for cell in &dirty { self.update_cell_deps(cell.sheet, cell.row, cell.col); }
+            let seeds: Vec<_> = dirty.iter().copied().collect();
+            match self.recalc_dirty_set(&seeds) {
+                super::Recalculated::Cells(cells) => {
+                    dirty.extend(cells);
+                    std::sync::Arc::make_mut(&mut self.dep_graph).inherit_untouched_cycles(&original_graph, &dirty);
+                    let sheets: HashSet<_> = dirty.iter().map(|c| c.sheet).collect();
+                    for id in sheets { self.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
+                }
+                super::Recalculated::All => {
+                    for sheet in &mut self.sheets { sheet.mark_table_changed(); }
+                }
+            }
+        } else {
+            self.rebuild_dep_graph();
+            self.recompute_full_ordered();
+        }
         let changed: HashSet<_> = totals_dependents.into_iter().filter_map(|(id, row, col, value)| {
             (self.sheet_by_id(id)?.get_computed_value(row, col) != value).then_some(id)
         }).collect();

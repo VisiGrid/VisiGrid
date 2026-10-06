@@ -53,6 +53,14 @@ pub(crate) fn range_label(r: TableRange) -> String {
     )
 }
 
+/// Conservative estimate from the million-row conversion probe (135 s).
+pub(crate) fn conversion_warning(table: &DataTable) -> Option<String> {
+    let rows = table.range.data_rows();
+    let seconds = (rows as f64 * 135.0 / 1_000_000.0).ceil() as usize;
+    (rows >= 200_000 || seconds >= 10).then(|| format!(
+        "Large Table: {rows} body rows. Estimated wait: about {seconds} seconds, possibly longer for complex formulas. The window won't respond while converting. Undo and redo may take about as long. History is limited to about 1 GB; a change too large to keep cannot be undone. Continue?"))
+}
+
 /// Only a finite, unqualified A1 rectangle; never quietly accept a name,
 /// reversed range, whole column or another sheet.
 pub(crate) fn parse_range(text: &str) -> Result<TableRange, String> {
@@ -701,6 +709,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         self.update_header_insertion_view(&commit, false, cx);
+        let conversion = commit.is_conversion();
         self.history.record_action_with_provenance(
             UndoAction::TableCommit { header_layout: None,
                 sheet_index: self
@@ -714,7 +723,10 @@ impl Spreadsheet {
         );
         self.bump_cells_rev();
         self.is_modified = true;
-        self.status_message = Some(description);
+        self.status_message = Some(if self.history.last_record_too_large() {
+            if conversion { "Converted; this change is too large to undo".into() }
+            else { format!("{description}; this change is too large to undo") }
+        } else { description });
         cx.notify();
     }
 
@@ -1113,5 +1125,50 @@ mod tests {
         rows.apply_sort(vec![2, 1, 0, 3, 4, 5, 6, 7, 8, 9]);
         assert!(header_in_view_rect(table, &rows, 0, 2, 0, 3));
         assert!(!header_in_view_rect(table, &rows, 2, 2, 2, 3));
+    }
+}
+
+#[cfg(test)]
+mod conversion_size_tests {
+    use super::{conversion_warning, TableDialogKind};
+    use crate::app::Spreadsheet;
+    use visigrid_engine::table::TableRange;
+    #[gpui::test]
+    fn conversion_too_large_for_history_reports_no_undo(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            let id = app.workbook.update(cx, |wb, _| {
+                wb.set_cell_value_tracked(0, 0, 0, "Amount");
+                wb.set_cell_value_tracked(0, 1, 0, "10");
+                wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 1, end_col: 0 }, "Sales").unwrap().table_id()
+            });
+            app.history.set_byte_budget_for_test(1);
+            app.open_table_dialog(TableDialogKind::Convert(id), cx);
+            app.submit_table_dialog(cx);
+            assert!(app.wb(cx).table(id).is_none());
+            assert!(app.table_dialog.is_none());
+            assert!(!app.history.can_undo());
+            assert_eq!(app.status_message.as_deref(), Some("Converted; this change is too large to undo"));
+        }).unwrap();
+    }
+
+    #[test]
+    fn large_conversion_confirmation_states_wait_unresponsive_window_and_undo_cost() {
+        let mut wb = visigrid_engine::workbook::Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "Amount");
+        let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 1_000_000, end_col: 0 }, "LargeRecords").unwrap().table_id();
+        let table = wb.table(id).unwrap().1;
+        let warning = conversion_warning(table).unwrap();
+        for text in ["1000000 body rows", "135 seconds", "won't respond", "Undo and redo", "1 GB"] {
+            assert!(warning.contains(text), "{warning}");
+        }
+        let mut small = table.clone(); small.range.end_row = 100;
+        assert!(conversion_warning(&small).is_none());
     }
 }

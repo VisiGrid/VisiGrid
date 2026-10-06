@@ -579,6 +579,12 @@ impl CellLookup for Sheet {
 }
 
 impl Sheet {
+    pub(crate) fn exceptional_reference_sources(&self) -> Vec<(usize, usize)> {
+        if self.cells.has_unparsed_formulas() {
+            self.cells_iter().filter(|(_, c)| c.frozen_formula().is_some() || matches!(c.value(), ValueRef::Formula { ast: None, .. })).map(|(p, _)| p).collect()
+        } else { self.cells.frozen_positions().collect() }
+    }
+
     /// Create a new sheet with the given dimensions and a unique ID
     /// Number of cells actually stored (non-empty or formatted), not the grid size.
     pub fn populated_cell_count(&self) -> usize {

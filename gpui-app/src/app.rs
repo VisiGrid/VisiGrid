@@ -3409,24 +3409,6 @@ impl Spreadsheet {
             start, self.row_view.row_count().saturating_sub(1)).take(count).collect()
     }
 
-    pub fn nth_visible_row_with_hidden(&self, visible_index: usize, cx: &gpui::App) -> Option<(usize, usize)> {
-        if !self.has_hidden_rows() {
-            return self.nth_visible_row(visible_index, cx);
-        }
-        let mut count = 0;
-        let mut idx = 0;
-        loop {
-            let (view_row, data_row) = self.nth_visible_row(idx, cx)?;
-            if !self.is_row_hidden(data_row) {
-                if count == visible_index {
-                    return Some((view_row, data_row));
-                }
-                count += 1;
-            }
-            idx += 1;
-        }
-    }
-
     /// Update cached sheet ID from the workbook.
     /// Call this after switching sheets.
     pub fn update_cached_sheet_id(&mut self, cx: &mut Context<Self>) {

@@ -120,6 +120,8 @@ pub struct GuardedStructureCommit {
     cells: Vec<CellPatch>,
     metadata: Vec<MetaPatch>,
     names: Option<(NamedRangeStore, NamedRangeStore)>,
+    fingerprint_sheets: Option<Vec<SheetId>>,
+    append_table: Option<crate::table::TableId>,
     before_fingerprint: [u8; 32],
     after_fingerprint: [u8; 32],
     // Replay restores authored states, including their existing cycles. Keep
@@ -257,10 +259,10 @@ mod fingerprint_tests {
         }
     }
 }
-fn workbook_fingerprint(wb: &Workbook) -> [u8; 32] {
+fn scoped_fingerprint(wb: &Workbook, sheets: Option<&[SheetId]>) -> [u8; 32] {
     let mut h = Sha256::new();
     for s in wb.sheets() {
-        h.update(fingerprint(s));
+        if sheets.is_none_or(|ids| ids.contains(&s.id)) { h.update(fingerprint(s)); }
         h.update(serde_json::to_vec(&Metadata::capture(s).signature()).unwrap());
     }
     h.update(serde_json::to_vec(&serde_json::to_value(wb.named_ranges()).unwrap()).unwrap());
@@ -393,18 +395,22 @@ impl Workbook {
         &self,
         candidate: &Workbook,
     ) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false, None, Some(100_000))
+        self.capture_guarded_batch_inner(candidate, false, None, Some(100_000), None)
+    }
+
+    pub(super) fn capture_footer_append(&self, candidate: &Workbook, id: crate::table::TableId) -> Result<GuardedStructureCommit, String> {
+        self.capture_guarded_batch_inner(candidate, false, None, Some(100_000), Some(id))
     }
 
     /// Conversion can rewrite every calculated cell in an existing Table.
     /// Its source-only patches are compact; the ordinary edit limit must not
     /// make a previously supported Table impossible to convert.
     pub(super) fn capture_table_conversion(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false, None, None)
+        self.capture_guarded_batch_inner(candidate, false, None, None, None)
     }
 
     pub(super) fn capture_sheet_rename(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, true, None, Some(100_000))
+        self.capture_guarded_batch_inner(candidate, true, None, Some(100_000), None)
     }
 
     pub(super) fn capture_sheet_change(&self, candidate: &Workbook, index: usize, added: bool) -> Result<GuardedStructureCommit, String> {
@@ -412,10 +418,10 @@ impl Workbook {
         let sheet = source.sheet(index).ok_or("The changed sheet no longer exists.")?;
         self.capture_guarded_batch_inner(candidate, false, Some(SheetChange {
             index, sheet: Box::new(sheet.clone()), added,
-        }), Some(100_000))
+        }), Some(100_000), None)
     }
 
-    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>, cell_limit: Option<usize>) -> Result<GuardedStructureCommit, String> {
+    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>, cell_limit: Option<usize>, append_table: Option<crate::table::TableId>) -> Result<GuardedStructureCommit, String> {
         self.ensure_writable()?;
         let mut before = identity(self);
         let mut after = identity(candidate);
@@ -433,10 +439,18 @@ impl Workbook {
         }
         let renamed_sheets = before.iter().zip(&after).filter(|(b, a)| b.1 != a.1)
             .map(|(b, a)| (b.0, b.1.clone(), a.1.clone())).collect();
-        validate_views(candidate)?;
+        // Static footer appends own sparse sheets. Dynamic addresses and name
+        // changes retain a full-workbook guard: their reference scope can move.
+        let fingerprint_sheets = append_table.filter(|_| self.volatile_cells.is_empty() && candidate.volatile_cells.is_empty()
+            && serde_json::to_value(&self.named_ranges).unwrap() == serde_json::to_value(&candidate.named_ranges).unwrap())
+            .map(|_| self.sheets.iter().filter(|b| candidate.sheet_by_id(b.id).is_some_and(|a| a.edit_generation() != b.edit_generation() || !a.exceptional_reference_sources().is_empty() || !b.exceptional_reference_sources().is_empty())).map(|s| s.id).collect::<Vec<_>>());
+        for sheet in candidate.sheets() {
+            if fingerprint_sheets.as_ref().is_none_or(|ids| ids.contains(&sheet.id)) { sheet.build_saved_table_view(sheet.rows)?; }
+        }
         let mut cells = Vec::new();
         let mut metadata = Vec::new();
         for b in &self.sheets {
+            if fingerprint_sheets.as_ref().is_some_and(|ids| !ids.contains(&b.id)) { continue; }
             let Some(a) = candidate.sheet_by_id(b.id) else { continue; };
             let positions: BTreeSet<_> = b
                 .cells_iter()
@@ -478,8 +492,10 @@ impl Workbook {
             cells,
             metadata,
             names,
-            before_fingerprint: workbook_fingerprint(self),
-            after_fingerprint: workbook_fingerprint(&candidate),
+            before_fingerprint: scoped_fingerprint(self, fingerprint_sheets.as_deref()),
+            after_fingerprint: scoped_fingerprint(candidate, fingerprint_sheets.as_deref()),
+            fingerprint_sheets,
+            append_table,
             before_cycles: self.dep_graph.find_cycle_members(),
             after_cycles: candidate.dep_graph.find_cycle_members(),
             sheets: identity(self),
@@ -492,6 +508,13 @@ impl Workbook {
 }
 
 impl GuardedStructureCommit {
+    pub fn estimated_history_bytes(&self) -> usize {
+        self.cells.iter().map(CellPatch::estimated_history_bytes).sum::<usize>()
+            .saturating_add(crate::history_size::estimated_debug_bytes(&(&self.metadata, &self.names, &self.sheet_change,
+                &self.before_cycles, &self.after_cycles, &self.views, &self.sheets,
+                &self.steps, &self.renamed_sheets, &self.fingerprint_sheets)))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty() && self.metadata.is_empty() && self.names.is_none() && self.renamed_sheets.is_empty() && self.sheet_change.is_none()
     }
@@ -522,7 +545,28 @@ impl GuardedStructureCommit {
         if identity(wb) != expected_sheets || views(wb) != expected_views {
             return Err("Sheets or Table criteria changed since this structural edit.".into());
         }
-        if workbook_fingerprint(wb)
+        if let (Some(ids), Some(table)) = (&self.fingerprint_sheets, self.append_table) {
+            let (owner, _) = wb.table(table).ok_or("Table no longer exists")?;
+            let patch = self.metadata.iter().find(|p| p.sheet == owner).ok_or("Missing Table history")?;
+            let mut readers = wb.table_readers.get(&table).map(|r| (**r).clone()).unwrap_or_default();
+            readers.extend(wb.volatile_cells.iter().copied());
+            for sheet in wb.sheets() {
+                readers.extend(sheet.exceptional_reference_sources().into_iter().map(|(row,col)| crate::cell_id::CellId::new(sheet.id,row,col)));
+            }
+            for state in [&patch.before, &patch.after] {
+                if let Some(t) = state.tables.iter().find(|t| t.id == table) {
+                    if let Some(row) = t.totals_row() {
+                        for col in t.range.start_col..=t.range.end_col {
+                            readers.extend(wb.dep_graph.dependents(crate::cell_id::CellId::new(owner, row, col)));
+                        }
+                    }
+                }
+            }
+            if readers.iter().any(|cell| !ids.contains(&cell.sheet)) {
+                return Err("New footer references require a fresh Table operation. Undo/redo was not applied.".into());
+            }
+        }
+        if scoped_fingerprint(wb, self.fingerprint_sheets.as_deref())
             != if undo {
                 self.after_fingerprint
             } else {

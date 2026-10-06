@@ -22,6 +22,12 @@ pub(crate) struct TableAppendHistory {
     paste: Option<TableCellsCommit>,
 }
 
+impl TableAppendHistory {
+    pub(crate) fn estimated_history_bytes(&self) -> usize {
+        self.table.estimated_history_bytes().saturating_add(visigrid_engine::history_size::estimated_debug_bytes(&(&self.edit, &self.view, &self.paste)))
+    }
+}
+
 fn validate_views(wb: &Workbook) -> Result<(), String> {
     for sheet in wb.sheets() {
         sheet.build_saved_table_view(crate::app::NUM_ROWS.min(sheet.rows))?;

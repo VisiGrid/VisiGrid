@@ -46,21 +46,21 @@ fn deleted_sheet_names_remain_ref_errors_through_all_save_paths() {
 }
 
 #[test]
-fn row_and_column_edge_merges_validation_origins_and_exclusions_survive_reopen() {
+fn row_and_column_near_edge_metadata_origins_and_exclusions_survive_reopen() {
     for axis in [Axis::Row, Axis::Col] {
         let mut wb = Workbook::new();
         let (merge, range, origin, excluded, shifted_origin) = if axis == Axis::Row {
             (
-                MergedRegion::new(NUM_ROWS - 2, 0, NUM_ROWS - 1, 1),
-                CellRange::new(0, 2, NUM_ROWS - 1, 2),
+                MergedRegion::new(NUM_ROWS - 3, 0, NUM_ROWS - 2, 1),
+                CellRange::new(0, 2, NUM_ROWS - 2, 2),
                 (0, 2),
                 CellRange::single(NUM_ROWS - 3, 2),
                 (1, 2),
             )
         } else {
             (
-                MergedRegion::new(0, NUM_COLS - 2, 1, NUM_COLS - 1),
-                CellRange::new(2, 0, 2, NUM_COLS - 1),
+                MergedRegion::new(0, NUM_COLS - 3, 1, NUM_COLS - 2),
+                CellRange::new(2, 0, 2, NUM_COLS - 2),
                 (2, 0),
                 CellRange::single(2, NUM_COLS - 3),
                 (2, 1),

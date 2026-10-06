@@ -108,6 +108,7 @@ fn sheet_lifecycle_delete_rewrites_refs_and_reindexes_names_with_exact_undo() {
     assert_eq!(recreated.sheet(0).unwrap().get_display(1, 0), "#REF!");
     commit.replay(&mut deleted, true).unwrap();
     assert_eq!(deleted.sheet_count(), 2);
+    assert_eq!(deleted.get_named_range("DeletedInput").unwrap().target, wb.get_named_range("DeletedInput").unwrap().target);
     assert_eq!(deleted.active_sheet_id(), summary_id);
     assert_eq!(deleted.sheet(summary).unwrap().get_raw(1, 0), formula);
     assert_eq!(deleted.sheet(summary).unwrap().get_display(1, 0), "140");

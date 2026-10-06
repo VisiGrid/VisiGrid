@@ -122,7 +122,7 @@ impl Workbook {
                 after_present: true,
             });
         }
-        let references_guarded = self.clone().relocate_footer_references(old.id, new.range.end_row, None)?;
+        let references_guarded = self.clone().relocate_footer_references(old.id, new.range.end_row, None)?.0;
         Ok(Some(FooterMove {
             references_guarded,
             before_row,
@@ -150,7 +150,7 @@ impl Workbook {
         )?;
         if !movement.references_guarded {
             let target = if undo { commit.before_table() } else { commit.after_table() }.unwrap();
-            if self.clone().relocate_footer_references(commit.table_id(), target.range.end_row, Some(commit))? {
+            if self.clone().relocate_footer_references(commit.table_id(), target.range.end_row, Some(commit))?.0 {
                 return Err("New footer references require a fresh Table operation.".into());
             }
         }

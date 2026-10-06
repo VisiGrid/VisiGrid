@@ -473,6 +473,17 @@ pub enum UndoAction {
 }
 
 impl UndoAction {
+    fn estimated_history_bytes(&self) -> usize {
+        match self {
+            Self::TableCommit { commit, .. } => commit.estimated_history_bytes(),
+            Self::TableBatchChanged { commit, .. } => commit.estimated_history_bytes(),
+            Self::TableAppend { history, .. } => history.estimated_history_bytes(),
+            Self::TableStructureChanged { history, .. } => history.estimated_history_bytes(),
+            Self::Group { actions, .. } => actions.iter().map(Self::estimated_history_bytes).sum::<usize>().saturating_add(4096),
+            _ => visigrid_engine::history_size::estimated_debug_bytes(self),
+        }
+    }
+
     /// Generate a human-readable label for this action.
     pub fn label(&self) -> String {
         match self {
@@ -850,6 +861,10 @@ pub struct History {
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
     max_entries: usize,
+    max_bytes: usize,
+    entry_bytes: HashMap<u64, usize>,
+    last_record_too_large: bool,
+    base_invalidated: bool,
     /// Save point for dirty detection: undo_stack length when document was saved
     save_point: usize,
     /// Monotonic counter for stable entry IDs
@@ -868,6 +883,10 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_entries: 100,
+            max_bytes: 1024 * 1024 * 1024,
+            entry_bytes: HashMap::new(),
+            last_record_too_large: false,
+            base_invalidated: false,
             save_point: 0,
             next_id: 1,
         }
@@ -938,6 +957,8 @@ impl History {
     pub fn retag_last_source(&mut self, source: MutationSource) {
         if let Some(entry) = self.undo_stack.last_mut() {
             entry.source = source;
+            self.entry_bytes.remove(&entry.id);
+            self.enforce_byte_budget();
         }
     }
 
@@ -1011,7 +1032,9 @@ impl History {
                         }
                         last.timestamp = now;
                         // Clear redo stack since we modified history
+                        self.entry_bytes.remove(&last.id);
                         self.redo_stack.clear();
+                        self.enforce_byte_budget();
                         return;
                     }
                 }
@@ -1081,18 +1104,41 @@ impl History {
         a.iter().zip(b.iter()).all(|(pa, pb)| pa.row == pb.row && pa.col == pb.col)
     }
 
+    pub fn last_record_too_large(&self) -> bool { self.last_record_too_large }
+
+    #[cfg(test)]
+    pub(crate) fn set_byte_budget_for_test(&mut self, bytes: usize) { self.max_bytes = bytes; }
+
+
+    fn enforce_byte_budget(&mut self) {
+        let ids: std::collections::HashSet<_> = self.undo_stack.iter().chain(&self.redo_stack).map(|e| e.id).collect();
+        self.entry_bytes.retain(|id, _| ids.contains(id));
+        for entry in self.undo_stack.iter().chain(&self.redo_stack) {
+            self.entry_bytes.entry(entry.id).or_insert_with(|| entry.action.estimated_history_bytes()
+                .saturating_add(visigrid_engine::history_size::estimated_debug_bytes(&(&entry.provenance, &entry.source))));
+        }
+        self.last_record_too_large = self.undo_stack.last().is_some_and(|e| self.entry_bytes[&e.id] > self.max_bytes);
+        if self.last_record_too_large {
+            // There is no safe undo path across an unrecorded mutation.
+            self.undo_stack.clear(); self.redo_stack.clear(); self.entry_bytes.clear();
+            self.save_point = usize::MAX;
+            self.base_invalidated = true;
+            return;
+        }
+        let mut total = self.entry_bytes.values().copied().sum::<usize>();
+        while !self.undo_stack.is_empty() && (total > self.max_bytes || self.undo_stack.len() > self.max_entries) {
+            let removed = self.undo_stack.remove(0);
+            self.base_invalidated = true;
+            total = total.saturating_sub(self.entry_bytes.remove(&removed.id).unwrap_or(0));
+            self.save_point = if self.save_point == 0 { usize::MAX } else { self.save_point - 1 };
+        }
+    }
+
     fn push_entry(&mut self, entry: HistoryEntry) {
+        if self.save_point > self.undo_stack.len() { self.save_point = usize::MAX; }
         self.undo_stack.push(entry);
         self.redo_stack.clear();
-        // Note: save_point may now be unreachable (undo→edit diverges from saved state).
-        // That's correct - is_dirty() will return true until next save.
-
-        // Limit history size (remove oldest entries from front)
-        if self.undo_stack.len() > self.max_entries {
-            self.undo_stack.remove(0);
-            // Indices shifted down - adjust save_point (saturating to 0)
-            self.save_point = self.save_point.saturating_sub(1);
-        }
+        self.enforce_byte_budget();
     }
 
     /// Pop the last entry for undo
@@ -1394,6 +1440,9 @@ impl History {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.save_point = 0;
+        self.entry_bytes.clear();
+        self.last_record_too_large = false;
+        self.base_invalidated = false;
         self.next_id = 1;
     }
 
@@ -1517,6 +1566,7 @@ impl History {
             source: MutationSource::Human,  // Rewind is always user-initiated
         };
         self.undo_stack.push(entry);
+        self.enforce_byte_budget();
 
         // Update save point if it was beyond truncation
         // (Document is now "dirty" relative to last save)
@@ -1555,6 +1605,9 @@ impl History {
             return Err(PreviewBuildError::TooManyActions(i));
         }
 
+        if self.base_invalidated {
+            return Err(PreviewBuildError::InvariantViolation("Older undo history was evicted to stay within the history limit. Rewind from the original snapshot is unavailable; ordinary undo is still available for retained changes.".into()));
+        }
         // No snapshot has been captured to replay from.
         let base = base.ok_or(PreviewBuildError::NoBaseSnapshot)?;
 
@@ -2994,5 +3047,59 @@ mod comment_tests {
         assert!(wb.active_sheet().comment(0,0).is_none());
         apply_comment_patches(&mut wb,0,&delete,false);
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
+    }
+}
+
+#[cfg(test)]
+mod byte_budget_tests {
+    use super::*;
+
+    #[test]
+    fn retagging_a_source_reaccounts_its_retained_payload() {
+        let mut history = History::new();
+        history.max_bytes = 32_000;
+        history.record_change(0, 0, 0, String::new(), "a".into());
+        history.retag_last_source(MutationSource::Agent { client: "x".repeat(40_000) });
+        assert!(history.last_record_too_large());
+        assert!(!history.can_undo());
+        assert!(history.is_dirty());
+    }
+
+    #[test]
+    fn oldest_entries_are_evicted_by_bytes_and_redo_transfers_keep_the_budget() {
+        let mut history = History::new();
+        history.max_bytes = 32_000;
+        history.record_change(0, 0, 0, String::new(), "a".repeat(4_000));
+        let first = history.undo_stack.last().map(|e| e.id);
+        history.mark_saved();
+        history.record_change(0, 1, 0, String::new(), "b".repeat(4_000));
+        assert!(history.undo_stack.iter().all(|e| Some(e.id) != first));
+        assert!(history.is_dirty());
+        assert!(matches!(history.build_workbook_before(0, Some(&Workbook::new()), 100, 1_000), Err(PreviewBuildError::InvariantViolation(_))));
+        let bytes = history.entry_bytes.values().sum::<usize>();
+        assert!(bytes <= history.max_bytes);
+        history.undo().unwrap();
+        assert_eq!(history.entry_bytes.values().sum::<usize>(), bytes);
+        history.redo().unwrap();
+        assert_eq!(history.entry_bytes.values().sum::<usize>(), bytes);
+        assert!(history.is_dirty());
+    }
+
+    #[test]
+    fn oversized_mutation_clears_both_stacks_and_cannot_jump_back_over_it() {
+        let mut history = History::new();
+        history.max_bytes = 32_000;
+        history.record_change(0, 0, 0, String::new(), "a".into());
+        history.mark_saved();
+        history.undo().unwrap();
+        history.record_change(0, 1, 0, String::new(), "b".repeat(40_000));
+        assert!(history.last_record_too_large());
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+        assert!(history.is_dirty());
+        assert!(history.entry_bytes.is_empty());
+        history.record_change(0, 2, 0, String::new(), "c".into());
+        assert!(!history.last_record_too_large());
+        assert!(history.can_undo());
     }
 }
