@@ -550,6 +550,9 @@ impl Spreadsheet {
         cx: &Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
         use crate::plan_manager::McpPlanState;
+        if self.cloud_live_enabled() {
+            return plan_error("go_collaboration_required", "Local plans cannot replace a live workbook outside its sequencer.", false);
+        }
         let Some(record) = self.mcp_plans.record(&req.plan_id) else {
             return plan_error("plan_not_found", "plan is unknown or expired", false);
         };
@@ -817,6 +820,15 @@ impl Spreadsheet {
     ) -> crate::session_server::ApplyOpsResponse {
         use crate::history::{CellChange, CellFormatPatch, FormatActionKind, MutationSource};
 
+        if self.cloud_live_enabled() {
+            let mut response = mutation_blocked_apply_response(req, self.wb(cx).revision());
+            response.error = Some(crate::session_server::ApplyOpsError::OpFailed(visigrid_protocol::OpError {
+                code: "go_collaboration_required".into(),
+                message: "The live workbook accepts sequenced Go operations; local session batches are disabled.".into(),
+                op_index: 0, suggestion: Some("Use the shared workbook's Go collaboration connection.".into()),
+            }));
+            return response;
+        }
         if self.review_mode.is_some() {
             return review_blocked_apply_response(req, self.workbook.read(cx).revision());
         }

@@ -30,6 +30,9 @@ impl Spreadsheet {
     /// - Internal use (e.g., after explicit user confirmation)
     /// - "New in This Window" menu item (if exposed)
     pub fn new_in_place(&mut self, cx: &mut Context<Self>) {
+        self.cloud_live_stop();
+        self.cloud_identity = None;
+        self.cloud_sync_state = crate::cloud::CloudSyncState::Local;
         if self.block_if_previewing_only(cx) { return; }
         if self.comment_editor.is_some() { self.close_comment(cx); }
         self.cancel_duckdb_import(cx);
@@ -112,6 +115,7 @@ impl Spreadsheet {
             return;
         }
         if self.block_if_previewing_only(cx) { return; }
+        self.cloud_live_stop();
         self.cancel_duckdb_import(cx);
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ext_lower = extension.to_lowercase();
@@ -259,6 +263,7 @@ impl Spreadsheet {
                         Ok(Some(identity)) => {
                             self.cloud_identity = Some(identity);
                             self.cloud_sync_state = crate::cloud::CloudSyncState::Synced;
+                            self.cloud_live_start(cx);
                         }
                         Ok(None) => {
                             self.cloud_identity = None;

@@ -214,7 +214,7 @@ impl Spreadsheet {
         Ok(())
     }
     pub(crate) fn table_structure_selection(&mut self, delete: bool, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         if self.mode.is_editing() || !self.view_state.additional_selections.is_empty() {
@@ -252,7 +252,7 @@ impl Spreadsheet {
         steps: Vec<StructureStep>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return false;
         }
         self.sync_table_view(cx);

@@ -77,7 +77,7 @@ pub(crate) fn plan_cut(
 
 impl Spreadsheet {
     pub(crate) fn cut_table_view(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.sync_table_view(cx);

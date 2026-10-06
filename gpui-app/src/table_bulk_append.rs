@@ -166,7 +166,7 @@ impl Spreadsheet {
         writes: Vec<TableCellWrite>,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered())

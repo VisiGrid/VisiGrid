@@ -118,7 +118,7 @@ impl Spreadsheet {
         index: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return true;
         }
         if !sheet_metadata_allowed(self.wb(cx), index) {

@@ -26,7 +26,7 @@ pub fn config_dir() -> PathBuf {
 /// covered and a recipe edited to read elsewhere is not.
 pub fn approval_key(recipe_path: &Path, recipe: &Recipe) -> String {
     let recipe_path = std::path::absolute(recipe_path).unwrap_or_else(|_| recipe_path.to_path_buf());
-    let text = format!("{}\0{}", recipe_path.display(), recipe.source.path());
+    let text = format!("{}\0{}", recipe_path.display(), recipe.source.identity());
     blake3::hash(text.as_bytes()).to_hex()[..32].to_string()
 }
 

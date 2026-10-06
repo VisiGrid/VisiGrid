@@ -1,6 +1,9 @@
 use std::process::Command;
 
+include!("../build-support/engine_commit.rs");
+
 fn main() {
+    println!("cargo:rustc-env=VISIGRID_ENGINE_COMMIT={}", engine_commit_stamp());
     // Embed git commit hash for version info
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs/heads");

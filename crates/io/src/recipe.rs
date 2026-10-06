@@ -85,7 +85,14 @@ pub enum Source {
     /// One sheet of an Excel workbook (.xlsx, .xlsm, .xls). Formulas are
     /// never evaluated: the values Excel last calculated are read.
     Xlsx(XlsxSource),
+    /// A VisiBooks report (trial balance, general ledger, AR/AP aging) of
+    /// one entity, read through the VisiBooks API. Not a file: it has no
+    /// path, and reads only when a run asks.
+    Visibooks(visibooks::VisibooksSource),
 }
+
+#[path = "recipe_visibooks.rs"]
+pub mod visibooks;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,7 +146,22 @@ impl Source {
             Source::Parquet(s) => &s.path,
             Source::Duckdb(s) => &s.path,
             Source::Xlsx(s) => &s.path,
+            Source::Visibooks(_) => "",
         }
+    }
+
+    /// What the source reads, for approvals and reports: the path, or for
+    /// VisiBooks the server, entity and report.
+    pub fn identity(&self) -> String {
+        match self {
+            Source::Visibooks(s) => s.identity(),
+            other => other.path().to_string(),
+        }
+    }
+
+    /// Whether the source is read over the network rather than from a file.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Source::Visibooks(_))
     }
 
     pub fn set_path(&mut self, path: String) {
@@ -148,6 +170,7 @@ impl Source {
             Source::Parquet(s) => s.path = path,
             Source::Duckdb(s) => s.path = path,
             Source::Xlsx(s) => s.path = path,
+            Source::Visibooks(_) => {}
         }
     }
 
@@ -158,6 +181,7 @@ impl Source {
             Source::Parquet(s) => &s.columns,
             Source::Duckdb(s) => &s.columns,
             Source::Xlsx(s) => &s.columns,
+            Source::Visibooks(s) => &s.columns,
         }
     }
 
@@ -167,6 +191,7 @@ impl Source {
             Source::Parquet(s) => &mut s.columns,
             Source::Duckdb(s) => &mut s.columns,
             Source::Xlsx(s) => &mut s.columns,
+            Source::Visibooks(s) => &mut s.columns,
         }
     }
 
@@ -176,7 +201,7 @@ impl Source {
             Source::Csv(s) => s.combine,
             Source::Parquet(s) => s.combine,
             Source::Xlsx(s) => s.combine,
-            Source::Duckdb(_) => false,
+            Source::Duckdb(_) | Source::Visibooks(_) => false,
         }
     }
 
@@ -186,7 +211,7 @@ impl Source {
             Source::Csv(s) => s.combine = on,
             Source::Parquet(s) => s.combine = on,
             Source::Xlsx(s) => s.combine = on,
-            Source::Duckdb(_) => {}
+            Source::Duckdb(_) | Source::Visibooks(_) => {}
         }
     }
 
@@ -197,6 +222,7 @@ impl Source {
             Source::Parquet(_) => "Parquet",
             Source::Duckdb(_) => "DuckDB",
             Source::Xlsx(_) => "Excel",
+            Source::Visibooks(_) => "VisiBooks",
         }
     }
 
@@ -847,6 +873,12 @@ impl Recipe {
     /// matches, in name order (skipping downloads in progress, and waiting
     /// while any changed in the last moments).
     pub fn resolve_sources(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<Vec<PathBuf>, String> {
+        if self.source.is_remote() {
+            return match over {
+                Some(_) => Err(format!("a {} source can't be replaced by a file", self.source.label())),
+                None => Ok(Vec::new()),
+            };
+        }
         if over.is_some() || !self.source.combine() || !self.source_is_pattern() {
             return self.resolve_source(recipe_dir, over).map(|p| vec![p]);
         }
@@ -881,6 +913,15 @@ impl Recipe {
 
     /// Read the run's source once: the file, or every file it appends.
     pub fn read_snapshot(&self, recipe_dir: &Path, over: Option<&Path>) -> Result<Snapshot, String> {
+        if let Source::Visibooks(src) = &self.source {
+            if over.is_some() {
+                return Err("a VisiBooks source can't be replaced by a file".into());
+            }
+            #[cfg(feature = "native")]
+            return visibooks::fetch(src, chrono::Local::now().date_naive());
+            #[cfg(not(feature = "native"))]
+            return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
+        }
         Snapshot::read_all(&self.resolve_sources(recipe_dir, over)?)
     }
 
@@ -935,6 +976,9 @@ impl Recipe {
     pub fn source_path(&self, recipe_dir: &Path, over: Option<&Path>) -> PathBuf {
         if let Some(p) = over {
             return p.to_path_buf();
+        }
+        if self.source.is_remote() {
+            return PathBuf::from(self.source.identity());
         }
         let p = Path::new(self.source.path());
         if p.is_absolute() {
@@ -1473,6 +1517,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         Source::Xlsx(src) => read_xlsx(src, snap),
         #[cfg(not(feature = "native"))]
         Source::Duckdb(_) | Source::Xlsx(_) => Err("DuckDB and Excel sources are read by the desktop app or the server import".to_string()),
+        Source::Visibooks(src) => visibooks::read_frame(src, snap),
     };
     let read = if snapshot.more.is_empty() {
         read_one(snapshot)

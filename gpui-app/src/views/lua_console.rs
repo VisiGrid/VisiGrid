@@ -1153,6 +1153,10 @@ pub(crate) fn apply_lua_ops(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    if app.cloud_live_enabled() {
+        return Err("Lua scripts cannot modify a live workbook outside its sequencer.".into());
+    }
+
     if crate::table_filter_ui::has_table_criteria(app.wb(cx)) {
         if app.block_if_previewing_only(cx) {
             return Err(app.status_message.clone().unwrap_or_default());

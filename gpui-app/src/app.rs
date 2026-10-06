@@ -955,6 +955,10 @@ pub struct Spreadsheet {
 
     // Cloud sync state
     pub cloud_identity: Option<crate::cloud::CloudIdentity>,
+    pub cloud_live: Option<crate::cloud::live::LiveSession>,
+    pub cloud_live_ready: bool,
+    pub cloud_live_writable: bool,
+    pub cloud_live_generation: u64,
     pub cloud_sync_state: crate::cloud::CloudSyncState,
     pub cloud_upload_generation: u64,
     /// An upload is between its save request and completion. Later saves wait
@@ -1599,6 +1603,10 @@ impl Spreadsheet {
             approval_history_len: 0,
 
             cloud_identity: None,
+            cloud_live: None,
+            cloud_live_ready: false,
+            cloud_live_writable: false,
+            cloud_live_generation: 0,
             cloud_sync_state: crate::cloud::CloudSyncState::Local,
             cloud_upload_generation: 0,
             cloud_upload_in_flight: false,
@@ -2513,6 +2521,7 @@ impl Spreadsheet {
                     None => self.new_recipe_prompt(cx),
                 },
             },
+            CommandId::NewVisibooksRecipe => self.new_visibooks_recipe(cx),
             CommandId::EditRecipe => match self.recipe_strip_table(cx) {
                 Some(t) => {
                     let path = self.recipe_link_path(&t.source.as_ref().unwrap().recipe);

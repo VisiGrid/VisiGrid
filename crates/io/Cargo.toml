@@ -18,6 +18,7 @@ native = [
     "dep:rusqlite", "dep:csv", "dep:calamine", "dep:rust_xlsxwriter", "dep:encoding_rs",
     "dep:quick-xml", "dep:zip", "dep:regex", "dep:blake3", "dep:uuid",
     "dep:chrono", "dep:dirs", "dep:toml", "dep:toml_edit", "dep:tempfile", "dep:parquet", "dep:libduckdb-sys", "dep:bytes",
+    "dep:visigrid-config", "dep:reqwest",
 ]
 
 [dependencies]
@@ -34,6 +35,11 @@ quick-xml = { version = "0.38", optional = true }
 zip = { version = "4", optional = true }
 regex = { version = "1", optional = true }
 blake3 = { version = "1", optional = true }
+# VisiBooks recipe sources (native): keychain lookups and one blocking GET per
+# run. The app and CLI turn on config's keychain feature; a headless io build
+# has none and reads VISIBOOKS_API_KEY
+visigrid-config = { path = "../config", default-features = false, optional = true }
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
 sha2 = { workspace = true }
 # Parquet read from memory (import_bytes).
 bytes = { version = "1", optional = true }

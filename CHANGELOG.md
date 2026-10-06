@@ -144,6 +144,10 @@
 
 - Workbooks containing unsupported content open read-only and retain their complete original document, including stored formula results. Protected native copies carry an upgrade marker so VisiGrid 0.42 and later refuses to overwrite the preview with missing content; use an updated client to open the protected original. Versions before 0.42 do not recognize this marker. ([#120](https://github.com/VisiGrid/VisiGrid/pull/120))
 
+### Import recipes
+
+- **VisiBooks reports as a source.** A recipe can read the trial balance, general ledger, or AR/AP aging of a VisiBooks entity into a Table that Refresh updates, with dates that move with the calendar (last month end, year start). The read-only API key is saved in the system keychain for one server with `vgrid visibooks key`, never in the recipe or workbook; `vgrid visibooks entities` lists what it can read. Run **New Recipe from VisiBooks…**. ([#118](https://github.com/VisiGrid/VisiGrid/pull/118))
+
 ## 0.49.2
 
 ### Merged cells and Center Across
