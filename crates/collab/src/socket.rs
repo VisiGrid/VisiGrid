@@ -23,7 +23,10 @@ impl LiveSocket {
         let (mut socket, response) =
             tungstenite::connect(request).map_err(|error| match error {
                 tungstenite::Error::Http(response) if response.status().as_u16() == 401 => {
-                String::from("Sign in again to resume collaboration")
+                    String::from("Sign in again to resume collaboration")
+                }
+                tungstenite::Error::Http(response) if response.status().is_client_error() => {
+                    String::from("The server refused live workbook access")
                 }
                 _ => "Could not connect to the collaboration service".into(),
             })?;

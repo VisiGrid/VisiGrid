@@ -124,8 +124,38 @@ fn run(
             writable,
             message: "Connecting to shared workbook…".into(),
         });
-        let mut socket = LiveSocket::connect(socket_url.as_str(), &auth.token)?;
-        socket.send(&replica.hello(env!("VISIGRID_ENGINE_COMMIT"), sequence_known))?;
+        let mut socket = match LiveSocket::connect(socket_url.as_str(), &auth.token) {
+            Ok(socket) => socket,
+            Err(message) => {
+                // Authentication and protocol refusals need user action;
+                // transient connection failures must preserve pending edits.
+                if message == "Sign in again to resume collaboration"
+                    || message == "The server refused live workbook access"
+                    || message == "The server did not accept the collaboration protocol"
+                    || message == "Invalid authentication token"
+                    || message == "Invalid collaboration URL"
+                    || message == "Unsupported collaboration transport"
+                {
+                    return Err(message);
+                }
+                replica.disconnect();
+                let _ = events.send(Event::State {
+                    ready: false,
+                    writable,
+                    message: "Service unavailable — reconnecting to shared workbook…".into(),
+                });
+                reconnect_pause(stop);
+                continue;
+            }
+        };
+        if socket
+            .send(&replica.hello(env!("VISIGRID_ENGINE_COMMIT"), sequence_known))
+            .is_err()
+        {
+            replica.disconnect();
+            reconnect_pause(stop);
+            continue;
+        }
         let mut ready = false;
         while !stop.load(Ordering::Relaxed) {
             if ready {
@@ -240,14 +270,18 @@ fn run(
             writable,
             message: "Disconnected — reconnecting to shared workbook…".into(),
         });
-        for _ in 0..10 {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        reconnect_pause(stop);
     }
     Ok(())
+}
+
+fn reconnect_pause(stop: &AtomicBool) {
+    for _ in 0..10 {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 impl crate::app::Spreadsheet {
