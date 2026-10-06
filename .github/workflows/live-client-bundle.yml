@@ -46,3 +46,33 @@ jobs:
           name: live-client-bundle
           path: live-client-bundle/
           if-no-files-found: error
+  native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-live-native-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-live-native-
+            ${{ runner.os }}-cargo-pr-
+            ${{ runner.os }}-cargo-io-
+      - name: Build real native client and sequencer host from the same commit
+        run: cargo build --locked -p visigrid-gpui --bin visigrid -p visigrid-cli --bin vgrid
+      - name: Record binary architecture and source identity
+        run: |
+          mkdir -p live-native-client
+          cp target/debug/visigrid target/debug/vgrid live-native-client/
+          printf '%s\n' "$GITHUB_SHA" > live-native-client/SOURCE_COMMIT
+          uname -m > live-native-client/ARCHITECTURE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-native-client
+          path: live-native-client/
+          if-no-files-found: error
