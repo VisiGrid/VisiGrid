@@ -18,11 +18,16 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::workbook::Workbook;
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "collab")]
 mod collab;
 mod formula_help;
+// The precedent/dependent inspector serves the collaboration replica only.
+#[cfg(feature = "collab")]
 mod inspect;
+#[cfg(feature = "recipes")]
 mod recipes;
 mod session;
+#[cfg(feature = "collab")]
 pub use collab::CollabClient;
 pub use session::Session;
 
