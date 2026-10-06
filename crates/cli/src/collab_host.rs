@@ -270,6 +270,11 @@ impl Host {
             ops = kept;
         }
         let wb = self.wb_mut()?;
+        // Advance volatile results only once this envelope is accepted. A
+        // refused operation must not change the committed calculation state.
+        if wb.recalc_clock().is_some() {
+            wb.recompute_full_ordered();
+        }
         apply_ops(wb, &ops);
         self.seq += 1;
         Ok(fields(json!({

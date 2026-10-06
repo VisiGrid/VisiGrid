@@ -362,6 +362,28 @@ mod tests {
         assert_eq!(a.client.wb.sheet(0).unwrap().get_raw(0, 0), "");
     }
     #[test]
+    fn clocked_ack_matches_remote_commit_and_reopened_snapshot() {
+        let mut editor = live(true, 1);
+        let mut viewer = live(false, 2);
+        let id = Uuid::from_u128(91);
+        editor.set_cell(id, 37, 0, 0, "=RAND()+NOW()".into()).unwrap();
+        let frame = editor.poll_send().unwrap();
+        let clock = json!({"now_ms":1791028800123_i64,"utc_offset_seconds":-18000,"seed":"18446744073709551615"});
+        viewer.receive(&json!({"type":"op","seq":1,"actor":1,"client_op_id":id,
+            "op":frame["envelope"]["op"],"clock":clock})).unwrap();
+        editor.receive(&json!({"type":"ack","seq":1,"client_op_id":id,"clock":clock})).unwrap();
+        assert_eq!(collab_checksum(&editor.client.wb), collab_checksum(&viewer.client.wb));
+        assert_eq!(editor.client.pending_count(), 0);
+
+        let mut snapshot = editor.client.confirmed.clone();
+        snapshot.set_recalc_clock(None);
+        snapshot.recompute_full_ordered();
+        let mut reopened = WireReplica::new(snapshot, 1, true);
+        reopened.hello("engine", true);
+        reopened.receive(&json!({"type":"welcome","seq":1,"actor":1,"ops":[],"clock":clock})).unwrap();
+        assert_eq!(collab_checksum(&reopened.client.wb), collab_checksum(&viewer.client.wb));
+    }
+    #[test]
     fn sequenced_clock_is_applied_once_and_invalid_clock_cannot_apply_cells() {
         let mut viewer = live(false, 2);
         let id = Uuid::from_u128(77);
