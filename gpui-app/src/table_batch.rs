@@ -39,6 +39,9 @@ impl Spreadsheet {
         source: MutationSource,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.cloud_live_enabled() {
+            return Err("This live session supports sequenced cell values and formulas only.".into());
+        }
         self.validate_saved_view_layout(&candidate)?;
         let changed = !commit.is_empty();
         let sheet_index = self.sheet_index(cx);

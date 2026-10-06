@@ -20,7 +20,7 @@ sha2 = { workspace = true }
 
 # Remote simulator (drives a real server over WebSocket protocol v2). Off by
 # default so nothing that depends on this crate pulls in a WebSocket stack.
-tungstenite = { version = "0.24", optional = true }
+tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
 url = { version = "2", optional = true }
 visigrid-io = { path = "../io", optional = true }
 
@@ -34,7 +34,8 @@ default = ["sim", "protocol"]
 protocol = ["dep:visigrid-protocol"]
 # The convergence simulator and its op generator. Off for the browser build.
 sim = ["dep:rand"]
-remote = ["sim", "dep:tungstenite", "dep:url", "dep:visigrid-io"]
+socket = ["dep:tungstenite", "dep:url"]
+remote = ["sim", "socket", "dep:url", "dep:visigrid-io"]
 # Long fuzz runs read COLLAB_FUZZ_SEEDS; this feature only exists so CI can
 # opt a job in without an environment variable.
 long-fuzz = []

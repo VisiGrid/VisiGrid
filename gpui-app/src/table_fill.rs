@@ -289,7 +289,7 @@ pub(crate) fn plan_handle(
 
 impl Spreadsheet {
     fn fill_table_view(&mut self, cx: &mut Context<Self>) -> Result<RowView, String> {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return Err(
                 "Fill is unavailable while viewing a read-only workbook or preview.".into(),
             );
@@ -379,7 +379,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn fill_table_selection(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         let editing = self.mode.is_editing();

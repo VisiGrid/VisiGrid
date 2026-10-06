@@ -261,7 +261,7 @@ impl Spreadsheet {
             self.commit_current_edit(cx);
             return;
         }
-        if self.block_if_previewing(cx) { return; }
+        if self.block_if_previewing_cell(cx) { return; }
 
         // Restore home sheet for cross-sheet formula editing
         self.restore_formula_home_sheet(cx);
@@ -1396,7 +1396,7 @@ impl Spreadsheet {
         }
 
         if self.table_edit_target.is_some() { return self.commit_table_cell_edit(cx); }
-        if self.block_if_previewing(cx) { return false; }
+        if self.block_if_previewing_cell(cx) { return false; }
         // Restore home sheet for cross-sheet formula editing
         self.restore_formula_home_sheet(cx);
 

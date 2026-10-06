@@ -1357,7 +1357,8 @@ sheet:cols()
     }
     /// Apply the pending Lua preview to a new sheet.
     pub fn apply_lua_to_new_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_read_only_recovery(cx) || self.is_previewing() { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx))
+            || self.block_read_only_recovery(cx) || self.is_previewing() { return; }
         use crate::terminal::state::PendingResult;
         let Some(PendingResult::LuaPreview(preview)) = self.terminal.pending_result.as_ref() else { return; };
         let result = (|| {
@@ -1381,7 +1382,8 @@ sheet:cols()
     }
     /// Apply the pending Lua preview to the current (source) sheet.
     pub fn apply_lua_to_current_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_read_only_recovery(cx) || self.is_previewing() {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx))
+            || self.block_read_only_recovery(cx) || self.is_previewing() {
             return;
         }
         use crate::terminal::state::PendingResult;

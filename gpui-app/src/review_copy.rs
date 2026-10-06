@@ -177,6 +177,9 @@ impl Spreadsheet {
         history: ReviewCopyHistory,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.cloud_live_enabled() {
+            return Err("This live session supports sequenced cell values and formulas only.".into());
+        }
         self.validate_structure_layout(&candidate, history.sheet.id, &history.layout)?;
         self.review_mode = None;
         self.workbook

@@ -59,6 +59,9 @@ impl Spreadsheet {
     }
 
     fn cloud_start_upload(&mut self, force: bool, cx: &mut gpui::Context<Self>) {
+        // The live sequencer owns publication; REST saves would replace its
+        // document and race the operation log.
+        if self.cloud_live_enabled() { return; }
         let identity = match &self.cloud_identity {
             Some(id) => id.clone(),
             None => return,

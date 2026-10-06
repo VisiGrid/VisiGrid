@@ -12,6 +12,7 @@
 
 pub mod apply;
 pub mod client;
+pub mod clock;
 pub mod copy;
 #[cfg(feature = "sim")]
 pub mod gen;
@@ -21,3 +22,8 @@ pub mod server;
 pub mod sim;
 pub mod transform;
 pub mod undo;
+
+pub mod wire;
+
+#[cfg(feature = "socket")]
+pub mod socket;

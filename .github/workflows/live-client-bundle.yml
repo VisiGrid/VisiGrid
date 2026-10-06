@@ -1,0 +1,81 @@
+name: Live collaboration client bundle
+on:
+  workflow_dispatch:
+concurrency:
+  group: live-client-bundle-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            target/
+          key: ${{ runner.os }}-cargo-live-wasm-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-live-wasm-
+      - name: Test collaboration replica
+        run: cargo test --locked -p visigrid-collab
+      - name: Install target for the workspace-pinned toolchain
+        run: rustup target add --toolchain 1.98.1 wasm32-unknown-unknown
+      - name: Check secure native collaboration socket
+        run: cargo check --locked -p visigrid-collab --no-default-features --features socket
+      - name: Build browser engine
+        run: cargo build --release --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
+      - name: Install matching bindings generator
+        run: |
+          if ! command -v wasm-bindgen >/dev/null || [ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.126" ]; then
+            cargo install wasm-bindgen-cli --version 0.2.126 --locked --force
+          fi
+      - name: Generate web bindings
+        run: |
+          mkdir -p live-client-bundle
+          wasm-bindgen target/wasm32-unknown-unknown/release/visigrid_engine_wasm.wasm --target web --out-dir live-client-bundle
+          printf '{"type":"module"}\n' > live-client-bundle/package.json
+      - name: Verify compiled collaboration client
+        run: node scripts/check-live-client-bundle.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-client-bundle
+          path: live-client-bundle/
+          if-no-files-found: error
+  native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-live-native-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-live-native-
+            ${{ runner.os }}-cargo-pr-
+            ${{ runner.os }}-cargo-io-
+      - name: Build real native client and sequencer host from the same commit
+        run: cargo build --locked -p visigrid-gpui --bin visigrid -p visigrid-cli --bin vgrid
+      - name: Verify real host sequencing and calculation context
+        run: cargo test --locked -p visigrid-cli --test collab_host
+      - name: Record binary architecture and source identity
+        run: |
+          mkdir -p live-native-client
+          cp target/debug/visigrid target/debug/vgrid live-native-client/
+          printf '%s\n' "$GITHUB_SHA" > live-native-client/SOURCE_COMMIT
+          uname -m > live-native-client/ARCHITECTURE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-native-client
+          path: live-native-client/
+          if-no-files-found: error

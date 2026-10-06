@@ -151,6 +151,14 @@ impl Client {
         self.changes.get_or_insert_with(Changes::default);
     }
 
+    /// Calculation outside an operation's tracked writes can change cells
+    /// anywhere in the workbook, such as NOW/RAND after a sequenced clock.
+    pub fn record_calculation_refresh(&mut self) {
+        if let Some(changes) = self.changes.as_mut() {
+            changes.full = true;
+        }
+    }
+
     /// The changes recorded since the last call (empty when not recording).
     pub fn take_changes(&mut self) -> Changes {
         match self.changes.as_mut() {

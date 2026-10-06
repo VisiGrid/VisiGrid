@@ -76,7 +76,14 @@ impl Spreadsheet {
     /// Returns true if blocked (command should return early).
     /// Sets status message with consistent preview warning.
     pub fn block_if_previewing(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.cloud_live_enabled() {
+            self.status_message = Some("This live session supports cell values and formulas only".into());
+            cx.notify(); return true;
+        }
         self.block_if_previewing_only(cx) || self.block_table_view_edit(cx)
+    }
+    pub(crate) fn block_if_previewing_cell(&mut self, cx: &mut Context<Self>) -> bool {
+        self.block_live_read_only(cx) || self.block_if_previewing_only(cx) || self.block_table_view_edit(cx)
     }
 
     pub(crate) fn block_if_previewing_only(&mut self, cx: &mut Context<Self>) -> bool {

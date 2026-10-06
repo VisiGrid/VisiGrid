@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import init, { CollabClient, engine_commit } from '../live-client-bundle/visigrid_engine_wasm.js';
+await init({ module_or_path: await readFile(new URL('../live-client-bundle/visigrid_engine_wasm_bg.wasm', import.meta.url)) });
+assert.equal(engine_commit(), process.env.GITHUB_SHA);
+const document = { format: 'visigrid-json', version: 2, collab_sheet_ids: [37], sheets: [{ name: 'Shared', cells: [] }] };
+const client = new CollabClient(document, 0);
+client.reconnect();
+client.receive({ type: 'welcome', seq: 0, actor: 1, ops: [] });
+client.local([{ SetCell: { sheet: 37, sheet_name: 'Shared', row: 0, col: 0, content: { Value: '3' } } }]);
+const envelope = client.poll_send();
+assert.equal(envelope.op[0].SetCell.sheet, 37);
+client.receive({ type: 'ack', seq: 1, client_op_id: envelope.client_op_id });
+assert.equal(client.last_seen(), 1);
+assert.equal(client.pending(), 0);
+assert.equal(client.raw(37, 0, 0), '3');
+client.free();
+console.log('Compiled WASM collaboration client, stable sheet identity and acknowledgement verified.');
