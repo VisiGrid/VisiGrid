@@ -39,7 +39,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -66,7 +65,10 @@ jobs:
       # web app's live editing ships the full one, and live-client-bundle.yml
       # is dispatch-only, so compile both browser builds on every PR.
       - name: Browser engine, lean and full builds
+        # cargo uses the toolchain pinned in rust-toolchain.toml, not the
+        # stable one installed above, so the target goes on the pinned one.
         run: |
+          rustup target add --toolchain "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" wasm32-unknown-unknown
           cargo check --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
           cargo check --locked -p visigrid-engine-wasm --features recipes --target wasm32-unknown-unknown
 
