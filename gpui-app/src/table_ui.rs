@@ -428,7 +428,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn create_table_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
         self.sync_table_view(cx);
@@ -479,7 +479,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn open_table_dialog(&mut self, kind: TableDialogKind, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
         if !matches!(kind, TableDialogKind::Resize(_)) && self.block_table_view_edit(cx) { return; }
@@ -531,7 +531,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn submit_table_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         let Some(draft) = self.table_dialog.clone() else {

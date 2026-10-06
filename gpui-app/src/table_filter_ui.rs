@@ -226,7 +226,7 @@ impl Spreadsheet {
         anchor: (f32, f32),
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         if !self.mode.is_navigation() {
@@ -307,7 +307,7 @@ impl Spreadsheet {
         description: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return false;
         }
         if self.import_in_progress || self.hub_activity.is_some() || !self.mode.is_navigation() {

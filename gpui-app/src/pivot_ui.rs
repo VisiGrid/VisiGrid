@@ -410,7 +410,7 @@ impl Spreadsheet {
     /// Insert → PivotTable: the selection (if more than one cell) or the
     /// current region around the cursor becomes the source.
     pub(crate) fn insert_pivot_table(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         let (vr, col) = self.view_state.selected;
@@ -682,7 +682,7 @@ impl Spreadsheet {
     /// Apply the drawer's draft: create the pivot on a new sheet, or update
     /// the existing one.
     pub(crate) fn pivot_apply(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let Some(panel) = self.pivot_panel.clone() else { return };
         let table = match &panel.mode {
             PivotPanelMode::New => PivotTable {
@@ -756,7 +756,7 @@ impl Spreadsheet {
     /// Delete the pivot under the cursor (or in the open drawer) and clear its
     /// output. One undo step.
     pub(crate) fn delete_pivot(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let id = match self.pivot_panel.as_ref().map(|p| p.mode.clone()) {
             Some(PivotPanelMode::Edit { pivot_id }) => Some(pivot_id),
             _ => self.pivot_under_cursor(cx).map(|t| t.id),
@@ -845,7 +845,7 @@ impl Spreadsheet {
     /// Validate, snapshot and compute; large sources aggregate on a background
     /// thread and are placed when done.
     fn run_pivot_job(&mut self, mut job: PivotJob, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let (table, snapshot, generation) = match self.pivot_prepare_snapshot(&job, cx) {
             Ok(s) => s,
             Err(msg) => {
@@ -876,7 +876,7 @@ impl Spreadsheet {
 
     /// The synchronous path, for Refresh All. Returns false on failure.
     fn run_pivot_job_sync(&mut self, mut job: PivotJob, cx: &mut Context<Self>) -> bool {
-        if self.block_if_previewing_only(cx) { return false; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return false; }
         match self.pivot_prepare_snapshot(&job, cx) {
             Ok((table, snapshot, generation)) => {
                 job.table = table;
@@ -914,7 +914,7 @@ impl Spreadsheet {
         result: Result<PivotOutput, PivotError>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) { return false; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return false; }
         if let Some(p) = self.pivot_panel.as_mut() {
             p.busy = false;
         }

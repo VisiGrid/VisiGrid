@@ -302,7 +302,7 @@ impl Spreadsheet {
             self.status_message = Some("Live Table editing is not enabled in this cell-editing slice".into());
             cx.notify(); return true;
         }
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return true;
         }
         if !crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
@@ -350,7 +350,7 @@ impl Spreadsheet {
         description: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return false;
         }
         if writes.is_empty() {

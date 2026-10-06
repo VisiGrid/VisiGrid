@@ -203,7 +203,7 @@ impl Spreadsheet {
                 return Some(false);
             }
         };
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return Some(false);
         }
         if !self.table_view_installed && (self.row_view.is_sorted() || self.row_view.is_filtered())
@@ -277,7 +277,7 @@ impl Spreadsheet {
         edit: Option<TableCellWrite>,
         cx: &mut Context<Self>,
     ) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.sync_table_view(cx);
