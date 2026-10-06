@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 concurrency:
   group: live-client-bundle-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   bundle:
     runs-on: ubuntu-latest
