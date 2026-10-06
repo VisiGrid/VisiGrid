@@ -4,8 +4,13 @@
 use serde_json::Value;
 use visigrid_engine::RecalcClock;
 
-pub fn install_frame_clock(client: &mut crate::client::Client, frame: &Value) -> Result<(), String> {
-    let Some(value) = frame.get("clock") else { return Ok(()); };
+pub fn install_frame_clock(
+    client: &mut crate::client::Client,
+    frame: &Value,
+) -> Result<(), String> {
+    let Some(value) = frame.get("clock") else {
+        return Ok(());
+    };
     let clock = parse_clock(value)?;
     client.wb.ensure_writable()?;
     client.confirmed.ensure_writable()?;
@@ -13,8 +18,11 @@ pub fn install_frame_clock(client: &mut crate::client::Client, frame: &Value) ->
     client.confirmed.set_recalc_clock(Some(clock));
     // A value edit can advance NOW/RAND in cells elsewhere in the workbook.
     // Rebase starts from confirmed, so it must include that recalculation.
-    client.confirmed.recompute_full_ordered();
-    client.wb.recompute_full_ordered();
+    if client.confirmed.volatile_cell_count() > 0 || client.wb.volatile_cell_count() > 0 {
+        client.confirmed.recompute_full_ordered();
+        client.wb.recompute_full_ordered();
+        client.record_calculation_refresh();
+    }
     Ok(())
 }
 
@@ -45,6 +53,21 @@ pub fn parse_clock(value: &Value) -> Result<RecalcClock, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn clock_recalculation_requests_a_repaint_for_volatile_cells() {
+        let mut client = crate::client::Client::new(1);
+        client.wb.set_cell_value_tracked_at(0, 0, 0, "=RAND()");
+        client.confirmed = client.wb.clone();
+        client.record_changes();
+        let frame = json!({"clock":{"now_ms":1,"utc_offset_seconds":0,"seed":"42"}});
+        install_frame_clock(&mut client, &frame).unwrap();
+        assert!(client.take_changes().full);
+        let mut ordinary = crate::client::Client::new(1);
+        ordinary.record_changes();
+        install_frame_clock(&mut ordinary, &frame).unwrap();
+        assert!(!ordinary.take_changes().full);
+    }
 
     #[test]
     fn retains_seed_beyond_javascript_integer_precision() {
