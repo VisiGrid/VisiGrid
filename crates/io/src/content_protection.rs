@@ -58,11 +58,40 @@ pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
                 }
                 None
             }
+            (Value::Number(a), Value::Number(b)) if decimal_number(a) == decimal_number(b) => None,
             _ if a == b => None,
             _ => Some(path.to_owned()),
         }
     }
     visit(source, projected, "")
+}
+
+// Compare the represented decimal values without converting integers to f64:
+// 42 and 42.0 are equivalent, but 9007199254740993 must not match a rounded
+// 9007199254740992.0. Keep the exponent separate to avoid large allocations.
+fn decimal_number(n: &serde_json::Number) -> (bool, String, i32) {
+    let text = n.to_string();
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.as_str()),
+    };
+    let (mantissa, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map(|(m, e)| (m, e.parse::<i32>().expect("JSON number exponent")))
+        .unwrap_or((unsigned, 0));
+    let fraction = mantissa.split_once('.').map_or(0, |(_, f)| f.len() as i32);
+    let digits = mantissa.replace('.', "");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return (false, "0".into(), 0);
+    }
+    let normalized = significant.trim_end_matches('0');
+    let trailing = significant.len() - normalized.len();
+    (
+        negative,
+        normalized.into(),
+        exponent - fraction + trailing as i32,
+    )
 }
 
 pub(crate) fn fingerprint(sheet: &Sheet) -> Result<[u8; 32], String> {
@@ -122,6 +151,29 @@ mod tests {
         assert!(first_loss(
             &json!({"cells":[{"row":0,"col":0,"formula":"","value":1}]}),
             &json!({"cells":[{"row":0,"col":0,"formula":"","value":2}]})
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn numeric_representation_changes_are_not_content_loss() {
+        for (before, after) in [
+            ("42", "42.0"),
+            ("1000", "1e3"),
+            ("0", "-0.0"),
+            ("0.125", "1.25e-1"),
+        ] {
+            assert_eq!(
+                first_loss(
+                    &serde_json::from_str(before).unwrap(),
+                    &serde_json::from_str(after).unwrap()
+                ),
+                None
+            );
+        }
+        assert!(first_loss(
+            &serde_json::from_str("9007199254740993").unwrap(),
+            &serde_json::from_str("9007199254740992.0").unwrap()
         )
         .is_some());
     }

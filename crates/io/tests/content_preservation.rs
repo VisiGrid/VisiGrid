@@ -1,5 +1,27 @@
 use visigrid_io::json::{export_workbook, import_any};
 
+#[test]
+fn ordinary_integer_cells_remain_editable_but_rounded_values_are_protected() {
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Numbers","cells":[{"row":0,"col":0,"value":42}]}]}"#;
+    let (mut workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_none());
+    workbook.sheet_mut(0).unwrap().set_value(0, 0, "43");
+    let output: serde_json::Value =
+        serde_json::from_str(&export_workbook(&workbook, &layouts, active).unwrap()).unwrap();
+    assert_eq!(
+        output["sheets"][0]["cells"][0]["value"].as_f64(),
+        Some(43.0)
+    );
+
+    let rounded = source.replace("42", "9007199254740993");
+    let (workbook, layouts, active) = import_any(&rounded).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        rounded
+    );
+}
+
 // Unknown content must remain attached to its original document, sheet, cell
 // and format. Merely accepting JSON on input does not establish compatibility.
 #[test]
