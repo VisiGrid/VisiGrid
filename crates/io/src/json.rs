@@ -405,7 +405,7 @@ struct SheetBody {
     /// (see `bands`); `cells` is then empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     bands: Vec<bands::BandRef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cells: Vec<FullCell>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     merges: Vec<MergeSpec>,

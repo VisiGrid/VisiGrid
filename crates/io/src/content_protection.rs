@@ -23,6 +23,14 @@ pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
                     }
                     let next = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
                     let Some(other) = b.get(key) else {
+                        // The codec omits empty cell lists. Recognize that one
+                        // default only at actual workbook/sheet bodies; unknown
+                        // empty fields must still survive unchanged.
+                        let body = (path.is_empty() && a.get("format").and_then(Value::as_str) == Some("visigrid-json"))
+                            || path.strip_prefix("/sheets/").is_some_and(|index| !index.is_empty() && index.bytes().all(|c| c.is_ascii_digit()));
+                        if key == "cells" && body && value.as_array().is_some_and(Vec::is_empty) {
+                            continue;
+                        }
                         return Some(next);
                     };
                     if let Some(loss) = visit(value, other, &next) {
@@ -180,4 +188,13 @@ mod tests {
         )
         .is_some());
     }
+    #[test]
+    fn empty_known_cell_lists_can_be_omitted_but_extensions_cannot() {
+        assert_eq!(first_loss(&json!({"format":"visigrid-json","cells":[],"sheets":[{"name":"A","cells":[]}]}),
+            &json!({"format":"visigrid-json","sheets":[{"name":"A"}]})), None);
+        assert_eq!(first_loss(&json!({"format":"visigrid-json","future":[]}), &json!({"format":"visigrid-json"})), Some("/future".into()));
+        assert_eq!(first_loss(&json!({"row":0,"col":0,"cells":[]}), &json!({"row":0,"col":0})), Some("/cells".into()));
+        assert!(first_loss(&json!({"format":"visigrid-json","cells":[{"row":0,"col":0,"value":42}]}), &json!({"format":"visigrid-json"})).is_some());
+    }
+
 }
