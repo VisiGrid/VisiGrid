@@ -13,7 +13,7 @@ use visigrid_engine::table::TableId;
 use visigrid_io::csv::{CsvOptions, Encoding};
 use visigrid_io::csv_import::{ColumnRule, DateOrder};
 use visigrid_io::recipe::{
-    self, CsvSource, FilterOp, Missing, OnError, OutColumn, Recipe, RunReport, Snapshot, SortKey, Source, SourceInfo, Step,
+    self, CsvSource, FilterOp, JoinHow, Missing, OnDuplicate, OnError, OutColumn, Recipe, RunReport, Snapshot, SortKey, Source, SourceInfo, Step,
     Total, TotalFn, RECIPE_VERSION,
 };
 
@@ -44,7 +44,7 @@ const AS_OF_WORDS: [&str; 5] = ["today", "month_end", "last_month_end", "year_en
 const FROM_WORDS: [&str; 4] = ["month_start", "last_month_start", "year_start", "last_year_start"];
 
 /// The kinds of step "Add step" offers, in menu order.
-pub const ADD_KINDS: [(&str, &str); 13] = [
+pub const ADD_KINDS: [(&str, &str); 14] = [
     ("Keep columns", "choose which, in order"),
     ("Remove columns", ""),
     ("Rename columns", ""),
@@ -58,7 +58,10 @@ pub const ADD_KINDS: [(&str, &str); 13] = [
     ("Fill down", "empty cells take the value above"),
     ("Replace values", "a whole cell or text inside it"),
     ("Split column", "at a delimiter, into new columns"),
+    ("Merge with a recipe", "join another table on key columns"),
 ];
+/// The add-menu entry that asks for a recipe file first.
+pub const MERGE_KIND: usize = 13;
 
 /// One row of the selected step's settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +96,16 @@ pub enum EditorRow {
     /// Split: the name of new column `index`.
     SplitInto { index: usize },
     AddSplitPiece,
+    /// Merge: the other recipe (Enter chooses another).
+    MergeWith,
+    /// Merge: key pair `index`, this side (`here`) or the other.
+    MergeKey { index: usize, here: bool },
+    AddMergeKey,
+    RemoveMergeKey { index: usize },
+    MergeHow,
+    MergeDuplicates,
+    /// Merge: a column of the other table to bring (checkbox).
+    MergeColumn { name: String, present: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +147,9 @@ pub struct RecipeBuilder {
     pub tables: Vec<String>,
     /// Columns going into the selected step.
     pub step_columns: Vec<String>,
+    /// The selected Merge step's other table: its columns (empty when it
+    /// can't be read).
+    pub merge_columns: Vec<String>,
     pub full: Option<RunReport>,
     pub preview: Option<Preview>,
     pub error: Option<String>,
@@ -248,7 +264,8 @@ pub fn step_missing(step: &Step) -> Missing {
         | Step::Sort { missing, .. }
         | Step::FillDown { missing, .. }
         | Step::Replace { missing, .. }
-        | Step::Split { missing, .. } => *missing,
+        | Step::Split { missing, .. }
+        | Step::Merge { missing, .. } => *missing,
     }
 }
 
@@ -266,7 +283,8 @@ fn step_missing_mut(step: &mut Step) -> &mut Missing {
         | Step::Sort { missing, .. }
         | Step::FillDown { missing, .. }
         | Step::Replace { missing, .. }
-        | Step::Split { missing, .. } => missing,
+        | Step::Split { missing, .. }
+        | Step::Merge { missing, .. } => missing,
     }
 }
 
@@ -286,6 +304,7 @@ pub fn step_kind(step: &Step) -> &'static str {
         Step::FillDown { .. } => ADD_KINDS[10].0,
         Step::Replace { .. } => ADD_KINDS[11].0,
         Step::Split { .. } => ADD_KINDS[12].0,
+        Step::Merge { .. } => ADD_KINDS[MERGE_KIND].0,
     }
 }
 
@@ -357,7 +376,12 @@ fn read_snapshot(recipe: &Recipe, recipe_path: Option<&Path>, source_path: &Path
         let base = recipe_path.and_then(Path::parent).or_else(|| source_path.parent()).unwrap_or(Path::new("."));
         recipe.read_snapshot(base, None)
     } else {
-        Snapshot::read(source_path)
+        let mut snapshot = Snapshot::read(source_path)?;
+        // The recipes Merge steps name, relative to the recipe (or the file
+        // until the recipe is saved)
+        let base = recipe_path.and_then(Path::parent).or_else(|| source_path.parent()).unwrap_or(Path::new("."));
+        recipe.attach_joined(base, &mut snapshot, 0)?;
+        Ok(snapshot)
     }
 }
 
@@ -387,6 +411,7 @@ impl RecipeBuilder {
             file_columns: Vec::new(),
             tables: Vec::new(),
             step_columns: Vec::new(),
+            merge_columns: Vec::new(),
             full: None,
             preview: None,
             error: None,
@@ -448,6 +473,16 @@ impl RecipeBuilder {
             None => raw,
             Some(i) => {
                 self.step_columns = upto(i).output.columns.iter().map(|c| c.name.clone()).collect();
+                // A Merge step: the other recipe's result columns, from its snapshot
+                self.merge_columns = match self.recipe.steps.get(i) {
+                    Some(Step::Merge { with, .. }) => snapshot
+                        .joined
+                        .iter()
+                        .find(|j| &j.with == with)
+                        .map(|j| recipe::run(&j.recipe, &j.snapshot).output.columns.into_iter().map(|c| c.name).collect())
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
                 upto(i + 1)
             }
         };
@@ -513,6 +548,33 @@ impl RecipeBuilder {
                     rows.push(EditorRow::ReplaceCase);
                 }
                 rows.extend(columns(c));
+            }
+            Step::Merge { on, right_on, columns: brought, .. } => {
+                let keys = if right_on.is_empty() { on } else { right_on };
+                rows.push(EditorRow::MergeWith);
+                for index in 0..on.len() {
+                    rows.push(EditorRow::MergeKey { index, here: true });
+                    rows.push(EditorRow::MergeKey { index, here: false });
+                    if on.len() > 1 {
+                        rows.push(EditorRow::RemoveMergeKey { index });
+                    }
+                }
+                rows.push(EditorRow::AddMergeKey);
+                rows.push(EditorRow::MergeHow);
+                rows.push(EditorRow::MergeDuplicates);
+                // The other table's key columns are matched on, never brought
+                let mut cols: Vec<EditorRow> = self
+                    .merge_columns
+                    .iter()
+                    .filter(|n| !keys.iter().any(|k| k.eq_ignore_ascii_case(n)))
+                    .map(|n| EditorRow::MergeColumn { name: n.clone(), present: true })
+                    .collect();
+                for n in brought {
+                    if !self.merge_columns.iter().any(|c| c.eq_ignore_ascii_case(n)) {
+                        cols.push(EditorRow::MergeColumn { name: n.clone(), present: false });
+                    }
+                }
+                rows.extend(cols);
             }
             Step::Split { into, .. } => {
                 rows.push(EditorRow::SplitColumn);
@@ -580,6 +642,7 @@ impl RecipeBuilder {
         let Some(row) = rows.get(index).cloned() else { return };
         self.editor_focus = index;
         let step_columns = self.step_columns.clone();
+        let merge_columns = self.merge_columns.clone();
         let Some(step) = self.step_mut() else { return };
         match (row, step) {
             (EditorRow::Missing, step) => {
@@ -684,6 +747,66 @@ impl RecipeBuilder {
                     },
                 }
             }
+            (EditorRow::MergeKey { index, here }, Step::Merge { on, right_on, .. }) => {
+                let list = if here { &step_columns } else { &merge_columns };
+                if list.is_empty() || index >= on.len() {
+                    return;
+                }
+                // Both sides start out named alike: split them on first change
+                if !here && right_on.is_empty() {
+                    *right_on = on.clone();
+                }
+                let slot = if here { &mut on[index] } else { &mut right_on[index] };
+                let i = list.iter().position(|c| c.eq_ignore_ascii_case(slot));
+                let n = list.len();
+                *slot = list[match (i, back) {
+                    (None, _) => 0,
+                    (Some(i), false) => (i + 1) % n,
+                    (Some(i), true) => (i + n - 1) % n,
+                }]
+                .clone();
+                // The same names on both sides again: say it once
+                if right_on.len() == on.len() && right_on.iter().zip(on.iter()).all(|(r, l)| r.eq_ignore_ascii_case(l)) {
+                    right_on.clear();
+                }
+            }
+            (EditorRow::AddMergeKey, Step::Merge { on, right_on, .. }) => {
+                let next = step_columns.iter().find(|c| !on.iter().any(|o| o.eq_ignore_ascii_case(c))).cloned();
+                let Some(next) = next else { return };
+                if !right_on.is_empty() {
+                    right_on.push(merge_columns.first().cloned().unwrap_or_else(|| next.clone()));
+                }
+                on.push(next);
+            }
+            (EditorRow::RemoveMergeKey { index }, Step::Merge { on, right_on, .. }) => {
+                if on.len() > 1 && index < on.len() {
+                    on.remove(index);
+                    if index < right_on.len() {
+                        right_on.remove(index);
+                    }
+                }
+            }
+            (EditorRow::MergeHow, Step::Merge { how, .. }) => *how = cycle(&JoinHow::ALL, *how, back),
+            (EditorRow::MergeDuplicates, Step::Merge { duplicates, .. }) => {
+                *duplicates = cycle(&[OnDuplicate::Fail, OnDuplicate::First], *duplicates, back)
+            }
+            // Every column is brought (the default) until one is unchecked
+            (EditorRow::MergeColumn { name, present }, Step::Merge { columns, on, right_on, .. }) => {
+                let keys: Vec<String> = if right_on.is_empty() { on.clone() } else { right_on.clone() };
+                let all: Vec<String> = merge_columns.iter().filter(|c| !keys.iter().any(|k| k.eq_ignore_ascii_case(c))).cloned().collect();
+                if columns.is_empty() {
+                    *columns = all.clone();
+                }
+                if let Some(i) = columns.iter().position(|c| c.eq_ignore_ascii_case(&name)) {
+                    columns.remove(i);
+                } else if present {
+                    columns.push(name);
+                }
+                if columns.len() == all.len() && all.iter().all(|a| columns.iter().any(|c| c.eq_ignore_ascii_case(a))) {
+                    columns.clear();
+                }
+            }
+            (EditorRow::MergeWith, _) => return,
             (EditorRow::ReplacePart, Step::Replace { part, .. }) => *part = !*part,
             (EditorRow::ReplaceCase, Step::Replace { match_case, .. }) => *match_case = !*match_case,
             (EditorRow::SplitColumn, Step::Split { column, .. }) => {
@@ -899,6 +1022,61 @@ impl RecipeBuilder {
     /// Whether a source row is the file (which opens a file picker).
     pub fn source_row_is_file(&self, row: usize) -> bool {
         row == 0 && !self.recipe.source.is_remote()
+    }
+
+    /// Whether a column of the other table is brought by the selected Merge.
+    pub fn merge_column_checked(&self, name: &str) -> bool {
+        match self.step() {
+            Some(Step::Merge { columns, on, right_on, .. }) => {
+                let keys = if right_on.is_empty() { on } else { right_on };
+                if columns.is_empty() {
+                    !keys.iter().any(|k| k.eq_ignore_ascii_case(name))
+                } else {
+                    columns.iter().any(|c| c.eq_ignore_ascii_case(name))
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Point the selected Merge step at `path`, or add one after the
+    /// selected step, keyed on a column both tables have if there is one.
+    pub fn set_merge_recipe(&mut self, path: &Path) {
+        let recipe_dir = self.recipe_path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
+        let with = stored_source_path(path, recipe_dir.as_deref());
+        let other: Vec<String> = Recipe::load(path)
+            .ok()
+            .and_then(|r| {
+                let dir = path.parent().unwrap_or(Path::new("."));
+                let snap = r.read_snapshot(dir, None).ok()?;
+                Some(recipe::run(&r, &snap).output.columns.into_iter().map(|c| c.name).collect())
+            })
+            .unwrap_or_default();
+        if let Some(Step::Merge { with: w, .. }) = self.step_mut() {
+            *w = with;
+            self.reload();
+            self.changed();
+            return;
+        }
+        let here = self.step_columns_after_selected();
+        let shared = here.iter().find(|h| other.iter().any(|o| o.eq_ignore_ascii_case(h))).cloned();
+        let (on, right_on) = match shared {
+            Some(k) => (vec![k], Vec::new()),
+            None => (here.first().cloned().into_iter().collect(), other.first().cloned().into_iter().collect()),
+        };
+        let at = self.selected.map_or(0, |i| i + 1);
+        self.recipe.steps.insert(
+            at,
+            Step::Merge { with, on, right_on, how: JoinHow::Left, columns: Vec::new(), duplicates: OnDuplicate::Fail, missing: Missing::Fail },
+        );
+        self.selected = Some(at);
+        self.reveal_selected();
+        self.add_menu = None;
+        self.pane = Pane::Editor;
+        self.editor_focus = 0;
+        self.text_selected = false;
+        self.reload();
+        self.changed();
     }
 
     pub fn change_source(&mut self, row: usize, back: bool) {
@@ -1390,6 +1568,33 @@ impl Spreadsheet {
     }
 
     /// "Choose file…" in the builder: read another file with the same recipe.
+    /// Choose the recipe a Merge step joins with (a new step, or the
+    /// selected one's).
+    pub fn recipe_builder_pick_merge(&mut self, cx: &mut Context<Self>) {
+        let future = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose the recipe to merge with (.recipe.toml)".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = future.await {
+                if let Some(path) = paths.first().cloned() {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(b) = this.recipe_builder.as_mut() {
+                            match Recipe::load(&path) {
+                                Ok(_) => b.set_merge_recipe(&path),
+                                Err(e) => b.error = Some(format!("Can't merge with {}: {e}", path.display())),
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn recipe_builder_choose_file(&mut self, cx: &mut Context<Self>) {
         let future = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1520,8 +1725,13 @@ impl Spreadsheet {
                 "escape" => b.add_menu = None,
                 "up" => b.add_menu = Some(i.saturating_sub(1)),
                 "down" => b.add_menu = Some((i + 1).min(ADD_KINDS.len() - 1)),
+                "enter" | "space" | "e" if i == MERGE_KIND || key.key == "e" => {
+                    b.add_menu = None;
+                    self.recipe_builder_pick_merge(cx);
+                    return;
+                }
                 "enter" | "space" => b.add_step(i),
-                // 1-9, then a b c d for the rest
+                // 1-9, then a b c d (e: Merge, which asks for a recipe first)
                 k if k.len() == 1 && ('a'..='d').contains(&k.chars().next().unwrap()) => {
                     b.add_step(9 + (k.as_bytes()[0] - b'a') as usize)
                 }
@@ -1610,6 +1820,13 @@ impl Spreadsheet {
             Pane::Editor => {
                 let rows = b.editor_rows().len();
                 let focus_text = b.editor_rows().get(b.editor_focus).and_then(|r| b.row_text(r)).is_some();
+                // The Merge step's recipe is chosen with a file picker
+                if matches!(key.key.as_str(), "enter" | "space" | "right")
+                    && b.editor_rows().get(b.editor_focus) == Some(&EditorRow::MergeWith)
+                {
+                    self.recipe_builder_pick_merge(cx);
+                    return;
+                }
                 match key.key.as_str() {
                     "up" => {
                         b.editor_focus = b.editor_focus.saturating_sub(1);
@@ -1878,5 +2095,37 @@ mod tests {
         b.type_text(&Keystroke { key: "backspace".into(), key_char: None, modifiers: Modifiers::default(), ..Default::default() }, None);
         assert_eq!(b.preview.as_ref().unwrap().columns.len(), 4);
         assert_eq!(super::step_kind(b.step().unwrap()), "Split column");
+    }
+
+    #[test]
+    fn merge_editor_picks_a_shared_key_and_edits_the_join() {
+        use visigrid_io::recipe::JoinHow;
+        let mut b = builder("Customer,Amount\nAcme,10\nBeta,5\n", vec![]);
+        let dir = b.source_path.parent().unwrap().to_path_buf();
+        std::fs::write(dir.join("regions.csv"), "customer,Region,Rep\nAcme,East,KM\n").unwrap();
+        let other = dir.join("regions.recipe.toml");
+        std::fs::write(&other, "version = 1\n[source]\nkind = \"csv\"\npath = \"regions.csv\"\n").unwrap();
+        b.set_merge_recipe(&other);
+        // Keyed on the column both have (names compared ignoring case)
+        assert!(matches!(b.step(), Some(Step::Merge { on, right_on, .. }) if on == &vec!["Customer".to_string()] && right_on.is_empty()));
+        let p = b.preview.as_ref().unwrap();
+        assert_eq!(p.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Customer", "Amount", "Region", "Rep"]);
+        assert_eq!(p.rows, vec![vec!["Acme", "10", "East", "KM"], vec!["Beta", "5", "", ""]]);
+        assert_eq!(b.merge_columns, ["customer", "Region", "Rep"]);
+        // How: left -> inner
+        let how = b.editor_rows().iter().position(|r| *r == EditorRow::MergeHow).unwrap();
+        b.activate_row(how, false);
+        assert!(matches!(b.step(), Some(Step::Merge { how: JoinHow::Inner, .. })));
+        assert_eq!(b.preview.as_ref().unwrap().rows.len(), 1);
+        // Uncheck Rep: an explicit list of the rest
+        let rep = b.editor_rows().iter().position(|r| *r == EditorRow::MergeColumn { name: "Rep".into(), present: true }).unwrap();
+        b.activate_row(rep, false);
+        assert!(matches!(b.step(), Some(Step::Merge { columns, .. }) if columns == &vec!["Region".to_string()]));
+        assert!(!b.merge_column_checked("Rep") && b.merge_column_checked("Region"));
+        // The other side's key, named differently: right_on appears
+        let there = b.editor_rows().iter().position(|r| *r == EditorRow::MergeKey { index: 0, here: false }).unwrap();
+        b.activate_row(there, false);
+        assert!(matches!(b.step(), Some(Step::Merge { right_on, .. }) if right_on == &vec!["Region".to_string()]));
+        assert_eq!(super::step_kind(b.step().unwrap()), "Merge with a recipe");
     }
 }

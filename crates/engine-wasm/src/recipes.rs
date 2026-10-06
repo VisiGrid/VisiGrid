@@ -7,7 +7,6 @@
 //! first is the source; an Append-folder recipe reads them all).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde_json::{json, Value};
 use visigrid_collab::op::{CellContent, CollabOp, FormatProps, Rect};
@@ -30,8 +29,9 @@ fn snapshot(names: &[String], sizes: &[u32], data: &[u8]) -> Result<Snapshot, St
     let mut snaps = names.iter().zip(sizes).map(|(name, &n)| {
         let bytes = data[at..at + n as usize].to_vec();
         at += n as usize;
-        let hash = blake3::hash(&bytes).to_hex()[..16].to_string();
-        Snapshot { path: PathBuf::from(name), bytes: Arc::new(bytes), hash, more: Vec::new() }
+        // The same snapshot the native reader makes (merged recipes, which
+        // the browser doesn't read, are left empty)
+        Snapshot::from_bytes(&PathBuf::from(name), bytes)
     });
     let mut first = snaps.next().expect("one file");
     first.more = snaps.collect();
