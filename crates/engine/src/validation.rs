@@ -800,9 +800,7 @@ impl ValidationStore {
     pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) -> Result<(), String> {
         let limit = if is_row { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
         let shift = |s, e| {
-            crate::structural::shift_span(s, e, at, count, delete)
-                .filter(|(start, _)| *start < limit)
-                .map(|(start, end)| (start, end.min(limit - 1)))
+            crate::structural::shift_edge_span(s, e, at, count, delete, limit)
         };
         let mut shifted: BTreeMap<CellRange, ValidationRule> = BTreeMap::new();
         for (range, mut rule) in self.rules.clone() {

@@ -23,7 +23,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct StructureStep {
     pub axis: Axis,
     pub at: usize,
@@ -99,7 +99,7 @@ impl Metadata {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 struct MetaPatch {
     sheet: SheetId,
     before: Metadata,
@@ -357,11 +357,10 @@ impl Workbook {
                 })
                 .any(|i| *i >= edge)
                     || s.merged_regions.iter().any(|m| {
-                        if step.axis == Axis::Row {
-                            m.end.0 >= edge
-                        } else {
-                            m.end.1 >= edge
-                        }
+                        let end = if step.axis == Axis::Row { m.end.0 } else { m.end.1 };
+                        // Already on the sheet edge: the insert keeps that end
+                        // there instead of truncating the merge.
+                        end != limit - 1 && end >= edge
                     })
                 {
                     return Err(
@@ -510,9 +509,11 @@ impl Workbook {
 impl GuardedStructureCommit {
     pub fn estimated_history_bytes(&self) -> usize {
         self.cells.iter().map(CellPatch::estimated_history_bytes).sum::<usize>()
-            .saturating_add(crate::history_size::estimated_debug_bytes(&(&self.metadata, &self.names, &self.sheet_change,
+            .saturating_add(crate::history_size::serialized_bytes(&(&self.metadata, &self.names,
                 &self.before_cycles, &self.after_cycles, &self.views, &self.sheets,
                 &self.steps, &self.renamed_sheets, &self.fingerprint_sheets)))
+            .saturating_add(self.sheet_change.as_ref().map_or(0, |c| crate::history_size::sheet_bytes(&c.sheet)))
+            .saturating_add(self.metadata.iter().map(|m| crate::history_size::serialized_bytes(&(&m.before.validations, &m.after.validations))).sum::<usize>())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -655,5 +656,11 @@ impl GuardedStructureCommit {
         let candidate = self.candidate(wb, undo)?;
         wb.restore_snapshot_monotonic(&candidate);
         Ok(())
+    }
+}
+
+impl serde::Serialize for GuardedStructureCommit {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::history_size::serialize_count(self.estimated_history_bytes(), serializer)
     }
 }

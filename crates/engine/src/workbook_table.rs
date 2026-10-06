@@ -28,14 +28,15 @@ use crate::table::{self, DataTable, TableColumn, TableColumnId, TableId, TableRa
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct HeaderCell {
     row: usize,
     col: usize,
+    #[serde(serialize_with = "crate::history_size::serialize_value")]
     value: CellValue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct TableState {
     table: Option<DataTable>,
     headers: Vec<HeaderCell>,
@@ -70,7 +71,7 @@ pub struct TableCommit {
 impl TableCommit {
     pub fn estimated_history_bytes(&self) -> usize {
         self.guarded.as_ref().map_or(0, |g| g.estimated_history_bytes())
-            .saturating_add(crate::history_size::estimated_debug_bytes(&(&self.before, &self.after, &self.cells,
+            .saturating_add(crate::history_size::serialized_bytes(&(&self.before, &self.after, &self.cells,
                 &self.formulas, &self.rules, &self.footer_move, &self.header_insertion, &self.absent_cells,
                 &self.creation_references, &self.totals_references)))
     }
@@ -119,7 +120,30 @@ impl TableCommit {
 /// Table metadata for ordinary whole-row history, or a guarded sparse commit
 /// when totals require protected-cell restoration. Explicit bounds restore a
 /// deleted last body row even when inverse insertion is outside the Table.
-#[derive(Debug, Clone)]
+/// Sparse rule/merge snapshots preserve exact inverse edits at the grid edge.
+/// No cells or dependency graph are retained.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(super) struct StructuralMetadata(Vec<(SheetId, crate::validation::ValidationStore, crate::cond_format::CondFormatStore, Vec<crate::sheet::MergedRegion>)>);
+impl StructuralMetadata {
+    fn capture(wb: &Workbook) -> Option<Self> {
+        let sheets: Vec<_> = wb.sheets().iter().filter(|s| !s.validations.is_empty() || s.validations.exclusions_iter().next().is_some() || s.cond_formats.iter().next().is_some() || !s.merged_regions.is_empty())
+            .map(|s| (s.id, s.validations.clone(), s.cond_formats.clone(), s.merged_regions.clone())).collect();
+        (!sheets.is_empty()).then_some(Self(sheets))
+    }
+    fn restore(&self, wb: &mut Workbook) {
+        for (id, validation, conditional, merges) in &self.0 {
+            if let Some(sheet) = wb.sheet_by_id_mut(*id) {
+                sheet.validations = validation.clone();
+                sheet.cond_formats = conditional.clone();
+                sheet.merged_regions = merges.clone();
+                sheet.rebuild_merge_index();
+                sheet.mark_table_changed();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableRowHistory {
     sheet: SheetId,
     at: usize,
@@ -129,6 +153,7 @@ pub struct TableRowHistory {
     after: Vec<DataTable>,
     rules: Vec<calculated::RuleChange>,
     guarded: Option<Box<super::GuardedStructureCommit>>,
+    metadata_before: Option<StructuralMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +213,7 @@ impl Workbook {
             }])?;
             return Ok(Some(TableRowHistory {
                 sheet: sheet.id, at, count, delete, before: Vec::new(), after: Vec::new(),
-                rules: Vec::new(), guarded: Some(Box::new(guarded)),
+                rules: Vec::new(), guarded: Some(Box::new(guarded)), metadata_before: None,
             }));
         }
         let rules = self.structural_rule_changes(
@@ -198,7 +223,8 @@ impl Workbook {
             count,
             delete,
         );
-        if sheet.tables().is_empty() && rules.is_empty() {
+        let metadata_before = StructuralMetadata::capture(self);
+        if sheet.tables().is_empty() && rules.is_empty() && metadata_before.is_none() {
             return Ok(None);
         }
         let before = sheet.tables().to_vec();
@@ -230,6 +256,7 @@ impl Workbook {
             }
         }
         Ok(Some(TableRowHistory {
+            metadata_before,
             guarded: None,
             rules,
             sheet: sheet.id,
@@ -293,6 +320,7 @@ impl Workbook {
             history.delete != undo,
             !undo,
         )?;
+        if undo { if let Some(metadata) = &history.metadata_before { metadata.restore(self); } }
         self.apply_rule_changes(&history.rules, undo);
         let target = if undo {
             &history.before
@@ -514,7 +542,16 @@ impl Workbook {
         let (_, old) = self.table(id).ok_or("Table no longer exists.")?;
         if !(old.totals.is_some() && old.range.end_col != range.end_col
             || old.totals_row().is_some() && old.range.end_row != range.end_row) {
-            return self.resize_table_inner(id, range);
+            // Publish only after the candidate settles. Undoing on the live
+            // workbook runs a second full calculation and can leave the resize
+            // in place when that undo fails.
+            let mut candidate = self.clone();
+            let commit = candidate.resize_table_inner(id, range)?;
+            if let Some(error) = candidate.incremental_errors.iter().find(|error| error.error.contains("not settled")) {
+                return Err(format!("Could not recalculate the resized Table: {error:?}"));
+            }
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(commit);
         }
         self.ensure_writable()?;
         let before = old.clone();
@@ -1318,6 +1355,23 @@ impl Workbook {
             dirty.extend(commit.cells.iter().map(|(c, _)| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
             dirty.extend(commit.formulas.iter().map(|c| c.cell));
             dirty.extend(target.headers.iter().map(|c| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
+            // New body cells can bring an existing SUBTOTAL range into a
+            // filtered Table even when those cells were previously empty.
+            if let Some(region) = commit.append_region {
+                for row in region.start_row..=region.end_row {
+                    for col in region.start_col..=region.end_col {
+                        dirty.extend(self.dep_graph.dependents(crate::cell_id::CellId::new(commit.sheet_id, row, col)));
+                    }
+                }
+            }
+            let mut pending: Vec<_> = dirty.iter().copied().collect();
+            while let Some(cell) = pending.pop() {
+                for reader in self.dep_graph.dependents(cell) {
+                    if dirty.insert(reader) { pending.push(reader); }
+                }
+            }
+            // Rebind the complete touched closure, including visibility edges,
+            // before evaluating it. Runtime dynamic edges settle below.
             for cell in &dirty { self.update_cell_deps(cell.sheet, cell.row, cell.col); }
             let seeds: Vec<_> = dirty.iter().copied().collect();
             match self.recalc_dirty_set(&seeds) {
@@ -1333,7 +1387,9 @@ impl Workbook {
             }
         } else {
             self.rebuild_dep_graph();
-            self.recompute_full_ordered();
+            let report = self.recompute_full_ordered();
+            self.incremental_errors.extend(report.errors.into_iter()
+                .filter(|e| e.error.contains("not settled")));
         }
         let changed: HashSet<_> = totals_dependents.into_iter().filter_map(|(id, row, col, value)| {
             (self.sheet_by_id(id)?.get_computed_value(row, col) != value).then_some(id)

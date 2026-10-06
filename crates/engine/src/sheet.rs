@@ -2412,36 +2412,15 @@ impl Sheet {
             crate::structural::shift_span(*row, *row, start_row, count, true)
                 .map(|(row, _)| row).filter(|row| *row < NUM_ROWS)
         }).collect();
-        let end_row = start_row + count; // exclusive
 
         // Remove cells in the deleted rows; those below move up
         self.cells.delete_rows(start_row, count);
 
-        // Adjust merged regions (grid-line semantics)
-        for m in &mut self.merged_regions {
-            if end_row <= m.start.0 {
-                // Deletion entirely above → shift up
-                m.start.0 -= count;
-                m.end.0 -= count;
-            } else if start_row > m.end.0 {
-                // Deletion entirely below → no effect
-            } else if start_row <= m.start.0 && end_row > m.end.0 {
-                // Deletion engulfs entire merge → mark degenerate
-                m.start.0 = start_row;
-                m.end.0 = m.start.0;
-                m.end.1 = m.start.1;
-            } else if start_row <= m.start.0 {
-                // Deletion clips top of merge; surviving rows shift up by count
-                m.start.0 = start_row;
-                m.end.0 -= count;
-            } else if end_row > m.end.0 {
-                // Deletion clips bottom of merge
-                m.end.0 = start_row - 1;
-            } else {
-                // Deletion entirely inside merge → shrink
-                m.end.0 -= count;
-            }
-        }
+        self.merged_regions.retain_mut(|m| {
+            if let Some((start, end)) = crate::structural::shift_edge_span(m.start.0, m.end.0, start_row, count, true, self.rows) {
+                m.start.0 = start; m.end.0 = end; true
+            } else { false }
+        });
         self.normalize_merges();
         self.row_formats = self.row_formats.drain().filter_map(|(i, f)| {
             if i >= start_row && i < start_row + count { None }
@@ -2489,36 +2468,15 @@ impl Sheet {
         let Ok(tables) = self.tables_after_column_edit(start_col, count, true) else { return; };
         self.install_column_tables(tables);
         self.print_setup.adjust(false, start_col, count, true);
-        let end_col = start_col + count; // exclusive
 
         // Remove cells in the deleted columns; those right of them move left
         self.cells.delete_cols(start_col, count);
 
-        // Adjust merged regions (grid-line semantics)
-        for m in &mut self.merged_regions {
-            if end_col <= m.start.1 {
-                // Deletion entirely left → shift left
-                m.start.1 -= count;
-                m.end.1 -= count;
-            } else if start_col > m.end.1 {
-                // Deletion entirely right → no effect
-            } else if start_col <= m.start.1 && end_col > m.end.1 {
-                // Deletion engulfs entire merge → mark degenerate
-                m.start.1 = start_col;
-                m.end.1 = m.start.1;
-                m.end.0 = m.start.0;
-            } else if start_col <= m.start.1 {
-                // Deletion clips left side; surviving cols shift left by count
-                m.start.1 = start_col;
-                m.end.1 -= count;
-            } else if end_col > m.end.1 {
-                // Deletion clips right side
-                m.end.1 = start_col - 1;
-            } else {
-                // Deletion entirely inside merge → shrink
-                m.end.1 -= count;
-            }
-        }
+        self.merged_regions.retain_mut(|m| {
+            if let Some((start, end)) = crate::structural::shift_edge_span(m.start.1, m.end.1, start_col, count, true, self.cols) {
+                m.start.1 = start; m.end.1 = end; true
+            } else { false }
+        });
         self.normalize_merges();
         self.col_formats = self.col_formats.drain().filter_map(|(i, f)| {
             if i >= start_col && i < start_col + count { None }

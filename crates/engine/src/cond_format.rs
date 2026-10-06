@@ -448,40 +448,15 @@ impl CondFormatStore {
         }
     }
 
-    fn shift_delete(&mut self, del_start: usize, count: usize, rows: bool) {
-        let del_end = del_start + count; // exclusive
+    fn shift_delete(&mut self, at: usize, count: usize, rows: bool) {
+        let limit = if rows { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
         for rule in &mut self.rules {
             rule.ranges.retain_mut(|r| {
-                let (start, end) = if rows {
-                    (&mut r.start_row, &mut r.end_row)
-                } else {
-                    (&mut r.start_col, &mut r.end_col)
-                };
-                if del_end <= *start {
-                    // Deletion entirely before → shift toward origin
-                    *start -= count;
-                    *end -= count;
-                    true
-                } else if del_start > *end {
-                    // Deletion entirely after → no effect
-                    true
-                } else if del_start <= *start && del_end > *end {
-                    // Deletion engulfs range → drop it
-                    false
-                } else if del_start <= *start {
-                    // Deletion clips leading edge
-                    *start = del_start;
-                    *end -= count;
-                    true
-                } else if del_end > *end {
-                    // Deletion clips trailing edge
-                    *end = del_start - 1;
-                    true
-                } else {
-                    // Deletion entirely inside → shrink
-                    *end -= count;
-                    true
-                }
+                let (start, end) = if rows { (&mut r.start_row, &mut r.end_row) }
+                    else { (&mut r.start_col, &mut r.end_col) };
+                if let Some((s, e)) = crate::structural::shift_edge_span(*start, *end, at, count, true, limit) {
+                    *start = s; *end = e; true
+                } else { false }
             });
         }
     }

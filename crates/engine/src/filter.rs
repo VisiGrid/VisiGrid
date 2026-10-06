@@ -58,6 +58,10 @@ impl Default for RowView {
 }
 
 impl RowView {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of_val(self) + (self.row_order.capacity() + self.data_to_view_map.capacity() + self.visible_rows.capacity()) * std::mem::size_of::<usize>() + self.visible_mask.capacity() + self.data_to_visible.capacity() * 4
+    }
+
     /// Initialize identity mapping for N rows
     pub fn new(row_count: usize) -> Self {
         Self {

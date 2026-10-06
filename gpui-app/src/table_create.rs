@@ -9,7 +9,7 @@ use visigrid_engine::{
     workbook::{StructureStep, TableCommit, Workbook},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct HeaderLayout {
     pub before: StructureLayout,
     pub after: StructureLayout,

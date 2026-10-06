@@ -2336,20 +2336,21 @@ impl Workbook {
             // Inverse deletion cannot restore metadata clipped at the edge.
             // Refuse the forward edit, including empty merged/formatted ranges.
             let beyond = |end: usize| end >= at && end.checked_add(count).is_none_or(|v| v >= limit);
+            let range_beyond = |start: usize, end: usize| beyond(start) || (end != limit - 1 && beyond(end));
             let mut obstacles = Vec::new();
             for m in &sheet.merged_regions {
-                if beyond(if is_row { m.end.0 } else { m.end.1 }) {
+                if range_beyond(if is_row { m.start.0 } else { m.start.1 }, if is_row { m.end.0 } else { m.end.1 }) {
                     obstacles.push((m.start, m.end, "merged range"));
                 }
             }
             for (r, _) in sheet.validations.iter() {
-                if beyond(if is_row { r.end_row } else { r.end_col }) {
+                if range_beyond(if is_row { r.start_row } else { r.start_col }, if is_row { r.end_row } else { r.end_col }) {
                     obstacles.push(((r.start_row, r.start_col), (r.end_row, r.end_col), "validation range"));
                 }
             }
             for rule in sheet.cond_formats.iter() {
                 for r in &rule.ranges {
-                    if beyond(if is_row { r.end_row } else { r.end_col }) {
+                    if range_beyond(if is_row { r.start_row } else { r.start_col }, if is_row { r.end_row } else { r.end_col }) {
                         obstacles.push(((r.start_row, r.start_col), (r.end_row, r.end_col), "conditional format"));
                     }
                 }

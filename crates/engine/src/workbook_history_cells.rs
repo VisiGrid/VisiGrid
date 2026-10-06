@@ -39,9 +39,11 @@ fn owned(cell: Option<CellRef<'_>>) -> Option<Cell> {
         cell
     })
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 struct Images {
+    #[serde(serialize_with = "crate::history_size::serialize_optional_cell")]
     before: Option<Cell>,
+    #[serde(serialize_with = "crate::history_size::serialize_optional_cell")]
     after: Option<Cell>,
 }
 #[derive(Clone, Debug)]
@@ -60,7 +62,7 @@ impl CellPatch {
     pub(super) fn estimated_history_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + match &self.change {
             Change::Formula { before, after } => before.len().next_multiple_of(16) + after.len().next_multiple_of(16) + 32,
-            Change::Images(images) => crate::history_size::estimated_debug_bytes(images),
+            Change::Images(images) => crate::history_size::serialized_bytes(images),
         }
     }
 

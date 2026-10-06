@@ -12,7 +12,7 @@ use visigrid_engine::{
     workbook::{shift_structure_index, GuardedStructureCommit, StructureStep, Workbook},
 };
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct StructureLayout {
     pub heights: HashMap<usize, f32>,
     pub widths: HashMap<usize, f32>,
@@ -64,7 +64,7 @@ impl StructureLayout {
     }
 }
 /// Sparse layout only: ordinary row history must not capture every shifted cell.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct RowLayoutHistory {
     pub sheet: SheetId,
     pub before: StructureLayout,
@@ -104,7 +104,7 @@ pub(crate) struct TableStructureHistory {
 }
 impl TableStructureHistory {
     pub(crate) fn estimated_history_bytes(&self) -> usize {
-        self.commit.estimated_history_bytes().saturating_add(visigrid_engine::history_size::estimated_debug_bytes(&(&self.before, &self.after)))
+        self.commit.estimated_history_bytes().saturating_add(visigrid_engine::history_size::serialized_bytes(&(&self.before, &self.after)))
     }
 }
 /// Resolve selected visible slots once. Deletions are coalesced and performed

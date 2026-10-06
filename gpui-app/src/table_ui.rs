@@ -123,6 +123,9 @@ impl Spreadsheet {
         source: &str,
         cx: &mut Context<Self>,
     ) -> Option<bool> {
+        // Live cell entry continues through the sequencer; never publish a
+        // locally inferred rule or fill neighboring records here.
+        if self.cloud_live_enabled() { return None; }
         let row = self.row_view.view_to_data(view_row);
         let sheet = self.sheet(cx).id;
         let result = crate::table_calculated::prepare_inferred(self.wb(cx), sheet, row, col, source);
@@ -1188,6 +1191,19 @@ mod conversion_size_tests {
                     assert_eq!(format!("{:?}", app.wb(cx)), before);
                     assert!(!app.history.can_undo());
                 }};
+            }
+            app.view_state.selected = (0, 0);
+            blocked!(assert!(app.paste_table_headers(crate::clipboard::TablePasteKind::Contents, cx)));
+            blocked!(assert!(app.paste_table_headers(crate::clipboard::TablePasteKind::Values, cx)));
+            app.view_state.selected = (1, 0);
+            assert_eq!(app.commit_calculated_value(1, 0, "=1+2", cx), None);
+            assert_eq!(format!("{:?}", app.wb(cx)), before);
+            use visigrid_protocol::StructureOp;
+            for op in [StructureOp::InsertRows { sheet:None,at:1,count:1 }, StructureOp::DeleteRows { sheet:None,at:1,count:1 }, StructureOp::InsertCols { sheet:None,at:0,count:1 }, StructureOp::DeleteCols { sheet:None,at:0,count:1 }] {
+                let result = app.handle_session_structure(&op, None, cx);
+                assert!(result.error.unwrap().1.contains("sequencer"));
+                assert_eq!(format!("{:?}", app.wb(cx)), before);
+                assert!(!app.history.can_undo());
             }
             blocked!(app.toggle_table_totals(id, cx));
             blocked!(app.restore_column_formula(id, cx));

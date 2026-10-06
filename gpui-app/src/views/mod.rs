@@ -76,6 +76,12 @@ use crate::mode::Mode;
 use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    if let Some(notice) = app.history.take_notice() {
+        // A caller may already have reported a more specific undo limit.
+        if app.status_message.as_deref().is_none_or(|message| !message.contains("too large to undo")) {
+            app.status_message = Some(notice);
+        }
+    }
     app.sync_toolbar_preferences(window, cx);
     if app.ui.desktop_keytips.active() && !app.desktop_keytips_available(window, cx) {
         app.dismiss_desktop_keytips(cx);

@@ -8,7 +8,7 @@ use crate::sheet::SheetId;
 ///
 /// Combines sheet identity with row/column coordinates.
 /// Used as graph nodes in the dependency graph.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct CellId {
     /// The sheet this cell belongs to (stable, never reused after deletion)
     pub sheet: SheetId,

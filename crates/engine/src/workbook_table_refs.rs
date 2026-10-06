@@ -9,7 +9,7 @@ use crate::formula::structured::{self, StructuredReference};
 use crate::sheet::SheetId;
 use crate::table::{DataTable, TableId, TableTotals};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct TableFormulaChange {
     pub cell: CellId,
     pub before: String,
@@ -29,7 +29,7 @@ pub(crate) fn names_only(before: &DataTable, after: &DataTable) -> bool {
     normalized == *before
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct TotalsReferenceChange {
     pub sheet: SheetId,
     pub table: TableId,

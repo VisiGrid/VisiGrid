@@ -9,7 +9,7 @@ use crate::{
     workbook::Workbook,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct RuleChange {
     pub sheet: SheetId,
     pub table: TableId,

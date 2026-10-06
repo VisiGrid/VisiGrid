@@ -194,6 +194,7 @@ impl Spreadsheet {
         };
         let range = table.range;
         let name = table.name.clone();
+        if self.cloud_live_enabled() && self.block_if_previewing(cx) { return true; }
         let result = (|| {
             if !matches!(kind, TablePasteKind::Contents | TablePasteKind::Values) {
                 return Err("Use Paste or Paste Values to rename Table headers. Header formatting and comments are retained.".to_string());

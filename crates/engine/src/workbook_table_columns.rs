@@ -9,7 +9,7 @@ use crate::{
     workbook::Workbook,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableColumnHistory {
     sheet: SheetId,
     at: usize,
@@ -19,6 +19,7 @@ pub struct TableColumnHistory {
     after: Vec<DataTable>,
     rules: Vec<RuleChange>,
     guarded: Option<Box<crate::workbook::GuardedStructureCommit>>,
+    metadata_before: Option<super::StructuralMetadata>,
 }
 
 impl Sheet {
@@ -262,13 +263,14 @@ impl Workbook {
             }])?;
             return Ok(Some(TableColumnHistory {
                 sheet: sheet.id, at, count, delete, before: Vec::new(), after: Vec::new(),
-                rules: Vec::new(), guarded: Some(Box::new(guarded)),
+                rules: Vec::new(), guarded: Some(Box::new(guarded)), metadata_before: None,
             }));
         }
         let before = sheet.tables().to_vec();
         let mut after = sheet.tables_after_column_edit(at, count, delete)?;
         let rules = self.column_rule_changes(index, at, count, delete, &before, &after)?;
-        if before.is_empty() && rules.is_empty() {
+        let metadata_before = super::StructuralMetadata::capture(self);
+        if before.is_empty() && rules.is_empty() && metadata_before.is_none() {
             return Ok(None);
         }
         for table in &mut after {
@@ -282,6 +284,7 @@ impl Workbook {
             }
         }
         Ok(Some(TableColumnHistory {
+            metadata_before,
             sheet: sheet.id,
             at,
             count,
@@ -356,6 +359,7 @@ impl Workbook {
         };
         self.sheets[index].install_column_tables(target.clone());
         self.sheets[index].sync_table_headers();
+        if undo { if let Some(metadata) = &history.metadata_before { metadata.restore(self); } }
         self.apply_rule_changes(&history.rules, undo);
         self.rebuild_dep_graph();
         self.recompute_full_ordered();

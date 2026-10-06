@@ -1132,6 +1132,7 @@ impl Spreadsheet {
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
         self.table_dialog = None;
         let snapshot = self.wb(cx).clone();
+        self.history.set_rewind_base(&snapshot);
         self.base_workbook = Some(snapshot);
     }
 
@@ -1246,7 +1247,7 @@ impl Spreadsheet {
 
         let mut app = Self {
             workbook,
-            history: History::new(),
+            history: { let mut history = History::new(); history.set_rewind_base(base_workbook.as_ref().unwrap()); history },
             base_workbook,
             rewind_preview: RewindPreviewState::Off,
             cell_metadata: crate::role_styles::CellMetadataMap::new(),

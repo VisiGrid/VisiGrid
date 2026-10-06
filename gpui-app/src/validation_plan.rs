@@ -17,7 +17,7 @@ pub(crate) struct Draft {
     pub anchor: (usize, usize),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct Commit {
     pub sheet_id: SheetId,
     pub ranges: Vec<CellRange>,

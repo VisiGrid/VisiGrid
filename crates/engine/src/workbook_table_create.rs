@@ -7,7 +7,7 @@ use crate::{
     table::TableRange, workbook::Workbook,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct HeaderInsertion {
     pub at: usize,
     rows: Option<TableRowHistory>,

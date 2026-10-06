@@ -948,7 +948,7 @@ impl Spreadsheet {
     /// entry with the agent's identity so the undo guard can tell them apart.
     /// Row/column ops only apply to the ACTIVE sheet: the view state they
     /// maintain is per-active-sheet.
-    fn handle_session_structure(
+    pub(crate) fn handle_session_structure(
         &mut self,
         op: &visigrid_protocol::StructureOp,
         client: Option<String>,
@@ -1006,6 +1006,11 @@ impl Spreadsheet {
                 out.error = Some((code.to_string(), msg));
                 return out;
             }
+        }
+
+        if self.cloud_live_enabled() {
+            out.error = Some(("invalid_op".into(), "Live structural edits must use the sequencer; they are not enabled in this slice.".into()));
+            return out;
         }
 
         // Row/column ops are active-sheet only in a GUI window.

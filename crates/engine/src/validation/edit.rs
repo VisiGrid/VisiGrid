@@ -19,7 +19,7 @@ pub enum ValidationEdit {
 /// Sparse, reversible metadata changes with a guard for the entire validation
 /// store. A newly introduced overlapping rule must not silently change replay.
 /// Cells, Table definitions and other sheet metadata are not retained here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidationPatch {
     rules: Vec<(CellRange, Option<ValidationRule>, Option<ValidationRule>)>,
     exclusions: Vec<(CellRange, bool, bool)>,

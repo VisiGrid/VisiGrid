@@ -678,3 +678,9 @@ mod tests {
     }
 
 }
+
+impl ReviewCopyHistory {
+    pub(crate) fn estimated_history_bytes(&self) -> usize {
+        visigrid_engine::history_size::sheet_bytes(&self.sheet) + visigrid_engine::history_size::serialized_bytes(&self.layout) + self.before.capacity() + self.after.capacity() + std::mem::size_of_val(self)
+    }
+}

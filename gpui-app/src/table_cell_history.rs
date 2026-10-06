@@ -7,15 +7,17 @@ use visigrid_engine::{
     workbook::Workbook,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct TableCellPatch {
     pub row: usize,
     pub col: usize,
+    #[serde(serialize_with = "visigrid_engine::history_size::serialize_optional_cell")]
     pub before: Option<Cell>,
+    #[serde(serialize_with = "visigrid_engine::history_size::serialize_optional_cell")]
     pub after: Option<Cell>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct TableCellsCommit {
     pub sheet: SheetId,
     tables: Vec<DataTable>,

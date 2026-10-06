@@ -6,17 +6,19 @@ use crate::{
     table::{DataTable, TableRange},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct FooterCell {
     pub row: usize,
     pub col: usize,
+    #[serde(serialize_with = "crate::history_size::serialize_cell")]
     pub before: Cell,
+    #[serde(serialize_with = "crate::history_size::serialize_cell")]
     pub after: Cell,
     pub before_present: bool,
     pub after_present: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct FooterMove {
     pub before_row: usize,
     pub after_row: usize,

@@ -11,7 +11,7 @@ use crate::{
 
 /// History owns only before/after criteria. No cells, cached permutations or
 /// visibility masks. Replay checks the current intent and target bindings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct TableViewCommit {
     sheet: SheetId,
     before: Option<TableViewSpec>,

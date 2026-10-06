@@ -3,6 +3,16 @@ use visigrid_engine::{
     workbook::Workbook,
 };
 
+fn assert_same_graph(wb: &Workbook, rebuilt: &Workbook) {
+    use std::collections::HashSet;
+    let formulas = wb.dep_graph().formula_cells().collect::<HashSet<_>>();
+    assert_eq!(formulas, rebuilt.dep_graph().formula_cells().collect());
+    for cell in formulas {
+        assert_eq!(wb.dep_graph().precedents(cell).collect::<HashSet<_>>(), rebuilt.dep_graph().precedents(cell).collect(), "precedents for {cell}");
+        assert_eq!(wb.dep_graph().precedent_ranges(cell).iter().copied().collect::<HashSet<_>>(), rebuilt.dep_graph().precedent_ranges(cell).iter().copied().collect(), "ranges for {cell}");
+    }
+}
+
 fn linked() -> (Workbook, TableId, usize) {
     let mut wb = Workbook::new();
     for (row, value) in ["Amount", "10", "20"].iter().enumerate() {
@@ -69,6 +79,7 @@ fn dirty_append_matches_full_calculation_with_symbolic_cross_sheet_and_dynamic_r
         let mut full = wb.clone();
         full.rebuild_dep_graph();
         full.recompute_full_ordered();
+        assert_same_graph(&wb, &full);
         for (index, sheet) in wb.sheets().iter().enumerate() {
             for ((row, col), _) in sheet.cells_iter() {
                 assert_eq!(
@@ -133,4 +144,33 @@ fn append_does_not_evaluate_unrelated_table_or_name_readers() {
         CALLS.load(Ordering::SeqCst) > 0,
         "unrelated dependencies must remain live"
     );
+}
+
+#[test]
+fn dirty_append_matches_full_calculation_and_later_subtotal_filter_edits() {
+    use visigrid_engine::{filter::{ColumnFilter, NormalizedFilterKey}, table_view::{TableFilter, TableViewSpec}};
+    let mut wb = Workbook::new();
+    for (r, values) in [["Amount", "Keep"], ["10", "yes"]].iter().enumerate() {
+        for (c, value) in values.iter().enumerate() { wb.set_cell_value_tracked(0, r, c, value); }
+    }
+    let id = wb.create_table(wb.active_sheet_id(), TableRange {start_row:0,start_col:0,end_row:1,end_col:1}, "Sales").unwrap().table_id();
+    // Totals keeps the append on the incremental rebind. Without it both
+    // sides full-rebuild and a missing filter edge cannot fail this test.
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let mut spec = TableViewSpec::new(id);
+    spec.filters.push(TableFilter { column: wb.table(id).unwrap().1.columns[1].id, criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Text("yes".into())].into()), text_filter: None } });
+    wb.set_table_view_spec(wb.active_sheet_id(), Some(spec)).unwrap();
+    // Initially the formula reads empty cells outside the Table. Appending
+    // brings them into its view and must add the B-column filter dependency.
+    wb.set_cell_value_tracked(0, 0, 3, "=SUBTOTAL(109,A3:A4)");
+    wb.set_cell_value_tracked(0, 1, 3, "=D1*2");
+    wb.append_table_rows(id, 2, &[(2,0,"20".into()),(2,1,"yes".into()),(3,0,"30".into()),(3,1,"yes".into())]).unwrap();
+    let mut full = wb.clone(); full.rebuild_dep_graph(); full.recompute_full_ordered();
+    assert_same_graph(&wb, &full);
+    assert_eq!(wb.sheet(0).unwrap().get_display(0,3), "50");
+    wb.set_cell_value_tracked(0,2,1,"no");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0,3), "30");
+    assert_eq!(wb.sheet(0).unwrap().get_display(1,3), "60");
+    wb.set_cell_value_tracked(0,3,1,"no");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0,3), "0");
 }

@@ -24,7 +24,7 @@ pub(crate) struct TableAppendHistory {
 
 impl TableAppendHistory {
     pub(crate) fn estimated_history_bytes(&self) -> usize {
-        self.table.estimated_history_bytes().saturating_add(visigrid_engine::history_size::estimated_debug_bytes(&(&self.edit, &self.view, &self.paste)))
+        self.table.estimated_history_bytes().saturating_add(visigrid_engine::history_size::serialized_bytes(&(&self.edit, &self.view, &self.paste)))
     }
 }
 

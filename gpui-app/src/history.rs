@@ -64,7 +64,7 @@ pub struct HistoryDisplayEntry {
     pub ai_source: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CellChange {
     pub row: usize,
     pub col: usize,
@@ -72,7 +72,7 @@ pub struct CellChange {
     pub new_value: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CommentPatch {
     /// The editor materialized an absent cell; undo must restore that absence.
     pub remove_cell_on_undo: bool,
@@ -96,7 +96,7 @@ pub(crate) fn apply_comment_patches(workbook: &mut Workbook, sheet_index: usize,
 }
 
 /// A patch for a single cell's format (before/after snapshot)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CellFormatPatch {
     /// Restore an absent cell when undo removes its only authored metadata.
     pub remove_cell_on_undo: bool,
@@ -139,7 +139,7 @@ impl WorkbookSnapshotCommit {
 }
 
 /// Kind of format action (for coalescing)
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FormatActionKind {
     Bold,
     Italic,
@@ -161,7 +161,7 @@ pub enum FormatActionKind {
 }
 
 /// An undoable action
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum UndoAction {
     PrintSetupChanged {
         sheet_id: SheetId,
@@ -218,6 +218,7 @@ pub enum UndoAction {
     },
     /// Atomic Review Mode commit. Workbook and GUI-owned row state are kept
     /// as before/after snapshots for the first implementation.
+    #[serde(skip)]
     PlanCommit {
         commit: Box<visigrid_engine::operation_plan::PlanCommit>,
         sheet_id: SheetId,
@@ -228,12 +229,15 @@ pub enum UndoAction {
     },
     /// Atomic non-plan workbook mutation. Used when a cell/format patch cannot
     /// faithfully represent the action, such as cloning a complete sheet.
+    #[serde(skip)]
     WorkbookSnapshot {
         commit: Box<WorkbookSnapshotCommit>,
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    #[serde(skip)]
     TableBatchChanged { sheet_index: usize, commit: Box<visigrid_engine::workbook::GuardedStructureCommit>, description: String },
+    #[serde(skip)]
     TableStructureChanged {
         sheet_index: usize,
         history: Box<crate::table_structure::TableStructureHistory>,
@@ -249,12 +253,15 @@ pub enum UndoAction {
         commit: Box<visigrid_engine::workbook::TableViewCommit>,
         description: String,
     },
+    #[serde(skip)]
     ReviewCopy { history: Box<crate::review_copy::ReviewCopyHistory> },
+    #[serde(skip)]
     TableAppend {
         sheet_index: usize,
         history: Box<crate::table_append::TableAppendHistory>,
         description: String,
     },
+    #[serde(skip)]
     TableCommit {
         header_layout: Option<Box<crate::table_create::HeaderLayout>>,
         sheet_index: usize,
@@ -263,6 +270,7 @@ pub enum UndoAction {
     },
     /// Pivot table action (create, apply fields, refresh, delete). Scoped to
     /// the pivot object and its output cells; never a workbook snapshot.
+    #[serde(skip)]
     PivotCommit {
         commit: Box<visigrid_engine::workbook::PivotCommit>,
         /// When the action created the pivot's output sheet: its index and the
@@ -474,14 +482,20 @@ pub enum UndoAction {
 
 impl UndoAction {
     fn estimated_history_bytes(&self) -> usize {
-        match self {
-            Self::TableCommit { commit, .. } => commit.estimated_history_bytes(),
-            Self::TableBatchChanged { commit, .. } => commit.estimated_history_bytes(),
-            Self::TableAppend { history, .. } => history.estimated_history_bytes(),
-            Self::TableStructureChanged { history, .. } => history.estimated_history_bytes(),
-            Self::Group { actions, .. } => actions.iter().map(Self::estimated_history_bytes).sum::<usize>().saturating_add(4096),
-            _ => visigrid_engine::history_size::estimated_debug_bytes(self),
-        }
+        use visigrid_engine::history_size::{serialized_bytes, workbook_bytes, sheet_bytes};
+        let payload = match self {
+            Self::TableCommit { commit, header_layout, description, .. } => commit.estimated_history_bytes() + serialized_bytes(header_layout) + description.capacity(),
+            Self::TableBatchChanged { commit, description, .. } => commit.estimated_history_bytes() + description.capacity(),
+            Self::TableAppend { history, description, .. } => history.estimated_history_bytes() + description.capacity(),
+            Self::TableStructureChanged { history, description, .. } => history.estimated_history_bytes() + description.capacity(),
+            Self::Group { actions, description } => actions.iter().map(Self::estimated_history_bytes).sum::<usize>() + description.capacity(),
+            Self::PlanCommit { commit, before_row_view, after_row_view, before_row_heights, after_row_heights, .. } => workbook_bytes(&commit.source) + workbook_bytes(&commit.applied) + commit.affected_cells.capacity() * std::mem::size_of::<visigrid_engine::cell_id::CellId>() + serialized_bytes(&commit.verification) + before_row_view.retained_bytes() + after_row_view.retained_bytes() + serialized_bytes(&(before_row_heights, after_row_heights)),
+            Self::WorkbookSnapshot { commit, before_row_view, after_row_view } => workbook_bytes(&commit.before) + workbook_bytes(&commit.after) + commit.description.capacity() + before_row_view.retained_bytes() + after_row_view.retained_bytes(),
+            Self::ReviewCopy { history } => history.estimated_history_bytes(),
+            Self::PivotCommit { commit, created_sheet, description } => commit.approx_bytes() + created_sheet.as_ref().map_or(0, |(_, s)| sheet_bytes(s)) + description.capacity(),
+            _ => serialized_bytes(self),
+        };
+        std::mem::size_of_val(self).saturating_add(payload)
     }
 
     /// Generate a human-readable label for this action.
@@ -802,7 +816,7 @@ fn format_constraint_value(value: &visigrid_engine::validation::ConstraintValue)
 }
 
 /// Source of a mutation (for provenance tracking)
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub enum MutationSource {
     /// Human entered value manually (default)
     #[default]
@@ -819,7 +833,7 @@ pub enum MutationSource {
 }
 
 /// Metadata for AI-generated mutations (minimal, no prompts/context stored)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AiMutationMeta {
     /// Provider used (e.g., "openai")
     pub provider: String,
@@ -865,6 +879,8 @@ pub struct History {
     entry_bytes: HashMap<u64, usize>,
     last_record_too_large: bool,
     base_invalidated: bool,
+    rewind_base: Option<(Workbook, crate::app::PreviewViewState)>,
+    pending_notice: Option<String>,
     /// Save point for dirty detection: undo_stack length when document was saved
     save_point: usize,
     /// Monotonic counter for stable entry IDs
@@ -887,6 +903,8 @@ impl History {
             entry_bytes: HashMap::new(),
             last_record_too_large: false,
             base_invalidated: false,
+            rewind_base: None,
+            pending_notice: None,
             save_point: 0,
             next_id: 1,
         }
@@ -1104,6 +1122,24 @@ impl History {
         a.iter().zip(b.iter()).all(|(pa, pb)| pa.row == pb.row && pa.col == pb.col)
     }
 
+    pub fn set_rewind_base(&mut self, workbook: &Workbook) {
+        self.rewind_base = Some((workbook.clone(), crate::app::PreviewViewState {
+            per_sheet: vec![Default::default(); workbook.sheet_count()],
+        }));
+        self.base_invalidated = false;
+    }
+
+    pub fn take_notice(&mut self) -> Option<String> { self.pending_notice.take() }
+
+    fn advance_rewind_base(&mut self, action: &UndoAction) {
+        if let Some((workbook, view)) = &mut self.rewind_base {
+            if Self::apply_action_forward(workbook, view, action).is_ok() { return; }
+        }
+        // Refuse a partial baseline if a replay invariant cannot be proven.
+        self.rewind_base = None;
+        self.base_invalidated = true;
+    }
+
     pub fn last_record_too_large(&self) -> bool { self.last_record_too_large }
 
     #[cfg(test)]
@@ -1115,20 +1151,29 @@ impl History {
         self.entry_bytes.retain(|id, _| ids.contains(id));
         for entry in self.undo_stack.iter().chain(&self.redo_stack) {
             self.entry_bytes.entry(entry.id).or_insert_with(|| entry.action.estimated_history_bytes()
-                .saturating_add(visigrid_engine::history_size::estimated_debug_bytes(&(&entry.provenance, &entry.source))));
+                .saturating_add(visigrid_engine::history_size::serialized_bytes(&(&entry.provenance, &entry.source))));
         }
         self.last_record_too_large = self.undo_stack.last().is_some_and(|e| self.entry_bytes[&e.id] > self.max_bytes);
         if self.last_record_too_large {
+            let conversion = matches!(self.undo_stack.last().map(|e| &e.action), Some(UndoAction::TableCommit { commit, .. }) if commit.is_conversion());
+            self.pending_notice = Some(if conversion { "Converted; this change is too large to undo" } else { "This change is too large to undo; earlier undo history was cleared" }.into());
+            // Advance across every discarded action, so the next retained
+            // change can still rewind to the state after this barrier.
+            for entry in std::mem::take(&mut self.undo_stack) { self.advance_rewind_base(&entry.action); }
             // There is no safe undo path across an unrecorded mutation.
             self.undo_stack.clear(); self.redo_stack.clear(); self.entry_bytes.clear();
             self.save_point = usize::MAX;
-            self.base_invalidated = true;
             return;
         }
         let mut total = self.entry_bytes.values().copied().sum::<usize>();
+        // Discard the farthest redo first; the next redo remains replayable.
+        while total > self.max_bytes && !self.redo_stack.is_empty() {
+            let removed = self.redo_stack.remove(0);
+            total = total.saturating_sub(self.entry_bytes.remove(&removed.id).unwrap_or(0));
+        }
         while !self.undo_stack.is_empty() && (total > self.max_bytes || self.undo_stack.len() > self.max_entries) {
             let removed = self.undo_stack.remove(0);
-            self.base_invalidated = true;
+            self.advance_rewind_base(&removed.action);
             total = total.saturating_sub(self.entry_bytes.remove(&removed.id).unwrap_or(0));
             self.save_point = if self.save_point == 0 { usize::MAX } else { self.save_point - 1 };
         }
@@ -1443,6 +1488,10 @@ impl History {
         self.entry_bytes.clear();
         self.last_record_too_large = false;
         self.base_invalidated = false;
+        // Load paths capture the opened workbook and then clear the stacks.
+        // Dropping the base here made the next eviction refuse rewind until
+        // the process restarted.
+        self.pending_notice = None;
         self.next_id = 1;
     }
 
@@ -1609,7 +1658,7 @@ impl History {
             return Err(PreviewBuildError::InvariantViolation("Older undo history was evicted to stay within the history limit. Rewind from the original snapshot is unavailable; ordinary undo is still available for retained changes.".into()));
         }
         // No snapshot has been captured to replay from.
-        let base = base.ok_or(PreviewBuildError::NoBaseSnapshot)?;
+        let base = self.rewind_base.as_ref().map(|(w, _)| w).or(base).ok_or(PreviewBuildError::NoBaseSnapshot)?;
 
         // REPLAY GATE: Scan [0..i) for unsupported actions BEFORE starting replay.
         // This ensures deterministic failure - same history always fails the same way.
@@ -1627,9 +1676,9 @@ impl History {
 
         // Initialize preview view state (one entry per sheet, identity order)
         let sheet_count = workbook.sheet_count();
-        let mut view_state = PreviewViewState {
+        let mut view_state = self.rewind_base.as_ref().map(|(_, v)| v.clone()).unwrap_or_else(|| PreviewViewState {
             per_sheet: vec![PreviewSheetView::default(); sheet_count],
-        };
+        });
 
         // Apply actions [0..i)
         for (idx, entry) in self.undo_stack.iter().take(i).enumerate() {
@@ -1781,13 +1830,12 @@ impl History {
                 crate::cond_format_ui::plan::apply(workbook, *sheet_index, rules, false);
             }
             UndoAction::Values { sheet_index, changes } => {
-                let sheet = workbook.sheet_mut(*sheet_index)
-                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
-                        format!("Values action references invalid sheet {}", sheet_index)
-                    ))?;
-                for change in changes {
-                    sheet.set_value(change.row, change.col, &change.new_value);
+                if workbook.sheet(*sheet_index).is_none() {
+                    return Err(PreviewBuildError::InvariantViolation(format!("Values action references invalid sheet {}", sheet_index)));
                 }
+                workbook.begin_batch();
+                for change in changes { workbook.set_cell_value_tracked(*sheet_index, change.row, change.col, &change.new_value); }
+                workbook.end_batch();
             }
             UndoAction::Format { sheet_index, patches, .. } => {
                 crate::formatting::plan::validate_history(workbook, action, true)
@@ -3068,9 +3116,12 @@ mod byte_budget_tests {
     #[test]
     fn oldest_entries_are_evicted_by_bytes_and_redo_transfers_keep_the_budget() {
         let mut history = History::new();
-        history.max_bytes = 32_000;
         history.record_change(0, 0, 0, String::new(), "a".repeat(4_000));
         let first = history.undo_stack.last().map(|e| e.id);
+        let one = history.entry_bytes.values().sum::<usize>();
+        assert!(one > 4_000, "history bytes should count the stored text, got {one}");
+        // Two measured entries do not fit; the oldest one is dropped.
+        history.max_bytes = one + one / 2;
         history.mark_saved();
         history.record_change(0, 1, 0, String::new(), "b".repeat(4_000));
         assert!(history.undo_stack.iter().all(|e| Some(e.id) != first));
@@ -3101,5 +3152,46 @@ mod byte_budget_tests {
         history.record_change(0, 2, 0, String::new(), "c".into());
         assert!(!history.last_record_too_large());
         assert!(history.can_undo());
+    }
+
+    #[test]
+    fn count_eviction_keeps_rewind_to_the_oldest_retained_entry() {
+        assert_eq!(History::new().max_entries, 100);
+        let base = Workbook::new();
+        let mut history = History::new();
+        history.max_entries = 3;
+        history.set_rewind_base(&base);
+        for i in 0..8 {
+            history.record_change(0, i, 0, String::new(), format!("v{i}"));
+        }
+        assert!(!history.base_invalidated);
+        assert!(history.rewind_base.is_some());
+        assert_eq!(history.undo_stack.len(), 3);
+        assert!(!history.last_record_too_large());
+        let oldest = history.build_workbook_before(0, None, 20, 10_000).expect("rewind after count eviction");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(4, 0), "v4");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(5, 0), "");
+        let current = history.build_workbook_before(history.undo_stack.len(), None, 20, 10_000).unwrap();
+        assert_eq!(current.workbook.active_sheet().get_raw(4, 0), "v4");
+        assert_eq!(current.workbook.active_sheet().get_raw(7, 0), "v7");
+    }
+
+    #[test]
+    fn clear_keeps_the_captured_base_so_later_eviction_still_rewinds() {
+        let base = Workbook::new();
+        let mut history = History::new();
+        history.set_rewind_base(&base);
+        history.record_change(0, 0, 0, String::new(), "stale".into());
+        history.clear();
+        assert!(history.rewind_base.is_some());
+        assert!(!history.base_invalidated);
+        assert!(!history.can_undo());
+        history.max_entries = 2;
+        history.record_change(0, 0, 0, String::new(), "b".into());
+        history.record_change(0, 1, 0, String::new(), "c".into());
+        history.record_change(0, 2, 0, String::new(), "d".into());
+        let oldest = history.build_workbook_before(0, None, 20, 10_000).expect("rewind after clear and eviction");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(0, 0), "b");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(1, 0), "");
     }
 }
