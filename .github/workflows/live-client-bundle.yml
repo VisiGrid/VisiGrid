@@ -68,6 +68,8 @@ jobs:
             ${{ runner.os }}-cargo-io-
       - name: Build real native client and sequencer host from the same commit
         run: cargo build --locked -p visigrid-gpui --bin visigrid -p visigrid-cli --bin vgrid
+      - name: Verify real host sequencing and calculation context
+        run: cargo test --locked -p visigrid-cli --test collab_host
       - name: Record binary architecture and source identity
         run: |
           mkdir -p live-native-client
