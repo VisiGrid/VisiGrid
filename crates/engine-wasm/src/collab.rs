@@ -265,6 +265,7 @@ impl CollabCore {
     }
 
     fn finish_welcome(&mut self, frame: &Value) -> Result<(), String> {
+        visigrid_collab::clock::install_frame_clock(&mut self.client, frame)?;
         for o in frame.get("ops").and_then(Value::as_array).into_iter().flatten() {
             let c = committed_from(o)?;
             self.check_order(c.seq)?;

@@ -189,6 +189,7 @@ impl WireReplica {
         self.finish_welcome(&frame)
     }
     fn finish_welcome(&mut self, frame: &Value) -> Result<(), String> {
+        crate::clock::install_frame_clock(&mut self.client, frame)?;
         self.client.actor = number(frame, "actor")?;
         for op in frame
             .get("ops")
