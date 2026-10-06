@@ -1051,6 +1051,9 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
             .map(|path| format!("Unsupported manifest content at {path}; use a compatible reader to load its bands."));
         let mut remaining = BTreeMap::new();
         for (index, body) in bodies.iter().enumerate() {
+            if !body.bands.is_empty() && (wb.has_table_history() || !wb.saved_pivots(index).is_empty()) {
+                return Err("Bands with Tables or pivot ownership require a compatible reader.".into());
+            }
             if !body.bands.is_empty() && !body.cells.is_empty() {
                 return Err("A sheet cannot contain both inline cells and bands.".into());
             }
@@ -2301,6 +2304,12 @@ pub mod bands {
             while let Some(raw) = seq.next_element::<serde_json::Value>()? {
                 let cell: FullCell = serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
                 if self.validate {
+                    if (cell.spill_from.is_some() && cell.fmt.is_some()) || (cell.stale_custom_fn && cell.formula.is_none()) {
+                        return Err(serde::de::Error::custom("Band cell metadata cannot be preserved"));
+                    }
+                    if cell.spill_from.is_none() && self.sheet.merge_origin_coord(cell.row, cell.col) != (cell.row, cell.col) {
+                        return Err(serde::de::Error::custom("Band cell is not the merged region anchor"));
+                    }
                     let projected = serde_json::to_value(&cell).map_err(serde::de::Error::custom)?;
                     if crate::content_protection::first_loss(&raw, &projected).is_some() {
                         return Err(serde::de::Error::custom("Unsupported band cell content"));

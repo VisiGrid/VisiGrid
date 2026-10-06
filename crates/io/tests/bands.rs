@@ -116,6 +116,9 @@ fn unknown_or_unrepresentable_band_content_never_changes_the_preview() {
         serde_json::json!({"row":0,"col":0,"value":42,"fmt":{"align":"future"}}),
         serde_json::json!({"row":0,"col":0,"value":9007199254740993_u64}),
         serde_json::json!({"row":2,"col":0,"value":42}),
+        serde_json::json!({"row":0,"col":0,"value":{"future":true}}),
+        serde_json::json!({"row":0,"col":0,"value":42,"spill_from":[1,0],"fmt":{"bold":true}}),
+        serde_json::json!({"row":0,"col":0,"value":42,"stale_custom_fn":true}),
     ] {
         let (manifest, data, key) = tiny_band(cell);
         let (mut wb, _, _) = import_any(&manifest).unwrap();
@@ -172,4 +175,15 @@ fn a_late_band_error_is_atomic() {
     assert!(bands::apply(&mut wb,&data,Some(&key)).is_err());
     assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
     assert_eq!(wb.pending_bands.as_ref().unwrap().remaining.len(),1);
+}
+
+#[test]
+fn bands_cannot_silently_move_cells_into_a_merge_anchor() {
+    let (manifest,data,key) = tiny_band(serde_json::json!({"row":1,"col":0,"value":42}));
+    let mut source: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    source["sheets"][0]["merges"] = serde_json::json!([{"start_row":0,"start_col":0,"end_row":1,"end_col":0}]);
+    let (mut wb,_,_) = import_any(&source.to_string()).unwrap();
+    assert!(bands::apply(&mut wb,&data,Some(&key)).is_err());
+    assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
+    assert!(bands::finish(&mut wb).is_err());
 }
