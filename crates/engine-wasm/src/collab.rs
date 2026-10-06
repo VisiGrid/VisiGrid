@@ -216,12 +216,16 @@ impl CollabCore {
             "op" => {
                 let c = committed_from(frame)?;
                 self.check_order(c.seq)?;
-                self.client.receive(ToClient::Op(c));
+                if c.seq > self.client.last_seen {
+                    visigrid_collab::clock::install_frame_clock(&mut self.client, frame)?;
+                    self.client.receive(ToClient::Op(c));
+                }
             }
             "ack" => {
                 let id = uuid_field(frame)?;
                 let seq = frame.get("seq").and_then(Value::as_u64).ok_or("ack without seq")?;
                 if seq == self.client.last_seen + 1 {
+                    visigrid_collab::clock::install_frame_clock(&mut self.client, frame)?;
                     self.client.ack(id, seq);
                 } else if seq > self.client.last_seen + 1 {
                     return Err(format!("ack seq {seq} skips ops after {}", self.client.last_seen));
@@ -264,7 +268,10 @@ impl CollabCore {
         for o in frame.get("ops").and_then(Value::as_array).into_iter().flatten() {
             let c = committed_from(o)?;
             self.check_order(c.seq)?;
-            self.client.receive(ToClient::Op(c));
+            if c.seq > self.client.last_seen {
+                visigrid_collab::clock::install_frame_clock(&mut self.client, o)?;
+                self.client.receive(ToClient::Op(c));
+            }
         }
         let head = frame.get("seq").and_then(Value::as_u64).ok_or("welcome without seq")?;
         self.client.receive(ToClient::Welcome { head });

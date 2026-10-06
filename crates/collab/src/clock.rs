@@ -4,6 +4,20 @@
 use serde_json::Value;
 use visigrid_engine::RecalcClock;
 
+pub fn install_frame_clock(client: &mut crate::client::Client, frame: &Value) -> Result<(), String> {
+    let Some(value) = frame.get("clock") else { return Ok(()); };
+    let clock = parse_clock(value)?;
+    client.wb.ensure_writable()?;
+    client.confirmed.ensure_writable()?;
+    client.wb.set_recalc_clock(Some(clock));
+    client.confirmed.set_recalc_clock(Some(clock));
+    // A value edit can advance NOW/RAND in cells elsewhere in the workbook.
+    // Rebase starts from confirmed, so it must include that recalculation.
+    client.confirmed.recompute_full_ordered();
+    client.wb.recompute_full_ordered();
+    Ok(())
+}
+
 pub fn parse_clock(value: &Value) -> Result<RecalcClock, String> {
     let now_ms = value
         .get("now_ms")

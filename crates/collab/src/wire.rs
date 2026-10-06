@@ -123,7 +123,9 @@ impl WireReplica {
                 let seq = number(frame, "seq")?;
                 if seq > self.client.last_seen {
                     self.check_order(seq)?;
-                    self.client.ack(op_id(frame)?, seq);
+                    let id = op_id(frame)?;
+                    crate::clock::install_frame_clock(&mut self.client, frame)?;
+                    self.client.ack(id, seq);
                     if self.client.last_seen != seq {
                         return Err("Acknowledgement does not match our pending edit".into());
                     }
@@ -217,12 +219,14 @@ impl WireReplica {
             return Ok(());
         }
         self.client.wb.ensure_writable()?;
-        self.client.receive(ToClient::Op(Committed {
+        let committed = Committed {
             seq,
             actor: number(frame, "actor")?,
             client_op_id: op_id(frame)?,
             ops: ops_from_json(frame.get("op").ok_or("Missing operations")?)?,
-        }));
+        };
+        crate::clock::install_frame_clock(&mut self.client, frame)?;
+        self.client.receive(ToClient::Op(committed));
         Ok(())
     }
 }
@@ -355,6 +359,26 @@ mod tests {
             .is_err());
         assert_eq!(a.client.last_seen, 0);
         assert_eq!(a.client.wb.sheet(0).unwrap().get_raw(0, 0), "");
+    }
+    #[test]
+    fn sequenced_clock_is_applied_once_and_invalid_clock_cannot_apply_cells() {
+        let mut viewer = live(false, 2);
+        let id = Uuid::from_u128(77);
+        let mut frame = json!({"type":"op","seq":1,"actor":1,"client_op_id":id,
+            "op":ops_to_json(&[CollabOp::SetCell { sheet:37,sheet_name:"Sheet1".into(),row:0,col:0,
+                content:CellContent::Formula("=RAND()".into()) }]),
+            "clock":{"now_ms":1791028800123_i64,"utc_offset_seconds":0,"seed":"18446744073709551615"}});
+        viewer.receive(&frame).unwrap();
+        let before = collab_checksum(&viewer.client.wb);
+        frame["clock"]["seed"] = json!("2");
+        viewer.receive(&frame).unwrap();
+        assert_eq!(collab_checksum(&viewer.client.wb), before);
+        assert_eq!(viewer.client.wb.recalc_clock().unwrap().seed, Some(u64::MAX));
+        frame["seq"] = json!(2);
+        frame["clock"]["seed"] = json!(2);
+        assert!(viewer.receive(&frame).is_err());
+        assert_eq!(viewer.client.last_seen, 1);
+        assert_eq!(collab_checksum(&viewer.client.wb), before);
     }
     #[test]
     fn unexpected_snapshot_does_not_replace_the_current_workbook() {
