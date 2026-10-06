@@ -400,6 +400,7 @@ impl CollabCore {
     /// the page can ask before importing.
     pub(crate) fn import_ops(&self, document: &Value) -> Result<Value, String> {
         let (wb, layouts, _) = visigrid_io::json::import_any(&document.to_string())?;
+        wb.ensure_writable()?;
         let mut ops = Vec::new();
         let mut sheets = Vec::new();
         let mut keys = Vec::new();
@@ -1483,4 +1484,14 @@ mod tests {
         }
         eprintln!("build {built:?}, layout {laid:?} {l}, 100 viewports (41x21) {:?}, {n} cells", t.elapsed());
     }
+    #[test]
+    fn protected_import_cannot_be_flattened_into_editable_collaboration_ops() {
+        let core = CollabCore::new(&doc(), 0).unwrap();
+        let before = core.snapshot().unwrap();
+        let mut source = doc();
+        source["future_feature"] = json!({"setting": "retain"});
+        assert!(core.import_ops(&source).is_err());
+        assert_eq!(core.snapshot().unwrap(), before);
+    }
+
 }
