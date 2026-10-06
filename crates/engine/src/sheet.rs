@@ -295,6 +295,7 @@ pub struct CanonicalContentProtection {
     pub sheet_ids: Vec<SheetId>,
     pub fingerprint: [u8; 32],
     pub layout: String,
+    pub incomplete_bands: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +351,10 @@ pub struct Sheet {
     /// Conditional formatting rules
     #[serde(default)]
     pub cond_formats: super::cond_format::CondFormatStore,
+    /// Column widths, row heights, hidden and frozen lines (replicated in
+    /// collaboration; moves with structural edits).
+    #[serde(default)]
+    pub layout: crate::layout::LineLayout,
     /// Merged cell regions
     #[serde(default)]
     pub merged_regions: Vec<MergedRegion>,
@@ -389,6 +394,8 @@ pub struct Sheet {
     /// all its content. Never serialize this recursively into engine state.
     #[serde(skip)]
     pub canonical_content_protection: Option<CanonicalContentProtection>,
+    #[serde(skip)]
+    pub canonical_wire_identity: bool,
     #[serde(default)]
     pub(crate) table_id_high_water: u64,
     #[serde(default)]
@@ -594,10 +601,12 @@ impl Sheet {
             table_view_spec: None,
             read_only_reason: None,
             canonical_content_protection: None,
+            canonical_wire_identity: false,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
             edit_generation: 0,
             merge_index: HashMap::new(),
+            layout: crate::layout::LineLayout::default(),
             has_any_borders: false,
         }
     }
@@ -631,10 +640,12 @@ impl Sheet {
             table_view_spec: None,
             read_only_reason: None,
             canonical_content_protection: None,
+            canonical_wire_identity: false,
             table_id_high_water: 0,
             table_column_allocators: Default::default(),
             edit_generation: 0,
             merge_index: HashMap::new(),
+            layout: crate::layout::LineLayout::default(),
             has_any_borders: false,
         }
     }
@@ -829,6 +840,13 @@ impl Sheet {
     pub fn set_value(&mut self, row: usize, col: usize, value: &str) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
+        self.set_value_at(row, col, value);
+    }
+
+    /// `set_value` at exactly (`row`, `col`), even inside a merge. Writes
+    /// whose meaning must not depend on where merges are (collaboration
+    /// operations, which are transformed by position) use this.
+    pub fn set_value_at(&mut self, row: usize, col: usize, value: &str) {
         if !self.accept_value_write(row, col) {
             return;
         }
@@ -851,6 +869,12 @@ impl Sheet {
     /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
     pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
+        self.set_text_at(row, col, text);
+    }
+
+    /// `set_text` at exactly (`row`, `col`), even inside a merge (see
+    /// `set_value_at`).
+    pub fn set_text_at(&mut self, row: usize, col: usize, text: &str) {
         if !self.accept_value_write(row, col) {
             return;
         }

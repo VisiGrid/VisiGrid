@@ -16,6 +16,7 @@ visigrid-io = { path = "../io" }
 visigrid-config = { path = "../config" }
 visigrid-protocol = { path = "../protocol" }
 visigrid-session-host = { path = "../session-host" }
+visigrid-collab = { path = "../collab" }
 ctrlc = "3"
 visigrid-hub-client = { path = "../hub_client" }
 visigrid-recon = { path = "../recon" }
@@ -74,4 +75,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 proptest = "1"
+# Only to assert collab-host and the browser engine report the same
+# engine_commit (crates/cli/tests/collab_host.rs).
+visigrid-engine-wasm = { path = "../engine-wasm" }
 httpmock = "0.8"

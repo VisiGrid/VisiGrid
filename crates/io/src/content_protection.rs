@@ -105,6 +105,9 @@ pub(crate) fn fingerprint(sheet: &Sheet) -> Result<[u8; 32], String> {
 /// partial grid. Any mutation, missing/reordered sheet or cleared warning
 /// invalidates this permission independently of the UI's read-only state.
 pub(crate) fn original_source(wb: &Workbook) -> Result<Option<&str>, String> {
+    if wb.pending_bands.is_some() || wb.sheets().iter().any(|s| s.canonical_content_protection.as_ref().is_some_and(|p| p.incomplete_bands)) {
+        return Err("Cannot export or save a workbook before all band data is loaded.".into());
+    }
     let Some(first) = wb.sheets().first() else {
         return Ok(None);
     };

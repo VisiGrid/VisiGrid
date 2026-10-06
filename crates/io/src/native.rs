@@ -610,7 +610,7 @@ fn write_fresh_db(
 }
 
 pub fn save(sheet: &Sheet, path: &Path) -> Result<(), String> {
-    if sheet.canonical_content_protection.is_some() {
+    if sheet.canonical_content_protection.is_some() || sheet.canonical_wire_identity {
         return save_workbook(&Workbook::from_sheets(vec![sheet.clone()], 0), path);
     }
     if let Some(reason) = &sheet.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
@@ -770,7 +770,7 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
     if let Some(source) = protected_source(&conn)? {
         return crate::json::import_full(&source);
     }
-    let has_tables: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'tables')", [], |r| r.get(0))
+    let has_tables: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key IN ('tables', 'collab_sheet_ids'))", [], |r| r.get(0))
         .unwrap_or(false);
     if has_tables {
         if conn.prepare("SELECT sheet_idx FROM sheets LIMIT 1").is_err() {
@@ -1604,6 +1604,7 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
         workbook.sheet_mut(i).unwrap().print_setup = load_print_setup(&conn, i)?;
     }
     // After cells: a pivot's ownership must not block loading its own output.
+    load_wire_ids(&conn, &mut workbook).map_err(|e| e.to_string())?;
     load_pivots(&conn, &mut workbook);
     let issue = match load_tables(&conn, &mut workbook, path.parent()) {
         Ok(()) => None,
@@ -1779,6 +1780,12 @@ fn load_tab_colors(conn: &Connection, workbook: &mut Workbook) {
 }
 
 fn save_tables(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) -> Result<(), String> {
+    conn.execute("DELETE FROM meta WHERE key = 'collab_sheet_ids'", []).map_err(|e| e.to_string())?;
+    if workbook.sheets().iter().any(|s| s.canonical_wire_identity) {
+        let ids: Vec<_> = workbook.sheets().iter().map(|s| s.id.0).collect();
+        let json = serde_json::to_string(&ids).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO meta (key, value) VALUES ('collab_sheet_ids', ?1)", params![json]).map_err(|e| e.to_string())?;
+    }
     conn.execute("DELETE FROM meta WHERE key = 'tables'", []).map_err(|e| e.to_string())?;
     if workbook.has_table_history() {
         let mut catalog = workbook.saved_tables();
@@ -1817,6 +1824,24 @@ fn relative_recipe_path(recipe: &str, dir: &Path) -> String {
 /// A relative recipe link (saved beside the workbook) is made absolute
 /// against the workbook's folder as it loads, so Save As elsewhere still
 /// finds the recipe; saving makes it relative again where it can.
+fn load_wire_ids(conn: &Connection, workbook: &mut Workbook) -> Result<(), crate::table_recovery::TableLoadIssue> {
+    use crate::table_recovery::TableLoadIssue;
+    use rusqlite::OptionalExtension;
+    let ids: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'collab_sheet_ids'", [], |r| r.get(0))
+        .optional().map_err(|e| TableLoadIssue::Corrupt(e.to_string()))?;
+    if let Some(ids) = ids {
+        let ids: Vec<u64> = serde_json::from_str(&ids).map_err(|e| TableLoadIssue::Corrupt(e.to_string()))?;
+        crate::json::validate_wire_ids(&ids, workbook.sheet_count()).map_err(TableLoadIssue::Corrupt)?;
+        for (index, id) in ids.iter().enumerate() {
+            let sheet = workbook.sheet_mut(index).unwrap();
+            sheet.id = SheetId(*id);
+            sheet.canonical_wire_identity = true;
+        }
+        workbook.set_next_sheet_id(ids.iter().max().copied().unwrap_or(0) + 1);
+    }
+    Ok(())
+}
+
 fn load_tables(conn: &Connection, workbook: &mut Workbook, dir: Option<&Path>) -> Result<(), crate::table_recovery::TableLoadIssue> {
     use crate::table_recovery::{decode_catalog, TableLoadIssue};
     use rusqlite::OptionalExtension;

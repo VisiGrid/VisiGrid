@@ -507,6 +507,13 @@ Examples:
         title: Option<String>,
     },
 
+    /// Engine host for the collaboration sequencer (JSON lines on stdio)
+    #[command(hide = true, after_help = "\
+Driven by the VisiGrid API's collaboration sequencer, one process per open
+workbook. Not for interactive use. Protocol: the vault spec \"VisiGrid
+Collaborative Workbook Model\", section Phase 2 interfaces.")]
+    CollabHost,
+
     /// Serve MCP (Model Context Protocol) over stdio for AI agents
     #[command(after_help = "\
 Bridges an MCP host (Claude Code, Claude Desktop) to a running VisiGrid
@@ -1999,6 +2006,11 @@ fn main() -> ExitCode {
         Some(Commands::Serve { file, new, save_as, autosave, share, title }) => serve::cmd_serve(file, new, save_as, autosave, share, title),
         Some(Commands::Pair { session, name, list, revoke }) => cmd_pair(session, name, list, revoke),
         Some(Commands::Mcp { session }) => mcp::cmd_mcp(session),
+        Some(Commands::CollabHost) => visigrid_cli::collab_host::run().map_err(|e| CliError {
+            code: 1,
+            message: format!("collab-host: {e}"),
+            hint: None,
+        }),
         Some(Commands::Stats { session, json }) => cmd_stats(session, json),
         Some(Commands::View { session, range, sheet, follow, width }) => {
             cmd_view(session, range, sheet, follow, width)

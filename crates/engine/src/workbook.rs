@@ -72,9 +72,19 @@ pub struct ValidationFailure {
     pub reason: crate::validation::ValidationFailureReason,
 }
 
+/// Manifest-bound load state. Editing and publication stay disabled until every band validates.
+#[derive(Debug, Clone)]
+pub struct PendingBandLoad {
+    pub remaining: std::collections::BTreeMap<(usize, String), (usize, usize, usize, usize)>,
+    pub read_only_after: Option<String>,
+    pub cached: Vec<(usize, usize, usize, Value)>,
+}
+
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workbook {
+    #[serde(skip)]
+    pub pending_bands: Option<PendingBandLoad>,
     sheets: Vec<Sheet>,
     active_sheet: usize,
     /// Next ID to assign to a new sheet. Monotonically increasing, never reused.
@@ -195,6 +205,7 @@ impl Workbook {
             next_table_id: 1,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
+            pending_bands: None,
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
@@ -535,6 +546,7 @@ impl Workbook {
             next_table_id,
             named_ranges,
             style_table: Vec::new(),
+            pending_bands: None,
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
@@ -567,6 +579,7 @@ impl Workbook {
             next_table_id,
             named_ranges,
             style_table: Vec::new(),
+            pending_bands: None,
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
@@ -2196,6 +2209,22 @@ impl Workbook {
         self.note_write_with_spills(cell_id, spill)
     }
 
+    /// `set_cell_value_tracked` at exactly (`row`, `col`): no redirect of a
+    /// cell hidden by a merge to the merge's origin (see `Sheet::set_value_at`).
+    pub fn set_cell_value_tracked_at(&mut self, sheet_index: usize, row: usize, col: usize, value: &str) -> Recalculated {
+        let sheet_id = match self.sheets.get(sheet_index) {
+            Some(sheet) => sheet.id,
+            None => return Recalculated::Cells(Vec::new()),
+        };
+        if self.sheets[sheet_index].table_value_write_error(row, col).is_some() {
+            return Recalculated::Cells(Vec::new());
+        }
+        let spill = self.spill_effects_of_write(sheet_index, row, col);
+        self.sheets[sheet_index].set_value_at(row, col, value);
+        self.update_cell_deps(sheet_id, row, col);
+        self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
+    }
+
     /// Write literal text with dependency tracking, without interpreting formulas
     /// or numeric-looking identifiers. Used by typed clipboard imports.
     pub fn set_cell_text_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
@@ -2204,6 +2233,18 @@ impl Workbook {
         let sheet_id = sheet.id;
         let spill = self.spill_effects_of_write(sheet_index, row, col);
         self.sheets[sheet_index].set_text(row, col, text);
+        self.update_cell_deps(sheet_id, row, col);
+        self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
+    }
+
+    /// `set_cell_text_tracked` at exactly (`row`, `col`), even inside a merge
+    /// (collaboration writes; see `set_cell_value_tracked_at`).
+    pub fn set_cell_text_tracked_at(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
+        let Some(sheet) = self.sheets.get(sheet_index) else { return Recalculated::Cells(Vec::new()); };
+        if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
+        let sheet_id = sheet.id;
+        let spill = self.spill_effects_of_write(sheet_index, row, col);
+        self.sheets[sheet_index].set_text_at(row, col, text);
         self.update_cell_deps(sheet_id, row, col);
         self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
     }
@@ -2454,8 +2495,9 @@ impl Workbook {
                 (false, false) => sheet.insert_cols(at, count),
                 (false, true) => sheet.delete_cols(at, count),
             }
-            // 2. Validations move with their cells.
+            // 2. Validations and line layout move with their cells.
             sheet.validations.shift_for_structural(at, count, delete, is_row);
+            sheet.layout.shift_for_structural(at, count, delete, is_row);
         }
 
         // 3. Named ranges (workbook-level, so missed by any sheet-local pass).
@@ -2506,7 +2548,9 @@ impl Workbook {
             }
         }
         for (idx, row, col, new_raw) in writes {
-            self.sheets[idx].set_value(row, col, &new_raw);
+            // The cell that was read, even inside a merge: a redirect to the
+            // merge origin would leave this formula stale and overwrite the origin.
+            self.sheets[idx].set_value_at(row, col, &new_raw);
         }
 
         self.apply_rule_changes(&rule_changes, false);

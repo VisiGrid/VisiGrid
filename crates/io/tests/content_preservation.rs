@@ -136,3 +136,24 @@ fn future_format_variant_opens_cached_grid_read_only() {
         source
     );
 }
+
+#[test]
+fn native_storage_preserves_collaboration_sheet_identities() {
+    let source = r#"{"format":"visigrid-json","version":2,"collab_sheet_ids":[17,4],"sheets":[{"name":"A","cells":[]},{"name":"B","cells":[]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    visigrid_io::native::save_workbook(&workbook, file.path()).unwrap();
+    let restored = visigrid_io::native::load_workbook(file.path()).unwrap();
+    restored.ensure_writable().unwrap();
+    assert_eq!(restored.sheet(0).unwrap().id.0,17);
+    assert_eq!(restored.sheet(1).unwrap().id.0,4);
+    let output: serde_json::Value = serde_json::from_str(&export_workbook(&restored,&layouts,active).unwrap()).unwrap();
+    assert_eq!(output["collab_sheet_ids"],serde_json::json!([17,4]));
+
+    let single = r#"{"format":"visigrid-json","version":1,"collab_sheet_ids":[21],"name":"Single","cells":[]}"#;
+    let sheet = visigrid_io::json::import_full(single).unwrap();
+    visigrid_io::native::save(&sheet,file.path()).unwrap();
+    let restored = visigrid_io::native::load(file.path()).unwrap();
+    assert_eq!(restored.id.0,21);
+    assert!(restored.canonical_wire_identity);
+}

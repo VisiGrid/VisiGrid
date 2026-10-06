@@ -35,3 +35,5 @@ jobs:
             ${{ runner.os }}-cargo-pr-
       - name: Test shared spreadsheet I/O without the GUI
         run: cargo test --locked -p visigrid-io
+      - name: Test browser-compatible JSON codec
+        run: cargo test --locked -p visigrid-io --no-default-features --lib --test bands
