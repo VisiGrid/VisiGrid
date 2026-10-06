@@ -153,6 +153,13 @@ impl Host {
             "finish_load" => self.finish_load(),
             "replace_document" => self.replace_document(req),
             "set_clock" => self.set_clock(req),
+            "restore_clock" => {
+                let clock = visigrid_collab::clock::parse_clock(req.get("clock").ok_or("restore_clock needs clock")?)?;
+                let wb = self.wb_mut()?;
+                wb.set_recalc_clock(Some(clock));
+                wb.recompute_full_ordered();
+                Ok(Map::new())
+            },
             "" => Err("missing cmd".into()),
             other => Err(format!("unknown cmd {other:?}")),
         }
