@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Workbook content protection
+
+- Workbooks containing unsupported content open read-only and retain their complete original document, including stored formula results. Protected native copies carry an upgrade marker so VisiGrid 0.42 and later refuses to overwrite the preview with missing content; use an updated client to open the protected original. Versions before 0.42 do not recognize this marker. ([#120](https://github.com/VisiGrid/VisiGrid/pull/120))
+
 ## 0.49.2
 
 ### Merged cells and Center Across

@@ -972,6 +972,13 @@ fn save_protected_source(workbook: &Workbook, source: &str, path: &Path) -> Resu
         write_workbook(conn, workbook, path.parent())?;
         conn.execute("INSERT INTO meta (key, value) VALUES ('protected_canonical_source', ?1)", params![source])
             .map_err(|e| e.to_string())?;
+        // Readers since 0.42 check the Table version before allowing edits.
+        // They do not know protected_canonical_source, so make the preview
+        // explicitly unreadable/writable rather than let Save erase it.
+        // Updated readers restore the authoritative source before this check.
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('tables', ?1)",
+            params![serde_json::json!({ "version": u64::MAX }).to_string()])
+            .map_err(|e| e.to_string())?;
         Ok(())
     })
 }

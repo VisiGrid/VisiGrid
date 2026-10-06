@@ -157,3 +157,28 @@ fn native_storage_preserves_collaboration_sheet_identities() {
     assert_eq!(restored.id.0,21);
     assert!(restored.canonical_wire_identity);
 }
+
+#[test]
+fn protected_native_preview_refuses_readers_without_source_support() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let (workbook, _, _) = import_any(source).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    visigrid_io::native::save_workbook(&workbook, file.path()).unwrap();
+    let restored = visigrid_io::native::load_workbook(file.path()).unwrap();
+    assert_eq!(export_workbook(&restored, &[], 0).unwrap(), source);
+
+    // Simulate a pre-protection reader: it ignores the source metadata and
+    // follows the existing Table-version recovery path.
+    let conn = rusqlite::Connection::open(file.path()).unwrap();
+    let marker: String = conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&marker).unwrap()["version"].as_u64(), Some(u64::MAX));
+    conn.execute("DELETE FROM meta WHERE key = 'protected_canonical_source'", []).unwrap();
+    drop(conn);
+    assert!(visigrid_io::native::load_workbook(file.path()).unwrap_err().contains("Upgrade VisiGrid"));
+    let (preview, issue) = visigrid_io::native::load_workbook_for_recovery(file.path()).unwrap();
+    assert!(issue.unwrap().to_string().contains("Upgrade VisiGrid"));
+    assert!(preview.read_only_reason().unwrap().contains("Upgrade VisiGrid"));
+    let before = std::fs::read(file.path()).unwrap();
+    assert!(visigrid_io::native::save_workbook(&preview, file.path()).is_err());
+    assert_eq!(std::fs::read(file.path()).unwrap(), before);
+}
