@@ -77,9 +77,11 @@ fn json_recovery_distinguishes_future_format_and_corrupt_metadata() {
         doc["table_catalog"] = catalog;
         let raw = doc.to_string();
         assert!(json::import_any(&raw).unwrap_err().contains(expected));
-        let (wb, _, _) = json::import_any_for_recovery(&raw).unwrap();
+        let (mut wb, _, _) = json::import_any_for_recovery(&raw).unwrap();
         assert!(wb.read_only_reason().unwrap().contains(expected));
         assert_eq!(wb.active_sheet().get_display(0, 2), "42");
+        assert_eq!(json::export_workbook(&wb, &[], 0).unwrap(), raw);
+        wb.sheet_mut(0).unwrap().name = "Edited partial preview".into();
         assert!(json::export_workbook(&wb, &[], 0).is_err());
     }
 }
