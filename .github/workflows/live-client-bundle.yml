@@ -33,7 +33,10 @@ jobs:
       - name: Build browser engine
         run: cargo build --release --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
       - name: Install matching bindings generator
-        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+        run: |
+          if ! command -v wasm-bindgen >/dev/null || [ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.126" ]; then
+            cargo install wasm-bindgen-cli --version 0.2.126 --locked --force
+          fi
       - name: Generate web bindings
         run: |
           mkdir -p live-client-bundle
