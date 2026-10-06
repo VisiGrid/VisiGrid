@@ -72,7 +72,7 @@ impl Spreadsheet {
         let Some(draft) = self.table_dialog.clone() else {
             return;
         };
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         if let TableDialogKind::Views(id) = draft.kind {

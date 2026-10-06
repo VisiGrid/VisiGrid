@@ -987,7 +987,7 @@ impl Spreadsheet {
             return out;
         }
         if matches!(op, StructureOp::RenameSheet { .. } | StructureOp::AddSheet { .. })
-            && (self.block_if_previewing_only(cx) || self.mode.is_editing())
+            && ((self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing())
         {
             out.error = Some(("invalid_op".into(), "Finish editing or reviewing before changing sheets.".into()));
             return out;

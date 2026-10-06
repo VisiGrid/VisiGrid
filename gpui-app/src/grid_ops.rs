@@ -517,7 +517,7 @@ impl Spreadsheet {
 
     /// Hide selected rows (Ctrl+9)
     pub(crate) fn hide_rows(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         if self.mode.is_editing() { return; }
         if self.wb(cx).sheets().iter().any(|s| s.tables().iter().any(|t| t.totals.is_some()))
             || crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
@@ -562,7 +562,7 @@ impl Spreadsheet {
     /// Excel behavior: select rows spanning the hidden range, then unhide.
     /// E.g., if rows 5-8 are hidden, select rows 4-9 and press Ctrl+Shift+9.
     pub(crate) fn unhide_rows(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         if self.mode.is_editing() { return; }
         if self.wb(cx).sheets().iter().any(|s| s.tables().iter().any(|t| t.totals.is_some()))
             || crate::table_filter_ui::has_table_criteria(self.wb(cx)) {

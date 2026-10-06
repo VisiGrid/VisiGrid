@@ -67,7 +67,7 @@ impl Spreadsheet {
     pub fn apply_impact_preview(&mut self, cx: &mut Context<Self>) {
         use crate::views::impact_preview::ImpactAction;
 
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let action = self.impact_preview_action.clone();
         let usage_count = self.impact_preview_usages.len();
 

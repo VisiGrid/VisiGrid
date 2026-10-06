@@ -242,7 +242,7 @@ impl Spreadsheet {
     }
 
     pub fn show_add_cond_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         if self.mode.is_editing() {
@@ -355,7 +355,7 @@ impl Spreadsheet {
     }
 
     pub fn confirm_add_cond_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.update_cf_preview(cx);
@@ -389,7 +389,7 @@ impl Spreadsheet {
     }
 
     pub fn clear_cond_formats_in_selection(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         let result = self
@@ -533,7 +533,7 @@ impl Spreadsheet {
     }
 
     pub fn toggle_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.change_cf_rules("Toggle conditional format", cx, |store| {
@@ -544,7 +544,7 @@ impl Spreadsheet {
     }
 
     pub fn delete_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.change_cf_rules("Delete conditional format", cx, |store| {
@@ -553,7 +553,7 @@ impl Spreadsheet {
     }
 
     pub fn move_cf_rule(&mut self, id: u64, delta: i32, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.change_cf_rules("Reorder conditional formats", cx, |store| {
@@ -570,7 +570,7 @@ impl Spreadsheet {
     }
 
     pub fn edit_cf_rule(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         let rules = self.cf_rules_snapshot(cx);

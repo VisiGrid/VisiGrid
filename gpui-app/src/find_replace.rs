@@ -204,7 +204,7 @@ impl Spreadsheet {
             self.find_next(cx);
             return;
         }
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.sync_table_view(cx);
@@ -254,7 +254,7 @@ impl Spreadsheet {
 
     /// Prepare every visible match before writing any; one failure refuses all.
     pub fn replace_all(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         if !self.find_replace_mode || self.find_results.is_empty() {

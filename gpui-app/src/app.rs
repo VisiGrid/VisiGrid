@@ -1959,7 +1959,7 @@ impl Spreadsheet {
     /// - Dependency graph is updated
     /// - Dirty state is tracked via history
     pub fn commit_validation_value(&mut self, value: &str, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         use crate::validation_dropdown::DropdownCloseReason;
         self.sync_table_view(cx);
         self.check_dropdown_staleness(cx);

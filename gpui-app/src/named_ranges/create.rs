@@ -13,7 +13,7 @@ impl Spreadsheet {
     /// Show the create named range dialog
     pub fn show_create_named_range(&mut self, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.sync_table_view(cx);
         if !self.view_state.additional_selections.is_empty() {
             self.status_message = Some("Select one rectangular range to name.".into());
@@ -104,7 +104,7 @@ impl Spreadsheet {
 
     /// Confirm creation of the named range
     pub fn confirm_create_named_range(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.validate_create_name(cx);
         if self.create_name_validation_error.is_some() { return; }
         let mut range = match self.named_range_draft(cx) {

@@ -74,7 +74,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) -> Option<bool> {
         if !self.wb(cx).has_table_criteria() { return None; }
-        if self.block_if_previewing_only(cx) { return Some(false); }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return Some(false); }
         self.sync_table_view(cx);
         let ranges = self.format_apply_ranges(cx);
         let index = self.sheet_index(cx);
@@ -447,7 +447,7 @@ impl Spreadsheet {
     /// and formulas keep working because no cells are actually merged.
     pub fn center_across_selection_toggle(&mut self, cx: &mut Context<Self>) {
         if self.wb(cx).has_table_criteria() {
-            if self.block_if_previewing_only(cx) { return; }
+            if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
             self.sync_table_view(cx);
             if self.single_row_merges_in(Some(self.all_selection_ranges()), cx).is_empty() {
                 let result = plan::plan(self.wb(cx), self.sheet_index(cx), &self.row_view,
@@ -934,13 +934,13 @@ impl Spreadsheet {
 
     /// Start Format Painter (single-shot): capture the active cell's format.
     pub fn start_format_painter(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.start_format_painter_inner(false, cx);
     }
 
     /// Start Format Painter in locked mode: stays active until Esc.
     pub fn start_format_painter_locked(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.start_format_painter_inner(true, cx);
     }
 
@@ -972,7 +972,7 @@ impl Spreadsheet {
 
     /// Paste the format copied with Ctrl+Shift+C onto the selection (Ctrl+Shift+V right after it).
     pub fn paste_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let snapshot = match &self.format_painter {
             Some(state) => state.snapshot.clone(),
             None => {
@@ -990,7 +990,7 @@ impl Spreadsheet {
 
     /// Apply Format Painter: set captured format on current selection.
     pub fn apply_format_painter(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let (snapshot, locked) = match &self.format_painter {
             Some(state) => (state.snapshot.clone(), state.locked),
             None => return,

@@ -182,7 +182,7 @@ impl Spreadsheet {
             return;
         }
         let blocked = if action.is_cell_format() {
-            self.block_if_previewing_only(cx)
+            (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx)
         } else {
             self.block_if_previewing(cx)
         };

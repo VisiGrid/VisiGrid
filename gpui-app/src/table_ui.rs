@@ -137,7 +137,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn restore_column_formula(&mut self, id: TableId, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) || self.mode.is_editing() { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() { return; }
         let (row, col) = self.view_state.selected;
         let row = self.row_view.view_to_data(row);
         let result = crate::table_calculated::prepare_restore(self.wb(cx), id, row, col)
@@ -1137,6 +1137,71 @@ mod conversion_size_tests {
     use super::{conversion_warning, TableDialogKind};
     use crate::app::Spreadsheet;
     use visigrid_engine::table::TableRange;
+
+    #[gpui::test]
+    fn live_session_refuses_phase4_metadata_commands_without_mutation(cx: &mut gpui::TestAppContext) {
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("VISIGRID_LIVE_COLLAB", value),
+                    None => std::env::remove_var("VISIGRID_LIVE_COLLAB"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(std::env::var_os("VISIGRID_LIVE_COLLAB"));
+        std::env::set_var("VISIGRID_LIVE_COLLAB", "1");
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            let id = app.workbook.update(cx, |wb, _| {
+                wb.set_cell_value_tracked(0, 0, 0, "Amount");
+                wb.set_cell_value_tracked(0, 1, 0, "10");
+                let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 1, end_col: 0 }, "Sales").unwrap().table_id();
+                let mut view = visigrid_engine::table_view::TableViewSpec::new(id);
+                view.sort = Some(visigrid_engine::table_view::TableSort {
+                    column: wb.table(id).unwrap().1.columns[0].id,
+                    direction: visigrid_engine::filter::SortDirection::Ascending,
+                });
+                wb.set_table_view_spec(wb.active_sheet_id(), Some(view)).unwrap();
+                id
+            });
+            app.sync_table_view(cx);
+            app.view_state.selected = (1, 0);
+            app.cloud_identity = Some(crate::cloud::CloudIdentity {
+                sheet_id: 1, public_id: "test-live".into(), sheet_name: "Test".into(),
+                api_base: "https://example.invalid".into(), last_synced_hash: None,
+                last_synced_at: None, last_synced_revision: None,
+            });
+            assert!(app.cloud_live_enabled());
+            let before = format!("{:?}", app.wb(cx));
+            macro_rules! blocked {
+                ($action:expr) => {{
+                    app.status_message = None;
+                    $action;
+                    assert!(app.status_message.as_deref().unwrap().contains("cell values and formulas only"));
+                    assert_eq!(format!("{:?}", app.wb(cx)), before);
+                    assert!(!app.history.can_undo());
+                }};
+            }
+            blocked!(app.toggle_table_totals(id, cx));
+            blocked!(app.restore_column_formula(id, cx));
+            blocked!(app.hide_rows(cx));
+            blocked!(app.set_bold(true, cx));
+            blocked!(app.add_sheet(cx));
+            app.table_dialog = Some(super::TableDialog {
+                kind: TableDialogKind::SaveView(id), sheet: app.wb(cx).active_sheet_id(),
+                name: "Saved".into(), range: String::new(), has_headers: true,
+                field: 0, select_all: false, error: None,
+            });
+            blocked!(app.submit_named_table_view(cx));
+        }).unwrap();
+    }
     #[gpui::test]
     fn conversion_too_large_for_history_reports_no_undo(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {

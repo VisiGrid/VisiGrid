@@ -87,7 +87,7 @@ impl Spreadsheet {
         description: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return false;
         }
         let result = self

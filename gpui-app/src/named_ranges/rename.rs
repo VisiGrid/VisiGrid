@@ -148,7 +148,7 @@ impl Spreadsheet {
 
     /// Apply the rename operation
     pub fn confirm_rename_symbol(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         if let Err(error) = self.named_range_draft(cx) {
             self.rename_validation_error = Some(error); cx.notify(); return;
         }
@@ -231,7 +231,7 @@ impl Spreadsheet {
 
     /// Apply the edited description and record undo
     pub fn apply_edit_description(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let before = match self.named_range_draft(cx) {
             Ok(before) => before,
             Err(error) => { self.name_draft_error = Some(error.clone()); self.status_message = Some(error); cx.notify(); return; }

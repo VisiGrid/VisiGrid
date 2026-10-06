@@ -103,7 +103,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn toggle_table_totals(&mut self, id: TableId, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
         if let Err(error) = self.change_table_totals(id, None, cx) {

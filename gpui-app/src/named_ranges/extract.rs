@@ -13,7 +13,7 @@ impl Spreadsheet {
 
     /// Show the extract named range modal
     pub fn show_extract_named_range(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.sync_table_view(cx);
         let draft = match ExtractionDraft::capture(self.wb(cx), &self.row_view, self.view_state.selected) {
             Ok(draft) => draft,
@@ -176,7 +176,7 @@ impl Spreadsheet {
 
     /// Publish the captured name and formula changes as one atomic history entry.
     pub fn confirm_extract_named_range(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.validate_extract_name(cx);
         if self.extract_validation_error.is_some() { cx.notify(); return; }
         let name = self.extract_name.clone();

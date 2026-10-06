@@ -152,7 +152,7 @@ impl Spreadsheet {
         label: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return Err("Validation cannot change in the current mode.".into());
         }
         let Some(commit) = draft.prepare(self.wb(cx), edit)? else {

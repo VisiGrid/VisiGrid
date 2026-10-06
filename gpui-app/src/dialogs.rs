@@ -683,7 +683,7 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn show_validation_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.open_validation_editor(cx);
     }
 
@@ -694,22 +694,22 @@ impl Spreadsheet {
     }
 
     pub fn apply_validation_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.save_validation_editor(false, cx);
     }
 
     pub fn clear_validation_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.save_validation_editor(true, cx);
     }
 
     pub fn exclude_from_validation(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.edit_validation_exclusions(false, cx);
     }
 
     pub fn clear_validation_exclusions(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.edit_validation_exclusions(true, cx);
     }
 

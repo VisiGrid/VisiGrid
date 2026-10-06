@@ -72,7 +72,7 @@ impl Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.mode.is_navigation() || self.block_if_previewing_only(cx) {
+        if !self.mode.is_navigation() || (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.sync_table_view(cx);
@@ -159,7 +159,7 @@ impl Spreadsheet {
         }
     }
     pub fn delete_comment(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
         self.sync_table_view(cx);
@@ -200,7 +200,7 @@ impl Spreadsheet {
         after: Option<CellComment>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.block_if_previewing_only(cx) { return false; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return false; }
         let result = plan::validate_edit(self.wb(cx), sheet_index, row, col, after.is_some(),
             self.comment_editor.as_ref().map(|e| e.revision));
         if let Err(error) = result {

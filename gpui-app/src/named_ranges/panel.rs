@@ -11,7 +11,7 @@ impl Spreadsheet {
 
     /// Delete a named range by name (shows impact preview first)
     pub fn delete_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         // Check if named range exists
         if self.wb(cx).get_named_range(name).is_none() {
             self.status_message = Some(format!("Named range '{}' not found", name));

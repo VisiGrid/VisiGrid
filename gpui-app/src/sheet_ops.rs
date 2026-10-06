@@ -46,18 +46,18 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.change_freeze_panes((1, 0), "Frozen top row", cx);
     }
 
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.change_freeze_panes((0, 1), "Frozen first column", cx);
     }
 
     /// Freeze boundaries are view-slot positions, not canonical record identities.
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let (row, col) = self.active_view_state().selected;
         if (row, col) == (0, 0) {
             self.status_message = Some("Select a cell to freeze rows above and columns to the left".into());
@@ -72,7 +72,7 @@ impl Spreadsheet {
     }
 
     pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.change_freeze_panes((0, 0), "Unfrozen all panes", cx);
     }
 
@@ -664,7 +664,7 @@ impl Spreadsheet {
 
     /// Add a new sheet and switch to it
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.commit_pending_edit(cx);
         if self.mode.is_editing() { return; }
         self.cancel_sheet_rename(cx);
@@ -695,7 +695,7 @@ impl Spreadsheet {
 
     /// Start renaming a sheet (double-click on tab or context menu)
     pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.commit_pending_edit(cx);
         if self.mode.is_editing() { return; }
         let draft = match SheetRenameDraft::capture(self.wb(cx), index) {
@@ -714,7 +714,7 @@ impl Spreadsheet {
 
     /// Rename the sheet and every authored qualifier in one guarded batch.
     pub fn confirm_sheet_rename(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         if self.renaming_sheet.is_none() { return; }
         let name = self.sheet_rename_input.trim().to_string();
         let result = self.sheet_rename_draft.as_ref()
@@ -908,7 +908,7 @@ impl Spreadsheet {
 
     /// Delete a sheet
     pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_if_previewing_only(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.commit_pending_edit(cx);
         if self.mode.is_editing() { return; }
         self.cancel_sheet_rename(cx);
