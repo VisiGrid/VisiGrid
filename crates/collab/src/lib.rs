@@ -21,3 +21,5 @@ pub mod server;
 pub mod sim;
 pub mod transform;
 pub mod undo;
+
+pub mod wire;
