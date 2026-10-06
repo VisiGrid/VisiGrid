@@ -2200,7 +2200,7 @@ impl Workbook {
                 (false, true) => sheet.delete_cols(at, count),
             }
             // 2. Validations and line layout move with their cells.
-            sheet.validations.shift_for_structural(at, count, delete, is_row);
+            sheet.validations.shift_for_structural(at, count, delete, is_row)?;
             sheet.layout.shift_for_structural(at, count, delete, is_row);
         }
 
@@ -2294,6 +2294,9 @@ impl Workbook {
         if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
             return Err("Structural edit exceeds the sheet boundary.".into());
         }
+        // The keyed rule store cannot represent two definitions at one exact
+        // range. Refuse clipping collisions before changing any cells/layout.
+        sheet.validations.clone().shift_for_structural(at, count, delete, is_row)?;
         // Refuse inserts that would push content off the grid rather than
         // dropping it (Excel's behavior).
         if !delete {
@@ -2973,8 +2976,9 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         use crate::named_range::NamedRangeTarget;
-        self.workbook.named_ranges.get(name).map(|nr| {
-            match &nr.target {
+        self.workbook.named_ranges.get(name).and_then(|nr| {
+            Some(match &nr.target {
+                NamedRangeTarget::RefError => return None,
                 NamedRangeTarget::Cell { row, col, .. } => {
                     NamedRangeResolution::Cell { row: *row, col: *col }
                 }
@@ -2986,7 +2990,7 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
                         end_col: *end_col,
                     }
                 }
-            }
+            })
         })
     }
 
@@ -2999,10 +3003,11 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
     fn resolve_named_reference(&self, name: &str) -> Option<crate::formula::parser::BoundExpr> {
         use crate::{formula::parser::Expr, named_range::NamedRangeTarget};
         let target = &self.workbook.named_ranges.get(name)?.target;
-        let index = match target { NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => *sheet };
+        let index = match target { NamedRangeTarget::RefError => return Some(Expr::RefError), NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => *sheet };
         let Some(id) = self.workbook.sheet_id_at_idx(index) else { return Some(Expr::RefError); };
         let sheet = crate::sheet::SheetRef::Id(id);
         Some(match *target {
+            NamedRangeTarget::RefError => Expr::RefError,
             NamedRangeTarget::Cell { row, col, .. } => Expr::CellRef { sheet, row, col, row_abs: true, col_abs: true },
             NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => Expr::Range {
                 sheet, start_row, start_col, end_row, end_col,

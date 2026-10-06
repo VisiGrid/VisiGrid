@@ -52,42 +52,42 @@ impl Spreadsheet {
     pub fn jump_to_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
         use visigrid_engine::named_range::NamedRangeTarget;
 
-        let target_info = self.wb(cx).get_named_range(name).map(|nr| {
-            match &nr.target {
-                NamedRangeTarget::Cell { sheet, row, col } => {
-                    (*sheet, *row, *col, *row, *col, nr.reference_string())
-                }
-                NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-                    (*sheet, *start_row, *start_col, *end_row, *end_col, nr.reference_string())
-                }
-            }
-        });
-
-        if let Some((sheet_idx, start_row, start_col, end_row, end_col, ref_str)) = target_info {
-            // Switch to target sheet if different
-            let current_sheet = self.sheet_index(cx);
-            if sheet_idx != current_sheet {
-                if !self.activate_sheet(sheet_idx, cx) {
-                    return;
-                }
-            }
-
-            self.sync_table_view(cx);
-            let ranges = super::plan::project_named_range(&self.row_view, (start_row, start_col), (end_row, end_col));
-            let Some(&(start, end)) = ranges.first() else {
-                self.status_message = Some(format!("'{name}' = {ref_str} is hidden by the current view."));
-                cx.notify(); return;
-            };
-            self.view_state.selected = start;
-            self.view_state.selection_end = (start != end).then_some(end);
-            self.view_state.additional_selections = ranges.into_iter().skip(1).map(|(a,b)| (a, (a != b).then_some(b))).collect();
-            self.ensure_cell_visible(start.0, start.1);
-            self.status_message = Some(format!("'{name}' = {ref_str} (visible cells selected)"));
+        let Some(nr) = self.wb(cx).get_named_range(name).cloned() else {
+            self.status_message = Some(format!("Named range '{name}' not found"));
             cx.notify();
-        } else {
-            self.status_message = Some(format!("Named range '{}' not found", name));
-            cx.notify();
+            return;
+        };
+        let ref_str = nr.reference_string();
+        let (sheet_idx, start_row, start_col, end_row, end_col) = match nr.target {
+            NamedRangeTarget::RefError => {
+                self.status_message = Some(format!("'{name}' refers to a deleted sheet (#REF!)."));
+                cx.notify();
+                return;
+            }
+            NamedRangeTarget::Cell { sheet, row, col } => (sheet, row, col, row, col),
+            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } =>
+                (sheet, start_row, start_col, end_row, end_col),
+        };
+        // Switch to target sheet if different
+        let current_sheet = self.sheet_index(cx);
+        if sheet_idx != current_sheet {
+            if !self.activate_sheet(sheet_idx, cx) {
+                return;
+            }
         }
+
+        self.sync_table_view(cx);
+        let ranges = super::plan::project_named_range(&self.row_view, (start_row, start_col), (end_row, end_col));
+        let Some(&(start, end)) = ranges.first() else {
+            self.status_message = Some(format!("'{name}' = {ref_str} is hidden by the current view."));
+            cx.notify(); return;
+        };
+        self.view_state.selected = start;
+        self.view_state.selection_end = (start != end).then_some(end);
+        self.view_state.additional_selections = ranges.into_iter().skip(1).map(|(a,b)| (a, (a != b).then_some(b))).collect();
+        self.ensure_cell_visible(start.0, start.1);
+        self.status_message = Some(format!("'{name}' = {ref_str} (visible cells selected)"));
+        cx.notify();
     }
 
     /// Filter named ranges by query (for Names panel search)
@@ -126,10 +126,12 @@ impl Spreadsheet {
 
         let range_info = self.wb(cx).get_named_range(name).map(|nr| {
             let sheet_index = match &nr.target {
+                NamedRangeTarget::RefError => 0,
                 NamedRangeTarget::Cell { sheet, .. } => *sheet,
                 NamedRangeTarget::Range { sheet, .. } => *sheet,
             };
             let cells: Vec<(usize, usize)> = match &nr.target {
+                NamedRangeTarget::RefError => vec![],
                 NamedRangeTarget::Cell { row, col, .. } => vec![(*row, *col)],
                 NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
                     let mut cells = Vec::new();

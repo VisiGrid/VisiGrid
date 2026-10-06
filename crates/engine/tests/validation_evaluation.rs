@@ -460,3 +460,24 @@ fn structural_edits_keep_full_grid_validation_ranges_and_exclusions_in_bounds() 
         assert_eq!(validations.exclusions_iter().count(), 0);
     }
 }
+
+#[test]
+fn clamping_colliding_validation_rules_refuses_before_any_mutation() {
+    use visigrid_engine::{sheet::{NUM_ROWS, NUM_COLS}, structural::Axis};
+    for axis in [Axis::Row, Axis::Col] {
+        let mut wb = Workbook::new();
+        let (first, second) = if axis == Axis::Row {
+            (CellRange::new(0, 0, NUM_ROWS - 2, 0), CellRange::new(0, 0, NUM_ROWS - 1, 0))
+        } else {
+            (CellRange::new(0, 0, 0, NUM_COLS - 2), CellRange::new(0, 0, 0, NUM_COLS - 1))
+        };
+        wb.active_sheet_mut().validations.set(first, ValidationRule::custom("=TRUE"));
+        wb.active_sheet_mut().validations.set(second, ValidationRule::custom("=FALSE"));
+        wb.active_sheet_mut().validations.exclude(CellRange::single(3, 3));
+        wb.set_cell_value_tracked(0, 3, 3, "keep");
+        let before = serde_json::json!([wb.active_sheet().validations.iter().collect::<Vec<_>>(), wb.active_sheet().validations.exclusions_iter().collect::<Vec<_>>()]);
+        assert!(wb.structural_edit(0, axis, 1, 1, false).unwrap_err().contains("collapse two validation rules"));
+        assert_eq!(serde_json::json!([wb.active_sheet().validations.iter().collect::<Vec<_>>(), wb.active_sheet().validations.exclusions_iter().collect::<Vec<_>>()]), before);
+        assert_eq!(wb.active_sheet().get_raw(3, 3), "keep");
+    }
+}

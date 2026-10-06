@@ -2300,7 +2300,13 @@ impl Sheet {
 
     /// Remove degenerate (1×1) merges and rebuild the index.
     pub fn normalize_merges(&mut self) {
-        self.merged_regions.retain(|m| !m.is_degenerate());
+        // Insertion can extend metadata past the fixed worksheet boundary.
+        self.merged_regions.retain_mut(|m| {
+            if m.start.0 >= self.rows || m.start.1 >= self.cols { return false; }
+            m.end.0 = m.end.0.min(self.rows - 1);
+            m.end.1 = m.end.1.min(self.cols - 1);
+            !m.is_degenerate()
+        });
         self.rebuild_merge_index();
         #[cfg(debug_assertions)]
         self.debug_assert_no_merge_overlap();
@@ -2377,11 +2383,11 @@ impl Sheet {
         for m in &mut self.merged_regions {
             if at_row <= m.start.0 {
                 // Insertion at or above merge → shift entire merge down
-                m.start.0 += count;
-                m.end.0 += count;
+                m.start.0 = m.start.0.saturating_add(count);
+                m.end.0 = m.end.0.saturating_add(count);
             } else if at_row <= m.end.0 {
                 // Insertion inside merge → expand merge
-                m.end.0 += count;
+                m.end.0 = m.end.0.saturating_add(count);
             }
         }
         self.normalize_merges();
@@ -2459,10 +2465,10 @@ impl Sheet {
         // Adjust merged regions (grid-line semantics)
         for m in &mut self.merged_regions {
             if at_col <= m.start.1 {
-                m.start.1 += count;
-                m.end.1 += count;
+                m.start.1 = m.start.1.saturating_add(count);
+                m.end.1 = m.end.1.saturating_add(count);
             } else if at_col <= m.end.1 {
-                m.end.1 += count;
+                m.end.1 = m.end.1.saturating_add(count);
             }
         }
         self.normalize_merges();

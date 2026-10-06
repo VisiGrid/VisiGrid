@@ -24,7 +24,11 @@ fn validate(wb: &Workbook, names: &[NamedRange]) -> Result<(), String> {
         if bytes > 8 * 1024 * 1024 {
             return Err("Named ranges exceed the 8 MiB text limit".into());
         }
+        if wb.tables().any(|(_, table)| table.name.eq_ignore_ascii_case(&name.name)) {
+            return Err(format!("Named range conflicts with Table: {}", name.name));
+        }
         let (sheet, r0, c0, r1, c1) = match name.target {
+            NamedRangeTarget::RefError => continue,
             NamedRangeTarget::Cell { sheet, row, col } => (sheet, row, col, row, col),
             NamedRangeTarget::Range {
                 sheet,
@@ -37,12 +41,7 @@ fn validate(wb: &Workbook, names: &[NamedRange]) -> Result<(), String> {
         if sheet >= wb.sheet_count() || r0 > r1 || c0 > c1 || r1 >= NUM_ROWS || c1 >= NUM_COLS {
             return Err(format!("Invalid named range target: {}", name.name));
         }
-        if wb
-            .tables()
-            .any(|(_, table)| table.name.eq_ignore_ascii_case(&name.name))
-        {
-            return Err(format!("Named range conflicts with Table: {}", name.name));
-        }
+
     }
     Ok(())
 }

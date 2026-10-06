@@ -87,6 +87,7 @@ fn target(wb: &Workbook, name: &str, formula: &str) -> Result<NamedRange, String
     };
     let bounded = |r: usize, c: usize| r < NUM_ROWS && c < NUM_COLS;
     match parser::parse(&source)? {
+        Expr::RefError => Ok(NamedRange { name: name.into(), target: NamedRangeTarget::RefError, description: None }),
         Expr::CellRef { sheet, row, col, row_abs: true, col_abs: true } if bounded(row, col) => Ok(NamedRange::cell(name, sheet_index(sheet)?, row, col)),
         Expr::Range { sheet, start_row, start_col, end_row, end_col, start_row_abs: true, start_col_abs: true, end_row_abs: true, end_col_abs: true }
             if bounded(start_row, start_col) && bounded(end_row, end_col) && start_row <= end_row && start_col <= end_col =>
@@ -163,6 +164,10 @@ pub(crate) fn export(wb: &Workbook, out: &mut rust_xlsxwriter::Workbook) -> Resu
             ));
         }
         let (sheet, r0, c0, r1, c1, range) = match name.target {
+            NamedRangeTarget::RefError => {
+                out.define_name(&name.name, "=#REF!").map_err(|e| e.to_string())?;
+                continue;
+            },
             NamedRangeTarget::Cell { sheet, row, col } => (sheet, row, col, row, col, false),
             NamedRangeTarget::Range {
                 sheet,

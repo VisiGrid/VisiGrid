@@ -270,6 +270,7 @@ impl Workbook {
                 ..movement.footer
             };
             guarded |= match name.target {
+                NamedRangeTarget::RefError => false,
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     sheet == owner_index && future.contains(row, col)
                 }

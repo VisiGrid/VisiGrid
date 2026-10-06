@@ -428,6 +428,7 @@ impl UndoAction {
             UndoAction::NamedRangeCreated { named_range } => {
                 use visigrid_engine::named_range::NamedRangeTarget;
                 let (sheet, range_str) = match &named_range.target {
+                    NamedRangeTarget::RefError => return vec![format!("broken_name:{}", named_range.name)],
                     NamedRangeTarget::Cell { sheet, row, col } => {
                         (*sheet + 1, cell_ref(*row, *col))
                     }
@@ -698,6 +699,7 @@ fn named_range_created_to_lua(nr: &visigrid_engine::named_range::NamedRange) -> 
     use visigrid_engine::named_range::NamedRangeTarget;
 
     match &nr.target {
+        NamedRangeTarget::RefError => format!("-- Name {} refers to #REF!; replay requires its sheet history", lua_escape(&nr.name)),
         NamedRangeTarget::Cell { sheet, row, col } => {
             format!(
                 "grid.define_name{{ name={}, sheet={}, range=\"{}\" }}",

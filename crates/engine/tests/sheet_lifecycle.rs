@@ -95,11 +95,11 @@ fn sheet_lifecycle_delete_rewrites_refs_and_reindexes_names_with_exact_undo() {
     );
     assert_eq!(deleted.active_sheet().get_display(1, 0), "#REF!");
     assert_eq!(deleted.active_sheet().get_display(2, 0), "8");
-    assert!(deleted
-        .active_sheet()
-        .get_display(3, 0)
-        .starts_with("#NAME?"));
-    assert!(deleted.get_named_range("DeletedInput").is_none());
+    assert_eq!(deleted.active_sheet().get_display(3, 0), "#REF!");
+    assert_eq!(deleted.get_named_range("DeletedInput").unwrap().target, NamedRangeTarget::RefError);
+    assert!(deleted.prepare_named_range_edit(&visigrid_engine::workbook::NamedRangeEdit::Create(
+        visigrid_engine::named_range::NamedRange::cell("DeletedInput", 0, 0, 0)
+    )).is_err(), "deleted names remain reserved");
     assert!(matches!(
         deleted.get_named_range("KeepMe").unwrap().target,
         NamedRangeTarget::Cell { sheet: 0, .. }

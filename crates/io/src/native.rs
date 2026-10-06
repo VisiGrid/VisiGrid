@@ -1124,6 +1124,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) ->
 
         for nr in workbook.list_named_ranges() {
             let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::RefError => (0i32, -1i64, 0i64, 0i64, None::<i64>, None::<i64>),
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
                 }
@@ -1300,6 +1301,7 @@ fn write_workbook_with_metadata(
 
         for nr in workbook.list_named_ranges() {
             let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::RefError => (0i32, -1i64, 0i64, 0i64, None::<i64>, None::<i64>),
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
                 }
@@ -1608,7 +1610,11 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
             let (name, target_type, sheet, start_row, start_col, end_row, end_col, description) =
                 nr_result.map_err(|e| e.to_string())?;
 
-            let target = if target_type == 0 {
+            // A deleted target uses the existing cell schema with a missing
+            // sheet sentinel. Older sheet-aware readers also evaluate #REF!.
+            let target = if sheet == -1 {
+                NamedRangeTarget::RefError
+            } else if target_type == 0 {
                 // Cell
                 NamedRangeTarget::Cell {
                     sheet: sheet as usize,
@@ -2954,6 +2960,7 @@ fn write_workbook_full(
 
         for nr in workbook.list_named_ranges() {
             let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::RefError => (0i32, -1i64, 0i64, 0i64, None::<i64>, None::<i64>),
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
                 }

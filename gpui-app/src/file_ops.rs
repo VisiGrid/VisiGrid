@@ -1578,3 +1578,39 @@ impl Spreadsheet {
         }
     }
 }
+
+#[cfg(test)]
+mod row_roundtrip_tests {
+    use crate::app::Spreadsheet;
+    use gpui::BorrowAppContext;
+
+    #[gpui::test]
+    fn insert_save_reopen_keeps_only_the_shifted_hidden_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hidden-insert.sheet");
+        view.update(cx, |app, _, cx| {
+            app.session_window_id = cx.update_global::<crate::session::SessionManager, _>(|mgr, _| mgr.next_window_id());
+            let id = app.wb(cx).active_sheet_id();
+            app.workbook.update(cx, |wb, _| {
+                wb.active_sheet_mut().set_manual_hidden_rows([5].into()).unwrap();
+                wb.set_cell_value_tracked(0, 5, 0, "hidden record");
+            });
+            app.hidden_rows.insert(id, [5].into());
+            app.insert_rows(1, 1, cx);
+            assert_eq!(app.wb(cx).active_sheet().manual_hidden_rows(), [6].into());
+            assert!(app.save_to_path(&path, cx), "{:?}", app.status_message);
+            // Exercise the synchronous native-open path used by the desktop.
+            app.load_file(&path, cx);
+            assert_eq!(app.wb(cx).active_sheet().manual_hidden_rows(), [6].into());
+            assert_eq!(app.hidden_rows.get(&app.wb(cx).active_sheet_id()), Some(&[6].into()));
+            assert_eq!(app.wb(cx).active_sheet().get_raw(6, 0), "hidden record");
+        }).unwrap();
+    }
+}

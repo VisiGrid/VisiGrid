@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep names targeting a deleted sheet as `#REF!` definitions through undo/redo and native, JSON and XLSX saves; reserve their names until explicitly deleted.
+- Extend body-and-totals validation/conditional-format coverage through repeated appends, preserve released body rules when shrinking, and clamp merged ranges at worksheet edges. Refuse structural edits that would collapse distinct validation rules onto the same range; equivalent rules may merge.
+- Reuse dependency-graph cycle proofs instead of scanning the entire graph twice per guarded history entry. Avoid an extra full recalculation when plain-row undo has already restored the correct hidden-row flags.
+
 - Harden Table release workflows: allow existing cycles through sheet changes, conversion and undo/redo; keep validation and conditional-format ranges within worksheet bounds after insertion; accept valid typed dates and times in date/time validation.
 - Keep edited imported validation sources anchored at the selected cell while preserving unchanged rules exactly.
 - Exclude hidden columns from Find/Replace and stale replacement plans. Keep manual row visibility and structural history aligned even on sheets without Tables.
@@ -28,7 +32,7 @@
 
 - Append or resize Tables with totals while using `INDIRECT` and `OFFSET`. Explicit footer references follow moved cells; literal addresses and numeric offsets retain their authored meaning. Recalculate and validate before applying, with atomic undo/redo and History rewind.
 
-- Add and delete worksheets while Table sorting/filtering is active, with atomic recalculation, undo/redo and History rewind. Deleted sheet/Table references become permanent `#REF!` tokens; surviving named ranges keep their original sheet targets, and names on the deleted sheet are removed. Deleting a source used by a PivotTable on another sheet is explicitly refused.
+- Add and delete worksheets while Table sorting/filtering is active, with atomic recalculation, undo/redo and History rewind. Deleted sheet/Table references become permanent `#REF!` tokens; surviving named ranges keep their original sheet targets, and names on the deleted sheet retain a broken `#REF!` target. Deleting a source used by a PivotTable on another sheet is explicitly refused.
 - Keep sheet identities and pane targets stable through sheet deletion and undo. History retains the removed sheet and sparse changes to surviving sheets, rather than a full workbook snapshot.
 
 - Rename worksheets through active Table sorting and filters without breaking formula references. Cell formulas, calculated-column rules, totals, conditional formatting and validation sources update atomically, with undo/redo and History rewind. Session and browser renames use the same checked behavior; quoted text such as `INDIRECT("OldName!A1")` remains literal.

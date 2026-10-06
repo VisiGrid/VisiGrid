@@ -293,6 +293,9 @@ fn cell_key(c: &CellId) -> (u64, usize, usize) {
 ///    running total over a column of formulas n²/2 edges (#29).
 #[derive(Default, Debug, Clone)]
 pub struct DepGraph {
+    // Derived solely from this graph. Clones retain the proof; every topology
+    // mutation invalidates it. OnceLock keeps read-only workbook sharing Sync.
+    cycle_cache: std::sync::OnceLock<Vec<Vec<CellId>>>,
     /// Precedents: for each formula cell B, the cells A it depends on.
     /// B -> {A1, A2, ...}
     preds: FxHashMap<CellId, FxHashSet<CellId>>,
@@ -372,6 +375,7 @@ impl DepGraph {
     /// These "leaf" formulas still need to appear in the topo order so that
     /// `recompute_full_ordered` evaluates them after clearing the cache.
     pub fn register_leaf_formula(&mut self, cell: CellId) {
+        self.cycle_cache.take();
         self.preds.entry(cell).or_default();
         self.index_formula(cell);
     }
@@ -457,6 +461,7 @@ impl DepGraph {
     /// Pass an empty set to clear all edges for this cell. Ranges are set
     /// separately, with [`DepGraph::set_ranges`], after this.
     pub fn replace_edges(&mut self, formula_cell: CellId, new_preds: FxHashSet<CellId>) {
+        self.cycle_cache.take();
         if let Some(old) = self.range_refs.remove(&formula_cell) {
             for range in &old {
                 self.ranges.remove(formula_cell, range);
@@ -498,6 +503,7 @@ impl DepGraph {
     /// the index changes: the formulas inside a range are ordered before its
     /// reader when an order is computed, however late they arrive.
     pub fn set_ranges(&mut self, formula: CellId, ranges: Vec<RangeRef>) {
+        self.cycle_cache.take();
         if ranges.is_empty() {
             return;
         }
@@ -561,6 +567,7 @@ impl DepGraph {
     ///
     /// Convenience wrapper around `replace_edges` with an empty set.
     pub fn clear_cell(&mut self, cell: CellId) {
+        self.cycle_cache.take();
         self.replace_edges(cell, FxHashSet::default());
     }
 
@@ -568,6 +575,7 @@ impl DepGraph {
     ///
     /// Called when a sheet is deleted.
     pub fn remove_sheet(&mut self, sheet: SheetId) {
+        self.cycle_cache.take();
         // Formulas elsewhere keep their range lists; the entries on this
         // sheet's index go with it.
         for ranges in self.range_refs.values_mut() {
@@ -813,7 +821,12 @@ impl DepGraph {
     /// recalc report uses as its depth. Levels count formulas inside ranges;
     /// computing them from `precedents` would miss those.
     pub fn topo_levels_all_formulas(&self) -> Result<(Vec<CellId>, FxHashMap<CellId, usize>), CycleReport> {
-        self.ordered(self.preds.keys().copied().collect())
+        let result = self.ordered(self.preds.keys().copied().collect());
+        if result.is_ok() {
+            // Full topological ordering already proved there are no cycles.
+            let _ = self.cycle_cache.set(Vec::new());
+        }
+        result
     }
 
     /// Topologically order a subset of the formula cells.
@@ -843,6 +856,10 @@ impl DepGraph {
     /// itself is a cycle of one. Iterative Tarjan, roots and neighbours in
     /// (sheet, row, col) order for deterministic output.
     fn cycle_components(&self) -> Vec<Vec<CellId>> {
+        self.cycle_cache.get_or_init(|| self.compute_cycle_components()).clone()
+    }
+
+    fn compute_cycle_components(&self) -> Vec<Vec<CellId>> {
         if self.preds.is_empty() {
             return Vec::new();
         }
@@ -2051,4 +2068,40 @@ where
     let end_col = (range.start_col..=range.end_col).rev().find_map(&col_probe)?;
     let sheet = map(CellId::new(range.sheet, range.start_row, range.start_col)).map_or(range.sheet, |c| c.sheet);
     Some(RangeRef { sheet, start_row, start_col, end_row, end_col })
+}
+
+#[cfg(test)]
+mod cycle_cache_regressions {
+    use super::*;
+
+    #[test]
+    fn cycle_proofs_follow_edges_ranges_new_formulas_clones_and_structural_mapping() {
+        let a = CellId::new(SheetId(1), 0, 0);
+        let b = CellId::new(SheetId(1), 1, 0);
+        let mut graph = DepGraph::new();
+        graph.topo_order_all_formulas().unwrap();
+        graph.register_leaf_formula(a);
+        graph.set_ranges(a, vec![RangeRef { sheet: a.sheet, start_row: 1, end_row: 1, start_col: 0, end_col: 0 }]);
+        assert!(graph.find_cycle_members().is_empty());
+        graph.replace_edges(b, [a].into_iter().collect::<FxHashSet<_>>());
+        assert_eq!(graph.find_cycle_members(), [a, b].into_iter().collect::<FxHashSet<_>>());
+        let mut cleared = graph.clone();
+        cleared.clear_cell(b);
+        assert!(cleared.find_cycle_members().is_empty());
+        assert_eq!(graph.find_cycle_members(), [a, b].into_iter().collect::<FxHashSet<_>>());
+        let mut removed = graph.clone();
+        removed.remove_sheet(a.sheet);
+        assert!(removed.find_cycle_members().is_empty());
+        graph.apply_mapping(|mut c| { c.row += 2; Some(c) });
+        assert_eq!(graph.find_cycle_members(), [CellId::new(a.sheet, 2, 0), CellId::new(a.sheet, 3, 0)].into_iter().collect::<FxHashSet<_>>());
+        graph.replace_edges(CellId::new(a.sheet, 3, 0), Default::default());
+        assert!(graph.find_cycle_members().is_empty());
+        // A formerly ordinary cell becoming a leaf formula can itself close
+        // a range cycle; registering formulas must invalidate proofs too.
+        let mut leaf = DepGraph::new();
+        leaf.topo_order_all_formulas().unwrap();
+        leaf.register_leaf_formula(a);
+        leaf.set_ranges(a, vec![RangeRef { sheet: a.sheet, start_row: 0, end_row: 0, start_col: 0, end_col: 0 }]);
+        assert_eq!(leaf.find_cycle_members(), [a].into_iter().collect::<FxHashSet<_>>());
+    }
 }

@@ -109,6 +109,7 @@ impl Workbook {
                     return Err(format!("'{}' already exists.", range.name));
                 }
                 let (index, r0, c0, r1, c1) = match range.target {
+                    NamedRangeTarget::RefError => return Err("Choose an existing cell or range for the name.".into()),
                     NamedRangeTarget::Cell { sheet, row, col } => (sheet, row, col, row, col),
                     NamedRangeTarget::Range {
                         sheet,

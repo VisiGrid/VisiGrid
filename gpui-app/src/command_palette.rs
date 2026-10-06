@@ -515,6 +515,7 @@ impl Spreadsheet {
                 .into_iter()
                 .map(|nr| {
                     let (row, col) = match &nr.target {
+                        NamedRangeTarget::RefError => (0, 0),
                         NamedRangeTarget::Cell { row, col, .. } => (*row, *col),
                         NamedRangeTarget::Range { start_row, start_col, .. } => (*start_row, *start_col),
                     };

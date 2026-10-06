@@ -22,6 +22,8 @@ pub struct NamedRange {
 /// The target of a named range - either a single cell or a rectangular range
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NamedRangeTarget {
+    /// A deleted target. The name remains reserved until explicitly removed.
+    RefError,
     /// Single cell reference
     Cell {
         sheet: usize,
@@ -79,6 +81,7 @@ impl NamedRange {
     /// Get the cell reference string (e.g., "A1" or "A1:B10")
     pub fn reference_string(&self) -> String {
         match &self.target {
+            NamedRangeTarget::RefError => "#REF!".into(),
             NamedRangeTarget::Cell { row, col, .. } => {
                 format!("{}{}", col_to_letter(*col), row + 1)
             }
@@ -103,6 +106,7 @@ impl NamedRange {
     /// Check if this named range references the given cell
     pub fn references_cell(&self, sheet: usize, row: usize, col: usize) -> bool {
         match &self.target {
+            NamedRangeTarget::RefError => false,
             NamedRangeTarget::Cell {
                 sheet: s,
                 row: r,
@@ -458,17 +462,17 @@ impl NamedRangeStore {
         self.ranges.remove(&name.to_lowercase())
     }
 
-    /// Keep surviving targets on their original sheet when a tab is removed.
-    /// As with deleted row/column targets, names on the removed sheet disappear.
+    /// Keep names reserved, permanently invalidating targets on a deleted tab.
     pub(crate) fn remove_sheet(&mut self, index: usize) {
-        self.ranges.retain(|_, range| {
-            let sheet = match &mut range.target {
-                NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => sheet,
-            };
-            if *sheet == index { return false; }
-            if *sheet > index { *sheet -= 1; }
-            true
-        });
+        for range in self.ranges.values_mut() {
+            match &mut range.target {
+                NamedRangeTarget::RefError => {},
+                NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => {
+                    if *sheet == index { range.target = NamedRangeTarget::RefError; }
+                    else if *sheet > index { *sheet -= 1; }
+                }
+            }
+        }
     }
 
     /// Update the description of a named range

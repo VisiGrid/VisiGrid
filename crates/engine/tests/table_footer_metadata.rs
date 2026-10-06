@@ -468,3 +468,34 @@ fn full_column_rules_remain_continuous_after_append_and_undo() {
     wb.apply_table_commit(&commit, true).unwrap();
     assert_eq!(metadata(&wb), original);
 }
+
+#[test]
+fn body_and_footer_rules_cover_two_appends_and_shrink() {
+    for end in [4, 999] {
+        let (mut wb, id) = book();
+        // Leave the shrink destination empty; totals never overwrite data.
+        wb.clear_cell_tracked(0, 3, 0);
+        wb.clear_cell_tracked(0, 3, 1);
+        // B3:B1000 is the common worksheet-wide dropdown; B3:B5 ends
+        // exactly at this Table's footer and must grow with it as well.
+        let range = CellRange::new(2, 1, end, 1);
+        wb.active_sheet_mut().validations.set(range, ValidationRule::list_inline(vec!["Yes".into(), "No".into()]));
+        wb.active_sheet_mut().cond_formats.add(vec![range], "=TRUE", CondStyle::Named(CellStyle::Warning));
+        let original = metadata(&wb);
+        let first = wb.append_table_rows(id, 1, &[]).unwrap();
+        let second = wb.append_table_rows(id, 1, &[]).unwrap();
+        for row in 2..=if end == 4 { 6 } else { 999 } {
+            assert!(wb.active_sheet().validations.has_validation(row, 1), "missing dropdown at {row}");
+            assert_eq!(predicate(&wb, row, 1), ["=TRUE"], "missing format at {row}");
+        }
+        let shrink = wb.resize_table(id, TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 1 }).unwrap();
+        for row in 2..=if end == 4 { 3 } else { 999 } {
+            assert!(wb.active_sheet().validations.has_validation(row, 1));
+            assert_eq!(predicate(&wb, row, 1), ["=TRUE"]);
+        }
+        wb.apply_table_commit(&shrink, true).unwrap();
+        wb.apply_table_commit(&second, true).unwrap();
+        wb.apply_table_commit(&first, true).unwrap();
+        assert_eq!(metadata(&wb), original);
+    }
+}

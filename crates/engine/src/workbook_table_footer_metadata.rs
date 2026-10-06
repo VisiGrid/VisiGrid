@@ -104,12 +104,28 @@ impl Movement {
         }
     }
     fn spanning(&self, range: CellRange) -> bool {
-        range.start_row < self.footer.start_row && range.end_row > self.footer.end_row
+        range.start_row < self.footer.start_row && range.end_row >= self.footer.end_row
     }
     fn mapped(&self, r: CellRange, local: bool, coverage: CellRange) -> Option<CellRange> {
         // A rule covering both sides of the footer describes worksheet space,
         // like A:A. Moving a footer must not punch a hole in that coverage.
-        if !local || self.spanning(coverage) {
+        if !local { return Some(r); }
+        if self.spanning(coverage) {
+            // Body + footer coverage follows the footer boundary. Rules that
+            // extend past it describe worksheet space and retain their extent.
+            if coverage.end_row == self.footer.end_row
+                && r.start_col >= self.footer.start_col && r.end_col <= self.footer.end_col
+            {
+                if r.start_row == self.footer.start_row {
+                    return Some(CellRange {
+                        start_row: r.start_row.min(self.destination),
+                        end_row: self.destination,
+                        ..r
+                    });
+                }
+                // Shrinking releases body records in place; keep their rules.
+                return Some(r);
+            }
             return Some(r);
         }
         if self.source_range().contains(r.start_row, r.start_col) {

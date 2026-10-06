@@ -81,12 +81,13 @@ impl RowLayoutHistory {
         let layout = if undo { &self.before } else { &self.after };
         let sheet = wb.sheet_mut(sheet_index).ok_or("Sheet no longer exists")?;
         if sheet.id != self.sheet { return Err("Row history belongs to another sheet".into()); }
-        if sheet.manual_hidden_rows() != layout.hidden_rows {
+        let visibility_changed = sheet.manual_hidden_rows() != layout.hidden_rows;
+        if visibility_changed {
             sheet.set_manual_hidden_rows(layout.hidden_rows.clone())?;
         }
         // Plain row undo restores cells directly. Rebuild dependencies before
         // recalculating SUBTOTAL and readers on other sheets.
-        if undo && (!self.before.hidden_rows.is_empty() || !self.after.hidden_rows.is_empty()) {
+        if undo && visibility_changed {
             wb.rebuild_dep_graph();
             wb.recompute_full_ordered();
         }
@@ -1045,4 +1046,29 @@ mod metadata_tests {
         assert_eq!(base.active_sheet().get_display(7, 3), "180");
     }
 
+}
+
+#[cfg(test)]
+mod row_visibility_recalc_tests {
+    use super::*;
+    use visigrid_engine::RecalcClock;
+
+    #[test]
+    fn plain_insert_undo_does_not_recalculate_when_hidden_flags_already_match() {
+        let mut wb = Workbook::new();
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(0), utc_offset_seconds: Some(0), seed: None }));
+        wb.active_sheet_mut().set_manual_hidden_rows([5].into()).unwrap();
+        wb.set_cell_value_tracked(0, 0, 0, "=NOW()");
+        let history = RowLayoutHistory::capture(StructureLayout::default(), wb.active_sheet(),
+            StructureStep { axis: Axis::Row, at: 1, count: 1, delete: false }).unwrap();
+        wb.structural_edit(0, Axis::Row, 1, 1, false).unwrap();
+        let value = wb.active_sheet().get_display(0, 0);
+        wb.active_sheet_mut().delete_rows(1, 1);
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(86_400_000), utc_offset_seconds: Some(0), seed: None }));
+        history.apply(&mut wb, 0, true).unwrap();
+        assert_eq!(wb.active_sheet().manual_hidden_rows(), [5].into());
+        assert_eq!(wb.active_sheet().get_display(0, 0), value, "visibility-only replay need not evaluate NOW again");
+        wb.recompute_full_ordered();
+        assert_ne!(wb.active_sheet().get_display(0, 0), value, "the clock change makes a full recalc observable");
+    }
 }

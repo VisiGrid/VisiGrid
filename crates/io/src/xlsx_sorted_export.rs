@@ -418,6 +418,7 @@ pub(super) fn prepare_inner<'a>(
     for original in wb.named_ranges().list() {
         let mut name = original.clone();
         match &mut name.target {
+            NamedRangeTarget::RefError => {},
             NamedRangeTarget::Cell { sheet, row, col } => *row = plan.row(*sheet, *row, *col),
             NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
                 let mapped = plan.range(*sheet, TableRange {

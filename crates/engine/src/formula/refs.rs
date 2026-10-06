@@ -173,6 +173,7 @@ fn expand_named_range_target<F>(
     use crate::named_range::NamedRangeTarget;
 
     match target {
+        NamedRangeTarget::RefError => {},
         NamedRangeTarget::Cell { sheet, row, col } => {
             if let Some(sheet_id) = sheet_id_at_idx(*sheet) {
                 refs.cells.insert(CellId::new(sheet_id, *row, *col));

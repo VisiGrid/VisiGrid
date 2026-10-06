@@ -797,7 +797,7 @@ impl ValidationStore {
     /// Shift rules for a structural edit on this sheet. Ranges follow the
     /// same grid-line semantics as merges and formula ranges; a range wholly
     /// inside a deleted span is dropped.
-    pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) {
+    pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) -> Result<(), String> {
         let limit = if is_row { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
         let shift = |s, e| {
             crate::structural::shift_span(s, e, at, count, delete)
@@ -805,7 +805,7 @@ impl ValidationStore {
                 .map(|(start, end)| (start, end.min(limit - 1)))
         };
         let mut shifted: BTreeMap<CellRange, ValidationRule> = BTreeMap::new();
-        for (range, mut rule) in std::mem::take(&mut self.rules) {
+        for (range, mut rule) in self.rules.clone() {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
             let span = shift(s, e);
             if let Some((ns, ne)) = span {
@@ -825,7 +825,13 @@ impl ValidationStore {
                     rule = rule.at(row, col).into_owned();
                     rule.reference_origin = Some((r.start_row, r.start_col));
                 }
-                shifted.insert(r, rule);
+                if let Some(existing) = shifted.get(&r) {
+                    if existing != &rule {
+                        return Err("This edit would collapse two validation rules onto the same range. Adjust their ranges first; nothing was changed.".into());
+                    }
+                } else {
+                    shifted.insert(r, rule);
+                }
             }
         }
         self.rules = shifted;
@@ -840,6 +846,7 @@ impl ValidationStore {
             }
         }
         self.exclusions = ex;
+        Ok(())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&CellRange, &ValidationRule)> {

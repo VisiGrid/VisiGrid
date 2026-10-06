@@ -1668,6 +1668,7 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str, cx: &App) -> Option
         let description = nr.description.clone();
 
         let (cells, cell_count, sheet_index): (Vec<(usize, usize)>, usize, usize) = match &nr.target {
+            NamedRangeTarget::RefError => (vec![], 0, 0),
             NamedRangeTarget::Cell { sheet, row, col } => {
                 (vec![(*row, *col)], 1, *sheet)
             }
@@ -1718,7 +1719,9 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str, cx: &App) -> Option
     };
 
     // Value preview: first cell value (or summary for multi-cell ranges)
-    let value_preview = if cell_count == 1 {
+    let value_preview = if cell_count == 0 {
+        "#REF!".to_string()
+    } else if cell_count == 1 {
         let (row, col) = cells[0];
         app.sheet(cx).get_display(row, col)
     } else {
@@ -1760,9 +1763,9 @@ fn get_named_range_detail(app: &mut Spreadsheet, name: &str, cx: &App) -> Option
         }
 
         // is_verified only true if Verified Mode is on and we have a valid report
-        let is_verified = app.verified_mode && app.last_recalc_report.is_some() && !any_dynamic;
+        let is_verified = cell_count > 0 && app.verified_mode && app.last_recalc_report.is_some() && !any_dynamic;
 
-        (Some(max_depth), is_verified, any_dynamic)
+        ((cell_count > 0).then_some(max_depth), is_verified, any_dynamic)
     };
 
     Some(NamedRangeDetail {
@@ -5499,4 +5502,37 @@ fn render_cond_format_section(
                         .child(pred)
                 )
         }))
+}
+
+
+#[cfg(test)]
+mod broken_name_tests {
+    #[gpui::test]
+    fn deleted_sheet_name_has_a_safe_inspector_and_navigation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(crate::app::Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            app.workbook.update(cx, |wb, _| {
+                let index = wb.add_sheet_named("Inputs").unwrap();
+                wb.define_name_for_cell("TaxPct", index, 0, 0).unwrap();
+                *wb = wb.prepare_sheet_delete(wb.sheets()[index].id).unwrap().0;
+            });
+            let detail = super::get_named_range_detail(app, "TaxPct", cx).unwrap();
+            assert_eq!(detail.reference, "#REF!");
+            assert_eq!(detail.value_preview, "#REF!");
+            assert_eq!(detail.cell_count, 0);
+            assert!(!detail.is_verified);
+            let selected = app.view_state.selected;
+            app.jump_to_named_range("TaxPct", cx);
+            assert_eq!(app.view_state.selected, selected);
+            assert!(app.status_message.as_ref().unwrap().contains("#REF!"));
+            app.trace_named_range("TaxPct", cx);
+            assert!(app.inspector_trace_path.as_ref().unwrap().is_empty());
+        }).unwrap();
+    }
 }
