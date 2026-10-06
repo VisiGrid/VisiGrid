@@ -414,9 +414,6 @@ impl Spreadsheet {
         cx: &Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
         use crate::plan_manager::McpPlanState;
-        if self.cloud_live_enabled() {
-            return plan_error("go_collaboration_required", "Local plans cannot replace a live workbook outside its sequencer.", false);
-        }
         let Some(record) = self.mcp_plans.record(plan_id) else {
             return plan_error("plan_not_found", "plan is unknown or expired", false);
         };
@@ -553,6 +550,9 @@ impl Spreadsheet {
         cx: &Context<Self>,
     ) -> crate::session_server::PlanBridgeOutcome {
         use crate::plan_manager::McpPlanState;
+        if self.cloud_live_enabled() {
+            return plan_error("go_collaboration_required", "Local plans cannot replace a live workbook outside its sequencer.", false);
+        }
         let Some(record) = self.mcp_plans.record(&req.plan_id) else {
             return plan_error("plan_not_found", "plan is unknown or expired", false);
         };
