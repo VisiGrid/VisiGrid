@@ -28,6 +28,8 @@ jobs:
         run: cargo test --locked -p visigrid-collab
       - name: Install target for the workspace-pinned toolchain
         run: rustup target add --toolchain 1.98.1 wasm32-unknown-unknown
+      - name: Check secure native collaboration socket
+        run: cargo check --locked -p visigrid-collab --no-default-features --features socket
       - name: Build browser engine
         run: cargo build --release --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
       - name: Install matching bindings generator

@@ -23,3 +23,6 @@ pub mod transform;
 pub mod undo;
 
 pub mod wire;
+
+#[cfg(feature = "socket")]
+pub mod socket;

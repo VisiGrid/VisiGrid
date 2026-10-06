@@ -1,0 +1,377 @@
+//! Native Go collaboration worker. No socket or HTTP call runs on the UI thread.
+use crate::hub::auth::AuthCredentials;
+use serde::Deserialize;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
+use visigrid_collab::{
+    socket::LiveSocket,
+    wire::{Received, WireReplica},
+};
+use visigrid_engine::workbook::Workbook;
+
+pub enum Command {
+    Cell {
+        sheet: u64,
+        row: usize,
+        col: usize,
+        raw: String,
+    },
+}
+pub enum Event {
+    State {
+        ready: bool,
+        writable: bool,
+        message: String,
+    },
+    Workbook {
+        workbook: Workbook,
+        pending: usize,
+    },
+}
+pub struct LiveSession {
+    pub commands: mpsc::Sender<Command>,
+    pub events: mpsc::Receiver<Event>,
+    stop: Arc<AtomicBool>,
+}
+impl Drop for LiveSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+#[derive(Deserialize)]
+struct Metadata {
+    role: String,
+}
+#[derive(Deserialize)]
+struct Snapshot {
+    revision: u64,
+    document: Box<serde_json::value::RawValue>,
+}
+
+impl LiveSession {
+    pub fn start(auth: AuthCredentials, pid: String, initial: Workbook) -> Self {
+        let (send, commands) = mpsc::channel();
+        let (events, receive) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        std::thread::spawn(move || {
+            if let Err(message) = run(auth, pid, initial, commands, &events, &stopping) {
+                let _ = events.send(Event::State {
+                    ready: false,
+                    writable: false,
+                    message,
+                });
+            }
+        });
+        Self {
+            commands: send,
+            events: receive,
+            stop,
+        }
+    }
+}
+fn run(
+    auth: AuthCredentials,
+    pid: String,
+    initial: Workbook,
+    commands: mpsc::Receiver<Command>,
+    events: &mpsc::Sender<Event>,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let base = reqwest::Url::parse(&auth.api_base).map_err(|_| "Invalid API origin")?;
+    if !matches!(base.scheme(), "http" | "https") {
+        return Err("Unsupported API origin".into());
+    }
+    let pid = uuid::Uuid::parse_str(&pid)
+        .map_err(|_| "A Go workbook UUID is required for live editing")?
+        .to_string();
+    let http = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|_| "Could not create API client")?;
+    let metadata_url = base
+        .join(&format!("/api/sheets/{pid}"))
+        .map_err(|_| "Invalid workbook URL")?;
+    let metadata: Metadata = http
+        .get(metadata_url)
+        .bearer_auth(&auth.token)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|_| "Could not authorize live workbook access")?
+        .json()
+        .map_err(|_| "Invalid workbook permissions")?;
+    let writable = matches!(metadata.role.as_str(), "owner" | "editor");
+    initial.ensure_writable()?;
+    let mut replica = WireReplica::new(initial, 0, writable);
+    let mut sequence_known = false;
+    let mut socket_url = base
+        .join(&format!("/api/sheets/{pid}/collab"))
+        .map_err(|_| "Invalid collaboration URL")?;
+    socket_url
+        .set_scheme(if base.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        })
+        .map_err(|_| "Invalid collaboration scheme")?;
+    let snapshot_path = format!("/api/sheets/{pid}/snapshot");
+    while !stop.load(Ordering::Relaxed) {
+        let _ = events.send(Event::State {
+            ready: false,
+            writable,
+            message: "Connecting to shared workbook…".into(),
+        });
+        let mut socket = LiveSocket::connect(socket_url.as_str(), &auth.token)?;
+        socket.send(&replica.hello(env!("VISIGRID_ENGINE_COMMIT"), sequence_known))?;
+        let mut ready = false;
+        while !stop.load(Ordering::Relaxed) {
+            if ready {
+                for command in commands.try_iter() {
+                    match command {
+                        Command::Cell {
+                            sheet,
+                            row,
+                            col,
+                            raw,
+                        } => replica.set_cell(uuid::Uuid::new_v4(), sheet, row, col, raw)?,
+                    }
+                    let _ = events.send(Event::Workbook {
+                        workbook: replica.client.wb.clone(),
+                        pending: replica.client.pending_count(),
+                    });
+                }
+                if let Some(frame) = replica.poll_send() {
+                    if socket.send(&frame).is_err() {
+                        break;
+                    }
+                }
+            }
+            let frame = match socket.read() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => continue,
+                Err(_) => break,
+            };
+            match replica.receive(&frame)? {
+                Received::Snapshot(request) => {
+                    let url = base
+                        .join(&request.url)
+                        .map_err(|_| "Invalid snapshot URL")?;
+                    if url.origin() != base.origin() || url.path() != snapshot_path {
+                        return Err("Unexpected snapshot origin or workbook".into());
+                    }
+                    let text = http
+                        .get(url)
+                        .bearer_auth(&auth.token)
+                        .send()
+                        .and_then(reqwest::blocking::Response::error_for_status)
+                        .map_err(|_| "Could not load collaboration snapshot")?
+                        .text()
+                        .map_err(|_| "Could not read collaboration snapshot")?;
+                    let snapshot: Snapshot = serde_json::from_str(&text)
+                        .map_err(|_| "Invalid collaboration snapshot")?;
+                    if request.revision.is_some_and(|r| r != snapshot.revision) {
+                        return Err(
+                            "The snapshot changed during startup; reopen the shared workbook"
+                                .into(),
+                        );
+                    }
+                    let (mut workbook, layouts, _) =
+                        visigrid_io::json::import_any(snapshot.document.get())?;
+                    for (index, layout) in layouts.iter().enumerate() {
+                        if let Some(sheet) = workbook.sheet_mut(index) {
+                            sheet.layout = layout.line_layout();
+                        }
+                    }
+                    if let Err(message) = workbook.ensure_writable() {
+                        let _ = events.send(Event::Workbook {
+                            workbook,
+                            pending: 0,
+                        });
+                        return Err(message);
+                    }
+                    replica.load_snapshot(workbook, request.seq)?;
+                    sequence_known = true;
+                    ready = true;
+                }
+                Received::Reconnect => break,
+                Received::Updated => {
+                    if frame["type"] == "welcome" {
+                        sequence_known = true;
+                        ready = true;
+                    }
+                }
+            }
+            let _ = events.send(Event::Workbook {
+                workbook: replica.client.wb.clone(),
+                pending: replica.client.pending_count(),
+            });
+            if ready {
+                let _ = events.send(Event::State {
+                    ready: true,
+                    writable,
+                    message: if replica.client.pending_count() == 0 {
+                        "Changes committed"
+                    } else {
+                        "Waiting for acknowledgement"
+                    }
+                    .into(),
+                });
+            }
+        }
+        replica.disconnect();
+        let _ = events.send(Event::State {
+            ready: false,
+            writable,
+            message: "Disconnected — reconnecting to shared workbook…".into(),
+        });
+        for _ in 0..10 {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    Ok(())
+}
+
+impl crate::app::Spreadsheet {
+    pub(crate) fn cloud_live_enabled(&self) -> bool {
+        std::env::var("VISIGRID_LIVE_COLLAB").is_ok_and(|v| v == "1")
+            && self.cloud_identity.is_some()
+    }
+    pub(crate) fn cloud_live_stop(&mut self) {
+        self.cloud_live_generation += 1;
+        self.cloud_live = None;
+        self.cloud_live_ready = false;
+        self.cloud_live_writable = false;
+    }
+    pub(crate) fn cloud_live_start(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.cloud_live_enabled() {
+            return;
+        }
+        self.cloud_live_stop();
+        let Some(identity) = self.cloud_identity.clone() else {
+            return;
+        };
+        let Some(auth) = crate::hub::auth::load_auth() else {
+            self.status_message = Some("Sign in to start live collaboration".into());
+            cx.notify();
+            return;
+        };
+        if auth.api_base.trim_end_matches('/') != identity.api_base.trim_end_matches('/') {
+            self.status_message =
+                Some("Sign in to this workbook's API before starting collaboration".into());
+            cx.notify();
+            return;
+        }
+        if let Err(error) = self.wb(cx).ensure_writable() {
+            self.status_message = Some(error);
+            cx.notify();
+            return;
+        }
+        self.cloud_live = Some(LiveSession::start(
+            auth,
+            identity.public_id.clone(),
+            self.wb(cx).clone(),
+        ));
+        self.status_message = Some("Connecting to shared workbook…".into());
+        let generation = self.cloud_live_generation;
+        cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_millis(16)).await;
+            let keep = this.update(cx, |this, cx| {
+                if this.cloud_live_generation != generation {
+                    return false;
+                }
+                let Some(session) = &this.cloud_live else {
+                    return false;
+                };
+                let events: Vec<_> = session.events.try_iter().collect();
+                for event in events {
+                    match event {
+                        Event::State {
+                            ready,
+                            writable,
+                            message,
+                        } => {
+                            this.cloud_live_ready = ready;
+                            this.cloud_live_writable = writable;
+                            this.status_message = Some(message);
+                        }
+                        Event::Workbook {
+                            mut workbook,
+                            pending,
+                        } => {
+                            let active = this.wb(cx).active_sheet().id;
+                            if let Some(index) = workbook.idx_for_sheet_id(active) {
+                                workbook.set_active_sheet(index);
+                            }
+                            this.workbook.update(cx, |wb, _| *wb = workbook);
+                            this.update_cached_sheet_id(cx);
+                            this.status_message = Some(
+                                if pending == 0 {
+                                    "Changes committed"
+                                } else {
+                                    "Waiting for acknowledgement"
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                    cx.notify();
+                }
+                true
+            });
+            if !matches!(keep, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    pub(crate) fn cloud_live_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        raw: &str,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if !self.cloud_live_enabled() {
+            return false;
+        }
+        if !self.cloud_live_ready || !self.cloud_live_writable {
+            self.status_message = Some("The live workbook is read-only or reconnecting".into());
+            cx.notify();
+            return true;
+        }
+        let sheet = self.wb(cx).active_sheet().id.0;
+        if let Some(session) = &self.cloud_live {
+            if session
+                .commands
+                .send(Command::Cell {
+                    sheet,
+                    row,
+                    col,
+                    raw: raw.into(),
+                })
+                .is_err()
+            {
+                self.cloud_live_ready = false;
+                self.status_message =
+                    Some("Live collaboration stopped; reopen the workbook to reconnect".into());
+            }
+        }
+        cx.notify();
+        true
+    }
+    pub(crate) fn block_live_read_only(&mut self, cx: &mut gpui::Context<Self>) -> bool {
+        if self.cloud_live_enabled() && (!self.cloud_live_ready || !self.cloud_live_writable) {
+            self.status_message = Some("The live workbook is read-only or reconnecting".into());
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+}

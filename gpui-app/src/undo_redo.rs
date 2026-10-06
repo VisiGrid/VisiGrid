@@ -34,6 +34,10 @@ impl Spreadsheet {
 
     // Undo/Redo
     pub fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.cloud_live_enabled() {
+            self.status_message = Some("Live undo/redo must use the sequenced history; it is not enabled in this slice".into());
+            cx.notify(); return;
+        }
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
@@ -1320,6 +1324,10 @@ impl Spreadsheet {
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.cloud_live_enabled() {
+            self.status_message = Some("Live undo/redo must use the sequenced history; it is not enabled in this slice".into());
+            cx.notify(); return;
+        }
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
             if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {

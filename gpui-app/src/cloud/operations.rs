@@ -288,6 +288,7 @@ impl Spreadsheet {
 
                         this.cloud_identity = Some(identity);
                         this.cloud_sync_state = CloudSyncState::Synced;
+                        this.cloud_live_start(cx);
                         this.status_message = Some(match &backup {
                             Some(prev) => format!(
                                 "Opened {} from the cloud. The previous local copy is kept at {}",

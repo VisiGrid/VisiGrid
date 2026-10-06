@@ -297,6 +297,11 @@ pub(crate) fn prepare_table_writes_with_new_rows(
 impl Spreadsheet {
     pub(crate) fn table_cell_edit_guard(&mut self, cx: &mut Context<Self>) -> bool {
         self.table_edit_target = None;
+        if self.block_live_read_only(cx) { return true; }
+        if self.cloud_live_enabled() && crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.status_message = Some("Live Table editing is not enabled in this cell-editing slice".into());
+            cx.notify(); return true;
+        }
         if self.block_if_previewing_only(cx) {
             return true;
         }
