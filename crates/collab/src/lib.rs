@@ -12,6 +12,7 @@
 
 pub mod apply;
 pub mod client;
+pub mod clock;
 pub mod copy;
 #[cfg(feature = "sim")]
 pub mod gen;
