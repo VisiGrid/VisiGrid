@@ -187,12 +187,19 @@ fn run(
             };
             match replica.receive(&frame)? {
                 Received::Snapshot(request) => {
-                    let url = base
+                    let mut url = base
                         .join(&request.url)
                         .map_err(|_| "Invalid snapshot URL")?;
-                    if url.origin() != base.origin() || url.path() != snapshot_path {
+                    if url.origin() != base.origin()
+                        || (url.path() != snapshot_path
+                            && url.path() != format!("/api/sheets/{pid}/download"))
+                    {
                         return Err("Unexpected snapshot origin or workbook".into());
                     }
+                    // Download may advertise an R2 transport. Use the API's
+                    // canonical inline snapshot without forwarding credentials.
+                    url.set_path(&snapshot_path);
+                    url.set_query(None);
                     let text = http
                         .get(url)
                         .bearer_auth(&auth.token)
