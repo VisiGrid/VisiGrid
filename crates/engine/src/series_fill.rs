@@ -8,7 +8,7 @@
 //!
 //! See: docs/features/series-fill-spec.md
 
-use visigrid_engine::formula::eval::Value;
+use crate::formula::eval::Value;
 
 // ============================================================================
 // Core Types
@@ -1215,5 +1215,170 @@ mod tests {
         let src = source(vec![text("Jan")]);
         let pattern = detect_pattern(&src, FillIntent::Series);
         assert_eq!(generate(&pattern, 1), text("Feb"));
+    }
+}
+
+// ============================================================================
+// Whole-run fill (shared by the desktop fill handle and the web grid)
+// ============================================================================
+
+/// A cell's raw text as a pattern value: empty, a number, or text.
+pub fn raw_value(raw: &str) -> Value {
+    if raw.is_empty() {
+        Value::Empty
+    } else if let Ok(n) = raw.parse::<f64>() {
+        Value::Number(n)
+    } else {
+        Value::Text(raw.to_string())
+    }
+}
+
+/// A generated value as the raw text a cell is given.
+pub fn value_text(value: &Value) -> String {
+    match value {
+        Value::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Value::Text(s) => s.clone(),
+        Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        Value::Empty => String::new(),
+        Value::Error(e) => format!("{}", e),
+    }
+}
+
+/// Whether one cell's text should extend as a series by default: a built-in
+/// list item (months, weekdays, quarters) or text ending in a number or a
+/// letter after a separator (Item1, Row A).
+pub fn is_list_item(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim();
+    if trimmed.starts_with('=') {
+        return false;
+    }
+    const MONTHS_SHORT: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    const MONTHS_LONG: [&str; 12] = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+    ];
+    const WEEKDAYS_SHORT: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    const WEEKDAYS_LONG: [&str; 7] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+    if MONTHS_SHORT.contains(&trimmed) || MONTHS_LONG.contains(&trimmed) || WEEKDAYS_SHORT.contains(&trimmed) || WEEKDAYS_LONG.contains(&trimmed) {
+        return true;
+    }
+    if trimmed.starts_with('q') && trimmed.len() >= 2 {
+        if let Some(first) = trimmed[1..].split_whitespace().next() {
+            if let Ok(q) = first.parse::<i32>() {
+                if (1..=4).contains(&q) {
+                    return true;
+                }
+            }
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() >= 2 {
+        let has_trailing_digits = chars.last().is_some_and(|c| c.is_ascii_digit());
+        let has_prefix = !chars.first().is_some_and(|c| c.is_ascii_digit() || *c == '-');
+        if has_trailing_digits && has_prefix {
+            return true;
+        }
+        if chars.last().is_some_and(|c| c.is_ascii_alphabetic()) {
+            let mut letter_start = chars.len();
+            for i in (0..chars.len()).rev() {
+                if chars[i].is_ascii_alphabetic() {
+                    letter_start = i;
+                } else {
+                    break;
+                }
+            }
+            if letter_start > 0 && !chars[letter_start - 1].is_ascii_alphabetic() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// What a fill writes into `count` cells past a run of `sources` (raw cell
+/// texts, in order along the fill axis), exactly as the desktop fill handle
+/// does: when any source is a formula, the sources repeat with their
+/// references shifted by each copy's distance; otherwise the run extends as
+/// a series (or copies) by Excel's rules for `ctrl_held`. `copy_only` is
+/// Fill Down/Right (Ctrl+D, Ctrl+R): always a copy. `backward` fills up or
+/// left: the first result is the cell just before the run. `rows` says the
+/// axis (formula references shift by row, else by column).
+pub fn fill_line(sources: &[String], count: usize, ctrl_held: bool, copy_only: bool, backward: bool, rows: bool) -> Vec<String> {
+    let len = sources.len();
+    if len == 0 || count == 0 {
+        return Vec::new();
+    }
+    let shift = |formula: &str, delta: i32| {
+        let (dr, dc) = if rows { (delta, 0) } else { (0, delta) };
+        crate::formula::parser::adjust_formula_refs(formula, dr, dc)
+    };
+    if sources.iter().any(|s| s.starts_with('=')) || copy_only {
+        return (0..count)
+            .map(|i| {
+                // Forward: copy i lands at len + i and repeats source i % len.
+                // Backward: copy i lands at -(i + 1), repeating from the end.
+                let (src, at) = if backward {
+                    (len - 1 - (i % len), -(i as i64) - 1)
+                } else {
+                    (i % len, (len + i) as i64)
+                };
+                let s = &sources[src];
+                if s.starts_with('=') { shift(s, (at - src as i64) as i32) } else { s.clone() }
+            })
+            .collect();
+    }
+    // A backward series is the forward series of the reversed run.
+    let ordered: Vec<String> = if backward { sources.iter().rev().cloned().collect() } else { sources.to_vec() };
+    let single_is_list = len == 1 && is_list_item(&ordered[0]);
+    let intent = fill_intent(ctrl_held, len, single_is_list);
+    let detected = DetectedSource {
+        values: ordered.iter().map(|s| raw_value(s)).collect(),
+        text_tokens: ordered.iter().map(|s| Some(s.clone())).collect(),
+    };
+    match detect_pattern(&detected, intent) {
+        FillPattern::Copy => (0..count).map(|i| ordered[i % len].clone()).collect(),
+        pattern => (1..=count).map(|k| value_text(&generate(&pattern, k))).collect(),
+    }
+}
+
+#[cfg(test)]
+mod fill_line_tests {
+    use super::fill_line;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn numbers_extend_by_their_step_and_a_single_number_copies() {
+        assert_eq!(fill_line(&s(&["1", "3"]), 3, false, false, false, true), s(&["5", "7", "9"]));
+        assert_eq!(fill_line(&s(&["7"]), 2, false, false, false, true), s(&["7", "7"]));
+        assert_eq!(fill_line(&s(&["7"]), 2, true, false, false, true), s(&["8", "9"]), "Ctrl makes a series");
+    }
+
+    #[test]
+    fn lists_and_labels_extend_and_ctrl_d_copies() {
+        assert_eq!(fill_line(&s(&["Jan"]), 3, false, false, false, true), s(&["Feb", "Mar", "Apr"]));
+        assert_eq!(fill_line(&s(&["Item 9"]), 2, false, false, false, false), s(&["Item 10", "Item 11"]));
+        assert_eq!(fill_line(&s(&["Jan"]), 2, false, true, false, true), s(&["Jan", "Jan"]), "Fill Down copies");
+    }
+
+    #[test]
+    fn backward_fills_extend_before_the_run() {
+        assert_eq!(fill_line(&s(&["5", "6"]), 2, false, false, true, true), s(&["4", "3"]));
+    }
+
+    #[test]
+    fn formulas_repeat_with_references_shifted_by_distance() {
+        assert_eq!(fill_line(&s(&["=A1*2"]), 2, false, false, false, true), s(&["=A2*2", "=A3*2"]));
+        assert_eq!(fill_line(&s(&["=A1*2"]), 2, false, false, false, false), s(&["=B1*2", "=C1*2"]));
+        assert_eq!(fill_line(&s(&["=$A$1+B5"]), 1, false, false, true, true), s(&["=$A$1+B4"]));
+        assert_eq!(fill_line(&s(&["x", "=A2"]), 2, false, false, false, true), s(&["x", "=A4"]));
     }
 }

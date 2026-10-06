@@ -192,6 +192,28 @@ pub struct SheetLayout {
 }
 
 impl SheetLayout {
+    /// This file layout's lines (sizes, hidden, frozen) as the engine holds them.
+    pub fn line_layout(&self) -> visigrid_engine::layout::LineLayout {
+        visigrid_engine::layout::LineLayout {
+            col_widths: self.col_widths.clone(),
+            row_heights: self.row_heights.clone(),
+            hidden_rows: self.hidden_rows.clone(),
+            hidden_cols: self.hidden_cols.clone(),
+            frozen_rows: self.frozen_rows,
+            frozen_cols: self.frozen_cols,
+        }
+    }
+
+    /// Replace this layout's lines with the engine's.
+    pub fn set_line_layout(&mut self, l: &visigrid_engine::layout::LineLayout) {
+        self.col_widths = l.col_widths.clone();
+        self.row_heights = l.row_heights.clone();
+        self.hidden_rows = l.hidden_rows.clone();
+        self.hidden_cols = l.hidden_cols.clone();
+        self.frozen_rows = l.frozen_rows;
+        self.frozen_cols = l.frozen_cols;
+    }
+
     /// Move presentation state to follow a structural edit on this sheet.
     ///
     /// The engine adjusts cells, formulas, validations, and named ranges;
@@ -389,6 +411,10 @@ struct FullDoc {
 struct SheetBody {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     name: String,
+    /// A large sheet's cells live in row bands stored beside the document
+    /// (see `bands`); `cells` is then empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bands: Vec<bands::BandRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cells: Vec<FullCell>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -588,7 +614,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
         version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
         table_catalog: sheet.has_table_history().then(||
             serde_json::to_value(visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()).unwrap()),
-        body: sheet_body(sheet, layout),
+        body: sheet_body(sheet, layout, true),
         sheets: Vec::new(),
         active_sheet: None,
     };
@@ -603,6 +629,18 @@ pub fn export_workbook(
     layouts: &[SheetLayout],
     active_sheet: usize,
 ) -> Result<String, String> {
+    let doc = workbook_doc(wb, layouts, active_sheet, &|_| true)?;
+    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+}
+
+/// The document for `wb`, with each sheet's cells written inline only when
+/// `inline(index)` (a banded sheet's cells are never built here).
+fn workbook_doc(
+    wb: &visigrid_engine::workbook::Workbook,
+    layouts: &[SheetLayout],
+    active_sheet: usize,
+    inline: &dyn Fn(usize) -> bool,
+) -> Result<FullDoc, String> {
     wb.ensure_writable()?;
     wb.validate_table_view_specs()?;
     if wb.sheets().iter().zip(layouts).any(|(sheet, layout)| sheet.table_view_spec().is_some() && layout.filter.is_some()) {
@@ -614,7 +652,7 @@ pub fn export_workbook(
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout));
+            let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout), inline(i));
             let saved = wb.saved_pivots(i);
             if !saved.is_empty() {
                 body.pivots = serde_json::to_value(&saved).ok();
@@ -630,13 +668,21 @@ pub fn export_workbook(
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
     };
-    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+    Ok(doc)
 }
 
-fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
+/// The cells of `sheet` as written to a document, in row-major order, for
+/// every row or (bands) only the rows in `rows`.
+fn sheet_cells(sheet: &Sheet, rows: Option<std::ops::Range<usize>>) -> Vec<FullCell> {
     let mut cells: Vec<FullCell> = Vec::new();
+    let in_rows = |r: usize| rows.as_ref().map_or(true, |range| range.contains(&r));
 
-    let mut coords: Vec<(usize, usize)> = sheet.cells_iter().map(|(rc, _)| rc).collect();
+    // A band reads only the store chunks its rows overlap, not the sheet.
+    let mut coords: Vec<(usize, usize)> = match &rows {
+        Some(range) if range.start < range.end => sheet.cells_in_range(range.start, range.end - 1, 0, usize::MAX - 1),
+        Some(_) => Vec::new(),
+        None => sheet.cells_iter().map(|(rc, _)| rc).collect(),
+    };
     coords.sort_unstable();
 
     for (row, col) in coords {
@@ -734,7 +780,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
 
     // Cells a formula spilled into. They hold no Cell of their own, so the loop
     // above never sees them.
-    let mut receivers: Vec<(usize, usize)> = sheet.spill_receiver_coords().collect();
+    let mut receivers: Vec<(usize, usize)> = sheet.spill_receiver_coords().filter(|&(r, _)| in_rows(r)).collect();
     receivers.sort_unstable();
     for (row, col) in receivers {
         {
@@ -761,6 +807,11 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         }
     }
 
+    cells
+}
+
+fn sheet_body(sheet: &Sheet, layout: &SheetLayout, with_cells: bool) -> SheetBody {
+    let cells = if with_cells { sheet_cells(sheet, None) } else { Vec::new() };
     let merges = sheet
         .merged_regions
         .iter()
@@ -797,6 +848,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout) -> SheetBody {
         filter: layout.filter.clone(),
         charts: layout.charts.clone(),
         pivots: None,
+        bands: Vec::new(),
     }
 }
 
@@ -990,23 +1042,12 @@ fn cached_formula_values(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook
     cached
 }
 
-fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
-    let mut sheet = Sheet::new(id, visigrid_engine::sheet::NUM_ROWS, visigrid_engine::sheet::NUM_COLS);
-    body.print_setup.validate()?;
-    sheet.print_setup = body.print_setup.clone();
-    // Quoted values that read as numbers. Ours are deliberate — the writer only
-    // quotes text — but a foreign document may have quoted a number by accident,
-    // and it now stays text. Said out loud so that is discoverable rather than
-    // something to deduce from a total that came out wrong.
+/// Write document cells into `sheet` without evaluating them (callers run an
+/// ordered recompute afterwards). Returns how many quoted values read as
+/// numbers (kept as text).
+fn apply_cells(sheet: &mut Sheet, cells: &[FullCell]) -> usize {
     let mut quoted_numerics = 0usize;
-    if !body.name.is_empty() {
-        sheet.set_name(&body.name);
-        sheet.tab_color = body.tab_color.as_deref().and_then(parse_hex_rgb);
-    } else if index > 0 {
-        sheet.set_name(&format!("Sheet{}", index + 1));
-    }
-
-    for cell in &body.cells {
+    for cell in cells {
         // Spill receivers are written for readers without an engine. Loading
         // them would occupy the range the spill needs and turn it into #SPILL!,
         // so they are skipped and the recompute puts them back.
@@ -1107,6 +1148,27 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
             sheet.set_format(cell.row, cell.col, format);
         }
     }
+
+    quoted_numerics
+}
+
+fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usize) -> Result<(Sheet, SheetLayout), String> {
+    let mut sheet = Sheet::new(id, visigrid_engine::sheet::NUM_ROWS, visigrid_engine::sheet::NUM_COLS);
+    body.print_setup.validate()?;
+    sheet.print_setup = body.print_setup.clone();
+    // Quoted values that read as numbers. Ours are deliberate — the writer only
+    // quotes text — but a foreign document may have quoted a number by accident,
+    // and it now stays text. Said out loud so that is discoverable rather than
+    // something to deduce from a total that came out wrong.
+    let mut quoted_numerics = 0usize;
+    if !body.name.is_empty() {
+        sheet.set_name(&body.name);
+        sheet.tab_color = body.tab_color.as_deref().and_then(parse_hex_rgb);
+    } else if index > 0 {
+        sheet.set_name(&format!("Sheet{}", index + 1));
+    }
+
+    quoted_numerics += apply_cells(&mut sheet, &body.cells);
 
     for m in &body.merges {
         let _ = sheet.add_merge(MergedRegion::new(m.start_row, m.start_col, m.end_row, m.end_col));
@@ -1882,3 +1944,210 @@ fn parse_hex_rgb(s: &str) -> Option<[u8; 4]> {
         255,
     ])
 }
+
+/// Large sheets as row bands: the document (the *manifest*) keeps everything
+/// but the cells of a sheet over [`BAND_THRESHOLD`] cells, and each run of
+/// [`BAND_ROWS`] rows is a separate, compressed, content-addressed blob. A
+/// reader paints the first band before the rest arrive and nothing re-uploads
+/// a band that did not change. A band's cells are exactly the document's cell
+/// form, so a banded sheet means what the same sheet written inline means.
+pub mod bands {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// Rows per band.
+    pub const BAND_ROWS: usize = 16_384;
+    /// Sheets with more cells than this are banded.
+    pub const BAND_THRESHOLD: usize = 200_000;
+    pub const BAND_FORMAT: &str = "visigrid-band";
+
+    /// A band as the manifest names it.
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+    pub struct BandRef {
+        /// First and one-past-last row.
+        pub r0: usize,
+        pub r1: usize,
+        /// Cells in the band.
+        pub cells: usize,
+        /// Hex SHA-256 of the compressed bytes: the storage key.
+        pub key: String,
+        pub bytes: usize,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct BandDoc {
+        format: String,
+        version: u32,
+        sheet: usize,
+        r0: usize,
+        r1: usize,
+        cells: Vec<FullCell>,
+    }
+
+    /// One encoded band, for storage under `reference.key`.
+    pub struct Band {
+        pub sheet: usize,
+        pub reference: BandRef,
+        pub data: Vec<u8>,
+    }
+
+    fn encode(sheet_index: usize, r0: usize, r1: usize, cells: Vec<FullCell>) -> Result<Band, String> {
+        let n = cells.len();
+        let doc = BandDoc { format: BAND_FORMAT.into(), version: 1, sheet: sheet_index, r0, r1, cells };
+        let json = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
+        let data = miniz_oxide::deflate::compress_to_vec(&json, 6);
+        let key = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+        Ok(Band { sheet: sheet_index, reference: BandRef { r0, r1, cells: n, key, bytes: data.len() }, data })
+    }
+
+    /// Whether a sheet is written as bands: large, and holding nothing that
+    /// must load with its cells (Tables, pivots).
+    fn banded(wb: &visigrid_engine::workbook::Workbook, index: usize) -> bool {
+        let sheet = &wb.sheets()[index];
+        sheet.cells_iter().nth(BAND_THRESHOLD).is_some() && !wb.has_table_history() && wb.saved_pivots(index).is_empty()
+    }
+
+    /// `export_workbook`, with every large sheet's cells moved into bands.
+    pub fn export_banded(
+        wb: &visigrid_engine::workbook::Workbook,
+        layouts: &[SheetLayout],
+        active_sheet: usize,
+    ) -> Result<(String, Vec<Band>), String> {
+        let banded_sheets: Vec<bool> = (0..wb.sheets().len()).map(|i| banded(wb, i)).collect();
+        let mut doc = workbook_doc(wb, layouts, active_sheet, &|i| !banded_sheets[i])?;
+        let mut out = Vec::new();
+        for (i, body) in doc.sheets.iter_mut().enumerate() {
+            if !banded_sheets[i] {
+                continue;
+            }
+            let sheet = &wb.sheets()[i];
+            let last = sheet.cells_iter().map(|((r, _), _)| r).chain(sheet.spill_receiver_coords().map(|(r, _)| r)).max().unwrap_or(0);
+            let mut r0 = 0;
+            while r0 <= last {
+                let r1 = r0 + BAND_ROWS;
+                let cells = sheet_cells(sheet, Some(r0..r1));
+                if !cells.is_empty() {
+                    let band = encode(i, r0, r1, cells)?;
+                    body.bands.push(band.reference.clone());
+                    out.push(band);
+                }
+                r0 = r1;
+            }
+        }
+        Ok((serde_json::to_string(&doc).map_err(|e| e.to_string())?, out))
+    }
+
+    /// The bands a manifest names, per sheet index.
+    pub fn manifest_bands(manifest: &str) -> Result<Vec<(usize, BandRef)>, String> {
+        let doc: FullDoc = serde_json::from_str(manifest).map_err(|e| format!("invalid visigrid-json: {e}"))?;
+        Ok(doc.sheets.iter().enumerate().flat_map(|(i, b)| b.bands.iter().map(move |r| (i, r.clone()))).collect())
+    }
+
+    /// Write one band's cells into the workbook, unevaluated: call
+    /// [`finish`] once every band is in. Checks the bytes against `key` when
+    /// given. Returns (sheet index, cells written).
+    pub fn apply(wb: &mut visigrid_engine::workbook::Workbook, data: &[u8], key: Option<&str>) -> Result<(usize, usize), String> {
+        if let Some(key) = key {
+            let got: String = Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect();
+            if got != key {
+                return Err(format!("band {key} does not match its contents"));
+            }
+        }
+        let json = miniz_oxide::inflate::decompress_to_vec_with_limit(data, 1 << 30).map_err(|e| format!("band does not inflate: {e:?}"))?;
+        // Streamed: each cell is written as it is read, so a band never
+        // exists as a list of decoded cells (512 bytes each, 1.3 million in
+        // a 20-column band).
+        let mut de = serde_json::Deserializer::from_slice(&json);
+        let out = serde::de::DeserializeSeed::deserialize(BandSeed { wb }, &mut de).map_err(|e| format!("invalid band: {e}"))?;
+        de.end().map_err(|e| format!("invalid band: {e}"))?;
+        Ok(out)
+    }
+
+    /// Reads a band's header, then streams its `cells` into the sheet it
+    /// names. Writers put `cells` last; a band whose header comes after its
+    /// cells is refused rather than buffered.
+    struct BandSeed<'a> {
+        wb: &'a mut visigrid_engine::workbook::Workbook,
+    }
+
+    impl<'de, 'a> serde::de::DeserializeSeed<'de> for BandSeed<'a> {
+        type Value = (usize, usize);
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_map(self)
+        }
+    }
+
+    impl<'de, 'a> serde::de::Visitor<'de> for BandSeed<'a> {
+        type Value = (usize, usize);
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a visigrid-band object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            use serde::de::Error;
+            let (mut format, mut version, mut sheet, mut r0, mut r1) = (None::<String>, None::<u32>, None::<usize>, None::<usize>, None::<usize>);
+            let mut written = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "format" => format = Some(map.next_value()?),
+                    "version" => version = Some(map.next_value()?),
+                    "sheet" => sheet = Some(map.next_value()?),
+                    "r0" => r0 = Some(map.next_value()?),
+                    "r1" => r1 = Some(map.next_value()?),
+                    "cells" => {
+                        if format.as_deref() != Some(BAND_FORMAT) || version != Some(1) {
+                            return Err(A::Error::custom(format!("not a version-1 band ({format:?} v{version:?})")));
+                        }
+                        let (Some(index), Some(r0), Some(r1)) = (sheet, r0, r1) else {
+                            return Err(A::Error::custom("band header must precede its cells"));
+                        };
+                        let target = self.wb.sheet_mut(index).ok_or_else(|| A::Error::custom(format!("band names sheet {index} the workbook lacks")))?;
+                        let n = map.next_value_seed(CellsSeed { sheet: target, r0, r1 })?;
+                        written = Some((index, n));
+                    }
+                    _ => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+            }
+            written.ok_or_else(|| A::Error::custom("band has no cells"))
+        }
+    }
+
+    struct CellsSeed<'a> {
+        sheet: &'a mut Sheet,
+        r0: usize,
+        r1: usize,
+    }
+
+    impl<'de, 'a> serde::de::DeserializeSeed<'de> for CellsSeed<'a> {
+        type Value = usize;
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<usize, D::Error> {
+            d.deserialize_seq(self)
+        }
+    }
+
+    impl<'de, 'a> serde::de::Visitor<'de> for CellsSeed<'a> {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of cells")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<usize, A::Error> {
+            let mut n = 0;
+            while let Some(cell) = seq.next_element::<FullCell>()? {
+                if cell.row < self.r0 || cell.row >= self.r1 {
+                    return Err(serde::de::Error::custom("band holds a cell outside its rows"));
+                }
+                apply_cells(self.sheet, std::slice::from_ref(&cell));
+                n += 1;
+            }
+            Ok(n)
+        }
+    }
+
+    /// After the last band: dependencies and one ordered recompute.
+    pub fn finish(wb: &mut visigrid_engine::workbook::Workbook) {
+        wb.rebuild_dep_graph();
+        wb.recompute_full_ordered();
+    }
+}
+
