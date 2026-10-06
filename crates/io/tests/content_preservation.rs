@@ -99,3 +99,18 @@ fn unsupported_extensions_restore_stored_results_after_projection_checks() {
         source
     );
 }
+
+#[test]
+fn future_format_variant_opens_cached_grid_read_only() {
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Future formatting","cells":[{"row":0,"col":0,"value":42,"fmt":{"number_format":"FutureAccounting"}}]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        workbook.active_sheet().get_computed_value(0, 0),
+        visigrid_engine::formula::eval::Value::Number(42.0)
+    );
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        source
+    );
+}

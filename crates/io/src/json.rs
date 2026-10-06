@@ -905,7 +905,7 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     use visigrid_engine::workbook::Workbook;
     use crate::table_recovery::{decode_catalog, TableLoadIssue};
 
-    let doc: FullDoc = serde_json::from_str(content).map_err(|e| format!("invalid visigrid-json: {}", e))?;
+    let (doc, preview_reason) = decode_document_for_preview(content)?;
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
@@ -938,6 +938,13 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     let active = doc.active_sheet.unwrap_or(0).min(sheets.len() - 1);
     // Recompute formulas (stored values are only a fallback for engine-less consumers)
     let mut wb = Workbook::from_sheets(sheets, active);
+    if let Some(reason) = preview_reason {
+        let cached = cached_formula_values(&doc, &wb);
+        crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
+        retain_protected_source(&mut wb, content, &layouts)?;
+        return Ok((wb, layouts, active));
+    }
+
     if doc.version > FULL_JSON_TABLE_VERSION {
         let cached = cached_formula_values(&doc, &wb);
         let reason = format!("visigrid-json version {} is newer than supported ({}). Opened read-only; original content is retained.", doc.version, FULL_JSON_TABLE_VERSION);
@@ -994,6 +1001,43 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     Ok((wb, layouts, active))
 }
 
+
+/// A future format/validation variant must not hide an otherwise readable
+/// grid. Decode a minimal cached preview, never use that projection to save.
+fn decode_document_for_preview(content: &str) -> Result<(FullDoc, Option<String>), String> {
+    match serde_json::from_str::<FullDoc>(content) {
+        Ok(doc) => Ok((doc, None)),
+        Err(original_error) => {
+            let mut preview: serde_json::Value = serde_json::from_str(content)
+                .map_err(|e| format!("invalid visigrid-json: {e}"))?;
+            if preview.get("format").and_then(serde_json::Value::as_str) != Some(FULL_JSON_FORMAT) {
+                return Err(format!("invalid visigrid-json: {original_error}"));
+            }
+            let recognizable = preview.get("cells").is_some_and(serde_json::Value::is_array)
+                || preview.get("sheets").and_then(serde_json::Value::as_array)
+                    .is_some_and(|sheets| !sheets.is_empty());
+            if !recognizable { return Err(format!("invalid visigrid-json: {original_error}")); }
+            fn strip_presentation(body: &mut serde_json::Value) {
+                let Some(object) = body.as_object_mut() else { return };
+                object.retain(|key, _| matches!(key.as_str(), "format" | "version" | "active_sheet" | "sheets" | "name" | "cells"));
+                if let Some(cells) = object.get_mut("cells").and_then(serde_json::Value::as_array_mut) {
+                    for cell in cells {
+                        if let Some(cell) = cell.as_object_mut() {
+                            cell.retain(|key, _| matches!(key.as_str(), "row" | "col" | "value" | "formula"));
+                        }
+                    }
+                }
+            }
+            strip_presentation(&mut preview);
+            if let Some(sheets) = preview.get_mut("sheets").and_then(serde_json::Value::as_array_mut) {
+                for sheet in sheets { strip_presentation(sheet); }
+            }
+            let doc = serde_json::from_value(preview)
+                .map_err(|_| format!("invalid visigrid-json: {original_error}"))?;
+            Ok((doc, Some(format!("A saved feature cannot be interpreted: {original_error}. Opened read-only with stored values; original content is retained. Upgrade VisiGrid to edit."))))
+        }
+    }
+}
 
 fn retain_protected_source(wb: &mut visigrid_engine::workbook::Workbook, content: &str, layouts: &[SheetLayout]) -> Result<(), String> {
     let source = std::sync::Arc::new(content.to_owned());
