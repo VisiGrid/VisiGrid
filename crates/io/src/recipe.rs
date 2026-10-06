@@ -1000,11 +1000,10 @@ impl Recipe {
             if over.is_some() {
                 return Err("a VisiBooks source can't be replaced by a file".into());
             }
-            #[cfg(feature = "native")]
-            let snap = visibooks::fetch(src, chrono::Local::now().date_naive())?;
             #[cfg(not(feature = "native"))]
-            let snap = return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
-            snap
+            return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
+            #[cfg(feature = "native")]
+            visibooks::fetch(src, chrono::Local::now().date_naive())?
         } else {
             Snapshot::read_all(&self.resolve_sources(recipe_dir, over)?)?
         };
@@ -4440,7 +4439,52 @@ values_to = "Sales"
             ("x.csv", "a\n1\n"),
         ]);
         let r = Recipe::load(&me.path().join("self.recipe.toml")).unwrap();
-        assert!(r.read_snapshot(me.path(), None).unwrap_err().contains("nest more than 8"));
+        assert!(r.read_snapshot(me.path(), None).unwrap_err().contains("loops back"));
+        // A loop through two recipes is refused at once, and a diamond (two
+        // steps merging the same recipe) is not a loop
+        let two = merge_dir(&[
+            ("a.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"merge\"\nwith = \"b.recipe.toml\"\non = [\"a\"]\n"),
+            ("b.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"merge\"\nwith = \"a.recipe.toml\"\non = [\"a\"]\n"),
+            ("x.csv", "a\n1\n"),
+        ]);
+        let a = Recipe::load(&two.path().join("a.recipe.toml")).unwrap();
+        assert!(a.read_snapshot(two.path(), None).unwrap_err().contains("loops back"));
+        let diamond = merge_dir(&[
+            ("a.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"merge\"\nwith = \"b.recipe.toml\"\non = [\"a\"]\n[[step]]\nop = \"merge\"\nwith = \"c.recipe.toml\"\non = [\"a\"]\n"),
+            ("b.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"merge\"\nwith = \"d.recipe.toml\"\non = [\"a\"]\n"),
+            ("c.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n[[step]]\nop = \"merge\"\nwith = \"d.recipe.toml\"\non = [\"a\"]\n"),
+            ("d.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"x.csv\"\n"),
+            ("x.csv", "a,z\n1,2\n"),
+        ]);
+        let a = Recipe::load(&diamond.path().join("a.recipe.toml")).unwrap();
+        assert!(a.read_snapshot(diamond.path(), None).is_ok());
+    }
+
+    #[test]
+    fn approval_covers_a_merged_visibooks_entity_and_server() {
+        let b = |entity: &str, server: &str| {
+            format!("version = 1\n[source]\nkind = \"visibooks\"\nserver = \"{server}\"\nentity = \"{entity}\"\nreport = \"trial_balance\"\n")
+        };
+        let dir = merge_dir(&[
+            ("a.recipe.toml", "version = 1\n[source]\nkind = \"csv\"\npath = \"a.csv\"\n[[step]]\nop = \"merge\"\nwith = \"b.recipe.toml\"\non = [\"Account\"]\n"),
+            ("a.csv", "Account\n1010\n"),
+            ("b.recipe.toml", &b("11", "https://api.visiapi.com")),
+        ]);
+        let path = dir.path().join("a.recipe.toml");
+        let a = Recipe::load(&path).unwrap();
+        let approved = crate::recipe_trust::approval_key(&path, &a);
+        // Another entity behind the merged recipe: a new approval
+        std::fs::write(dir.path().join("b.recipe.toml"), b("20", "https://api.visiapi.com")).unwrap();
+        let other_entity = crate::recipe_trust::approval_key(&path, &a);
+        assert_ne!(other_entity, approved);
+        // Another server: a new approval again
+        std::fs::write(dir.path().join("b.recipe.toml"), b("11", "https://evil.example")).unwrap();
+        let other_server = crate::recipe_trust::approval_key(&path, &a);
+        assert_ne!(other_server, approved);
+        assert_ne!(other_server, other_entity);
+        // Back as it was: the same approval
+        std::fs::write(dir.path().join("b.recipe.toml"), b("11", "https://api.visiapi.com")).unwrap();
+        assert_eq!(crate::recipe_trust::approval_key(&path, &a), approved);
     }
 
     #[test]
