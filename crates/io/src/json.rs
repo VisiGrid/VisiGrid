@@ -996,6 +996,14 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     let active = doc.active_sheet.unwrap_or(0).min(sheets.len() - 1);
     // Recompute formulas (stored values are only a fallback for engine-less consumers)
     let mut wb = Workbook::from_sheets(sheets, active);
+    if let Some(path) = crate::content_protection::inline_number_loss(content)? {
+        let cached = cached_formula_values(&doc, &wb);
+        let location = if path == "a numeric literal" { String::new() } else { format!(" at {path}") };
+        let reason = format!("A stored number{location} cannot be represented exactly. Opened read-only; original content is retained.");
+        crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
+        retain_protected_source(&mut wb, content, &layouts)?;
+        return Ok((wb, layouts, active));
+    }
     if let Some(reason) = preview_reason {
         let cached = cached_formula_values(&doc, &wb);
         crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
@@ -2301,7 +2309,11 @@ pub mod bands {
         fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<usize, A::Error> {
             let mut n = 0;
             let mut coords = std::collections::BTreeSet::new();
-            while let Some(raw) = seq.next_element::<serde_json::Value>()? {
+            while let Some(original) = seq.next_element::<Box<serde_json::value::RawValue>>()? {
+                if self.validate && crate::content_protection::band_cell_number_loss(original.get()).map_err(serde::de::Error::custom)? {
+                    return Err(serde::de::Error::custom("Band numeric literal cannot be represented exactly"));
+                }
+                let raw: serde_json::Value = serde_json::from_str(original.get()).map_err(serde::de::Error::custom)?;
                 let cell: FullCell = serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
                 if self.validate {
                     if (cell.spill_from.is_some() && cell.fmt.is_some()) || (cell.stale_custom_fn && cell.formula.is_none()) {

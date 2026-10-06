@@ -78,28 +78,110 @@ pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
 // 42 and 42.0 are equivalent, but 9007199254740993 must not match a rounded
 // 9007199254740992.0. Keep the exponent separate to avoid large allocations.
 fn decimal_number(n: &serde_json::Number) -> (bool, String, i32) {
-    let text = n.to_string();
+    decimal_literal(&n.to_string()).expect("representable JSON number")
+}
+
+fn decimal_literal(text: &str) -> Option<(bool, String, i32)> {
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, text.as_str()),
+        None => (false, text),
     };
-    let (mantissa, exponent) = unsigned
-        .split_once(['e', 'E'])
-        .map(|(m, e)| (m, e.parse::<i32>().expect("JSON number exponent")))
-        .unwrap_or((unsigned, 0));
-    let fraction = mantissa.split_once('.').map_or(0, |(_, f)| f.len() as i32);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m,e)) => (m,e.parse::<i32>().ok()?),
+        None => (unsigned,0),
+    };
+    let fraction = match mantissa.split_once('.') {
+        Some((_,f)) => i32::try_from(f.len()).ok()?,
+        None => 0,
+    };
     let digits = mantissa.replace('.', "");
     let significant = digits.trim_start_matches('0');
-    if significant.is_empty() {
-        return (false, "0".into(), 0);
-    }
+    if significant.is_empty() { return Some((false,"0".into(),0)); }
     let normalized = significant.trim_end_matches('0');
-    let trailing = significant.len() - normalized.len();
-    (
-        negative,
-        normalized.into(),
-        exponent - fraction + trailing as i32,
-    )
+    let trailing = i32::try_from(significant.len() - normalized.len()).ok()?;
+    Some((negative, normalized.into(), exponent.checked_sub(fraction)?.checked_add(trailing)?))
+}
+
+#[derive(serde::Deserialize)]
+struct NumericCell {
+    #[serde(default)]
+    value: Option<Box<serde_json::value::RawValue>>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct NumericBody {
+    #[serde(default)]
+    cells: Vec<NumericCell>,
+}
+
+#[derive(serde::Deserialize)]
+struct NumericDocument {
+    #[serde(default)]
+    cells: Vec<NumericCell>,
+    #[serde(default)]
+    sheets: Vec<NumericBody>,
+}
+
+fn numeric_cell_loss(cell: &NumericCell) -> bool {
+    // Both values and caches must be readable before recalculation is allowed.
+    let Some(raw) = &cell.value else { return false };
+    let literal = raw.get().trim();
+    if !literal.starts_with(|c: char| c == '-' || c.is_ascii_digit()) { return false; }
+    let projected = literal.parse::<f64>().ok().and_then(serde_json::Number::from_f64);
+    let Some(projected) = projected else { return true };
+    match (decimal_literal(literal), decimal_literal(&projected.to_string())) {
+        (Some(original),Some(projected)) => original != projected,
+        _ => true,
+    }
+}
+
+// The normal Value parser retains u64 integers but rounds larger integers
+// and precise fractions. Inspect original tokens, including opaque metadata,
+// while skipping quoted strings and their escapes.
+fn parsed_number_loss(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 2,
+                    b'"' => { i += 1; break; }
+                    _ => i += 1,
+                }
+            }
+        } else if bytes[i] == b'-' || bytes[i].is_ascii_digit() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || matches!(bytes[i], b'.' | b'e' | b'E' | b'+' | b'-')) { i += 1; }
+            let literal = &content[start..i];
+            let parsed = serde_json::from_str::<Value>(literal).ok();
+            let Some(Value::Number(parsed)) = parsed else { return true };
+            if decimal_literal(literal) != decimal_literal(&parsed.to_string()) { return true; }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+pub(crate) fn inline_number_loss(content: &str) -> Result<Option<String>, String> {
+    if parsed_number_loss(content) { return Ok(Some("a numeric literal".into())); }
+    let document: NumericDocument = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    if document.sheets.is_empty() {
+        Ok(document.cells.iter().position(numeric_cell_loss).map(|i| format!("/cells/{i}/value")))
+    } else {
+        Ok(document.sheets.iter().enumerate().find_map(|(s,body)| {
+            body.cells.iter().position(numeric_cell_loss).map(|i| format!("/sheets/{s}/cells/{i}/value"))
+        }))
+    }
+}
+
+pub(crate) fn band_cell_number_loss(content: &str) -> Result<bool, String> {
+    if parsed_number_loss(content) { return Ok(true); }
+    let cell: NumericCell = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    Ok(numeric_cell_loss(&cell))
 }
 
 pub(crate) fn fingerprint(sheet: &Sheet) -> Result<[u8; 32], String> {

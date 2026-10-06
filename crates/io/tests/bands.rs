@@ -187,3 +187,43 @@ fn bands_cannot_silently_move_cells_into_a_merge_anchor() {
     assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
     assert!(bands::finish(&mut wb).is_err());
 }
+
+#[test]
+fn numeric_literals_beyond_u64_or_double_precision_keep_the_original() {
+    for number in ["90071992547409930000124", "0.10000000000000000001"] {
+        let source = format!(r#"{{"format":"visigrid-json","version":2,"sheets":[{{"name":"Precision","cells":[{{"row":0,"col":0,"value":{number}}}]}}]}}"#);
+        let (wb,layouts,active) = import_any(&source).unwrap();
+        assert!(wb.read_only_reason().is_some(), "unsafe numeric literal {number} remained editable");
+        assert_eq!(export_workbook(&wb,&layouts,active).unwrap(),source);
+    }
+}
+
+#[test]
+fn numeric_precision_is_checked_in_opaque_metadata_and_formula_caches() {
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Precision","cells":[{"row":0,"col":0,"formula":"=CUSTOM(1)","value":9007199254740993}]}]}"#;
+    let (wb,layouts,active) = import_any(source).unwrap();
+    assert!(wb.read_only_reason().is_some());
+    assert_eq!(export_workbook(&wb,&layouts,active).unwrap(),source);
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Precision","cells":[],"charts":[{"future_id":90071992547409930000124}]}]}"#;
+    let (wb,layouts,active) = import_any(source).unwrap();
+    assert!(wb.read_only_reason().is_some());
+    assert_eq!(export_workbook(&wb,&layouts,active).unwrap(),source);
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Text","cells":[{"row":0,"col":0,"value":"90071992547409930000124 \"quoted\" \\ 0.10000000000000000001"}]}]}"#;
+    let (wb,_,_) = import_any(source).unwrap();
+    wb.ensure_writable().unwrap();
+}
+
+#[test]
+fn raw_band_numbers_are_checked_before_json_value_rounding() {
+    use sha2::{Digest,Sha256};
+    for number in ["90071992547409930000124", "0.10000000000000000001"] {
+        let doc = format!(r#"{{"format":"visigrid-band","version":1,"sheet":0,"r0":0,"r1":2,"cells":[{{"row":0,"col":0,"value":{number}}}]}}"#);
+        let data = miniz_oxide::deflate::compress_to_vec(doc.as_bytes(),6);
+        let key: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+        let manifest = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Data","bands":[{"r0":0,"r1":2,"cells":1,"key":key,"bytes":data.len()}]}]}).to_string();
+        let (mut wb,_,_) = import_any(&manifest).unwrap();
+        assert!(bands::apply(&mut wb,&data,Some(&key)).is_err());
+        assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
+        assert!(bands::finish(&mut wb).is_err());
+    }
+}

@@ -22,7 +22,7 @@ native = [
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 rusqlite = { workspace = true, optional = true }
 visigrid-engine = { workspace = true }
 csv = { version = "1", optional = true }
