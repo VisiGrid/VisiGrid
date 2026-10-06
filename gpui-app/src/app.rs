@@ -3357,12 +3357,12 @@ impl Spreadsheet {
 
     /// Check if a column is hidden on the current sheet
     pub fn is_col_hidden(&self, col: usize) -> bool {
-        if let Some(layout) = self.preview_structure_layout() {
-            return layout.hidden_cols.contains(&col);
-        }
-        self.hidden_cols
-            .get(&self.cached_sheet_id)
-            .map_or(false, |set| set.contains(&col))
+        self.display_hidden_cols().is_some_and(|hidden| hidden.contains(&col))
+    }
+
+    pub(crate) fn display_hidden_cols(&self) -> Option<&std::collections::BTreeSet<usize>> {
+        self.preview_structure_layout().map(|layout| &layout.hidden_cols)
+            .or_else(|| self.hidden_cols.get(&self.cached_sheet_id))
     }
 
     /// Check if current sheet has any hidden rows

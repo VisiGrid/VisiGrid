@@ -1115,12 +1115,13 @@ mod tests {
         assert_eq!(wb.revision(), revision);
         wb.set_cell_value_tracked(summary, 1, 0, "='New Data'!A2+@");
         let revision = wb.revision();
-        assert!(apply_structure(&mut wb, &StructureOp::RenameSheet {
+        apply_structure(&mut wb, &StructureOp::RenameSheet {
             sheet: Some(0), name: "Next".into(),
-        }).is_err());
-        assert_eq!(wb.revision(), revision);
-        assert_eq!(wb.sheet(0).unwrap().name, "New Data");
-        assert_eq!(wb.sheet(summary).unwrap().get_raw(0, 0), "=('New Data'!A2+'New Data'!A3)*2");
+        }).unwrap();
+        assert!(wb.revision() > revision);
+        assert_eq!(wb.sheet(0).unwrap().name, "Next");
+        assert_eq!(wb.sheet(summary).unwrap().get_raw(0, 0), "=('Next'!A2+'Next'!A3)*2");
+        assert_eq!(wb.sheet(summary).unwrap().get_raw(1, 0), "=Next!A2+@");
     }
 
     #[test]

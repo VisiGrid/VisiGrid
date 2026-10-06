@@ -238,6 +238,7 @@ fn plan(sheet: &Sheet) -> Result<Plan, String> {
     let mut notes = BTreeSet::new();
     let mut skipped_disabled = 0;
     let mut skipped_bad = 0;
+    let mut skipped_structured = 0;
     // Lower Excel priorities win; VisiGrid applies later rules last.
     for rule in store.into_iter().rev() {
         if rule.ranges.len() > MAX_RANGES {
@@ -264,6 +265,13 @@ fn plan(sheet: &Sheet) -> Result<Plan, String> {
         }
         if parser::parse(&rule.predicate).is_err() {
             skipped_bad += 1;
+            continue;
+        }
+        if visigrid_engine::formula::structured::source_references(&rule.predicate)
+            .iter().any(|(start, end, _)| rule.predicate[*start..*end].contains('[')) {
+            // Excel does not accept structured references in CF formulas.
+            // Keep the native rule, but do not emit a rule Excel will repair.
+            skipped_structured += 1;
             continue;
         }
         let dxf = style_xml(rule.style.as_override(), &mut notes);
@@ -315,6 +323,9 @@ fn plan(sheet: &Sheet) -> Result<Plan, String> {
             "{skipped_bad} unparseable, inert rule(s) are omitted"
         ));
     }
+    if skipped_structured > 0 {
+        notes.insert(format!("{skipped_structured} rule(s) using Table structured references are omitted because Excel conditional formatting requires cell references"));
+    }
     result.warnings = notes
         .into_iter()
         .map(|n| format!("Conditional formatting on '{}': {n}.", sheet.name))
@@ -354,16 +365,24 @@ pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
     let mut ids = BTreeMap::new();
     let mut sheet_ids = Vec::new();
     for p in plans {
-        let mut refs = Vec::new();
-        for rule in p.rules {
+        let mut groups = Vec::<Vec<(usize, usize)>>::new();
+        let mut ranges = BTreeMap::new();
+        for (priority, rule) in p.rules.into_iter().enumerate() {
             let id = *ids.entry(rule.dxf.clone()).or_insert_with(|| {
                 let id = styles.len();
                 styles.push(rule.dxf);
                 id
             });
-            refs.push(id);
+            // rust_xlsxwriter groups repeated sqrefs, assigning priorities in
+            // first-range order. Retain the original global precedence as well
+            // as the style for each entry in that emitted order.
+            let group = *ranges.entry(rule.range).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[group].push((priority + 1, id));
         }
-        sheet_ids.push(refs);
+        sheet_ids.push(groups.into_iter().flatten().collect::<Vec<_>>());
     }
     let mut input = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut xml = String::new();
@@ -477,7 +496,7 @@ fn append_styles(xml: &str, styles: &[String]) -> Result<(Vec<u8>, usize), Strin
     }
     Ok((writer.into_inner(), base))
 }
-fn patch_rules(xml: &str, ids: &[usize], base: usize) -> Result<Vec<u8>, String> {
+fn patch_rules(xml: &str, ids: &[(usize, usize)], base: usize) -> Result<Vec<u8>, String> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Vec::new());
     let mut seen = BTreeSet::new();
@@ -489,12 +508,19 @@ fn patch_rules(xml: &str, ids: &[usize], base: usize) -> Result<Vec<u8>, String>
                     .and_then(|n| n.parse::<usize>().ok())
                     .and_then(|n| n.checked_sub(1))
                     .ok_or("Generated conditional-format priority is invalid.")?;
-                let id = ids
+                let (priority, id) = ids
                     .get(index)
                     .ok_or("Generated conditional-format priority is outside the plan.")?;
                 if !seen.insert(index) {
                     return Err("Generated conditional-format priority is duplicated.".into());
                 }
+                let attributes = e.attributes().map(|a| a.map(|a| (a.key.as_ref().to_vec(), a.value.into_owned())))
+                    .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+                e.clear_attributes();
+                for (key, value) in attributes {
+                    if key != b"priority" { e.push_attribute((key.as_slice(), value.as_slice())); }
+                }
+                e.push_attribute(("priority", priority.to_string().as_str()));
                 e.push_attribute(("dxfId", (base + id).to_string().as_str()));
             }
         }
@@ -526,7 +552,7 @@ mod tests {
         assert_eq!(base, 1);
         assert!(text.contains(r#"<dxfs count="2"><dxf><font><b/></font></dxf>"#));
         assert!(text.contains(r#"numFmtId="209" formatCode="0%""#));
-        let patched = patch_rules(r#"<worksheet><conditionalFormatting sqref="A1"><cfRule type="expression" priority="2"/><cfRule type="expression" priority="1"/></conditionalFormatting></worksheet>"#, &[0, 1], base).unwrap();
+        let patched = patch_rules(r#"<worksheet><conditionalFormatting sqref="A1"><cfRule type="expression" priority="2"/><cfRule type="expression" priority="1"/></conditionalFormatting></worksheet>"#, &[(1, 0), (2, 1)], base).unwrap();
         let patched = String::from_utf8(patched).unwrap();
         assert!(patched.contains(r#"priority="2" dxfId="2""#));
         assert!(patched.contains(r#"priority="1" dxfId="1""#));

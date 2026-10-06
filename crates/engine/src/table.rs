@@ -305,6 +305,11 @@ impl DataTable {
 
 pub fn validate_table_name(name: &str) -> Result<(), String> {
     crate::named_range::is_valid_name(name)?;
+    // Keep the existing Table naming policy while defined ranges can use
+    // Excel names such as Rate, Date and Value.
+    if crate::named_range::is_reserved_table_word(&name.to_ascii_uppercase()) {
+        return Err("Table name conflicts with a reserved function or error word.".into());
+    }
     if !name
         .chars()
         .enumerate()
@@ -408,6 +413,8 @@ mod tests {
             "C",
             "TRUE",
             "SUM",
+            "NA",
+            "DIV0",
             "9Sales",
             "Sales Data",
             "Sales.Data",

@@ -144,9 +144,18 @@ pub(crate) fn import(path: &Path, wb: &mut Workbook, warnings: &mut Vec<String>)
         }
     }
 }
+pub(crate) fn export_warnings(wb: &Workbook) -> Vec<String> {
+    wb.named_ranges().list().into_iter().filter_map(|name| {
+        visigrid_engine::named_range::is_valid_name(&name.name).err().map(|reason|
+            format!("Defined name '{}' is omitted from Excel export: {reason} Formulas using it may show an error in Excel; the native definition is unchanged.", name.name))
+    }).collect()
+}
+
 pub(crate) fn export(wb: &Workbook, out: &mut rust_xlsxwriter::Workbook) -> Result<(), String> {
     for name in wb.named_ranges().list() {
-        visigrid_engine::named_range::is_valid_name(&name.name)?;
+        // Legacy native files can retain identifiers that new creation rejects
+        // (notably R1C1 names). Report the omission in review and ExportResult.
+        if visigrid_engine::named_range::is_valid_name(&name.name).is_err() { continue; }
         if name.name.chars().count() > 255 || name.name.to_ascii_lowercase().starts_with("_xlnm.") {
             return Err(format!(
                 "Defined name '{}' is not a valid Excel user name",

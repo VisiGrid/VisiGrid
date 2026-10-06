@@ -3,6 +3,27 @@
 use super::*;
 use crate::cell::CellValue;
 use crate::formula::eval::{EvalResult, Value};
+use chrono::{Datelike, NaiveDate, NaiveTime, Timelike};
+
+// Date/time cells can retain their typed text. Interpret that text only for
+// date/time validation, with the same serial epoch used by DATE and TIME.
+fn date_time_text(kind: &ValidationType, text: &str) -> Option<f64> {
+    let text = text.trim();
+    match kind {
+        ValidationType::Date(_) => ["%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y"]
+            .iter()
+            .find_map(|format| NaiveDate::parse_from_str(text, format).ok())
+            .filter(|date| (1900..=9999).contains(&date.year()))
+            .map(|date| crate::formula::eval_helpers::date_to_serial(
+                date.year(), date.month() as i32, date.day() as i32)),
+        ValidationType::Time(_) => ["%H:%M", "%H:%M:%S%.f", "%I:%M %p", "%I:%M:%S%.f %p"]
+            .iter()
+            .find_map(|format| NaiveTime::parse_from_str(&text.to_ascii_uppercase(), format).ok())
+            .filter(|time| time.nanosecond() < 1_000_000_000)
+            .map(|time| (time.num_seconds_from_midnight() as f64 + time.nanosecond() as f64 / 1e9) / 86_400.0),
+        _ => None,
+    }
+}
 
 pub(crate) fn invalid(rule: &ValidationRule, reason: impl Into<String>) -> ValidationResult {
     ValidationResult::Invalid {
@@ -166,6 +187,12 @@ pub(crate) fn validate_rule(
             };
             let number = match value {
                 Value::Number(n) if n.is_finite() => *n,
+                Value::Text(text) if matches!(numeric, ValidationType::Date(_) | ValidationType::Time(_)) => {
+                    match date_time_text(numeric, text) {
+                        Some(n) => n,
+                        None => return invalid(rule, format!("Value must be a {type_name}")),
+                    }
+                }
                 _ => return invalid(rule, format!("Value must be a {type_name}")),
             };
             if matches!(numeric, ValidationType::WholeNumber(_)) && number.fract() != 0.0 {

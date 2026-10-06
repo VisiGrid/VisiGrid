@@ -65,6 +65,7 @@ pub fn render_find_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> i
                 .text_sm()
                 .child(title)
         )
+        .child(div().text_xs().text_color(text_muted).child("Search visible cells; hidden rows and columns are excluded."))
         // Find input row
         .child(
             div()

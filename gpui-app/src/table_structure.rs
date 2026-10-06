@@ -63,6 +63,36 @@ impl StructureLayout {
         Ok(next)
     }
 }
+/// Sparse layout only: ordinary row history must not capture every shifted cell.
+#[derive(Clone, Debug)]
+pub(crate) struct RowLayoutHistory {
+    pub sheet: SheetId,
+    pub before: StructureLayout,
+    pub after: StructureLayout,
+}
+impl RowLayoutHistory {
+    pub(crate) fn capture(mut before: StructureLayout, sheet: &Sheet, step: StructureStep) -> Result<Self, String> {
+        before.hidden_rows = sheet.manual_hidden_rows();
+        let after = before.shifted(sheet, &[step])?;
+        Ok(Self { sheet: sheet.id, before, after })
+    }
+
+    pub(crate) fn apply(&self, wb: &mut Workbook, sheet_index: usize, undo: bool) -> Result<&StructureLayout, String> {
+        let layout = if undo { &self.before } else { &self.after };
+        let sheet = wb.sheet_mut(sheet_index).ok_or("Sheet no longer exists")?;
+        if sheet.id != self.sheet { return Err("Row history belongs to another sheet".into()); }
+        if sheet.manual_hidden_rows() != layout.hidden_rows {
+            sheet.set_manual_hidden_rows(layout.hidden_rows.clone())?;
+        }
+        // Plain row undo restores cells directly. Rebuild dependencies before
+        // recalculating SUBTOTAL and readers on other sheets.
+        if undo && (!self.before.hidden_rows.is_empty() || !self.after.hidden_rows.is_empty()) {
+            wb.rebuild_dep_graph();
+            wb.recompute_full_ordered();
+        }
+        Ok(layout)
+    }
+}
 #[derive(Clone, Debug)]
 pub(crate) struct TableStructureHistory {
     pub commit: GuardedStructureCommit,
@@ -133,6 +163,17 @@ impl Spreadsheet {
         self.col_widths.insert(id, layout.widths.clone());
         self.hidden_rows.insert(id, layout.hidden_rows.clone());
         self.hidden_cols.insert(id, layout.hidden_cols.clone());
+    }
+    pub(crate) fn replay_row_layout(&mut self, history: Option<&RowLayoutHistory>, sheet_index: usize, undo: bool, cx: &mut Context<Self>) {
+        let Some(history) = history else { return; };
+        let result = self.workbook.update(cx, |wb, _| history.apply(wb, sheet_index, undo).map(|_| ()));
+        if let Err(error) = result {
+            self.status_message = Some(error);
+            return;
+        }
+        if let Some(sheet) = self.wb(cx).sheet(sheet_index) {
+            self.install_structure_layout(sheet.id, if undo { &history.before } else { &history.after });
+        }
     }
     pub(crate) fn validate_structure_layout(
         &self,
@@ -574,6 +615,27 @@ mod tests {
         assert!(layout
             .shifted(b.active_sheet(), &[step(Axis::Row, 0, usize::MAX, false)])
             .is_err());
+    }
+    #[test]
+    fn ordinary_sheet_hidden_rows_shift_with_layout_and_restore_deleted_hides() {
+        let mut before = Workbook::new();
+        before.active_sheet_mut().set_manual_hidden_rows([2, 8].into()).unwrap();
+        let layout = StructureLayout { heights: [(2, 40.0)].into(), ..Default::default() };
+        for delete in [false, true] {
+            let history = RowLayoutHistory::capture(layout.clone(), before.active_sheet(), step(Axis::Row, 2, 1, delete)).unwrap();
+            let mut candidate = before.clone();
+            candidate.structural_edit(0, Axis::Row, 2, 1, delete).unwrap();
+            assert_eq!(candidate.active_sheet().manual_hidden_rows(), history.after.hidden_rows);
+            assert_eq!(history.after.hidden_rows, if delete { [7].into() } else { [3, 9].into() });
+            if delete { candidate.active_sheet_mut().insert_rows(2, 1); }
+            else { candidate.active_sheet_mut().delete_rows(2, 1); }
+            history.apply(&mut candidate, 0, true).unwrap();
+            assert_eq!(candidate.active_sheet().manual_hidden_rows(), history.before.hidden_rows);
+            assert_eq!(history.before.heights.get(&2), Some(&40.0));
+            candidate.structural_edit(0, Axis::Row, 2, 1, delete).unwrap();
+            history.apply(&mut candidate, 0, false).unwrap();
+            assert_eq!(candidate.active_sheet().manual_hidden_rows(), history.after.hidden_rows);
+        }
     }
     #[test]
     fn structural_history_does_not_break_earlier_cell_undo_after_column_ids_advance() {

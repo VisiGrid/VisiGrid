@@ -155,7 +155,8 @@ fn sheet_lifecycle_refuses_invalid_last_recovery_and_unparsed_changes() {
     let second = wb.add_sheet_named("Other").unwrap();
     wb.set_cell_value_tracked(second, 0, 0, "=Data!A1+@");
     let revision = wb.revision();
-    assert!(wb.prepare_sheet_delete(SheetId(1)).is_err());
+    let (deleted, _) = wb.prepare_sheet_delete(SheetId(1)).unwrap();
+    assert_eq!(deleted.sheet(0).unwrap().get_raw(0, 0), "=#REF!+@");
     assert_eq!(wb.revision(), revision);
     assert_eq!(wb.sheet_count(), 2);
     wb.active_sheet_mut().read_only_reason = Some("Recovery".into());
@@ -213,5 +214,40 @@ fn sheet_lifecycle_handles_quoted_sheet_names_and_literal_text() {
     let (candidate, _) = wb.prepare_sheet_delete(id).unwrap();
     assert_eq!(candidate.sheets()[0].get_raw(0, 0), "=#REF!&\"O'Brien!A1\"");
     wb.set_cell_value_tracked(0, 1, 0, "='O''Brien'!A1+@");
-    assert!(wb.prepare_sheet_delete(id).is_err());
+    let (candidate, _) = wb.prepare_sheet_delete(id).unwrap();
+    assert_eq!(candidate.sheets()[0].get_raw(1, 0), "=#REF!+@");
+}
+
+#[test]
+fn existing_cycles_survive_sheet_changes_and_structural_history() {
+    use visigrid_engine::{structural::Axis, workbook::StructureStep};
+    let mut wb = filtered();
+    let other = wb.add_sheet_named("Other").unwrap();
+    let other_id = wb.sheet(other).unwrap().id;
+    wb.set_cell_value_tracked(other, 5, 0, "=B6");
+    wb.set_cell_value_tracked(other, 5, 1, "=A6");
+    assert_eq!(wb.sheet(other).unwrap().get_display(5, 0), "#CYCLE!");
+    let (mut added, add) = wb.prepare_sheet_add(Some("New")).unwrap();
+    add.replay(&mut added, true).unwrap();
+    add.replay(&mut added, false).unwrap();
+    let (mut renamed, rename) = wb.prepare_sheet_rename(other_id, "Other", "Renamed").unwrap();
+    rename.replay(&mut renamed, true).unwrap();
+    rename.replay(&mut renamed, false).unwrap();
+    let (mut deleted, delete) = wb.prepare_sheet_delete(other_id).unwrap();
+    delete.replay(&mut deleted, true).unwrap();
+    assert_eq!(deleted.sheet(other).unwrap().get_display(5, 0), "#CYCLE!");
+    delete.replay(&mut deleted, false).unwrap();
+    for index in [0, other] {
+        let (mut edited, edit) = wb.prepare_guarded_structure(index, vec![StructureStep {
+            axis: Axis::Row, at: 1, count: 1, delete: false,
+        }]).unwrap();
+        edit.replay(&mut edited, true).unwrap();
+        assert_eq!(edited.sheet(other).unwrap().get_raw(5, 0), "=B6");
+        edit.replay(&mut edited, false).unwrap();
+        let row = if index == other { 6 } else { 5 };
+        assert_eq!(edited.sheet(other).unwrap().get_display(row, 0), "#CYCLE!");
+    }
+    // An unrelated old cycle must not hide a new cycle on rename.
+    wb.set_cell_value_tracked(0, 12, 0, "=Future!A13");
+    assert!(wb.prepare_sheet_rename(wb.active_sheet_id(), "Data", "Future").is_err());
 }

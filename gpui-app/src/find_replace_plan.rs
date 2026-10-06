@@ -165,6 +165,7 @@ pub(super) fn search(
     index: usize,
     rows: &RowView,
     hidden: Option<&BTreeSet<usize>>,
+    hidden_cols: Option<&BTreeSet<usize>>,
     query: &str,
 ) -> Result<Vec<MatchHit>, String> {
     if query.is_empty() {
@@ -173,7 +174,8 @@ pub(super) fn search(
     let reference = reference_query(query);
     let mut hits = Vec::new();
     for ((row, col), cell) in sheet.cells_iter() {
-        if visible_row(rows, hidden, row).is_none() || sheet.is_merge_hidden(row, col) {
+        if visible_row(rows, hidden, row).is_none() || hidden_cols.is_some_and(|h| h.contains(&col))
+            || sheet.is_merge_hidden(row, col) {
             continue;
         }
         let (kind, source): (_, Arc<str>) = match cell.value() {
@@ -212,6 +214,7 @@ pub(super) fn replacements(
     index: usize,
     rows: &RowView,
     hidden: Option<&BTreeSet<usize>>,
+    hidden_cols: Option<&BTreeSet<usize>>,
     hits: &[MatchHit],
     replacement: &str,
 ) -> Result<(Vec<TableCellWrite>, usize), String> {
@@ -224,6 +227,7 @@ pub(super) fn replacements(
         if hit.sheet != index
             || hit.sheet_id != sheet.id
             || visible_row(rows, hidden, hit.row).is_none()
+            || hidden_cols.is_some_and(|h| h.contains(&hit.col))
         {
             return Err("Search results changed or are hidden. Search again before replacing. Nothing was changed.".into());
         }

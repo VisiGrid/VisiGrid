@@ -173,6 +173,16 @@ impl Spreadsheet {
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };
         let print_setup_before = self.sheet(cx).print_setup.clone();
+        let row_layout = match crate::table_structure::RowLayoutHistory::capture(
+            self.structure_layout(self.sheet(cx).id), self.sheet(cx),
+            visigrid_engine::workbook::StructureStep {
+                axis: visigrid_engine::structural::Axis::Row, at: at_row, count, delete: false,
+            },
+        ) {
+            Ok(layout) => Some(Box::new(layout)),
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+
 
         // Perform the insert through the engine's structural entry point so
         // formulas, validations, and named ranges follow the moved cells.
@@ -210,10 +220,15 @@ impl Spreadsheet {
             }
         }
 
+        if let Some(layout) = &row_layout {
+            self.install_structure_layout(self.sheet(cx).id, &layout.after);
+        }
+
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::RowsInserted {
             sheet_index,
             table_rows,
+            row_layout,
             at_row,
             count,
             print_setup_before,
@@ -250,6 +265,16 @@ impl Spreadsheet {
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };
         let print_setup_before = self.sheet(cx).print_setup.clone();
+        let row_layout = match crate::table_structure::RowLayoutHistory::capture(
+            self.structure_layout(self.sheet(cx).id), self.sheet(cx),
+            visigrid_engine::workbook::StructureStep {
+                axis: visigrid_engine::structural::Axis::Row, at: at_row, count, delete: true,
+            },
+        ) {
+            Ok(layout) => Some(Box::new(layout)),
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+
 
         // Capture cells to be deleted for undo
         // Only cells that exist can be deleted, so ask the sparse store rather
@@ -298,10 +323,15 @@ impl Spreadsheet {
             self.row_view.delete_row(at_row + i);
         }
 
+        if let Some(layout) = &row_layout {
+            self.install_structure_layout(self.sheet(cx).id, &layout.after);
+        }
+
         // Record undo entry
         self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
             sheet_index,
             table_rows,
+            row_layout,
             at_row,
             count,
             deleted_cells,

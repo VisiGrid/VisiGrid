@@ -120,7 +120,7 @@ impl Spreadsheet {
         }
     }
 
-    /// Search only displayed rows; hits retain canonical cell identities.
+    /// Search only displayed cells; hits retain canonical cell identities.
     pub(crate) fn perform_find(&mut self, cx: &mut Context<Self>) {
         self.sync_table_view(cx);
         self.find_index = 0;
@@ -129,6 +129,7 @@ impl Spreadsheet {
             self.sheet_index(cx),
             &self.row_view,
             self.display_hidden_rows(),
+            self.display_hidden_cols(),
             &self.find_input,
         ) {
             Ok(hits) => {
@@ -136,10 +137,10 @@ impl Spreadsheet {
                 self.status_message = if self.find_input.is_empty() {
                     None
                 } else if self.find_results.is_empty() {
-                    Some("No matches in visible rows".into())
+                    Some("No matches in visible cells".into())
                 } else {
                     Some(format!(
-                        "Found {} matches in visible rows",
+                        "Found {} matches in visible cells",
                         self.find_results.len()
                     ))
                 };
@@ -180,6 +181,7 @@ impl Spreadsheet {
             return;
         }
         let Some(row) = plan::visible_row(&self.row_view, self.display_hidden_rows(), hit.row)
+            .filter(|_| !self.is_col_hidden(hit.col))
         else {
             self.status_message =
                 Some("This match is now hidden. Search again to update the results.".into());
@@ -189,7 +191,7 @@ impl Spreadsheet {
         self.view_state.select_cell(row, hit.col);
         self.ensure_visible(cx);
         self.status_message = Some(format!(
-            "Match {} of {} in visible rows",
+            "Match {} of {} in visible cells",
             self.find_index + 1,
             self.find_results.len()
         ));
@@ -281,6 +283,7 @@ impl Spreadsheet {
             self.sheet_index(cx),
             &self.row_view,
             self.display_hidden_rows(),
+            self.display_hidden_cols(),
             hits,
             &self.replace_input,
         ) {

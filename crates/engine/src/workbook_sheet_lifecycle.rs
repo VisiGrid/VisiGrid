@@ -20,7 +20,7 @@ impl Workbook {
         } else {
             candidate.add_sheet()
         };
-        candidate.validate_sheet_lifecycle()?;
+        candidate.validate_sheet_lifecycle(self)?;
         let mut commit = self.capture_sheet_change(&candidate, index, true)?;
         commit.sheet = candidate.sheets[index].id;
         candidate.bump_revision_for_structure();
@@ -66,17 +66,17 @@ impl Workbook {
             *source = result;
             Ok(changed)
         })?;
-        candidate.validate_sheet_lifecycle()?;
+        candidate.validate_sheet_lifecycle(self)?;
         let mut commit = self.capture_sheet_change(&candidate, index, false)?;
         commit.sheet = id;
         candidate.bump_revision_for_structure();
         Ok((candidate, commit))
     }
 
-    fn validate_sheet_lifecycle(&mut self) -> Result<(), String> {
+    fn validate_sheet_lifecycle(&mut self, before: &Workbook) -> Result<(), String> {
         self.rebuild_dep_graph();
         let report = self.recompute_full_ordered();
-        if report.had_cycles
+        if (report.had_cycles && self.has_new_cycles(before))
             || report
                 .errors
                 .iter()

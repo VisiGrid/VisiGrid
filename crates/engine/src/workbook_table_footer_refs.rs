@@ -75,8 +75,16 @@ impl Movement {
         } else {
             format!("={source}")
         };
-        let mut expr = parser::parse(&input)
-            .map_err(|_| "A formula cannot be checked for totals-row references. Resolve it before moving the footer.".to_string())?;
+        let mut expr = match parser::parse(&input) {
+            Ok(expr) => expr,
+            Err(_) => {
+                let result = crate::formula::source_refs::rewrite(source, |expr| self.adjust(expr, local))?;
+                let changed = result != *source;
+                *guarded |= changed;
+                *source = result;
+                return Ok(changed);
+            }
+        };
         // Explicit OFFSET bases follow the moved cells. Constructed addresses
         // and offsets retain their authored meaning; runtime dependencies are
         // rebuilt/settled on the final candidate, with guarded history even if
@@ -107,9 +115,25 @@ impl Movement {
 }
 
 impl Workbook {
-    pub(super) fn validate_footer_relocation(&mut self) -> Result<(), String> {
+    pub(super) fn validate_footer_relocation(&mut self, before: &Workbook, id: TableId) -> Result<(), String> {
         let report = self.recompute_full_ordered();
-        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+        let new_cycles = report.had_cycles && {
+            let mut allowed = before.dep_graph.find_cycle_members();
+            if let (Some((sheet, old)), Some((_, new))) = (before.table(id), self.table(id)) {
+                if let (Some(from), Some(to)) = (old.totals_row(), new.totals_row()) {
+                    allowed = allowed.into_iter().map(|mut cell| {
+                        if cell.sheet == sheet && cell.row == from
+                            && (old.range.start_col..=old.range.end_col).contains(&cell.col)
+                            && (new.range.start_col..=new.range.end_col).contains(&cell.col) {
+                            cell.row = to;
+                        }
+                        cell
+                    }).collect();
+                }
+            }
+            !self.dep_graph.find_cycle_members().is_subset(&allowed)
+        };
+        if new_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
             return Err("Moving totals would create a cycle or an unsettled calculation. Nothing was changed.".into());
         }
         for sheet in &self.sheets {

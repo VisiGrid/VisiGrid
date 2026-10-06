@@ -415,3 +415,48 @@ fn validation_preview_does_not_invoke_host_custom_functions() {
     assert!(wb.validate_cell_input(0, 0, 0, "2").is_invalid());
     assert_eq!(CALLS.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn typed_date_and_time_validation_accepts_calendar_text_and_checks_bounds() {
+    let mut wb = book();
+    for (row, kind, valid, invalid) in [
+        (0, ValidationType::Date(bound("DATE(2024,2,29)")),
+         vec!["1/15/2024", "2024-01-15", "2024/2/29", "45306"],
+         vec!["2024-03-01", "2/30/2024", "2/29/2023", "1/32/2024", "text"]),
+        (1, ValidationType::Time(bound("TIME(13,0,0)")),
+         vec!["12:30", "12:30:15", "12:30 PM", "12:30 am", "0.5"],
+         vec!["14:00", "24:00", "12:60", "13:00 PM", "text"]),
+    ] {
+        wb.active_sheet_mut().set_cell_validation(row, 0, ValidationRule::new(kind));
+        for input in valid {
+            assert!(wb.validate_cell_input(0, row, 0, input).is_valid(), "{input}");
+            assert!(wb.active_sheet().validate_cell_input(row, 0, input).is_valid(), "{input}");
+            wb.set_cell_value_tracked(0, row, 0, input);
+            assert!(wb.validate_cell(0, row, 0).is_valid(), "stored {input}");
+        }
+        for input in invalid {
+            assert!(wb.validate_cell_input(0, row, 0, input).is_invalid(), "{input}");
+        }
+    }
+}
+
+#[test]
+fn structural_edits_keep_full_grid_validation_ranges_and_exclusions_in_bounds() {
+    use visigrid_engine::{sheet::{NUM_ROWS, NUM_COLS}, structural::Axis};
+    for (axis, range, last) in [
+        (Axis::Row, CellRange::new(0, 0, NUM_ROWS - 1, 0), CellRange::single(NUM_ROWS - 1, 2)),
+        (Axis::Col, CellRange::new(0, 0, 0, NUM_COLS - 1), CellRange::single(2, NUM_COLS - 1)),
+    ] {
+        let mut wb = Workbook::new();
+        let rule = ValidationRule::decimal(NumericConstraint::between(0.0, 10.0));
+        wb.active_sheet_mut().validations.set(range, rule.clone());
+        wb.active_sheet_mut().validations.set(last, rule);
+        wb.active_sheet_mut().validations.exclude(last);
+        wb.structural_edit(0, axis, 1, 1, false).unwrap();
+        let validations = &wb.active_sheet().validations;
+        assert!(validations.effective_ranges().is_ok());
+        assert_eq!(validations.len(), 1);
+        assert_eq!(*validations.iter().next().unwrap().0, range);
+        assert_eq!(validations.exclusions_iter().count(), 0);
+    }
+}

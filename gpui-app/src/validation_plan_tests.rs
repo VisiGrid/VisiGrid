@@ -641,3 +641,26 @@ fn formula_list_editor_preserves_commas_and_table_sources() {
         ValidationType::List(ListSource::Inline(vec!["Yes".into(), "No".into()]))
     );
 }
+
+#[test]
+fn editing_relative_source_reanchors_at_the_selected_cell_but_noop_keeps_authored_rule() {
+    let mut wb = fixture(true);
+    let mut original = ValidationRule::list_range("=$H4:$H6");
+    original.reference_origin = Some((3, 2));
+    wb.active_sheet_mut().validations.set(CellRange::new(3, 2, 6, 2), original.clone());
+    let draft = Draft::new(&wb, vec![CellRange::single(5, 2)], (5, 2)).unwrap();
+    let mut state = ValidationDialogState::default();
+    state.open_draft(draft.clone(), Some(&original), true);
+    assert_eq!(state.list_source, "=$H6:$H8");
+    assert_eq!(state.build_rule().unwrap(), Some(original));
+    state.list_source = "=$I6:$I8".into();
+    let edited = state.build_rule().unwrap().unwrap();
+    assert_eq!(edited.reference_origin, Some((5, 2)));
+    let commit = draft.prepare(&wb, ValidationEdit::Set(edited)).unwrap().unwrap();
+    commit.apply(&mut wb, true).unwrap();
+    assert_eq!(wb.active_sheet().validations.get(5, 2).unwrap().at(5, 2).rule_type,
+        ValidationType::List(ListSource::Range("=$I6:$I8".into())));
+    assert_eq!(wb.active_sheet().validations.get(3, 2).unwrap().at(3, 2).rule_type,
+        ValidationType::List(ListSource::Range("=$H4:$H6".into())));
+    commit.apply(&mut wb, false).unwrap();
+}

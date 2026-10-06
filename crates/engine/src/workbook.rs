@@ -769,6 +769,12 @@ impl Workbook {
         &self.dep_graph
     }
 
+    /// Whether a recalculated candidate adds cycle members. Existing cycles
+    /// are a supported saved state and must not block unrelated transactions.
+    pub fn has_new_cycles(&self, before: &Workbook) -> bool {
+        !self.dep_graph.find_cycle_members().is_subset(&before.dep_graph.find_cycle_members())
+    }
+
     /// A formula's single-cell references and its ranges, whole rows and
     /// columns included. Ranges stay ranges (#29): the graph indexes them
     /// instead of holding an edge per cell, which made a running total

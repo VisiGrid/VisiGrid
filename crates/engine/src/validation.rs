@@ -798,10 +798,16 @@ impl ValidationStore {
     /// same grid-line semantics as merges and formula ranges; a range wholly
     /// inside a deleted span is dropped.
     pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) {
+        let limit = if is_row { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
+        let shift = |s, e| {
+            crate::structural::shift_span(s, e, at, count, delete)
+                .filter(|(start, _)| *start < limit)
+                .map(|(start, end)| (start, end.min(limit - 1)))
+        };
         let mut shifted: BTreeMap<CellRange, ValidationRule> = BTreeMap::new();
         for (range, mut rule) in std::mem::take(&mut self.rules) {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
-            let span = crate::structural::shift_span(s, e, at, count, delete);
+            let span = shift(s, e);
             if let Some((ns, ne)) = span {
                 let mut r = range;
                 if is_row {
@@ -827,7 +833,7 @@ impl ValidationStore {
         let mut ex = BTreeSet::new();
         for range in std::mem::take(&mut self.exclusions) {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
-            if let Some((ns, ne)) = crate::structural::shift_span(s, e, at, count, delete) {
+            if let Some((ns, ne)) = shift(s, e) {
                 let mut r = range;
                 if is_row { r.start_row = ns; r.end_row = ne; } else { r.start_col = ns; r.end_col = ne; }
                 ex.insert(r);

@@ -435,6 +435,8 @@ pub struct ValidationDialogState {
     pub has_existing_validation: bool,
     pub(crate) draft: Option<crate::validation_ui::plan::Draft>,
     pub original_rule: Option<visigrid_engine::validation::ValidationRule>,
+    /// Stored source before rebasing its editable fields to the selected cell.
+    authored_rule: Option<visigrid_engine::validation::ValidationRule>,
     /// Choosing Any Value explicitly clears an imported unsupported rule;
     /// merely opening and applying its common options must preserve the type.
     pub type_changed: bool,
@@ -444,7 +446,10 @@ pub struct ValidationDialogState {
 impl ValidationDialogState {
     pub(crate) fn open_draft(&mut self, draft: crate::validation_ui::plan::Draft, rule: Option<&visigrid_engine::validation::ValidationRule>, has_existing_rules: bool) {
         self.reset();
-        if let Some(rule) = rule { self.load_from_rule(rule); }
+        if let Some(rule) = rule {
+            self.load_from_rule(&rule.at(draft.anchor.0, draft.anchor.1));
+            self.authored_rule = Some(rule.clone());
+        }
         self.anchor_excluded = draft.anchor_excluded();
         self.has_existing_validation = has_existing_rules;
         self.target_range = draft.ranges.first().copied();
@@ -578,8 +583,14 @@ impl ValidationDialogState {
                 }
             }
         };
-        let mut rule = self.original_rule.clone().unwrap_or_else(|| ValidationRule::new(kind.clone()));
-        rule.rule_type = kind;
+        let unchanged_source = self.original_rule.as_ref().is_some_and(|rule| rule.rule_type == kind);
+        let mut rule = if unchanged_source {
+            self.authored_rule.clone().or_else(|| self.original_rule.clone()).unwrap()
+        } else {
+            let mut rule = self.original_rule.clone().unwrap_or_else(|| ValidationRule::new(kind.clone()));
+            rule.rule_type = kind;
+            rule
+        };
         rule.ignore_blank = self.ignore_blank;
         rule.show_dropdown = self.show_dropdown;
         Ok(Some(rule))

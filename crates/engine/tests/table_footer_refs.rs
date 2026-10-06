@@ -427,3 +427,37 @@ fn fixed_pivot_source_confined_to_footer_moves_and_replays_with_it() {
     wb.refresh_pivot(pivot).unwrap();
     assert!(!wb.is_pivot_stale(wb.find_pivot(pivot).unwrap().1));
 }
+
+#[test]
+fn unsupported_formulas_and_predicates_do_not_block_unrelated_footer_movement() {
+    let (mut wb, id) = book();
+    let other = wb.add_sheet_named("Other").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "=UNSUPPORTED(@)");
+    wb.set_cell_value_tracked(other, 1, 0, "='Sales Data'!$B$5#+@A1");
+    wb.active_sheet_mut().cond_formats.add(vec![CellRange::single(12, 8)], "=UNSUPPORTED(@)", CondStyle::Named(visigrid_engine::cell::CellStyle::Warning));
+    let commit = wb.append_table_rows(id, 1, &[]).unwrap();
+    assert_eq!(wb.sheet(other).unwrap().get_raw(0, 0), "=UNSUPPORTED(@)");
+    assert_eq!(wb.sheet(other).unwrap().get_raw(1, 0), "='Sales Data'!$B$6#+@A1");
+    wb.apply_table_commit(&commit, true).unwrap();
+    assert_eq!(wb.sheet(other).unwrap().get_raw(1, 0), "='Sales Data'!$B$5#+@A1");
+}
+
+#[test]
+fn shrinking_width_keeps_a_released_footer_cycle_at_its_stored_position() {
+    let (mut wb, id) = book();
+    wb.set_table_total(id, 1, TableTotal {
+        function: Some("custom".into()), formula: Some("=B5".into()), label: None,
+    }).unwrap();
+    let other = wb.add_sheet_named("Other").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "='Sales Data'!A5");
+    let commit = wb.resize_table(id, TableRange {
+        start_row: 0, start_col: 0, end_row: 4, end_col: 0,
+    }).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "#CYCLE!");
+    assert_eq!(wb.sheet(other).unwrap().get_raw(0, 0), "='Sales Data'!A6");
+    wb.apply_table_commit(&commit, true).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "#CYCLE!");
+    assert_eq!(wb.sheet(other).unwrap().get_raw(0, 0), "='Sales Data'!A5");
+    wb.apply_table_commit(&commit, false).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "#CYCLE!");
+}

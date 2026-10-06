@@ -305,3 +305,66 @@ fn empty_differential_border_edges_clear_only_the_present_sides() {
     assert_eq!(styles[2].bold, Some(false));
     assert!(styles.iter().all(|dxf| !dxf.has_unmapped));
 }
+
+#[test]
+fn interleaved_ranges_keep_their_styles_and_global_precedence() {
+    let mut wb = Workbook::new();
+    for (col, bold, italic) in [(0, Some(true), None), (1, None, Some(true)), (0, Some(false), None)] {
+        wb.active_sheet_mut().cond_formats.add(vec![CellRange::new(0, col, 2, col)], "=TRUE",
+            CondStyle::Inline(CellFormatOverride { bold, italic, ..Default::default() }));
+    }
+    let (loaded, _, _) = roundtrip(&wb);
+    for col in 0..2 {
+        let expected = wb.active_sheet().cond_formats.override_for_cell(0, col, wb.active_sheet());
+        let actual = loaded.active_sheet().cond_formats.override_for_cell(0, col, loaded.active_sheet());
+        assert_eq!(actual, expected, "column {col}");
+    }
+}
+
+#[test]
+fn structured_conditional_rules_warn_instead_of_exporting_invalid_excel_syntax() {
+    let mut wb = Workbook::new();
+    wb.active_sheet_mut().cond_formats.add(vec![CellRange::new(0, 0, 2, 0)], "=Sales[Amount]>0",
+        CondStyle::Inline(CellFormatOverride { bold: Some(true), ..Default::default() }));
+    let (bytes, report) = xlsx::export_to_buffer_with_order(&wb, None, ExportOrder::Stored).unwrap();
+    assert!(!xml(&bytes, "xl/worksheets/sheet1.xml").contains("<conditionalFormatting"));
+    assert!(report.warnings.iter().any(|w| w.contains("structured references")));
+    assert_eq!(wb.active_sheet().cond_formats.iter().count(), 1);
+}
+
+#[test]
+fn interleaved_overlapping_ranges_keep_global_rule_precedence() {
+    let mut wb = Workbook::new();
+    for (col, bold, italic) in [(0, Some(true), None), (1, Some(false), None), (0, None, Some(true))] {
+        wb.active_sheet_mut().cond_formats.add(vec![CellRange::new(0, col, 2, col + 1)], "=TRUE",
+            CondStyle::Inline(CellFormatOverride { bold, italic, ..Default::default() }));
+    }
+    let (loaded, _, _) = roundtrip(&wb);
+    for col in 0..3 {
+        assert_eq!(loaded.active_sheet().cond_formats.override_for_cell(0, col, loaded.active_sheet()),
+            wb.active_sheet().cond_formats.override_for_cell(0, col, wb.active_sheet()), "column {col}");
+    }
+}
+
+#[test]
+fn row_insert_under_full_column_rules_still_saves_and_reopens_in_every_format() {
+    use visigrid_engine::{structural::Axis, validation::{NumericConstraint, ValidationRule}};
+    use visigrid_io::{native, json};
+    let mut wb = Workbook::new();
+    let range = CellRange::new(0, 0, NUM_ROWS - 1, 0);
+    wb.active_sheet_mut().validations.set(range, ValidationRule::decimal(NumericConstraint::between(0.0, 10.0)));
+    wb.active_sheet_mut().cond_formats.add(vec![range], "=A1>0", CondStyle::Named(CellStyle::Warning));
+    wb.structural_edit(0, Axis::Row, 1, 1, false).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("full-column.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let native_copy = native::load_workbook(&path).unwrap();
+    let (excel_copy, _, _) = roundtrip(&wb);
+    let encoded = json::export_workbook(&wb, &[], 0).unwrap();
+    let (json_copy, _, _) = json::import_any(&encoded).unwrap();
+    for copy in [&native_copy, &excel_copy, &json_copy] {
+        assert_eq!(*copy.active_sheet().validations.iter().next().unwrap().0, range);
+        assert!(copy.active_sheet().validations.effective_ranges().is_ok());
+        assert_eq!(copy.active_sheet().cond_formats.iter().next().unwrap().ranges, vec![range]);
+    }
+}

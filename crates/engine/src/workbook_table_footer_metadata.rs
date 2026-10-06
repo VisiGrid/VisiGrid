@@ -74,6 +74,19 @@ fn sources(rule: &ValidationRule) -> Vec<String> {
     });
     result
 }
+fn rebase(source: &str, row: i32, col: i32) -> Result<String, String> {
+    let input = format!("={}", source.trim_start_matches('='));
+    if parser::parse(&input).is_ok() {
+        return Ok(parser::adjust_formula_refs(source, row, col));
+    }
+    let mut result = source.to_owned();
+    for (span, expr) in crate::formula::source_refs::references(source)?.into_iter().rev() {
+        let input = parser::format_parsed_expr(&expr);
+        let adjusted = parser::adjust_formula_refs(&input, row, col);
+        result.replace_range(span, adjusted.trim_start_matches('='));
+    }
+    Ok(result)
+}
 impl Movement {
     fn source_range(&self) -> CellRange {
         CellRange::new(
@@ -90,8 +103,13 @@ impl Movement {
             ..self.source_range()
         }
     }
-    fn mapped(&self, r: CellRange, local: bool) -> Option<CellRange> {
-        if !local {
+    fn spanning(&self, range: CellRange) -> bool {
+        range.start_row < self.footer.start_row && range.end_row > self.footer.end_row
+    }
+    fn mapped(&self, r: CellRange, local: bool, coverage: CellRange) -> Option<CellRange> {
+        // A rule covering both sides of the footer describes worksheet space,
+        // like A:A. Moving a footer must not punch a hole in that coverage.
+        if !local || self.spanning(coverage) {
             return Some(r);
         }
         if self.source_range().contains(r.start_row, r.start_col) {
@@ -241,10 +259,12 @@ impl Movement {
                 } else {
                     format!("={source}")
                 };
-                let expr = parser::parse(&input).map_err(|_| {
-                    "A rule formula cannot be checked before moving totals.".to_string()
-                })?;
-                refs(&expr, &mut visit, budget)?;
+                match parser::parse(&input) {
+                    Ok(expr) => refs(&expr, &mut visit, budget)?,
+                    Err(_) => for (_, expr) in crate::formula::source_refs::references(source)? {
+                        refs(&expr, &mut visit, budget)?;
+                    },
+                }
             }
         }
         let count = (rows.len() - 1).saturating_mul(cols.len() - 1);
@@ -287,6 +307,7 @@ impl Movement {
     fn validation_pieces(
         &self,
         range: CellRange,
+        coverage: CellRange,
         rule: &ValidationRule,
         local: bool,
         guarded: &mut bool,
@@ -296,11 +317,22 @@ impl Movement {
         let mut result = Vec::new();
         let mut changed = false;
         for piece in pieces {
-            let Some(target) = self.mapped(piece, local) else {
+            let Some(target) = self.mapped(piece, local, coverage) else {
                 changed = true;
                 continue;
             };
-            let mut rebased = rule.at(piece.start_row, piece.start_col).into_owned();
+            let mut rebased = rule.clone();
+            if let Some((row, col)) = rule.reference_origin {
+                let mut error = None;
+                rebased.map_references(|source| {
+                    match rebase(source, piece.start_row as i32 - row as i32, piece.start_col as i32 - col as i32) {
+                        Ok(result) => result,
+                        Err(e) => { error = Some(e); source.into() },
+                    }
+                });
+                if let Some(error) = error { return Err(error); }
+                rebased.reference_origin = Some((piece.start_row, piece.start_col));
+            }
             let rewritten = self.rewrite_validation(&mut rebased, local, guarded)?;
             if rewritten || target != piece {
                 changed = true;
@@ -329,7 +361,7 @@ impl Movement {
         let rules: Vec<_> = store.iter().map(|(r, rule)| (*r, rule.clone())).collect();
         let mut affected = BTreeSet::new();
         for (i, (range, rule)) in rules.iter().enumerate() {
-            let transformed = self.validation_pieces(*range, rule, local, guarded, budget)?;
+            let transformed = self.validation_pieces(*range, *range, rule, local, guarded, budget)?;
             if transformed != vec![(*range, rule.clone())] {
                 affected.insert(i);
             }
@@ -355,7 +387,7 @@ impl Movement {
         for i in affected {
             let (range, rule) = &rules[i];
             for piece in without(vec![*range], &earlier, budget)? {
-                for (target, rule) in self.validation_pieces(piece, rule, local, guarded, budget)? {
+                for (target, rule) in self.validation_pieces(piece, *range, rule, local, guarded, budget)? {
                     fragments += 1;
                     if fragments > MAX_FRAGMENTS {
                         return Err(limit());
@@ -380,7 +412,7 @@ impl Movement {
             for range in affected {
                 *guarded = true;
                 for piece in self.pieces(range, None, &[], local, budget)? {
-                    if let Some(target) = self.mapped(piece, local) {
+                    if let Some(target) = self.mapped(piece, local, range) {
                         result.exclude(target);
                         fragments += 1;
                     }
@@ -416,15 +448,15 @@ impl Movement {
                         local,
                         budget,
                     )? {
-                        let Some(target) = self.mapped(piece, local) else {
+                        let Some(target) = self.mapped(piece, local, *range) else {
                             changed = true;
                             continue;
                         };
-                        let mut source = parser::adjust_formula_refs(
+                        let mut source = rebase(
                             &rule.predicate,
                             (piece.start_row - range.start_row) as i32,
                             (piece.start_col - range.start_col) as i32,
-                        );
+                        )?;
                         let rewritten = self.rewrite(&mut source, local, guarded)?;
                         changed |= rewritten || target != piece;
                         transformed.push((target, source));

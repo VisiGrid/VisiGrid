@@ -585,6 +585,7 @@ pub(crate) fn export_warnings(
         }
     }
     warnings.extend(crate::xlsx_cond_formats::warnings(wb)?);
+    warnings.extend(crate::xlsx_names::export_warnings(wb));
     if !wb.pivots().is_empty() {
         warnings.push("Pivot results are exported as cells. Pivot definitions and Table-source bindings are not exported to Excel.".into());
     }

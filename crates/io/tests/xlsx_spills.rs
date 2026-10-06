@@ -341,3 +341,38 @@ fn spills_beyond_excel_bounds_refuse_without_replacing_the_destination() {
     assert!(error.contains("Excel's worksheet limits"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), b"original file");
 }
+
+#[test]
+fn blocked_lifted_array_retains_array_identity_and_blocker() {
+    let mut wb = Workbook::new();
+    for row in 0..3 { wb.set_cell_value_tracked(0, row, 1, "2"); }
+    wb.set_cell_value_tracked(0, 1, 0, "blocker");
+    wb.set_cell_value_tracked(0, 0, 0, "=B1:B3*2");
+    assert!(wb.active_sheet().get_cell(0, 0).spill_error().is_some());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocked.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let document = xml(&path, "xl/worksheets/sheet1.xml");
+    assert!(document.contains("t=\"array\" ref=\"A1\""), "{document}");
+    let (mut loaded, _) = xlsx::import(&path).unwrap();
+    assert_eq!(loaded.active_sheet().get_raw(1, 0), "blocker");
+    loaded.set_cell_value_tracked(0, 1, 0, "");
+    assert_eq!(loaded.active_sheet().get_display(2, 0), "4");
+}
+
+#[test]
+fn out_of_bounds_hidden_row_does_not_abort_import_or_survive_in_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("valid.xlsx");
+    let altered = dir.path().join("invalid-hidden.xlsx");
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "Keep");
+    wb.active_sheet_mut().set_manual_hidden_rows([2].into()).unwrap();
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    replace(&path, &altered, "</sheetData>", "<row r=\"1048577\" hidden=\"1\"/></sheetData>");
+    let (loaded, report) = xlsx::import(&altered).unwrap();
+    assert_eq!(loaded.active_sheet().get_raw(0, 0), "Keep");
+    assert_eq!(loaded.active_sheet().manual_hidden_rows(), [2].into());
+    assert_eq!(report.imported_layouts[0].hidden_rows, vec![2]);
+    assert!(report.warnings.iter().any(|w| w.contains("outside the worksheet")));
+}

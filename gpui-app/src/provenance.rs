@@ -1009,6 +1009,7 @@ mod tests {
     fn test_rows_inserted_to_lua() {
         let action = UndoAction::RowsInserted {
             table_rows: None,
+            row_layout: None,
             print_setup_before: Default::default(),
             sheet_index: 0,
             at_row: 4,

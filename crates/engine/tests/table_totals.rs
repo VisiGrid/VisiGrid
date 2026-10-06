@@ -293,9 +293,9 @@ fn fixed_and_structured_footer_references_follow_and_stale_replay_refuses() {
     assert_eq!(wb.sheet(summary).unwrap().get_display(0, 0), "60");
     for source in ["=SUM(((", "=INDIRECT(", "=OFFSET("] {
         wb.set_cell_value_tracked(0, 0, 4, source);
-        let revision = wb.revision();
-        assert!(wb.append_table_rows(id, 1, &[]).is_err(), "{source}");
-        assert_eq!(wb.revision(), revision);
+        let append = wb.append_table_rows(id, 1, &[]).unwrap();
+        assert_eq!(wb.active_sheet().get_raw(0, 4), source);
+        wb.apply_table_commit(&append, true).unwrap();
     }
     wb.clear_cell_tracked(0, 0, 4);
     assert!(

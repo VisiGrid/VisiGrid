@@ -160,7 +160,7 @@ impl ExtractionDraft {
         // validated result and refresh every affected Table projection.
         candidate.rebuild_dep_graph();
         let report = candidate.recompute_full_ordered();
-        if report.had_cycles
+        if (report.had_cycles && candidate.has_new_cycles(wb))
             || report
                 .errors
                 .iter()

@@ -39,7 +39,7 @@ impl Workbook {
         candidate.sheets[index].set_name(name);
         candidate.rebuild_dep_graph();
         let report = candidate.recompute_full_ordered();
-        if report.had_cycles
+        if (report.had_cycles && candidate.has_new_cycles(self))
             || report
                 .errors
                 .iter()

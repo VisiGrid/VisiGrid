@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Harden Table release workflows: allow existing cycles through sheet changes, conversion and undo/redo; keep validation and conditional-format ranges within worksheet bounds after insertion; accept valid typed dates and times in date/time validation.
+- Keep edited imported validation sources anchored at the selected cell while preserving unchanged rules exactly.
+- Exclude hidden columns from Find/Replace and stale replacement plans. Keep manual row visibility and structural history aligned even on sheets without Tables.
+- Preserve continuous column-wide rule coverage when moving totals, and rewrite recognizable sheet/footer references inside unsupported formula syntax without discarding surrounding text.
+- Fix XLSX conditional-format styles and priorities for interleaved ranges; warn and omit structured-reference conditional-format rules that Excel cannot represent. Preserve blocked array-formula identity, ignore out-of-grid hidden rows with a warning, accept function-named defined ranges, and reject new R1C1-shaped names. Omit invalid legacy names from Excel copies with a warning while preserving native definitions.
+
 - Convert large calculated Tables to ordinary ranges beyond the 100,000-cell history limit. Index dependent-formula checks, store compact formula history, and reduce temporary history allocations while retaining atomic validation and stale undo protection.
 
 - Convert Tables referenced by another Table’s custom totals, including dormant settings and independently stored footer formulas. Preserve local reference ownership when a dormant footer overlaps another Table, including during column renaming.

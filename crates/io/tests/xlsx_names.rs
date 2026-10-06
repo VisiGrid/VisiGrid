@@ -235,3 +235,44 @@ fn split_name_target_and_invalid_export_preserve_existing_destination() {
     );
     assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
 }
+
+#[test]
+fn function_named_ranges_import_and_export_without_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("function-names.xlsx");
+    let mut excel = rust_xlsxwriter::Workbook::new();
+    excel.add_worksheet().write_number(0, 0, 7).unwrap();
+    for name in ["Rate", "Date", "Value", "SUM"] {
+        excel.define_name(name, "=Sheet1!$A$1").unwrap();
+    }
+    excel.save(&path).unwrap();
+    let (mut wb, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    wb.set_cell_value_tracked(0, 1, 0, "=Rate+Date+Value+SUM+SUM(A1)");
+    assert_eq!(wb.active_sheet().get_display(1, 0), "35");
+    xlsx::export(&wb, &path, None).unwrap();
+    let (loaded, _) = xlsx::import(&path).unwrap();
+    assert_eq!(loaded.named_ranges().list().len(), 4);
+    assert_eq!(loaded.active_sheet().get_display(1, 0), "35");
+}
+
+#[test]
+fn legacy_r1c1_names_are_omitted_with_matching_preview_and_export_warnings() {
+    let mut wb = Workbook::new();
+    let mut ranges = serde_json::Map::new();
+    for name in ["R", "C", "RC", "R1C", "R1C1", "R10C2"] {
+        assert!(wb.define_name_for_cell(name, 0, 0, 0).is_err());
+        ranges.insert(name.to_lowercase(), serde_json::to_value(NamedRange::cell(name, 0, 0, 0)).unwrap());
+    }
+    *wb.named_ranges_mut() = serde_json::from_value(serde_json::json!({"ranges": ranges})).unwrap();
+    let warnings = xlsx::table_export_warnings_with_order(&wb, None, xlsx::ExportOrder::Stored).unwrap();
+    let (bytes, report) = xlsx::export_to_buffer_with_order(&wb, None, xlsx::ExportOrder::Stored).unwrap();
+    assert_eq!(report.warnings, warnings);
+    assert_eq!(warnings.len(), 6);
+    assert!(warnings.iter().all(|w| w.contains("omitted") && w.contains("R1C1")));
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/workbook.xml").unwrap(), &mut xml).unwrap();
+    assert!(!xml.contains("<definedName"));
+    assert_eq!(wb.named_ranges().list().len(), 6);
+}

@@ -426,8 +426,9 @@ impl CondFormatStore {
     }
 
     fn shift_insert(&mut self, at: usize, count: usize, rows: bool) {
+        let limit = if rows { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
         for rule in &mut self.rules {
-            for r in &mut rule.ranges {
+            rule.ranges.retain_mut(|r| {
                 let (start, end) = if rows {
                     (&mut r.start_row, &mut r.end_row)
                 } else {
@@ -435,13 +436,15 @@ impl CondFormatStore {
                 };
                 if at <= *start {
                     // Insertion at or before range → shift whole range
-                    *start += count;
-                    *end += count;
+                    *start = start.saturating_add(count);
+                    *end = end.saturating_add(count);
                 } else if at <= *end {
                     // Insertion inside range → expand
-                    *end += count;
+                    *end = end.saturating_add(count);
                 }
-            }
+                *end = (*end).min(limit - 1);
+                *start < limit
+            });
         }
     }
 

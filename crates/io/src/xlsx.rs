@@ -959,6 +959,14 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     // Keep them in the engine even when no Table has a totals definition.
     let mut visibility_changed = false;
     for index in 0..workbook.sheet_count() {
+        if let Some(layout) = result.imported_layouts.get_mut(index) {
+            let before = layout.hidden_rows.len();
+            layout.hidden_rows.retain(|row| *row < visigrid_engine::sheet::NUM_ROWS);
+            let skipped = before - layout.hidden_rows.len();
+            if skipped > 0 {
+                result.warnings.push(format!("Sheet '{}': ignored {skipped} hidden row(s) outside the worksheet.", workbook.sheet(index).unwrap().name));
+            }
+        }
         let hidden = result.imported_layouts.get(index)
             .map(|layout| layout.hidden_rows.iter().copied().collect()).unwrap_or_default();
         let sheet = workbook.sheet_mut(index).unwrap();
@@ -1867,6 +1875,13 @@ fn export_sheet_cells(
                             end_col.unwrap() as u16, formula_str, &format,
                         )
                             .map_err(|e| format!("Failed to write array formula ({row}, {col}): {e}"))?;
+                    } else if cell.spill_error().is_some() {
+                        // A blocked array still needs Excel's array flag even
+                        // when its source has no dynamic function (e.g. B1:B3*2).
+                        // Only write the anchor: the blocking cells must survive.
+                        worksheet.write_dynamic_array_formula_with_format(
+                            row32, col16, row32, col16, formula_str, &format,
+                        ).map_err(|e| format!("Failed to write blocked array formula ({row}, {col}): {e}"))?;
                     } else {
                         worksheet.write_formula_with_format(row32, col16, formula_str, &format)
                             .map_err(|e| format!("Failed to write formula ({}, {}): {}", row, col, e))?;

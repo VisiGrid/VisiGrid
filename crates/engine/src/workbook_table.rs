@@ -525,7 +525,7 @@ impl Workbook {
         if let Some(error) = candidate.take_incremental_errors().first() {
             return Err(format!("Could not recalculate the resized Table: {error:?}"));
         }
-        if reference_guarded { candidate.validate_footer_relocation()?; }
+        if reference_guarded { candidate.validate_footer_relocation(self, id)?; }
         let guarded = if width_changed || reference_guarded { Some(Box::new(self.capture_guarded_batch(&candidate)?)) } else { None };
         commit.before.table = Some(before);
         commit.after.table = Some(candidate.table(id).unwrap().1.clone());
@@ -670,7 +670,7 @@ impl Workbook {
             return Err(format!("Could not recalculate the appended Table: {error:?}"));
         }
         if guarded {
-            candidate.validate_footer_relocation()?;
+            candidate.validate_footer_relocation(self, id)?;
             commit.guarded = Some(Box::new(self.capture_guarded_batch(&candidate)?));
         }
         commit.before.table = Some(before);
@@ -846,7 +846,7 @@ impl Workbook {
         let mut commit = candidate.table_commit(sheet_id, id, Some(old.clone()), None)?;
         candidate.apply_table_commit(&commit, false)?;
         let report = candidate.recompute_full_ordered();
-        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+        if (report.had_cycles && candidate.has_new_cycles(self)) || report.errors.iter().any(|e| e.error.contains("not settled")) {
             return Err("Converting this Table would leave a cycle or unsettled calculation. Nothing was changed.".into());
         }
         commit.guarded = Some(Box::new(self.capture_table_conversion(&candidate)?));

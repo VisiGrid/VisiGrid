@@ -272,3 +272,19 @@ fn conversion_invalidates_cross_sheet_dynamic_formula_source_generations() {
     assert_eq!(wb.sheet(other).unwrap().get_display(0, 0), "0");
     assert!(wb.sheet(other).unwrap().edit_generation() > generation);
 }
+
+#[test]
+fn an_unrelated_existing_cycle_does_not_block_conversion_or_its_history() {
+    let (mut wb, id) = book(false);
+    let other = wb.add_sheet_named("Other").unwrap();
+    wb.set_cell_value_tracked(other, 0, 0, "=A1");
+    let commit = wb.remove_table(id).unwrap();
+    assert!(wb.table(id).is_none());
+    assert_eq!(wb.sheet(other).unwrap().get_display(0, 0), "#CYCLE!");
+    wb.apply_table_commit(&commit, true).unwrap();
+    assert!(wb.table(id).is_some());
+    assert_eq!(wb.sheet(other).unwrap().get_raw(0, 0), "=A1");
+    wb.apply_table_commit(&commit, false).unwrap();
+    assert!(wb.table(id).is_none());
+    assert_eq!(wb.sheet(other).unwrap().get_display(0, 0), "#CYCLE!");
+}

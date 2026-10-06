@@ -51,17 +51,19 @@ pub fn delete_sheet_references(
     let mut expr = match parse(&input) {
         Ok(expr) => expr,
         Err(_) => {
-            let lower = source.to_ascii_lowercase();
-            if std::iter::once(old)
-                .chain(tables.iter().map(String::as_str))
-                .any(|name| {
-                    lower.contains(&name.to_ascii_lowercase())
-                        || lower.contains(&name.replace('\'', "''").to_ascii_lowercase())
-                })
-            {
-                return Err("A formula referencing this sheet cannot be parsed. Resolve it before deleting the sheet.".into());
+            let lower = source.to_lowercase();
+            if !std::iter::once(old).chain(tables.iter().map(String::as_str)).any(|name|
+                lower.contains(&name.to_lowercase()) || lower.contains(&name.replace('\'', "''").to_lowercase())) {
+                return Ok(source.into());
             }
-            return Ok(source.into());
+            // Bare Table names in unsupported grammar may be local bindings.
+            // Do not leave a possibly deleted Table reference able to rebind.
+            if super::structured::source_references(source).iter().any(|(start, end, reference)|
+                !source[*start..*end].contains('[') && reference.table.as_ref().is_some_and(|name|
+                    tables.iter().any(|table| table.eq_ignore_ascii_case(name)))) {
+                return Err("A bare Table reference in an unsupported formula cannot be checked before deleting its sheet.".into());
+            }
+            return super::source_refs::rewrite(source, |expr| adjust(expr, old, tables));
         }
     };
     if !adjust(&mut expr, old, tables) {
@@ -166,9 +168,9 @@ pub fn rename_sheet_reference(source: &str, old: &str, new: &str) -> Result<Stri
             format!("={s}")
         }
     };
-    let mut expected = parse(&input(source)).map_err(|_| {
-        "A formula referencing this sheet cannot be parsed. Resolve it before renaming the sheet."
-    })?;
+    let Ok(mut expected) = parse(&input(source)) else {
+        return super::source_refs::rewrite(source, |expr| rename_expr(expr, old, new) > 0);
+    };
     let count = rename_expr(&mut expected, old, new);
     // Quoting every rewritten qualifier also handles Unicode, punctuation,
     // numeric names and embedded apostrophes without changing their meaning.

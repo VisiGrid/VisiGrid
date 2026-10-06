@@ -122,6 +122,10 @@ pub struct GuardedStructureCommit {
     names: Option<(NamedRangeStore, NamedRangeStore)>,
     before_fingerprint: [u8; 32],
     after_fingerprint: [u8; 32],
+    // Replay restores authored states, including their existing cycles. Keep
+    // each side's identities because structural edits can move or delete them.
+    before_cycles: rustc_hash::FxHashSet<crate::cell_id::CellId>,
+    after_cycles: rustc_hash::FxHashSet<crate::cell_id::CellId>,
     sheets: Vec<(SheetId, String, usize, usize)>,
     renamed_sheets: Vec<(SheetId, String, String)>,
     sheet_change: Option<SheetChange>,
@@ -476,6 +480,8 @@ impl Workbook {
             names,
             before_fingerprint: workbook_fingerprint(self),
             after_fingerprint: workbook_fingerprint(&candidate),
+            before_cycles: self.dep_graph.find_cycle_members(),
+            after_cycles: candidate.dep_graph.find_cycle_members(),
             sheets: identity(self),
             renamed_sheets,
             sheet_change,
@@ -576,7 +582,9 @@ impl GuardedStructureCommit {
         }
         candidate.rebuild_dep_graph();
         let report = candidate.recompute_full_ordered();
-        if report.had_cycles || report.errors.iter().any(|e| e.error.contains("not settled")) {
+        let allowed_cycles = if undo { &self.before_cycles } else { &self.after_cycles };
+        if (report.had_cycles && !candidate.dep_graph.find_cycle_members().is_subset(allowed_cycles))
+            || report.errors.iter().any(|e| e.error.contains("not settled")) {
             return Err("History replay would create a cycle or an unsettled calculation.".into());
         }
         if self.sheet_change.is_some() || !self.renamed_sheets.is_empty() || self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some()) {

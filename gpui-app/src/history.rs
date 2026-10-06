@@ -275,6 +275,7 @@ pub enum UndoAction {
     RowsInserted {
         sheet_index: usize,
         table_rows: Option<visigrid_engine::workbook::TableRowHistory>,
+        row_layout: Option<Box<crate::table_structure::RowLayoutHistory>>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
@@ -289,6 +290,7 @@ pub enum UndoAction {
     RowsDeleted {
         sheet_index: usize,
         table_rows: Option<visigrid_engine::workbook::TableRowHistory>,
+        row_layout: Option<Box<crate::table_structure::RowLayoutHistory>>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
@@ -1590,6 +1592,8 @@ impl History {
         for (index, entry) in self.undo_stack.iter().enumerate().skip(i) {
             let source = match &entry.action {
                 UndoAction::TableStructureChanged { history, .. } => Some((history.commit.sheet, &history.before, history.source_frozen)),
+                UndoAction::RowsInserted { row_layout: Some(layout), .. }
+                | UndoAction::RowsDeleted { row_layout: Some(layout), .. } => Some((layout.sheet, &layout.before, None)),
                 UndoAction::TableCommit { commit, header_layout: Some(layout), .. } => Some((commit.sheet_id(), &layout.before, Some(layout.frozen_before))),
                 _ => None,
             };
@@ -1696,7 +1700,7 @@ impl History {
         crate::validation_ui::plan::validate_history(workbook, action, true)
             .map_err(PreviewBuildError::InvariantViolation)?;
         if view_state.per_sheet.iter().any(|v| v.structure_layout.is_some())
-            && matches!(action, UndoAction::RowsInserted { .. } | UndoAction::RowsDeleted { .. }
+            && matches!(action, UndoAction::RowsInserted { row_layout: None, .. } | UndoAction::RowsDeleted { row_layout: None, .. }
                 | UndoAction::ColsInserted { .. } | UndoAction::ColsDeleted { .. }
                 | UndoAction::WorkbookSnapshot { .. })
         {
@@ -1887,12 +1891,21 @@ impl History {
                     .apply_pivot_state(&commit.after)
                     .map_err(|e| PreviewBuildError::InvariantViolation(e.to_string()))?;
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, .. } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, row_layout, .. } => {
                 if let Some(history) = table_rows {
                     workbook.apply_table_row_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else if row_layout.is_some() {
+                    workbook.structural_edit(*sheet_index, visigrid_engine::structural::Axis::Row, *at_row, *count, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
                 } else {
                     let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
                     sheet.insert_rows(*at_row, *count);
+                }
+                if let Some(history) = row_layout {
+                    let layout = history.apply(workbook, *sheet_index, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    view_state.per_sheet.resize_with(workbook.sheet_count(), crate::app::PreviewSheetView::default);
+                    view_state.per_sheet[*sheet_index].structure_layout = Some(layout.clone());
                 }
                 // STRUCTURAL CHANGE: Invalidate sort for this sheet (Option B)
                 // Row structure changed, previous sort order is no longer valid
@@ -1901,12 +1914,21 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, .. } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, .. } => {
                 if let Some(history) = table_rows {
                     workbook.apply_table_row_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else if row_layout.is_some() {
+                    workbook.structural_edit(*sheet_index, visigrid_engine::structural::Axis::Row, *at_row, *count, true)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
                 } else {
                     let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
                     sheet.delete_rows(*at_row, *count);
+                }
+                if let Some(history) = row_layout {
+                    let layout = history.apply(workbook, *sheet_index, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    view_state.per_sheet.resize_with(workbook.sheet_count(), crate::app::PreviewSheetView::default);
+                    view_state.per_sheet[*sheet_index].structure_layout = Some(layout.clone());
                 }
                 // STRUCTURAL CHANGE: Invalidate sort for this sheet (Option B)
                 if let Some(sheet_view) = view_state.per_sheet.get_mut(*sheet_index) {
@@ -2380,6 +2402,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_row_rewind_preserves_hidden_rows_and_layout_before_and_after_edits() {
+        use crate::table_structure::{RowLayoutHistory, StructureLayout};
+        use visigrid_engine::{structural::Axis, workbook::StructureStep};
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_manual_hidden_rows([2].into()).unwrap();
+        let base = wb.clone();
+        let mut layout = StructureLayout {
+            hidden_rows: [2].into(), heights: [(2, 40.0)].into(),
+            widths: [(4, 120.0)].into(), hidden_cols: [5].into(),
+        };
+        let mut layouts = vec![layout.clone()];
+        let mut history = History::new();
+        for (at, delete) in [(1, false), (3, true), (1, false)] {
+            let rows = RowLayoutHistory::capture(layout, wb.active_sheet(), StructureStep {
+                axis: Axis::Row, at, count: 1, delete,
+            }).unwrap();
+            let print_setup_before = wb.active_sheet().print_setup.clone();
+            wb.structural_edit(0, Axis::Row, at, 1, delete).unwrap();
+            layout = rows.after.clone();
+            layouts.push(layout.clone());
+            let action = if delete {
+                UndoAction::RowsDeleted {
+                    sheet_index: 0, table_rows: None, row_layout: Some(Box::new(rows)),
+                    print_setup_before, at_row: at, count: 1, formula_rewrites: vec![],
+                    deleted_cells: vec![], deleted_comments: vec![], deleted_row_heights: vec![(3, 40.0)],
+                }
+            } else {
+                UndoAction::RowsInserted {
+                    sheet_index: 0, table_rows: None, row_layout: Some(Box::new(rows)),
+                    print_setup_before, at_row: at, count: 1, formula_rewrites: vec![],
+                }
+            };
+            history.record_named_range_action(action);
+        }
+        for (index, expected) in layouts.iter().enumerate() {
+            let preview = history.build_workbook_before(index, Some(&base), 100, 10_000).unwrap();
+            assert_eq!(preview.workbook.active_sheet().manual_hidden_rows(), expected.hidden_rows);
+            assert_eq!(preview.view_state.per_sheet[0].structure_layout.as_ref(), Some(expected));
+        }
+    }
+
+    #[test]
     fn table_history_replays_schema_formulas_and_style_without_body_snapshots() {
         use visigrid_engine::table::TableRange;
         let mut workbook = Workbook::new();
@@ -2461,13 +2525,13 @@ mod tests {
             workbook.apply_table_row_history(&history, false).unwrap();
             let action = if delete {
                 UndoAction::RowsDeleted {
-                    sheet_index: 0, at_row: 1, count, table_rows: Some(history),
+                    sheet_index: 0, at_row: 1, count, table_rows: Some(history), row_layout: None,
                     print_setup_before, formula_rewrites: vec![], deleted_cells: vec![],
                     deleted_comments: vec![], deleted_row_heights: vec![],
                 }
             } else {
                 UndoAction::RowsInserted {
-                    sheet_index: 0, at_row: 1, count, table_rows: Some(history),
+                    sheet_index: 0, at_row: 1, count, table_rows: Some(history), row_layout: None,
                     print_setup_before, formula_rewrites: vec![],
                 }
             };

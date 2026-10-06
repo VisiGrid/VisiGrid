@@ -153,12 +153,12 @@ impl Workbook {
             candidate.rebuild_dep_graph();
             let report = candidate.recompute_full_ordered();
             // Ordinary formula errors (notably #NAME? after deletion) are
-            // valid results. Cycles and unsettled spills cannot be published.
-            if report.had_cycles
+            // valid results, including cycles already present before this edit.
+            if (report.had_cycles && candidate.has_new_cycles(self))
                 || report
                     .errors
                     .iter()
-                    .any(|e| e.error.contains("spill not settled"))
+                    .any(|e| e.error.contains("not settled"))
             {
                 return Err("The named range would create a cycle or an unsettled spill. Nothing was changed.".into());
             }

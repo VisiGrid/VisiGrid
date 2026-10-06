@@ -109,7 +109,7 @@ fn footer_rules_replace_destination_coverage_and_restore_exactly() {
 }
 
 #[test]
-fn spanning_rules_keep_surrounding_anchors_and_move_only_footer_cells() {
+fn spanning_rules_keep_continuous_coverage_and_surrounding_anchors() {
     let (mut wb, id) = book();
     let ranges = vec![CellRange::new(0, 1, 8, 1), CellRange::new(2, 1, 10, 1)];
     let rule_id = wb.active_sheet_mut().cond_formats.add(
@@ -130,19 +130,10 @@ fn spanning_rules_keep_surrounding_anchors_and_move_only_footer_cells() {
     let commit = wb.append_table_rows(id, 1, &[]).unwrap();
     for row in 0..=10 {
         let cf_old_row = if row <= 8 { row } else { row - 2 };
-        if row == 4 {
-            assert!(predicate(&wb, row, 1).is_empty());
-            assert_eq!(constraint(&wb, row, 1), None);
-        } else {
-            let expected_cf = format!("=H{}+$B$6>0", if row == 5 { 5 } else { cf_old_row + 1 });
-            assert_eq!(predicate(&wb, row, 1), [expected_cf], "CF row {row}");
-            let expected = format!("=H{}+$B$6>0", if row == 5 { 5 } else { row + 1 });
-            assert_eq!(
-                constraint(&wb, row, 1),
-                Some(expected),
-                "validation row {row}"
-            );
-        }
+        let expected_cf = format!("=H{}+$B$6>0", cf_old_row + 1);
+        assert_eq!(predicate(&wb, row, 1), [expected_cf], "CF row {row}");
+        let expected = format!("=H{}+$B$6>0", row + 1);
+        assert_eq!(constraint(&wb, row, 1), Some(expected), "validation row {row}");
     }
     assert!(wb.active_sheet().cond_formats.iter().all(|r| !r.enabled));
     wb.apply_table_commit(&commit, true).unwrap();
@@ -210,7 +201,7 @@ fn validation_overlap_precedence_and_exclusions_follow_the_moved_cells() {
     assert!(wb.active_sheet().validations.is_excluded(1, 5));
     for row in 0..=10 {
         for col in 0..=1 {
-            let expected = if row == 4 || row == 5 && col == 1 || row == 0 && col == 1 {
+            let expected = if row == 5 && col == 1 || row == 0 && col == 1 {
                 None
             } else if col == 0 && row <= 8 {
                 Some("=TRUE".to_string())
@@ -459,4 +450,21 @@ fn fragment_ids_respect_persisted_rules_and_refuse_invalid_identity_stores() {
         .append_table_rows(id, 1, &[])
         .unwrap_err()
         .contains("exhausted"));
+}
+
+#[test]
+fn full_column_rules_remain_continuous_after_append_and_undo() {
+    use visigrid_engine::sheet::NUM_ROWS;
+    let (mut wb, id) = book();
+    let column = CellRange::new(0, 1, NUM_ROWS - 1, 1);
+    wb.active_sheet_mut().cond_formats.add(vec![column], "=B1>0", CondStyle::Named(CellStyle::Warning));
+    wb.active_sheet_mut().validations.set(column, custom("=B1>0", Some((0, 1))));
+    let original = metadata(&wb);
+    let commit = wb.append_table_rows(id, 1, &[]).unwrap();
+    for row in [0, 3, 4, 5, 6, NUM_ROWS - 1] {
+        assert!(!predicate(&wb, row, 1).is_empty(), "CF row {row}");
+        assert!(constraint(&wb, row, 1).is_some(), "validation row {row}");
+    }
+    wb.apply_table_commit(&commit, true).unwrap();
+    assert_eq!(metadata(&wb), original);
 }
