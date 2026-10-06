@@ -129,6 +129,7 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
         .child(section_title(&format!("Source · {}", b.recipe.source.label()), c, focused));
     for (i, label) in b.source_rows().iter().enumerate() {
         let (value, hint) = b.source_value(i);
+        let is_file = b.source_row_is_file(i);
         let active = focused && b.source_focus == i;
         let (accent, border, text) = (c.accent, c.border, c.text);
         col = col.child(
@@ -158,10 +159,10 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
                                 .text_size(px(12.0))
                                 .text_color(text)
                                 .cursor_pointer()
-                                .child(if i == 0 { format!("{value} …") } else { format!("{value} ›") })
+                                .child(if is_file { format!("{value} …") } else { format!("{value} ›") })
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    if i == 0 {
+                                    if is_file {
                                         this.recipe_builder_choose_file(cx);
                                         return;
                                     }
@@ -207,14 +208,18 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(c.text).child("Columns in the file"))
+            .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(c.text).child(if b.recipe.source.is_remote() { "Columns in the report" } else { "Columns in the file" }))
             .child(list)
             .child(
                 div()
                     .text_size(px(11.0))
                     .line_height(px(15.0))
                     .text_color(c.muted)
-                    .child("Saved with the recipe. Next month's file is checked against them before anything runs."),
+                    .child(if b.recipe.source.is_remote() {
+                        "Saved with the recipe. Each refresh is checked against them before anything runs."
+                    } else {
+                        "Saved with the recipe. Next month's file is checked against them before anything runs."
+                    }),
             ),
     )
 }
@@ -236,6 +241,7 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
         "recipe-step-source".into(),
         "0".into(),
         match b.snapshot.as_ref().map_or(1, |s| s.file_count()) {
+            1 if b.recipe.source.is_remote() => "Read the report".into(),
             1 => "Read the file".into(),
             n => format!("Read {n} files and append them"),
         },
@@ -664,15 +670,17 @@ fn column_label(name: &str, present: bool) -> String {
 fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
     let Some(p) = &b.preview else { return div() };
     let title = match b.selected {
+        None if b.recipe.source.is_remote() => "Preview of the report".to_string(),
         None => "Preview of the file".to_string(),
         Some(i) => format!("Preview after step {}", i + 1),
     };
     let meta = format!(
-        "{} row{} · {} column{} · counts from the whole file{}",
+        "{} row{} · {} column{} · counts from the whole {}{}",
         thousands(p.total_rows),
         plural(p.total_rows),
         p.columns.len(),
         plural(p.columns.len()),
+        if b.recipe.source.is_remote() { "report" } else { "file" },
         if p.total_rows > p.rows.len() { format!(" · showing the first {}", p.rows.len()) } else { String::new() }
     );
     const W: f32 = 140.0;
@@ -774,6 +782,7 @@ fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
 fn render_footer(app: &Spreadsheet, b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let (summary, tone) = match (&b.full, &b.error) {
         (_, Some(e)) => (e.clone(), c.error),
+        (None, _) if b.recipe.source.is_remote() => ("VisiBooks can't be read with these settings.".to_string(), c.error),
         (None, _) => ("The file can't be read with these settings.".to_string(), c.error),
         (Some(r), _) if !r.ok => {
             let first = r.failures.first().cloned().unwrap_or_else(|| "a check failed".into());

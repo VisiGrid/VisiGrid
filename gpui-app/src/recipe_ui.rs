@@ -130,6 +130,14 @@ pub(crate) fn when(stamp: &str) -> String {
 }
 
 pub(crate) fn file_name(path: &str) -> String {
+    // A VisiBooks source is named by server/entity/report, not a file:
+    // "visibooks:https://api.visiapi.com/42/trial_balance" reads as
+    // "VisiBooks 42 trial balance"
+    if let Some(rest) = path.strip_prefix("visibooks:") {
+        let mut parts = rest.rsplitn(3, '/');
+        let (report, entity) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        return format!("VisiBooks {entity} {}", report.replace('_', " "));
+    }
     Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string()
 }
 
@@ -404,6 +412,12 @@ impl Spreadsheet {
     /// pattern already matches is read once without changing the recipe;
     /// any other file becomes the recipe's source (saved), then it runs.
     pub fn recipe_choose_source(&mut self, recipe_path: PathBuf, target: RecipeTarget, cx: &mut Context<Self>) {
+        // A VisiBooks report isn't a file: what it reads changes in the recipe
+        if Recipe::load(&recipe_path).is_ok_and(|r| r.source.is_remote()) {
+            self.status_message = Some("This recipe reads a VisiBooks report, not a file; Edit recipe changes which report or entity".into());
+            cx.notify();
+            return;
+        }
         let future = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,

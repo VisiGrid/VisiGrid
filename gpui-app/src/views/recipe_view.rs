@@ -517,6 +517,7 @@ pub(crate) fn render_recipe_confirm(app: &Spreadsheet, cx: &mut Context<Spreadsh
     let recipe_name = file_name(&confirm.recipe_path.display().to_string());
     let (muted, text) = (c.muted, c.text);
     let readable = confirm.source.is_ok();
+    let remote = confirm.recipe.source.is_remote();
     let mut body = div().flex().flex_col().gap(px(6.0)).px(px(14.0)).py(px(12.0));
     match &confirm.source {
         Ok((file, detail)) => {
@@ -530,7 +531,11 @@ pub(crate) fn render_recipe_confirm(app: &Spreadsheet, cx: &mut Context<Spreadsh
                         .text_size(px(11.0))
                         .line_height(px(16.0))
                         .text_color(c.warn)
-                        .child("A recipe can read any file you can. Load only recipes you made or trust; this is asked once per recipe and file."),
+                        .child(if remote {
+                            "The recipe reads your books with the API key saved for this server. Load only recipes you made or trust; this is asked once per recipe and report."
+                        } else {
+                            "A recipe can read any file you can. Load only recipes you made or trust; this is asked once per recipe and file."
+                        }),
                 );
         }
         Err(e) => {
@@ -559,7 +564,9 @@ pub(crate) fn render_recipe_confirm(app: &Spreadsheet, cx: &mut Context<Spreadsh
                 .py(px(10.0))
                 .border_b_1()
                 .border_color(c.border.opacity(0.6))
-                .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(c.text).child(if readable {
+                .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(c.text).child(if readable && remote {
+                    "Load data from VisiBooks?"
+                } else if readable {
                     "Load data from this file?"
                 } else {
                     "This recipe's source can't be read"
