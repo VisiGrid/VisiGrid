@@ -1,0 +1,44 @@
+name: Live collaboration client bundle
+on:
+  push:
+    branches: [feat/native-web-live-cells]
+  workflow_dispatch:
+concurrency:
+  group: live-client-bundle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            target/
+          key: ${{ runner.os }}-cargo-live-wasm-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-live-wasm-
+      - name: Test collaboration replica
+        run: cargo test --locked -p visigrid-collab
+      - name: Build browser engine
+        run: cargo build --release --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
+      - name: Install matching bindings generator
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Generate web bindings
+        run: |
+          mkdir -p live-client-bundle
+          wasm-bindgen target/wasm32-unknown-unknown/release/visigrid_engine_wasm.wasm --target web --out-dir live-client-bundle
+          printf '{"type":"module"}\n' > live-client-bundle/package.json
+      - name: Verify compiled collaboration client
+        run: node scripts/check-live-client-bundle.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-client-bundle
+          path: live-client-bundle/
+          if-no-files-found: error
