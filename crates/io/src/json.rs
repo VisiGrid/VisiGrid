@@ -909,6 +909,16 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
+    if doc.version > FULL_JSON_TABLE_VERSION {
+        let shape: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+        let recognizable = shape.get("cells").is_some_and(serde_json::Value::is_array)
+            || shape.get("sheets").and_then(serde_json::Value::as_array)
+                .is_some_and(|sheets| !sheets.is_empty());
+        if !recognizable {
+            return Err("Newer workbook format has no recognizable grid to preview. Original file is unchanged.".into());
+        }
+    }
+
 
 
     let bodies: Vec<&SheetBody> = if doc.sheets.is_empty() {
