@@ -469,8 +469,8 @@ impl Spreadsheet {
         }
         // Right after a sort/filter refused because of merged titles, the
         // shortcut converts those titles (the refusal says so).
-        if let Some((origins, at, when)) = self.merge_block_offer.take() {
-            if at == self.view_state.selected && when.elapsed() < std::time::Duration::from_secs(30) {
+        if let Some((origins, at, message)) = self.merge_block_offer.take() {
+            if at == self.view_state.selected && self.status_message.as_deref() == Some(message.as_str()) {
                 self.convert_merges_at(origins, cx);
                 return;
             }
@@ -1594,8 +1594,14 @@ impl Spreadsheet {
     /// - Own right and bottom: always draw if set
     /// - Own top: only draw if cell above has no bottom border
     /// - Own left: only draw if cell to left has no right border
+    /// `above`/`below` are the data rows shown directly above and below this
+    /// one, which differ from the next row in storage under a sort or filter: a cell's top
+    /// edge meets whatever row is displayed above it, not its storage
+    /// neighbour (a header's bottom rule used to reappear above the row that
+    /// had been under it before sorting).
     pub fn cell_user_borders(
         &self, row: usize, col: usize, cx: &App,
+        above: Option<usize>, below: Option<usize>,
         boundary_bottom: bool, boundary_right: bool,
     ) -> (CellBorder, CellBorder, CellBorder, CellBorder) {
         #[cfg(debug_assertions)]
@@ -1617,9 +1623,6 @@ impl Spreadsheet {
 
         let sheet = self.sheet(cx);
         let mapped = self.display_workbook(cx).has_table_criteria();
-        let view_row = (row < self.row_view.row_count()).then(|| self.row_view.data_to_view_unchecked(row));
-        let above = if mapped { view_row.and_then(|v| plan::row_neighbor(&self.row_view, self.display_hidden_rows(), v, false)) } else { row.checked_sub(1) };
-        let below = if mapped { view_row.and_then(|v| plan::row_neighbor(&self.row_view, self.display_hidden_rows(), v, true)) } else { (row + 1 < NUM_ROWS).then_some(row + 1) };
         let left_col = if mapped { (0..col).rev().find(|c| !self.is_col_hidden(*c)) } else { col.checked_sub(1) };
         let right_col = if mapped { (col.saturating_add(1)..sheet.cols).find(|c| !self.is_col_hidden(*c)) } else { (col + 1 < NUM_COLS).then_some(col + 1) };
 
@@ -1672,11 +1675,7 @@ impl Spreadsheet {
         // Resolve TOP edge: max(my_top, above_neighbor_bottom)
         let top = {
             let my_top = effective_side(row, col, 0);
-            let above_bottom = if let Some(above) = above {
-                effective_side(above, col, 2)
-            } else {
-                none
-            };
+            let above_bottom = above.map_or(none, |r| effective_side(r, col, 2));
             max_border(my_top, above_bottom)
         };
 
@@ -1694,11 +1693,7 @@ impl Spreadsheet {
         // Resolve BOTTOM edge: only at viewport boundary (last visible row)
         let bottom = if boundary_bottom {
             let my_bottom = effective_side(row, col, 2);
-            let below_top = if let Some(below) = below {
-                effective_side(below, col, 0)
-            } else {
-                none
-            };
+            let below_top = below.map_or(none, |r| effective_side(r, col, 0));
             max_border(my_bottom, below_top)
         } else {
             none

@@ -33,16 +33,29 @@ fn non_interactive_overlay() -> Div {
         .inset_0()
 }
 
-/// A merge overlay already paints its full perimeter. A neighboring cell must
-/// not repeat an identical resolved edge immediately outside that perimeter.
-fn merge_owns_adjacent_edges(
-    sheet: &Sheet, row: usize, col: usize, top: CellBorder, left: CellBorder,
-) -> (bool, bool) {
-    let owns_top = top.is_set() && row > 0 && sheet.get_merge(row - 1, col)
-        .is_some_and(|m| m.end.0 == row - 1 && sheet.resolve_merge_borders(m).2 == top);
-    let owns_left = left.is_set() && col > 0 && sheet.get_merge(row, col - 1)
-        .is_some_and(|m| m.end.1 == col - 1 && sheet.resolve_merge_borders(m).1 == left);
-    (owns_top, owns_left)
+#[derive(Clone, Copy)]
+enum Edge { Right, Bottom }
+
+/// A cell's bottom or right edge border, taking merges into account: a cell
+/// inside a merge contributes the merge's edge only when it's on that edge.
+fn edge_of(sheet: &Sheet, row: usize, col: usize, edge: Edge) -> CellBorder {
+    match sheet.get_merge(row, col) {
+        Some(m) => {
+            let (_, right, bottom, _) = sheet.resolve_merge_borders(m);
+            match edge {
+                Edge::Bottom if row == m.end.0 => bottom,
+                Edge::Right if col == m.end.1 => right,
+                _ => CellBorder::default(),
+            }
+        }
+        None => {
+            let format = sheet.get_format(row, col);
+            match edge {
+                Edge::Bottom => format.border_bottom,
+                Edge::Right => format.border_right,
+            }
+        }
+    }
 }
 
 /// Resolve regular-cell border ownership from an immutable review snapshot.
@@ -207,6 +220,12 @@ pub fn render_grid(
     let scrollable_visible_rows = row_panes.body.len();
     let scrollable_visible_cols = col_panes.body.len();
 
+    // Resolve this frame once in view-slot coordinates, skipping both filter
+    // and manual hiding. Keep the next row for shared bottom-edge ownership.
+    let frame_rows = app.displayed_rows(view_state.scroll_row.max(frozen_rows), scrollable_visible_rows + 1, cx);
+    let frame_above = frame_rows.first().and_then(|&(slot, _)|
+        crate::pane_layout::row_neighbors(&app.row_view, app.display_hidden_rows(), slot).0);
+
     // Get divider color for freeze pane separators
     let divider_color = app.token(TokenKey::FreezeDivider);
 
@@ -223,13 +242,17 @@ pub fn render_grid(
                     .children(
                         (0..total_visible_rows).filter_map(|screen_row| {
                             // Get the view_row and data_row for this screen position
-                            // The shared layout already skips every hidden row.
-                            let view_row = row_panes.body[screen_row].index;
-                            let data_row = app.view_to_data(view_row, cx);
+                            // This respects both sort order AND filter visibility
+                            let at = screen_row;
+                            let (view_row, data_row) = *frame_rows.get(at)?;
+                            let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d).or(frame_above);
+                            let row_below = frame_rows.get(at + 1).map(|&(_, d)| d);
                             let is_last_visible_row = screen_row == total_visible_rows - 1;
                             Some(render_row(
                                 view_row,
                                 data_row,
+                                row_above,
+                                row_below,
                                 scroll_col,
                                 total_visible_cols,
                                 view_state,
@@ -293,6 +316,7 @@ pub fn render_grid(
                             let view_row = slot.index;
                             let data_row = app.view_to_data(view_row, cx);
                             let row_height = slot.size;
+                            let (row_above, row_below) = crate::pane_layout::row_neighbors(&app.row_view, app.display_hidden_rows(), view_row);
                             div()
                                 .flex()
                                 .flex_shrink_0()
@@ -307,7 +331,7 @@ pub fn render_grid(
                                             let col = slot.index;
                                             if app.is_col_hidden(col) { return None; }
                                             let col_width = metrics.col_width(app.col_width(col));
-                                            Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, false, app, window, cx))
+                                            Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, false, app, window, cx))
                                         })
                                     )
                                 })
@@ -328,7 +352,7 @@ pub fn render_grid(
                                         let col = app.nth_visible_col(visible_col, scroll_col)?;
                                         let col_width = metrics.col_width(app.col_width(col));
                                         let is_last_col = visible_col == scrollable_visible_cols - 1;
-                                        Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, is_last_col, app, window, cx))
+                                        Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, is_last_col, app, window, cx))
                                     })
                                 )
                         })
@@ -355,11 +379,12 @@ pub fn render_grid(
                         .children(
                             (0..scrollable_visible_rows).filter_map(|screen_row| {
                                 // Get the view_row and data_row for this screen position
-                                // The body starts at a view slot after the frozen boundary.
-                                let slot = row_panes.body[screen_row];
-                                let view_row = slot.index;
-                                let data_row = app.view_to_data(view_row, cx);
-                                let row_height = slot.size;
+                                // Account for frozen rows + scroll position in visible index
+                                let at = screen_row;
+                                let (view_row, data_row) = *frame_rows.get(at)?;
+                                let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d).or(frame_above);
+                                let row_below = frame_rows.get(at + 1).map(|&(_, d)| d);
+                                let row_height = row_panes.body[screen_row].size;
                                 let is_last_row = screen_row == scrollable_visible_rows - 1;
                                 Some(div()
                                     .flex()
@@ -375,7 +400,7 @@ pub fn render_grid(
                                             let col = slot.index;
                                                 if app.is_col_hidden(col) { return None; }
                                                 let col_width = metrics.col_width(app.col_width(col));
-                                                Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, false, app, window, cx))
+                                                Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, false, app, window, cx))
                                             })
                                         )
                                     })
@@ -395,7 +420,7 @@ pub fn render_grid(
                                             let col = app.nth_visible_col(visible_col, scroll_col)?;
                                             let col_width = metrics.col_width(app.col_width(col));
                                             let is_last_col = visible_col == scrollable_visible_cols - 1;
-                                            Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, is_last_col, app, window, cx))
+                                            Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, is_last_col, app, window, cx))
                                         })
                                     ))
                             })
@@ -418,6 +443,8 @@ pub fn render_grid(
 fn render_row(
     view_row: usize,
     data_row: usize,
+    row_above: Option<usize>,
+    row_below: Option<usize>,
     scroll_col: usize,
     visible_cols: usize,
     view_state: &WorkbookViewState,
@@ -444,14 +471,20 @@ fn render_row(
                 let col_width = app.metrics.col_width(app.col_width(col));
                 let is_last_visible_col = visible_col == visible_cols - 1;
                 // view_row for selection/display, data_row for cell data access
-                Some(render_cell(view_row, data_row, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, is_last_visible_row, is_last_visible_col, app, window, cx))
+                Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, edit_value, show_gridlines, is_last_visible_row, is_last_visible_col, app, window, cx))
             })
         )
 }
 
+/// `row_above` / `row_below`: the data rows displayed directly above and
+/// below this one. Under a sort or filter (or hidden rows) these aren't
+/// the next rows in storage, and shared edges (borders, gridlines, style perimeters)
+/// belong to whatever is on screen next to the cell.
 fn render_cell(
     view_row: usize,
     data_row: usize,
+    row_above: Option<usize>,
+    row_below: Option<usize>,
     col: usize,
     col_width: f32,
     _row_height: f32,
@@ -1049,7 +1082,7 @@ fn render_cell(
                     )
                 } else {
                     app.cell_user_borders(
-                        data_row, col, cx, is_last_visible_row, is_last_visible_col,
+                        data_row, col, cx, row_above, row_below, is_last_visible_row, is_last_visible_col,
                     )
                 }
             } else {
@@ -1082,7 +1115,7 @@ fn render_cell(
                 // reading as an "extra border" (#5-adjacent field report).
                 let above_selected = view_row > 0 && is_selected_in_pane(view_state, view_row - 1, col);
                 let left_selected = col > 0 && is_selected_in_pane(view_state, view_row, col - 1);
-                if !user_top && data_row > 0 && !top_in_merge && !above_selected { c = c.border_t_1(); }
+                if !user_top && view_row > 0 && !top_in_merge && !above_selected { c = c.border_t_1(); }
                 if !user_left && col > 0 && !left_in_merge && !left_selected { c = c.border_l_1(); }
                 if !user_bottom && is_last_visible_row && !bottom_in_merge { c = c.border_b_1(); }
                 if !user_right && is_last_visible_col && !right_in_merge { c = c.border_r_1(); }
@@ -1113,17 +1146,14 @@ fn render_cell(
                     .map(rgba_to_hsla)
                     .unwrap_or_else(|| app.token(TokenKey::UserBorder));
 
-                let (merge_owns_top, merge_owns_left) = merge_owns_adjacent_edges(
-                    display_sheet, display_data_row, col, border_top, border_left,
-                );
 
                 c = c.child(
                     non_interactive_overlay()
                         .border_color(border_color)
-                        .when(user_top && !merge_owns_top, |d| d.border_t_1())
+                        .when(user_top, |d| d.border_t_1())
                         .when(user_right, |d| d.border_r_1())
                         .when(user_bottom, |d| d.border_b_1())
-                        .when(user_left && !merge_owns_left, |d| d.border_l_1())
+                        .when(user_left, |d| d.border_l_1())
                 );
             }
 
@@ -1131,8 +1161,13 @@ fn render_cell(
             // Suppress borders where the neighboring cell shares the same style.
             if let Some(style_border_color) = cell_style.border {
                 let cur_style = format.cell_style;
-                let neighbor_top = if display_data_row > 0 { display_sheet.get_format(display_data_row - 1, col).cell_style } else { CellStyle::None };
-                let neighbor_bottom = display_sheet.get_format(display_data_row + 1, col).cell_style;
+                let (style_above, style_below) = if is_frozen_review {
+                    (display_data_row.checked_sub(1), Some(display_data_row + 1))
+                } else {
+                    (row_above, row_below)
+                };
+                let neighbor_top = style_above.map_or(CellStyle::None, |r| display_sheet.get_format(r, col).cell_style);
+                let neighbor_bottom = style_below.map_or(CellStyle::None, |r| display_sheet.get_format(r, col).cell_style);
                 let neighbor_left = if col > 0 { display_sheet.get_format(display_data_row, col - 1).cell_style } else { CellStyle::None };
                 let neighbor_right = display_sheet.get_format(display_data_row, col + 1).cell_style;
 
@@ -2548,6 +2583,10 @@ struct VisibleMerge {
     y: f32,
     width: f32,
     height: f32,
+    /// The merge reaches the last visible row / column, so no cell below /
+    /// to the right is drawn to own that shared edge; the merge draws it.
+    at_bottom: bool,
+    at_right: bool,
 }
 
 /// Collect merges that overlap the current viewport.
@@ -2571,8 +2610,23 @@ fn collect_visible_merges(
     }
 
 
+    // Merges are stored in data rows but drawn among view rows. Under a sort
+    // or filter, place each merge where its rows are displayed; one whose rows
+    // are hidden, split or reordered can't be drawn as a block, so skip it
+    // (sorts and filters refuse to move merged rows, so this is rare).
+    let row_view = &app.row_view;
+    let remap = row_view.is_filtered() || row_view.is_sorted() || app.has_hidden_rows();
+
     let mut out = Vec::new();
-    for merge in &sheet.merged_regions {
+    for stored in &sheet.merged_regions {
+        let shown;
+        let merge = if remap {
+            let Some(region) = merge_in_slots(stored, row_view, app.display_hidden_rows()) else { continue };
+            shown = region;
+            &shown
+        } else {
+            stored
+        };
         if !merge.overlaps_viewport(scroll_row, scroll_col, visible_rows, visible_cols) {
             continue;
         }
@@ -2588,10 +2642,12 @@ fn collect_visible_merges(
         );
 
         out.push(VisibleMerge {
-            origin_row: merge.start.0,
-            origin_col: merge.start.1,
-            end_row: merge.end.0,
-            end_col: merge.end.1,
+            at_bottom: merge.end.0 + 1 >= scroll_row + visible_rows,
+            at_right: merge.end.1 + 1 >= scroll_col + visible_cols,
+            origin_row: stored.start.0,
+            origin_col: stored.start.1,
+            end_row: stored.end.0,
+            end_col: stored.end.1,
             x,
             y,
             width,
@@ -2599,6 +2655,38 @@ fn collect_visible_merges(
         });
     }
     out
+}
+
+/// Where a stored merge appears in display order (the visible-row index the
+/// grid scrolls by), or None when its rows are hidden, split apart or
+/// reordered, so it can't be drawn as one block.
+fn merge_in_view(
+    stored: &visigrid_engine::sheet::MergedRegion,
+    row_view: &visigrid_engine::filter::RowView,
+) -> Option<visigrid_engine::sheet::MergedRegion> {
+    // O(1) lookups (RowView keeps the inverse of its display order), so
+    // mapping every merge each frame stays linear in the number of merges.
+    let sv = row_view.visible_index_of_data(stored.start.0)?;
+    let ev = row_view.visible_index_of_data(stored.end.0)?;
+    (ev >= sv && ev - sv == stored.end.0 - stored.start.0)
+        .then(|| visigrid_engine::sheet::MergedRegion::new(sv, stored.start.1, ev, stored.end.1))
+}
+
+/// Pane geometry uses view slots with zero extent for hidden rows, rather
+/// than visible ranks. Keep #117's constant-time inverse lookup, then recover
+/// those slots for the shared geometry used by cells and overlays.
+fn merge_in_slots(
+    stored: &visigrid_engine::sheet::MergedRegion,
+    rows: &visigrid_engine::filter::RowView,
+    hidden: Option<&std::collections::BTreeSet<usize>>,
+) -> Option<visigrid_engine::sheet::MergedRegion> {
+    if hidden.is_some_and(|hidden| hidden.range(stored.start.0..=stored.end.0).next().is_some()) {
+        return None;
+    }
+    let mut displayed = merge_in_view(stored, rows)?;
+    displayed.start.0 = rows.nth_visible(displayed.start.0)?;
+    displayed.end.0 = rows.nth_visible(displayed.end.0)?;
+    Some(displayed)
 }
 
 /// Build the gpui element for a single merge overlay.
@@ -2641,12 +2729,52 @@ fn render_merge_div(
         .bg(bg)
         .flex();
 
+    // User borders, resolved first: an edge with a border draws no gridline
+    // (as for cells), or the border sits a pixel inside the gridline frame.
+    let (mut b_top, b_right, b_bottom, mut b_left) =
+        sheet.get_merge(display_row, m.origin_col).map_or_else(
+            || {
+                let format = sheet.get_format(display_row, m.origin_col);
+                (
+                    format.border_top,
+                    format.border_right,
+                    format.border_bottom,
+                    format.border_left,
+                )
+            },
+            |merge| sheet.resolve_merge_borders(merge),
+        );
+    // The merge owns its top and left edges, so like an ordinary cell it
+    // resolves them against what's beside it: the bottom edge of the row
+    // displayed above (across its columns) and the right edge of the column
+    // before it. Otherwise a header's bottom rule stops short of a merged
+    // cell below it.
+    let row_view = &app.row_view;
+    let above = row_view.visible_index_of_data(m.origin_row)
+        .and_then(|rank| row_view.nth_visible(rank))
+        .and_then(|slot| crate::pane_layout::row_neighbors(row_view, app.display_hidden_rows(), slot).0);
+    if let Some(a) = above {
+        for col in m.origin_col..=m.end_col {
+            b_top = max_border(b_top, edge_of(sheet, a, col, Edge::Bottom));
+        }
+    }
+    if m.origin_col > 0 {
+        for row in m.origin_row..=m.end_row {
+            b_left = max_border(b_left, edge_of(sheet, row, m.origin_col - 1, Edge::Right));
+        }
+    }
     // Unfilled merges show perimeter gridlines; fills replace the default grid.
+    // Same single-ownership rule as cells: a merge draws its top and left
+    // edges; the cells below and to the right draw the shared bottom and right
+    // edges as their own top/left, unless the merge reaches the viewport edge.
+    // Drawing both doubled the line, and drew it inside the merge, a few
+    // pixels off the column/row line beside it.
     if show_gridlines && format.background_color.is_none() && merge_cell_style.fill.is_none() {
         merge_div = merge_div.border_color(gridline_color);
-        if m.origin_row > 0 { merge_div = merge_div.border_t_1(); }
-        if m.origin_col > 0 { merge_div = merge_div.border_l_1(); }
-        merge_div = merge_div.border_b_1().border_r_1();
+        if m.origin_row > 0 && !b_top.is_set() { merge_div = merge_div.border_t_1(); }
+        if m.origin_col > 0 && !b_left.is_set() { merge_div = merge_div.border_l_1(); }
+        if m.at_bottom && !b_bottom.is_set() { merge_div = merge_div.border_b_1(); }
+        if m.at_right && !b_right.is_set() { merge_div = merge_div.border_r_1(); }
     }
 
     if app.sheet(cx).comment(m.origin_row, m.origin_col).is_some() {
@@ -2711,27 +2839,23 @@ fn render_merge_div(
         }
     }
 
-    // 4. User borders (non-interactive overlay — no .id())
-    let (b_top, b_right, b_bottom, b_left) =
-        sheet.get_merge(display_row, m.origin_col).map_or_else(
-            || {
-                let format = sheet.get_format(display_row, m.origin_col);
-                (
-                    format.border_top,
-                    format.border_right,
-                    format.border_bottom,
-                    format.border_left,
-                )
-            },
-            |merge| sheet.resolve_merge_borders(merge),
-        );
-    if !is_selected && !is_active && (b_top.is_set() || b_right.is_set() || b_bottom.is_set() || b_left.is_set()) {
+    // 4. User borders (non-interactive overlay — no .id()); resolved above.
+    if !is_selected && !is_active && (b_top.is_set() || b_left.is_set() || (b_right.is_set() && m.at_right) || (b_bottom.is_set() && m.at_bottom)) {
+        // Same colour rule as ordinary cells: the first stored edge colour,
+        // else the theme's. Merges always used the theme colour, so a grey
+        // header rule drew black under a merged header and grey beside it.
+        let stored = b_top.color.or(b_right.color).or(b_bottom.color).or(b_left.color);
+        let edge_color = stored
+            .map(|[r, g, b, a]| -> Hsla { Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 }.into() })
+            .unwrap_or(user_border_color);
         merge_div = merge_div.child(
             non_interactive_overlay()
-                .border_color(user_border_color)
+                .border_color(edge_color)
                 .when(b_top.is_set(), |d| d.border_t_1())
-                .when(b_right.is_set(), |d| d.border_r_1())
-                .when(b_bottom.is_set(), |d| d.border_b_1())
+                // Bottom/right belong to the neighbouring cells (resolved from
+                // this merge's edge in cell_user_borders) except at the viewport edge.
+                .when(b_right.is_set() && m.at_right, |d| d.border_r_1())
+                .when(b_bottom.is_set() && m.at_bottom, |d| d.border_b_1())
                 .when(b_left.is_set(), |d| d.border_l_1())
         );
     }
@@ -3493,24 +3617,44 @@ mod frozen_overlay_tests {
     }
 
     #[test]
-    fn adjacent_cells_do_not_repeat_a_merge_perimeter() {
-        use super::{merge_owns_adjacent_edges, CellBorder};
-        use visigrid_engine::{cell::BorderStyle, sheet::MergedRegion, workbook::Workbook};
-        let mut wb = Workbook::new();
-        let sheet = wb.active_sheet_mut();
-        let thin = CellBorder { style: BorderStyle::Thin, ..Default::default() };
-        let none = CellBorder::default();
-        sheet.set_border_bottom(10, 0, thin);
-        sheet.set_border_right(10, 2, thin);
-        sheet.add_merge(MergedRegion::new(10, 0, 10, 2)).unwrap();
-        for col in 0..3 {
-            assert_eq!(merge_owns_adjacent_edges(sheet, 11, col, thin, none), (true, false));
-        }
-        assert_eq!(merge_owns_adjacent_edges(sheet, 10, 3, none, thin), (false, true));
-        assert_eq!(merge_owns_adjacent_edges(sheet, 12, 0, thin, none), (false, false));
-        // An independently styled, stronger adjacent edge must still render.
-        let thick = CellBorder { style: BorderStyle::Thick, ..Default::default() };
-        assert_eq!(merge_owns_adjacent_edges(sheet, 11, 0, thick, none), (false, false));
+    fn merges_are_placed_where_their_rows_are_displayed() {
+        use super::merge_in_view;
+        use visigrid_engine::{filter::RowView, sheet::MergedRegion};
+        // A merged total at data row 9 under a table of rows 2..=8.
+        let total = MergedRegion::new(9, 0, 9, 1);
+        let mut view = RowView::new(12);
+        // Filter hides rows 3 and 5: the total moves up two view rows.
+        view.apply_filter((0..12).map(|r| r != 3 && r != 5).collect());
+        assert_eq!(merge_in_view(&total, &view), Some(MergedRegion::new(7, 0, 7, 1)));
+        // A two-row merge with one row hidden can't be drawn as a block.
+        let tall = MergedRegion::new(4, 0, 5, 0);
+        assert_eq!(merge_in_view(&tall, &view), None);
+        // Sorted rows: a merge whose rows stay adjacent and in order follows them;
+        // one whose rows were split apart doesn't.
+        let mut sorted = RowView::new(6);
+        sorted.apply_sort(vec![0, 3, 4, 1, 2, 5]);
+        assert_eq!(merge_in_view(&MergedRegion::new(3, 0, 4, 2), &sorted), Some(MergedRegion::new(1, 0, 2, 2)));
+        assert_eq!(merge_in_view(&MergedRegion::new(2, 0, 3, 2), &sorted), None);
+    }
+
+    #[test]
+    fn filtered_merges_use_slots_and_manual_hiding_in_shared_pane_geometry() {
+        use super::merge_in_slots;
+        use visigrid_engine::{filter::RowView, sheet::MergedRegion};
+        let mut rows = RowView::new(12);
+        rows.apply_filter((0..12).map(|row| row != 3 && row != 5).collect());
+        let total = MergedRegion::new(9, 0, 9, 1);
+        // The visible rank is 7; all pane geometry instead uses slot 9,
+        // with the filtered and manually hidden rows contributing zero height.
+        let displayed = merge_in_slots(&total, &rows, Some(&[2].into())).unwrap();
+        assert_eq!(displayed, total);
+        assert_eq!(displayed.pixel_rect(0, 0, |_| 100.0, |slot| {
+            if rows.is_view_row_visible(slot) && rows.view_to_data(slot) != 2 { 20.0 } else { 0.0 }
+        }), (0.0, 120.0, 200.0, 20.0));
+        assert_eq!(merge_in_slots(&total, &rows, Some(&[9].into())), None);
+        assert_eq!(merge_in_slots(&MergedRegion::new(8, 0, 9, 0), &rows, Some(&[8].into())), None);
+        rows.apply_sort(vec![0, 1, 2, 3, 4, 5, 6, 9, 8, 7, 10, 11]);
+        assert_eq!(merge_in_slots(&total, &rows, None), Some(MergedRegion::new(7, 0, 7, 1)));
     }
 
     #[test]

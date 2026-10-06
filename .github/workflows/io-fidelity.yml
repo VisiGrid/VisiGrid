@@ -21,5 +21,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-io-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-io-
+            ${{ runner.os }}-cargo-pr-
       - name: Test shared spreadsheet I/O without the GUI
         run: cargo test --locked -p visigrid-io
+      - name: Test browser-compatible JSON codec
+        run: cargo test --locked -p visigrid-io --no-default-features --lib --test bands

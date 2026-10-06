@@ -42,7 +42,14 @@ pub struct RowView {
     /// Rebuilt when filters change OR sort changes
     /// Used for fast iteration in rendering/navigation
     visible_rows: Vec<usize>,
+
+    /// Inverse of `visible_rows`, by DATA row: its position in display order,
+    /// or `HIDDEN` when filtered out. Rebuilt with `visible_rows`, so the
+    /// renderer can place rows and merges in O(1) per lookup.
+    data_to_visible: Vec<u32>,
 }
+
+const HIDDEN: u32 = u32::MAX;
 
 impl Default for RowView {
     fn default() -> Self {
@@ -58,6 +65,7 @@ impl RowView {
             data_to_view_map: (0..row_count).collect(),
             visible_mask: vec![true; row_count],
             visible_rows: (0..row_count).collect(),
+            data_to_visible: (0..row_count as u32).collect(),
         }
     }
 
@@ -116,9 +124,18 @@ impl RowView {
         self.visible_rows.get(n).copied()
     }
 
-    /// Find the index of a view row in visible_rows
+    /// Find the index of a view row in visible_rows - O(1)
     pub fn visible_index_of(&self, view_row: usize) -> Option<usize> {
-        self.visible_rows.iter().position(|&vr| vr == view_row)
+        self.visible_index_of_data(*self.row_order.get(view_row)?)
+    }
+
+    /// Position of a data row in display order (the index into
+    /// `visible_rows`), or None when it's hidden by a filter - O(1)
+    pub fn visible_index_of_data(&self, data_row: usize) -> Option<usize> {
+        match self.data_to_visible.get(data_row) {
+            Some(&i) if i != HIDDEN => Some(i as usize),
+            _ => None,
+        }
     }
 
     /// Is any filtering active?
@@ -161,6 +178,14 @@ impl RowView {
                 }
             })
             .collect();
+        self.data_to_visible.clear();
+        self.data_to_visible.resize(self.row_order.len(), HIDDEN);
+        for (index, &view_row) in self.visible_rows.iter().enumerate() {
+            let data_row = self.row_order[view_row];
+            if data_row < self.data_to_visible.len() {
+                self.data_to_visible[data_row] = index as u32;
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -871,6 +896,27 @@ impl FilterState {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn visible_index_lookup_follows_sort_and_filter() {
+        let mut view = RowView::new(6);
+        assert_eq!(view.visible_index_of_data(4), Some(4));
+        view.apply_sort(vec![5, 4, 3, 2, 1, 0]);
+        assert_eq!(view.visible_index_of_data(0), Some(5));
+        assert_eq!(view.visible_index_of(0), Some(0)); // view row 0 shows data row 5
+        view.apply_filter(vec![true, false, true, false, true, true]);
+        // Display order: data 5, 4, 2, 0 (1 and 3 hidden).
+        assert_eq!(view.visible_index_of_data(2), Some(2));
+        assert_eq!(view.visible_index_of_data(3), None);
+        assert_eq!(view.visible_index_of_data(0), Some(3));
+        for (i, &v) in view.visible_rows().iter().enumerate() {
+            assert_eq!(view.visible_index_of(v), Some(i));
+        }
+        view.delete_row(5);
+        assert_eq!(view.visible_index_of_data(4), Some(0));
+        assert_eq!(view.visible_index_of_data(99), None);
+    }
+
     use super::*;
 
     #[test]

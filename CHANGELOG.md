@@ -132,10 +132,35 @@
 - Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
 - Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes remain protected. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
 
+### Workbook content protection
+
+- Workbooks containing unsupported content open read-only and retain their complete original document, including stored formula results. Protected native copies carry an upgrade marker so VisiGrid 0.42 and later refuses to overwrite the preview with missing content; use an updated client to open the protected original. Versions before 0.42 do not recognize this marker. ([#120](https://github.com/VisiGrid/VisiGrid/pull/120))
+
+## 0.49.2
+
+### Merged cells and Center Across
+
+- **"Press Ctrl+Alt+C" means what it says for as long as it's showing.** After a sort or filter is refused because of merged cells, Ctrl+Alt+C converts them while that message is on screen and the cursor hasn't moved. It used to stop working after 30 seconds, and pressing it later centered the selected cell instead. ([#116](https://github.com/VisiGrid/VisiGrid/pull/116))
+- **The refusal names the first merged cell in the way**, in sheet order (it could name A7:B7 when A6:B6 came first). ([#116](https://github.com/VisiGrid/VisiGrid/pull/116))
+- **"Convert Merged Cells to Center Across" fits in the Format menu**; the menus are a little wider. ([#116](https://github.com/VisiGrid/VisiGrid/pull/116))
+- **Print and PDF export no longer warn "Clipped text" for a large title that prints whole.** A 16pt title in a default-height row was flagged because the check counted line spacing as text. ([#116](https://github.com/VisiGrid/VisiGrid/pull/116))
+
+### Grid drawing
+
+- **Borders on merged cells keep their colour.** A merged cell drew its borders in the theme colour, so a grey header rule came out black under a merged header and grey beside it. ([#117](https://github.com/VisiGrid/VisiGrid/pull/117))
+- **Lines next to merged cells line up.** A merged block drew its bottom and right edges inside itself while the cells beside it drew theirs on the shared line, so a header rule stepped by a pixel or two at a merged cell, and the gridline at a merge's right edge was doubled. Merged cells now share edges with their neighbours the same way ordinary cells do. ([#117](https://github.com/VisiGrid/VisiGrid/pull/117))
+- **Borders stay where they belong after sorting or filtering.** A cell's top edge was taken from the row above it in storage rather than the row shown above it, so a header's bottom rule could reappear above whichever row had been under it before sorting. Merged cells (a merged title or total) are also placed where their rows are displayed under a filter. ([#117](https://github.com/VisiGrid/VisiGrid/pull/117))
+
+
+## 0.49.1
+
+### Formulas
+
+- Fixed Group by totals showing float noise on large files (`186318331.08999842` instead of `186318331.09`; since 0.48.0). Group by, SUM, AVERAGE, SUMIF(S), AVERAGEIF(S), pivot totals and the status bar's Sum now add without drift and agree with each other, so `=SUM(...)` equals the exact total. Recipe totals keep 15 significant digits, as the sheet shows them and as Excel does, so a 16-digit integer total (an ID column summed by mistake) loses its last digit. ([#108](https://github.com/VisiGrid/VisiGrid/pull/108))
+
 ### Import recipes
 
 - Fixed the window freezing while an AI agent refreshed a large recipe-linked Table (MCP `refresh_table`): the recipe now runs in the background, as Alt+F5 does, and nothing is published if you open a plan to review before it finishes. ([#106](https://github.com/VisiGrid/VisiGrid/pull/106))
-- Fixed Group by totals showing float noise on large files (`186318331.08999842` instead of `186318331.09`; since 0.48.0). Group by, SUM, AVERAGE, SUMIF(S), AVERAGEIF(S), pivot totals and the status bar's Sum now add without drift and agree with each other, so `=SUM(...)` equals the exact total. Recipe totals keep 15 significant digits, as the sheet shows them and as Excel does, so a 16-digit integer total (an ID column summed by mistake) loses its last digit. ([#108](https://github.com/VisiGrid/VisiGrid/pull/108))
 - An AI agent's recipe refresh that runs past its 10-minute wait now reports that it may still finish (`still_running`) instead of a communication failure, since the refresh still updates the Table when it's done. ([#109](https://github.com/VisiGrid/VisiGrid/pull/109))
 
 ## 0.49.0

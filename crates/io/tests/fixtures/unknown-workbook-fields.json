@@ -1,0 +1,17 @@
+{
+  "format": "visigrid-json",
+  "version": 2,
+  "active_sheet": 0,
+  "future_document_feature": {"required": true, "payload": [1, null, {"enabled": false}]},
+  "sheets": [
+    {
+      "name": "Customers",
+      "future_sheet_feature": {"range": "A1:A2", "mode": "review"},
+      "cells": [
+        {"row": 0, "col": 0, "value": "Name", "future_cell_feature": {"source": "fixture", "confidence": 0.5}},
+        {"row": 1, "col": 0, "value": "Alice", "fmt": {"bold": true, "future_format_feature": {"variant": "accent"}}}
+      ]
+    },
+    {"name": "Untouched", "cells": [{"row": 0, "col": 0, "value": 42}]}
+  ]
+}

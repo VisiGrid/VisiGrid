@@ -1716,6 +1716,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7596,6 +7602,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.7",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
 name = "twox-hash"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7787,6 +7811,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7941,7 +7971,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "atty",
  "base64 0.22.1",
@@ -7973,8 +8003,10 @@ dependencies = [
  "unicode-width 0.2.0",
  "url",
  "uuid",
+ "visigrid-collab",
  "visigrid-config",
  "visigrid-engine",
+ "visigrid-engine-wasm",
  "visigrid-hub-client",
  "visigrid-io",
  "visigrid-protocol",
@@ -7986,8 +8018,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "visigrid-collab"
+version = "0.49.2"
+dependencies = [
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tungstenite",
+ "url",
+ "uuid",
+ "visigrid-engine",
+ "visigrid-io",
+ "visigrid-protocol",
+]
+
+[[package]]
 name = "visigrid-config"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "dirs 5.0.1",
  "keyring",
@@ -7998,14 +8046,14 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "chrono",
  "hashbrown 0.16.1",
@@ -8021,19 +8069,23 @@ dependencies = [
 
 [[package]]
 name = "visigrid-engine-wasm"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
+ "blake3",
  "console_error_panic_hook",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "uuid",
+ "visigrid-collab",
  "visigrid-engine",
+ "visigrid-io",
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -8076,7 +8128,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-hub-client"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "blake3",
  "dirs 6.0.0",
@@ -8088,15 +8140,17 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "blake3",
+ "bytes",
  "calamine",
  "chrono",
  "csv",
  "dirs 5.0.1",
  "encoding_rs",
  "libduckdb-sys",
+ "miniz_oxide",
  "parquet",
  "quick-xml 0.38.4",
  "regex",
@@ -8115,7 +8169,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -8130,7 +8184,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-print"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "ashpd",
  "cosmic-text",
@@ -8145,7 +8199,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-protocol"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "dirs 6.0.0",
  "rand 0.8.7",
@@ -8155,7 +8209,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-recon"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "chrono",
  "csv",
@@ -8167,7 +8221,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-scripting"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "blake3",
  "chrono",
@@ -8180,7 +8234,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-session-host"
-version = "0.49.0"
+version = "0.49.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",

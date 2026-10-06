@@ -151,6 +151,9 @@ impl Workbook {
     }
 
     pub fn ensure_writable(&self) -> Result<(), String> {
+        if self.pending_bands.is_some() {
+            return Err("Workbook band data is still loading; editing and saving are disabled.".into());
+        }
         match self.read_only_reason() {
             Some(reason) => Err(format!("Read-only recovery: {reason} Saving, including Save As, is disabled.")),
             None => Ok(()),

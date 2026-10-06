@@ -186,6 +186,19 @@ pub(crate) fn scroll(
     next
 }
 
+/// Adjacent displayed data rows for a view slot. Filtering has an indexed
+/// inverse; only immediately adjacent manually hidden rows need to be skipped.
+pub(crate) fn row_neighbors(
+    rows: &visigrid_engine::filter::RowView,
+    hidden: Option<&std::collections::BTreeSet<usize>>,
+    slot: usize,
+) -> (Option<usize>, Option<usize>) {
+    (
+        crate::formatting::plan::row_neighbor(rows, hidden, slot, false),
+        crate::formatting::plan::row_neighbor(rows, hidden, slot, true),
+    )
+}
+
 use crate::{app::Spreadsheet, workbook_view::WorkbookViewState};
 impl Spreadsheet {
     pub(crate) fn displayed_row_height(&self, row: usize) -> f32 {
@@ -242,3 +255,21 @@ impl Spreadsheet {
 #[cfg(test)]
 #[path = "pane_layout_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod displayed_neighbor_tests {
+    use super::row_neighbors;
+    use visigrid_engine::filter::RowView;
+
+    #[test]
+    fn borders_use_displayed_neighbors_through_sort_filter_and_manual_hiding() {
+        let mut rows = RowView::new(8);
+        rows.apply_sort(vec![0, 4, 2, 3, 1, 5, 6, 7]);
+        rows.apply_filter((0..8).map(|data| data != 2).collect());
+        let hidden = [4, 6].into();
+        assert_eq!(row_neighbors(&rows, Some(&hidden), 3), (Some(0), Some(1)));
+        assert_eq!(row_neighbors(&rows, Some(&hidden), 5), (Some(1), Some(7)));
+        assert_eq!(row_neighbors(&rows, Some(&hidden), 0), (None, Some(3)));
+        assert_eq!(row_neighbors(&rows, Some(&hidden), 7), (Some(5), None));
+    }
+}

@@ -238,9 +238,11 @@ fn damaged_current_view_and_future_catalog_use_distinct_read_only_recovery() {
         }
         let raw = doc.to_string();
         assert!(json::import_any(&raw).unwrap_err().contains(expected));
-        let recovered = json::import_any_for_recovery(&raw).unwrap().0;
+        let mut recovered = json::import_any_for_recovery(&raw).unwrap().0;
         assert!(recovered.read_only_reason().unwrap().contains(expected));
         assert_eq!(recovered.active_sheet().get_display(0, 0), "35");
+        assert_eq!(json::export_workbook(&recovered, &[], 0).unwrap(), raw);
+        recovered.sheet_mut(0).unwrap().name = "Edited preview".into();
         assert!(json::export_workbook(&recovered, &[], 0).is_err());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("view.sheet");
@@ -475,9 +477,11 @@ fn damaged_named_presets_and_future_versions_keep_cells_in_read_only_recovery() 
         }
         let raw = doc.to_string();
         assert!(json::import_any(&raw).unwrap_err().contains(expected));
-        let recovered = json::import_any_for_recovery(&raw).unwrap().0;
+        let mut recovered = json::import_any_for_recovery(&raw).unwrap().0;
         assert!(recovered.read_only_reason().unwrap().contains(expected));
         assert_eq!(recovered.active_sheet().get_display(0, 0), "35");
+        assert_eq!(json::export_workbook(&recovered, &[], 0).unwrap(), raw);
+        recovered.sheet_mut(0).unwrap().name = "Edited preview".into();
         assert!(json::export_workbook(&recovered, &[], 0).is_err());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("preset.sheet");

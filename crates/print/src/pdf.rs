@@ -418,7 +418,11 @@ fn draw_cell(
         VerticalAlignment::Middle => ((height - text_height) / 2.0).max(0.0),
         VerticalAlignment::Bottom => (height - text_height).max(0.0),
     };
-    let mut clipped = text_height > height + 0.1;
+    // Lines are laid out at 1.2x the font size; the extra 0.2x is spacing,
+    // not ink. Only report clipping when the text itself doesn't fit, or a
+    // 16pt title in a default 21pt row is flagged though it prints whole.
+    let leading = size * 0.2;
+    let mut clipped = text_height - leading > height + 0.1;
     fill(
         surface,
         f.font_color.unwrap_or_else(|| {

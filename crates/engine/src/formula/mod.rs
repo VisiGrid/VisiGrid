@@ -10,6 +10,9 @@ pub mod eval;
 pub mod functions;
 pub mod analyze;
 pub mod refs;
+/// Formula-editing help shared by the desktop and the web: the function
+/// table with signatures, caret context, diagnostics, highlight tokens.
+pub mod help;
 pub mod whole_range;
 
 pub(crate) mod eval_helpers;

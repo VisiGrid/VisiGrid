@@ -15,11 +15,12 @@ members = [
     "crates/recon",
     "crates/cli",
     "crates/scripting",
+    "crates/collab",
     "gpui-app",
 ]
 
 [workspace.package]
-version = "0.49.0"
+version = "0.49.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 

@@ -18,7 +18,12 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::workbook::Workbook;
 use wasm_bindgen::prelude::*;
 
+mod collab;
+mod formula_help;
+mod inspect;
+mod recipes;
 mod session;
+pub use collab::CollabClient;
 pub use session::Session;
 
 #[derive(Deserialize, Clone)]
@@ -72,6 +77,20 @@ pub fn engine_version() -> String {
 #[wasm_bindgen]
 pub fn engine_commit() -> String {
     env!("VISIGRID_ENGINE_COMMIT").to_string()
+}
+
+/// Bytes of linear memory the engine has grown to (WASM pages never shrink,
+/// so this is the high-water mark), for the large-sheet measurements.
+#[wasm_bindgen]
+pub fn wasm_memory_bytes() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (core::arch::wasm32::memory_size(0) * 65536) as f64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0.0
+    }
 }
 
 /// Every built-in function name, sorted — the engine's own FUNCTION_NAMES.
