@@ -1,0 +1,83 @@
+# Instruction-count ratchet for the engine's hot paths.
+#
+# On a pull request that touches the engine or io crates, count instructions
+# under callgrind and fail if any scenario exceeds its ceiling. Nightly, run
+# the same counts on main and open a PR that lowers any ceiling the count
+# came in under, so the ceilings only ever go down. See docs/engine-counts.md.
+name: Engine counts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/engine/**"
+      - "crates/io/**"
+      - "scripts/engine-counts*"
+      - "benches/engine-counts*"
+      - ".github/workflows/engine-counts.yml"
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: engine-counts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-counts-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-counts-
+
+      - name: Count instructions
+        run: scripts/engine-counts.sh target/counts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-counts
+          path: target/counts/
+          retention-days: 30
+
+      - name: Gate against the ceilings
+        if: github.event_name == 'pull_request'
+        run: scripts/engine-counts-gate.py target/counts/results.json
+
+      - name: Lower the ceilings
+        if: github.event_name != 'pull_request'
+        run: scripts/engine-counts-gate.py target/counts/results.json --ratchet
+
+      - name: Open a PR with the lowered ceilings
+        if: github.event_name != 'pull_request'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/engine-counts-ratchet
+          title: "Lower engine instruction-count ceilings"
+          commit-message: "Lower engine instruction-count ceilings to last night's counts"
+          body: |
+            Nightly engine-counts run on main came in under one or more ceilings.
+            This lowers them to what was measured, so a later change that
+            raises a count fails its PR. Nothing else changed.
+          add-paths: benches/engine-counts.ceilings.*.json
+          delete-branch: true

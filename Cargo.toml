@@ -55,6 +55,13 @@ opt-level = "z"
 [profile.dev]
 opt-level = 1
 
+# Release as shipped, with symbols kept so callgrind can find the measured_*
+# boundary in scripts/engine-counts.sh. Nothing else builds with this.
+[profile.counts]
+inherits = "release"
+strip = false
+debug = "line-tables-only"
+
 # DuckDB's bundled C++ engine is a 1.8 GB library when built with debug info,
 # and every binary that uses visigrid-io (the CLI's dozens of test binaries
 # included) links it statically, at 1-2 GB each: one test run filled a 476 GB
