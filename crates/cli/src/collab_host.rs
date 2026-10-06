@@ -52,6 +52,7 @@ pub struct Clock {
     pub now: Option<String>,
     pub tz: Option<String>,
     pub seed: Option<u64>,
+    pub utc_offset_seconds: Option<i64>,
 }
 
 pub struct Host {
@@ -67,8 +68,7 @@ pub struct Host {
     /// After a panic mid-request the workbook may be half-updated; refuse
     /// everything but `hello` and `load` until the sequencer reloads.
     poisoned: bool,
-    /// Accepted and stored. TODO(#99): pass to the engine's recalc clock
-    /// once VisiGrid#99 (deterministic NOW/TODAY/RAND) is merged.
+    /// Calculation context supplied by the sequencer.
     pub clock: Clock,
     /// The bands of the last `snapshot`, by key, until the next one: the
     /// sequencer fetches each with `band` (one per line, never one huge line).
@@ -334,18 +334,33 @@ impl Host {
 
     fn set_clock(&mut self, req: &Map<String, Value>) -> Reply {
         let now = req.get("now").and_then(Value::as_str).map(str::to_string);
-        if let Some(n) = &now {
-            chrono::DateTime::parse_from_rfc3339(n).map_err(|e| format!("now must be RFC 3339: {e}"))?;
-        }
+        let parsed = now.as_ref().map(|n| chrono::DateTime::parse_from_rfc3339(n)
+            .map_err(|e| format!("now must be RFC 3339: {e}"))).transpose()?;
+        let tz = req.get("tz").and_then(Value::as_str).map(str::to_string);
+        let offset = match req.get("utc_offset_seconds") {
+            Some(value) => Some(value.as_i64().filter(|v| (-86400..=86400).contains(v))
+                .ok_or("utc_offset_seconds must be an integer within one day")?),
+            None if tz.as_deref().is_some_and(|tz| tz != "UTC") =>
+                return Err("a named timezone requires utc_offset_seconds".into()),
+            None => parsed.as_ref().map(|date| i64::from(date.offset().local_minus_utc())),
+        };
         let seed = match req.get("seed") {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.as_u64().ok_or("seed must be a non-negative integer")?),
         };
         self.clock = Clock {
             now,
-            tz: req.get("tz").and_then(Value::as_str).map(str::to_string),
+            tz,
             seed,
+            utc_offset_seconds: offset,
         };
+        if let Some(wb) = self.wb.as_mut() {
+            wb.set_recalc_clock(Some(visigrid_engine::RecalcClock {
+                now_ms: parsed.as_ref().map(|date| date.timestamp_millis()),
+                utc_offset_seconds: offset,
+                seed,
+            }));
+        }
         Ok(Map::new())
     }
 }

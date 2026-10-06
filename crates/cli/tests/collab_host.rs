@@ -80,6 +80,24 @@ fn blank() -> Value {
     serde_json::from_str(BLANK).unwrap()
 }
 
+#[test]
+fn sequencer_clock_controls_volatile_formula_results() {
+    let mut checksums = Vec::new();
+    for _ in 0..2 {
+        let mut host = Host::spawn();
+        host.ok(json!({"cmd":"load","document":blank(),"seq":0}));
+        host.ok(json!({"cmd":"set_clock","now":"2026-10-03T12:00:00.123Z",
+            "tz":"America/Chicago","utc_offset_seconds":-18000,"seed":42}));
+        let result = submit(&mut host, 0, &[
+            set(0, 0, CellContent::Formula("=NOW()".into())),
+            set(0, 1, CellContent::Formula("=RAND()".into())),
+        ], &[]);
+        checksums.push(result["checksum"].clone());
+    }
+    assert_eq!(checksums[0], checksums[1]);
+    assert!(checksums[0].as_str().is_some_and(|sum| !sum.is_empty()));
+}
+
 fn set(row: usize, col: usize, content: CellContent) -> CollabOp {
     CollabOp::SetCell { sheet: 1, sheet_name: "Sheet1".into(), row, col, content }
 }
