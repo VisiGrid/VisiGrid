@@ -227,3 +227,16 @@ fn raw_band_numbers_are_checked_before_json_value_rounding() {
         assert!(bands::finish(&mut wb).is_err());
     }
 }
+
+#[test]
+fn ordinary_native_float_values_remain_editable_after_json_round_trip() {
+    let mut seed = 0x5eed_u64;
+    let cells: Vec<_> = (0..1000).map(|row| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let value = f64::from_bits(0x3ff0000000000000 | (seed & 0x000fffffffffffff));
+        serde_json::json!({"row":row,"col":0,"value":value})
+    }).collect();
+    let source = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Floats","cells":cells}]}).to_string();
+    let (wb,_,_) = import_any(&source).unwrap();
+    wb.ensure_writable().unwrap();
+}

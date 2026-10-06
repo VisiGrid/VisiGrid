@@ -22,7 +22,8 @@ native = [
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true, features = ["raw_value"] }
+# Inspect original literals without making ordinary native/JS float exports lossy.
+serde_json = { workspace = true, features = ["raw_value", "float_roundtrip"] }
 rusqlite = { workspace = true, optional = true }
 visigrid-engine = { workspace = true }
 csv = { version = "1", optional = true }
