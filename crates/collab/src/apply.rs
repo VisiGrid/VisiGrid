@@ -80,6 +80,7 @@ pub fn apply_op(wb: &mut Workbook, op: &CollabOp) -> Result<(), Skipped> {
 
 /// [`apply_op`], recording what changed into `changes` when given.
 pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&mut Changes>) -> Result<(), Skipped> {
+    wb.ensure_writable().map_err(Skipped::Refused)?;
     match op {
         CollabOp::SetCell {
             sheet,

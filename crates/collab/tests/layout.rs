@@ -116,3 +116,19 @@ fn every_layout_op_undoes() {
         assert_eq!(fingerprint(&w), start, "undo of {ops:?}");
     }
 }
+
+#[test]
+fn protected_workbooks_refuse_collaboration_mutations() {
+    let mut wb = Workbook::new();
+    let op = lines(&wb,Axis::Row,0,0,Some(42.0),None);
+    wb.sheet_mut(0).unwrap().read_only_reason = Some("Unsupported saved feature".into());
+    let before = fingerprint(&wb);
+    assert!(visigrid_collab::apply::apply_op(&mut wb,&op).is_err());
+    assert_eq!(fingerprint(&wb),before);
+    wb.sheet_mut(0).unwrap().read_only_reason = None;
+    wb.pending_bands = Some(visigrid_engine::workbook::PendingBandLoad {
+        remaining: Default::default(),read_only_after: None,cached: vec![],
+    });
+    assert!(visigrid_collab::apply::apply_op(&mut wb,&op).is_err());
+    assert_eq!(fingerprint(&wb),before);
+}

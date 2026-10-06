@@ -52,7 +52,7 @@ fn banded_export_round_trips_in_any_band_order() {
     for b in out.iter().rev() {
         bands::apply(&mut loaded, &b.data, Some(&b.reference.key)).unwrap();
     }
-    bands::finish(&mut loaded);
+    bands::finish(&mut loaded).unwrap();
 
     for &(sheet, r, c) in &[(0, 0, 0), (0, 70_000, 1), (0, 149_999, 1), (0, 0, 3), (0, 140_000, 3), (0, 5, 5), (0, 7, 5), (1, 0, 0)] {
         assert_eq!(shown(&loaded, sheet, r, c), shown(&wb, sheet, r, c), "cell {sheet}:{r}:{c}");
@@ -79,4 +79,164 @@ fn small_workbooks_are_not_banded() {
     assert!(out.is_empty());
     let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
     assert_eq!(v(&manifest), v(&export_workbook(&wb, &[SheetLayout::default()], 0).unwrap()));
+}
+
+fn tiny_band(cell: serde_json::Value) -> (String, Vec<u8>, String) {
+    use sha2::{Digest, Sha256};
+    let doc = format!(r#"{{"format":"visigrid-band","version":1,"sheet":0,"r0":0,"r1":2,"cells":[{cell}]}}"#);
+    let data = miniz_oxide::deflate::compress_to_vec(doc.as_bytes(), 6);
+    let key: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+    let manifest = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Data","cells":[],"bands":[{"r0":0,"r1":2,"cells":1,"key":key,"bytes":data.len()}]}]}).to_string();
+    (manifest, data, key)
+}
+
+#[test]
+fn partial_workbook_cannot_edit_save_or_finish_early() {
+    let (manifest, data, key) = tiny_band(serde_json::json!({"row":0,"col":0,"value":42}));
+    let (mut wb, layouts, active) = import_any(&manifest).unwrap();
+    assert!(wb.ensure_writable().is_err());
+    assert!(bands::finish(&mut wb).is_err());
+    assert!(export_workbook(&wb, &layouts, active).is_err());
+    wb.sheet_mut(0).unwrap().read_only_reason = None;
+    assert!(wb.ensure_writable().is_err());
+    assert!(export_workbook(&wb, &layouts, active).is_err());
+    bands::apply(&mut wb, &data, Some(&key)).unwrap();
+    assert!(bands::apply(&mut wb, &data, Some(&key)).is_err());
+    bands::finish(&mut wb).unwrap();
+    wb.ensure_writable().unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(0,0), "42");
+    assert!(export_workbook(&wb, &layouts, active).is_ok());
+}
+
+#[test]
+fn unknown_or_unrepresentable_band_content_never_changes_the_preview() {
+    for cell in [
+        serde_json::json!({"row":0,"col":0,"value":42,"future":true}),
+        serde_json::json!({"row":0,"col":0,"value":42,"fmt":{"future":true}}),
+        serde_json::json!({"row":0,"col":0,"value":42,"fmt":{"align":"future"}}),
+        serde_json::json!({"row":0,"col":0,"value":9007199254740993_u64}),
+        serde_json::json!({"row":2,"col":0,"value":42}),
+        serde_json::json!({"row":0,"col":0,"value":{"future":true}}),
+        serde_json::json!({"row":0,"col":0,"value":42,"spill_from":[1,0],"fmt":{"bold":true}}),
+        serde_json::json!({"row":0,"col":0,"value":42,"stale_custom_fn":true}),
+    ] {
+        let (manifest, data, key) = tiny_band(cell);
+        let (mut wb, _, _) = import_any(&manifest).unwrap();
+        assert!(bands::apply(&mut wb, &data, Some(&key)).is_err());
+        assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
+        assert_eq!(wb.pending_bands.as_ref().unwrap().remaining.len(),1);
+        assert!(bands::finish(&mut wb).is_err());
+    }
+}
+
+#[test]
+fn unsupported_manifest_stays_locked_and_retains_original_source() {
+    let (manifest, data, key) = tiny_band(serde_json::json!({"row":0,"col":0,"value":42}));
+    let mut source: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    source["future"] = serde_json::json!({"setting":"keep"});
+    let original = source.to_string();
+    let (mut wb, _, _) = import_any(&original).unwrap();
+    assert!(bands::apply(&mut wb, &data, Some(&key)).is_err());
+    assert_eq!(wb.sheet(0).unwrap().canonical_content_protection.as_ref().unwrap().source.as_str(), original);
+    assert!(wb.ensure_writable().is_err());
+}
+
+#[test]
+fn stable_collaboration_identities_survive_editable_json_round_trip() {
+    let source = r#"{"format":"visigrid-json","version":2,"collab_sheet_ids":[17,4],"sheets":[{"name":"A","cells":[]},{"name":"B","cells":[]}]}"#;
+    let (mut wb, layouts, active) = import_any(source).unwrap();
+    wb.ensure_writable().unwrap();
+    assert_eq!(wb.sheet(0).unwrap().id,SheetId(17));
+    assert_eq!(wb.sheet(1).unwrap().id,SheetId(4));
+    wb.sheet_mut(0).unwrap().set_value(0,0,"edited");
+    let result: serde_json::Value = serde_json::from_str(&export_workbook(&wb,&layouts,active).unwrap()).unwrap();
+    assert_eq!(result["collab_sheet_ids"],serde_json::json!([17,4]));
+    assert!(import_any(&source.replace("[17,4]","[17,17]")).is_err());
+    assert!(import_any(&source.replace("[17,4]","[17]")).is_err());
+}
+
+#[test]
+fn band_loading_retains_cached_custom_formula_results() {
+    let (manifest,data,key) = tiny_band(serde_json::json!({"row":0,"col":0,"formula":"=FUTURE_CUSTOM(1)","value":123}));
+    let (mut wb,_,_) = import_any(&manifest).unwrap();
+    bands::apply(&mut wb,&data,Some(&key)).unwrap();
+    bands::finish(&mut wb).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(0,0),"123");
+}
+
+#[test]
+fn a_late_band_error_is_atomic() {
+    use sha2::{Digest,Sha256};
+    let doc = r#"{"format":"visigrid-band","version":1,"sheet":0,"r0":0,"r1":2,"cells":[{"row":0,"col":0,"value":42},{"row":1,"col":0,"value":43,"future":true}]}"#;
+    let data = miniz_oxide::deflate::compress_to_vec(doc.as_bytes(),6);
+    let key: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+    let manifest = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Data","bands":[{"r0":0,"r1":2,"cells":2,"key":key,"bytes":data.len()}]}]}).to_string();
+    let (mut wb,_,_) = import_any(&manifest).unwrap();
+    assert!(bands::apply(&mut wb,&data,Some(&key)).is_err());
+    assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
+    assert_eq!(wb.pending_bands.as_ref().unwrap().remaining.len(),1);
+}
+
+#[test]
+fn bands_cannot_silently_move_cells_into_a_merge_anchor() {
+    let (manifest,data,key) = tiny_band(serde_json::json!({"row":1,"col":0,"value":42}));
+    let mut source: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    source["sheets"][0]["merges"] = serde_json::json!([{"start_row":0,"start_col":0,"end_row":1,"end_col":0}]);
+    let (mut wb,_,_) = import_any(&source.to_string()).unwrap();
+    assert!(bands::apply(&mut wb,&data,Some(&key)).is_err());
+    assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
+    assert!(bands::finish(&mut wb).is_err());
+}
+
+#[test]
+fn numeric_literals_beyond_u64_or_double_precision_keep_the_original() {
+    for number in ["90071992547409930000124", "0.10000000000000000001"] {
+        let source = format!(r#"{{"format":"visigrid-json","version":2,"sheets":[{{"name":"Precision","cells":[{{"row":0,"col":0,"value":{number}}}]}}]}}"#);
+        let (wb,layouts,active) = import_any(&source).unwrap();
+        assert!(wb.read_only_reason().is_some(), "unsafe numeric literal {number} remained editable");
+        assert_eq!(export_workbook(&wb,&layouts,active).unwrap(),source);
+    }
+}
+
+#[test]
+fn numeric_precision_is_checked_in_opaque_metadata_and_formula_caches() {
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Precision","cells":[{"row":0,"col":0,"formula":"=CUSTOM(1)","value":9007199254740993}]}]}"#;
+    let (wb,layouts,active) = import_any(source).unwrap();
+    assert!(wb.read_only_reason().is_some());
+    assert_eq!(export_workbook(&wb,&layouts,active).unwrap(),source);
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Precision","cells":[],"charts":[{"future_id":90071992547409930000124}]}]}"#;
+    let (wb,layouts,active) = import_any(source).unwrap();
+    assert!(wb.read_only_reason().is_some());
+    assert_eq!(export_workbook(&wb,&layouts,active).unwrap(),source);
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Text","cells":[{"row":0,"col":0,"value":"90071992547409930000124 \"quoted\" \\ 0.10000000000000000001"}]}]}"#;
+    let (wb,_,_) = import_any(source).unwrap();
+    wb.ensure_writable().unwrap();
+}
+
+#[test]
+fn raw_band_numbers_are_checked_before_json_value_rounding() {
+    use sha2::{Digest,Sha256};
+    for number in ["90071992547409930000124", "0.10000000000000000001"] {
+        let doc = format!(r#"{{"format":"visigrid-band","version":1,"sheet":0,"r0":0,"r1":2,"cells":[{{"row":0,"col":0,"value":{number}}}]}}"#);
+        let data = miniz_oxide::deflate::compress_to_vec(doc.as_bytes(),6);
+        let key: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+        let manifest = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Data","bands":[{"r0":0,"r1":2,"cells":1,"key":key,"bytes":data.len()}]}]}).to_string();
+        let (mut wb,_,_) = import_any(&manifest).unwrap();
+        assert!(bands::apply(&mut wb,&data,Some(&key)).is_err());
+        assert!(wb.sheet(0).unwrap().cells_iter().next().is_none());
+        assert!(bands::finish(&mut wb).is_err());
+    }
+}
+
+#[test]
+fn ordinary_native_float_values_remain_editable_after_json_round_trip() {
+    let mut seed = 0x5eed_u64;
+    let cells: Vec<_> = (0..1000).map(|row| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let value = f64::from_bits(0x3ff0000000000000 | (seed & 0x000fffffffffffff));
+        serde_json::json!({"row":row,"col":0,"value":value})
+    }).collect();
+    let source = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Floats","cells":cells}]}).to_string();
+    let (wb,_,_) = import_any(&source).unwrap();
+    wb.ensure_writable().unwrap();
 }

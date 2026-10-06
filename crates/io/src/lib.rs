@@ -7,6 +7,7 @@ pub mod csv_import;
 #[cfg(feature = "native")]
 pub mod duckdb;
 pub mod json;
+pub mod content_protection;
 #[cfg(feature = "native")]
 pub mod native;
 #[cfg(any(feature = "native", feature = "recipes"))]

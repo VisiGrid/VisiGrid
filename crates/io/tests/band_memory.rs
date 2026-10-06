@@ -45,7 +45,7 @@ fn banded_load_memory() {
         visigrid_io::json::bands::apply(&mut loaded, &b.data, None).unwrap();
         eprintln!("after band: now {} MB peak {} MB", mb(NOW.load(Relaxed) - base), mb(PEAK.load(Relaxed) - base));
     }
-    visigrid_io::json::bands::finish(&mut loaded);
+    visigrid_io::json::bands::finish(&mut loaded).unwrap();
     eprintln!("after finish: now {} MB peak {} MB", mb(NOW.load(Relaxed) - base), mb(PEAK.load(Relaxed) - base));
     let copy = loaded.clone();
     eprintln!("with a confirmed copy: now {} MB", mb(NOW.load(Relaxed) - base));

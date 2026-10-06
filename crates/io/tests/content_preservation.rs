@@ -1,0 +1,184 @@
+use visigrid_io::json::{export_workbook, import_any};
+
+#[test]
+fn ordinary_integer_cells_remain_editable_but_rounded_values_are_protected() {
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Numbers","cells":[{"row":0,"col":0,"value":42}]}]}"#;
+    let (mut workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_none());
+    workbook.sheet_mut(0).unwrap().set_value(0, 0, "43");
+    let output: serde_json::Value =
+        serde_json::from_str(&export_workbook(&workbook, &layouts, active).unwrap()).unwrap();
+    assert_eq!(
+        output["sheets"][0]["cells"][0]["value"].as_f64(),
+        Some(43.0)
+    );
+
+    let rounded = source.replace("42", "9007199254740993");
+    let (workbook, layouts, active) = import_any(&rounded).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        rounded
+    );
+}
+
+// Unknown content must remain attached to its original document, sheet, cell
+// and format. Merely accepting JSON on input does not establish compatibility.
+#[test]
+fn unknown_fields_survive_canonical_round_trip() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let before: serde_json::Value = serde_json::from_str(source).unwrap();
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    let after: serde_json::Value =
+        serde_json::from_str(&export_workbook(&workbook, &layouts, active).unwrap()).unwrap();
+    for pointer in [
+        "/future_document_feature",
+        "/sheets/0/future_sheet_feature",
+        "/sheets/0/cells/0/future_cell_feature",
+        "/sheets/0/cells/1/fmt/future_format_feature",
+    ] {
+        assert_eq!(
+            after.pointer(pointer),
+            before.pointer(pointer),
+            "lost {pointer}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_content_survives_native_storage_without_becoming_editable() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let (workbook, _, _) = import_any(source).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    visigrid_io::native::save_workbook(&workbook, file.path()).unwrap();
+    // The source envelope supplements a normal preview, never an empty DB.
+    let conn = rusqlite::Connection::open(file.path()).unwrap();
+    let sheets: i64 = conn
+        .query_row("SELECT count(*) FROM sheets", [], |r| r.get(0))
+        .unwrap();
+    let cells: i64 = conn
+        .query_row("SELECT count(*) FROM cells", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sheets, 2);
+    assert!(cells > 0);
+    drop(conn);
+
+    let restored = visigrid_io::native::load_workbook(file.path()).unwrap();
+    assert!(restored.read_only_reason().is_some());
+    let output = export_workbook(&restored, &[], 0).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+        serde_json::from_str::<serde_json::Value>(source).unwrap()
+    );
+}
+
+#[test]
+fn clearing_the_warning_does_not_allow_a_lossy_rewrite() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let (mut workbook, layouts, active) = import_any(source).unwrap();
+    workbook.sheet_mut(0).unwrap().read_only_reason = None;
+    assert!(export_workbook(&workbook, &layouts, active).is_err());
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), b"keep existing contents").unwrap();
+    assert!(visigrid_io::native::save_workbook(&workbook, file.path()).is_err());
+    assert_eq!(
+        std::fs::read(file.path()).unwrap(),
+        b"keep existing contents"
+    );
+}
+
+#[test]
+fn recognizable_future_version_keeps_original_without_recalculation() {
+    let source = r#"{"format":"visigrid-json","version":99,"sheets":[{"name":"Future","cells":[{"row":0,"col":0,"formula":"=1+1","value":123}]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        source
+    );
+}
+
+#[test]
+fn layout_edits_cannot_masquerade_as_original_copies() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let (workbook, mut layouts, active) = import_any(source).unwrap();
+    layouts[0].hidden_rows.insert(42);
+    assert!(export_workbook(&workbook, &layouts, active).is_err());
+}
+
+#[test]
+fn unsupported_extensions_restore_stored_results_after_projection_checks() {
+    let source = r#"{"format":"visigrid-json","version":2,"future":false,"sheets":[{"name":"Cached","cells":[{"row":0,"col":0,"formula":"=1+1","value":123}]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        workbook.active_sheet().get_computed_value(0, 0),
+        visigrid_engine::formula::eval::Value::Number(123.0)
+    );
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        source
+    );
+}
+
+#[test]
+fn future_format_variant_opens_cached_grid_read_only() {
+    let source = r#"{"format":"visigrid-json","version":2,"sheets":[{"name":"Future formatting","cells":[{"row":0,"col":0,"value":42,"fmt":{"number_format":"FutureAccounting"}}]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    assert!(workbook.read_only_reason().is_some());
+    assert_eq!(
+        workbook.active_sheet().get_computed_value(0, 0),
+        visigrid_engine::formula::eval::Value::Number(42.0)
+    );
+    assert_eq!(
+        export_workbook(&workbook, &layouts, active).unwrap(),
+        source
+    );
+}
+
+#[test]
+fn native_storage_preserves_collaboration_sheet_identities() {
+    let source = r#"{"format":"visigrid-json","version":2,"collab_sheet_ids":[17,4],"sheets":[{"name":"A","cells":[]},{"name":"B","cells":[]}]}"#;
+    let (workbook, layouts, active) = import_any(source).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    visigrid_io::native::save_workbook(&workbook, file.path()).unwrap();
+    let restored = visigrid_io::native::load_workbook(file.path()).unwrap();
+    restored.ensure_writable().unwrap();
+    assert_eq!(restored.sheet(0).unwrap().id.0,17);
+    assert_eq!(restored.sheet(1).unwrap().id.0,4);
+    let output: serde_json::Value = serde_json::from_str(&export_workbook(&restored,&layouts,active).unwrap()).unwrap();
+    assert_eq!(output["collab_sheet_ids"],serde_json::json!([17,4]));
+
+    let single = r#"{"format":"visigrid-json","version":1,"collab_sheet_ids":[21],"name":"Single","cells":[]}"#;
+    let sheet = visigrid_io::json::import_full(single).unwrap();
+    visigrid_io::native::save(&sheet,file.path()).unwrap();
+    let restored = visigrid_io::native::load(file.path()).unwrap();
+    assert_eq!(restored.id.0,21);
+    assert!(restored.canonical_wire_identity);
+}
+
+#[test]
+fn protected_native_preview_refuses_readers_without_source_support() {
+    let source = include_str!("fixtures/unknown-workbook-fields.json");
+    let (workbook, _, _) = import_any(source).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    visigrid_io::native::save_workbook(&workbook, file.path()).unwrap();
+    let restored = visigrid_io::native::load_workbook(file.path()).unwrap();
+    assert_eq!(export_workbook(&restored, &[], 0).unwrap(), source);
+
+    // Simulate a pre-protection reader: it ignores the source metadata and
+    // follows the existing Table-version recovery path.
+    let conn = rusqlite::Connection::open(file.path()).unwrap();
+    let marker: String = conn.query_row("SELECT value FROM meta WHERE key = 'tables'", [], |r| r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&marker).unwrap()["version"].as_u64(), Some(u64::MAX));
+    conn.execute("DELETE FROM meta WHERE key = 'protected_canonical_source'", []).unwrap();
+    drop(conn);
+    assert!(visigrid_io::native::load_workbook(file.path()).unwrap_err().contains("Upgrade VisiGrid"));
+    let (preview, issue) = visigrid_io::native::load_workbook_for_recovery(file.path()).unwrap();
+    assert!(issue.unwrap().to_string().contains("Upgrade VisiGrid"));
+    assert!(preview.read_only_reason().unwrap().contains("Upgrade VisiGrid"));
+    let before = std::fs::read(file.path()).unwrap();
+    assert!(visigrid_io::native::save_workbook(&preview, file.path()).is_err());
+    assert_eq!(std::fs::read(file.path()).unwrap(), before);
+}

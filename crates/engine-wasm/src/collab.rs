@@ -303,15 +303,15 @@ impl CollabCore {
 
     /// After the last band: dependencies, one ordered recompute, and the
     /// confirmed copy brought level.
-    pub(crate) fn finish_load(&mut self) -> Value {
-        visigrid_io::json::bands::finish(&mut self.client.wb);
+    pub(crate) fn finish_load(&mut self) -> Result<Value, String> {
+        visigrid_io::json::bands::finish(&mut self.client.wb)?;
         if self.confirmed_copy {
             self.client.confirmed = self.client.wb.clone();
         }
         if let Some(ch) = self.client.changes.as_mut() {
             ch.full = true;
         }
-        self.effects()
+        Ok(self.effects())
     }
 
     /// `load_snapshot` from a workbook assembled elsewhere (a banded
@@ -400,6 +400,7 @@ impl CollabCore {
     /// the page can ask before importing.
     pub(crate) fn import_ops(&self, document: &Value) -> Result<Value, String> {
         let (wb, layouts, _) = visigrid_io::json::import_any(&document.to_string())?;
+        wb.ensure_writable()?;
         let mut ops = Vec::new();
         let mut sheets = Vec::new();
         let mut keys = Vec::new();
@@ -845,7 +846,7 @@ impl CollabClient {
 
     /// Evaluate the workbook once every band is in (full-repaint Effects).
     pub fn finish_load(&mut self) -> Result<JsValue, JsValue> {
-        to_js(&self.core.finish_load())
+        to_js(&self.core.finish_load().map_err(js_err)?)
     }
 
     /// `load_snapshot` taking the workbook of another client (a banded
@@ -1021,7 +1022,7 @@ mod tests {
         }
         // Readable mid-load (values; formulas evaluate at the end).
         assert_eq!(banded.display(1, 139_999, 1).as_deref(), Some("row 139999"));
-        banded.finish_load();
+        banded.finish_load().unwrap();
         assert_eq!(banded.display(1, 0, 2), whole.display(1, 0, 2));
         assert_eq!(checksum(&banded.client.confirmed), checksum(&whole.client.confirmed), "the confirmed copy matches the whole document");
         assert_eq!(banded.checksum(), "", "too large to checksum in collaboration");
@@ -1483,4 +1484,14 @@ mod tests {
         }
         eprintln!("build {built:?}, layout {laid:?} {l}, 100 viewports (41x21) {:?}, {n} cells", t.elapsed());
     }
+    #[test]
+    fn protected_import_cannot_be_flattened_into_editable_collaboration_ops() {
+        let core = CollabCore::new(&doc(), 0).unwrap();
+        let before = core.snapshot().unwrap();
+        let mut source = doc();
+        source["future_feature"] = json!({"setting": "retain"});
+        assert!(core.import_ops(&source).is_err());
+        assert_eq!(core.snapshot().unwrap(), before);
+    }
+
 }

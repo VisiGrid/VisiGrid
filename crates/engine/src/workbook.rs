@@ -72,9 +72,19 @@ pub struct ValidationFailure {
     pub reason: crate::validation::ValidationFailureReason,
 }
 
+/// Manifest-bound load state. Editing and publication stay disabled until every band validates.
+#[derive(Debug, Clone)]
+pub struct PendingBandLoad {
+    pub remaining: std::collections::BTreeMap<(usize, String), (usize, usize, usize, usize)>,
+    pub read_only_after: Option<String>,
+    pub cached: Vec<(usize, usize, usize, Value)>,
+}
+
 /// A workbook containing multiple sheets
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workbook {
+    #[serde(skip)]
+    pub pending_bands: Option<PendingBandLoad>,
     sheets: Vec<Sheet>,
     active_sheet: usize,
     /// Next ID to assign to a new sheet. Monotonically increasing, never reused.
@@ -195,6 +205,7 @@ impl Workbook {
             next_table_id: 1,
             named_ranges: NamedRangeStore::new(),
             style_table: Vec::new(),
+            pending_bands: None,
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
@@ -535,6 +546,7 @@ impl Workbook {
             next_table_id,
             named_ranges,
             style_table: Vec::new(),
+            pending_bands: None,
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
@@ -567,6 +579,7 @@ impl Workbook {
             next_table_id,
             named_ranges,
             style_table: Vec::new(),
+            pending_bands: None,
             dep_graph: Arc::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,

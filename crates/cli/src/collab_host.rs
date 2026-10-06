@@ -304,7 +304,7 @@ impl Host {
 
     fn finish_load(&mut self) -> Reply {
         let wb = self.wb_mut()?;
-        visigrid_io::json::bands::finish(wb);
+        visigrid_io::json::bands::finish(wb)?;
         Ok(fields(json!({"checksum": collab_checksum(self.wb()?)})))
     }
 
