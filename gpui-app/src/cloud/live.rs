@@ -106,6 +106,7 @@ fn run(
     initial.ensure_writable()?;
     let mut replica = WireReplica::new(initial, 0, writable);
     let mut sequence_known = false;
+    let mut refusal: Option<String> = None;
     let mut socket_url = base
         .join(&format!("/api/sheets/{pid}/collab"))
         .map_err(|_| "Invalid collaboration URL")?;
@@ -129,6 +130,7 @@ fn run(
         while !stop.load(Ordering::Relaxed) {
             if ready {
                 for command in commands.try_iter() {
+                    refusal = None;
                     match command {
                         Command::Cell {
                             sheet,
@@ -203,6 +205,16 @@ fn run(
                     }
                 }
             }
+            if frame["type"] == "rejected" {
+                refusal = Some(format!(
+                    "Edit was not committed: {}",
+                    frame
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|reason| !reason.is_empty())
+                        .unwrap_or("the server refused this edit")
+                ));
+            }
             let _ = events.send(Event::Workbook {
                 workbook: replica.client.wb.clone(),
                 pending: replica.client.pending_count(),
@@ -211,12 +223,14 @@ fn run(
                 let _ = events.send(Event::State {
                     ready: true,
                     writable,
-                    message: if replica.client.pending_count() == 0 {
-                        "Changes committed"
-                    } else {
-                        "Waiting for acknowledgement"
-                    }
-                    .into(),
+                    message: refusal.clone().unwrap_or_else(|| {
+                        if replica.client.pending_count() == 0 {
+                            "Changes committed"
+                        } else {
+                            "Waiting for acknowledgement"
+                        }
+                        .into()
+                    }),
                 });
             }
         }
@@ -255,8 +269,17 @@ impl crate::app::Spreadsheet {
         let Some(identity) = self.cloud_identity.clone() else {
             return;
         };
-        let Some(auth) = crate::hub::auth::load_auth() else {
-            self.status_message = Some("Sign in to start live collaboration".into());
+        // A disposable QA backend can use its own credentials without changing
+        // the user's saved sign-in. An invalid override must never fall back to
+        // production credentials.
+        let auth = match std::env::var_os("VISIGRID_LIVE_AUTH_FILE") {
+            Some(path) => std::fs::read_to_string(path)
+                .ok()
+                .and_then(|contents| serde_json::from_str::<AuthCredentials>(&contents).ok()),
+            None => crate::hub::auth::load_auth(),
+        };
+        let Some(auth) = auth else {
+            self.status_message = Some("Sign in or provide valid live test credentials".into());
             cx.notify();
             return;
         };
