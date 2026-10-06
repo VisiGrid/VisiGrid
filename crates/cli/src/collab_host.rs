@@ -194,11 +194,16 @@ impl Host {
                 return Err(format!("replay expected seq {expect}, got {seq}"));
             }
             let ops = ops_from_json(entry.get("op").ok_or("replay entry needs op")?)?;
-            parsed.push(ops);
+            let clock = entry.get("clock").map(visigrid_collab::clock::parse_clock).transpose()?;
+            parsed.push((ops, clock));
             expect += 1;
         }
         let wb = self.wb_mut()?;
-        for ops in &parsed {
+        for (ops, clock) in &parsed {
+            if let Some(clock) = clock {
+                wb.set_recalc_clock(Some(*clock));
+                wb.recompute_full_ordered();
+            }
             apply_ops(wb, ops);
         }
         self.seq += parsed.len() as u64;
