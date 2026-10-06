@@ -178,6 +178,10 @@ impl WireReplica {
         // Never substitute an incomplete/protected projection into a live
         // editable replica. Its original stays with the normal read-only UI.
         wb.ensure_writable()?;
+        let pending = self.welcome.as_ref().ok_or("No snapshot welcome pending")?;
+        if number(pending, "snapshot_seq")? != seq {
+            return Err("Snapshot sequence differs from its welcome".into());
+        }
         self.client.replace_document(wb, seq);
         let frame = self.welcome.take().ok_or("No snapshot welcome pending")?;
         self.finish_welcome(&frame)
@@ -349,6 +353,19 @@ mod tests {
         assert!(a
             .receive(&committed(&sequence(&mut server, &mut editor)))
             .is_err());
+        assert_eq!(a.client.last_seen, 0);
+        assert_eq!(a.client.wb.sheet(0).unwrap().get_raw(0, 0), "");
+    }
+    #[test]
+    fn unexpected_snapshot_does_not_replace_the_current_workbook() {
+        let mut a = live(true, 1);
+        let mut replacement = wb();
+        replacement.set_cell_value_tracked_at(0, 0, 0, "replacement");
+        assert!(a.load_snapshot(replacement.clone(), 4).is_err());
+        assert_eq!(a.client.last_seen, 0);
+        assert_eq!(a.client.wb.sheet(0).unwrap().get_raw(0, 0), "");
+        a.receive(&json!({"type":"welcome","seq":4,"actor":1,"ops":[],"snapshot_url":"/snapshot","snapshot_seq":4})).unwrap();
+        assert!(a.load_snapshot(replacement, 3).is_err());
         assert_eq!(a.client.last_seen, 0);
         assert_eq!(a.client.wb.sheet(0).unwrap().get_raw(0, 0), "");
     }
