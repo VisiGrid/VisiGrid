@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare engine instruction counts against the checked-in ceilings.
 
-    scripts/engine-counts-gate.py target/counts/results.json [--ratchet]
+    scripts/engine-counts-gate.py target/engine-counts/results.json [--ratchet]
 
 The ceilings live in benches/engine-counts.ceilings.<arch>.json, one number
 per scenario. A count above its ceiling by more than the tolerance fails.

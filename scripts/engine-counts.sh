@@ -12,7 +12,9 @@
 # measurement. See docs/engine-counts.md.
 set -euo pipefail
 
-out="${1:-target/counts}"
+out="${1:-target/engine-counts}"
+# Not target/counts: that is where cargo puts the `counts` profile's build,
+# and the workflow uploads this directory as an artifact.
 mkdir -p "$out"
 
 if ! command -v valgrind >/dev/null; then

@@ -52,21 +52,21 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-counts-
 
       - name: Count instructions
-        run: scripts/engine-counts.sh target/counts
+        run: scripts/engine-counts.sh target/engine-counts
 
       - uses: actions/upload-artifact@v4
         with:
           name: engine-counts
-          path: target/counts/
+          path: target/engine-counts/
           retention-days: 30
 
       - name: Gate against the ceilings
         if: github.event_name == 'pull_request'
-        run: scripts/engine-counts-gate.py target/counts/results.json
+        run: scripts/engine-counts-gate.py target/engine-counts/results.json
 
       - name: Lower the ceilings
         if: github.event_name != 'pull_request'
-        run: scripts/engine-counts-gate.py target/counts/results.json --ratchet
+        run: scripts/engine-counts-gate.py target/engine-counts/results.json --ratchet
 
       - name: Open a PR with the lowered ceilings
         if: github.event_name != 'pull_request'

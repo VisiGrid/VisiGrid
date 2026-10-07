@@ -38,8 +38,8 @@ free.
 Linux with valgrind:
 
 ```sh
-scripts/engine-counts.sh target/counts
-scripts/engine-counts-gate.py target/counts/results.json
+scripts/engine-counts.sh target/engine-counts
+scripts/engine-counts-gate.py target/engine-counts/results.json
 ```
 
 Without valgrind the scenarios still run as a plain binary and check their
