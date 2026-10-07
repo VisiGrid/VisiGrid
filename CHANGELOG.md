@@ -4,7 +4,7 @@
 
 ### Import recipes
 
-- **JSON files as a source.** A recipe can read a `.json` export or a JSON Lines file (`.jsonl`, `.ndjson`) into a Table that Refresh updates. In a `.json` file the records are found by themselves (the top-level array, or the largest array of records inside, such as `invoices`), or read from a path you choose under **Records at**. Nested objects become dotted columns (`customer.name`) in the order they first appear; a column of JSON numbers is a number column, and IDs too large to be exact stay text with every digit. A file pattern reads the newest match or appends every match, as for CSV. ([#125](https://github.com/VisiGrid/VisiGrid/pull/125))
+- **JSON files as a source.** A recipe can read a `.json` export or a JSON Lines file (`.jsonl`, `.ndjson`) into a Table that Refresh updates. In a `.json` file the records are found by themselves (the top-level array, or the largest array of records inside, such as `invoices`), or read from a path you choose under **Records at**. Nested objects become dotted columns (`customer.name`) in the order they first appear; a column of JSON numbers is a number column, and IDs too large to be exact stay text with every digit. A file pattern reads the newest match or appends every match, as for CSV. A new recipe saves the array it found, so a later export with a larger array elsewhere still reads the same records; a key repeated in one object, or two fields that make the same column, are noted in the run report (the last value is kept); and JSON Lines are read one record at a time, so a large `.jsonl` needs about as much memory as the same data as CSV. ([#125](https://github.com/VisiGrid/VisiGrid/pull/125), [#127](https://github.com/VisiGrid/VisiGrid/pull/127))
 
 ### Fixed
 
