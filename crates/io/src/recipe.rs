@@ -89,7 +89,13 @@ pub enum Source {
     /// one entity, read through the VisiBooks API. Not a file: it has no
     /// path, and reads only when a run asks.
     Visibooks(visibooks::VisibooksSource),
+    /// Records from a JSON file: an array (at a dotted path, or found by
+    /// itself) in `.json`, or one per line in `.jsonl` / `.ndjson`.
+    Json(json::JsonSource),
 }
+
+#[path = "recipe_json.rs"]
+pub mod json;
 
 #[path = "recipe_visibooks.rs"]
 pub mod visibooks;
@@ -144,6 +150,7 @@ impl Source {
         match self {
             Source::Csv(s) => &s.path,
             Source::Parquet(s) => &s.path,
+            Source::Json(s) => &s.path,
             Source::Duckdb(s) => &s.path,
             Source::Xlsx(s) => &s.path,
             Source::Visibooks(_) => "",
@@ -168,6 +175,7 @@ impl Source {
         match self {
             Source::Csv(s) => s.path = path,
             Source::Parquet(s) => s.path = path,
+            Source::Json(s) => s.path = path,
             Source::Duckdb(s) => s.path = path,
             Source::Xlsx(s) => s.path = path,
             Source::Visibooks(_) => {}
@@ -179,6 +187,7 @@ impl Source {
         match self {
             Source::Csv(s) => &s.columns,
             Source::Parquet(s) => &s.columns,
+            Source::Json(s) => &s.columns,
             Source::Duckdb(s) => &s.columns,
             Source::Xlsx(s) => &s.columns,
             Source::Visibooks(s) => &s.columns,
@@ -189,6 +198,7 @@ impl Source {
         match self {
             Source::Csv(s) => &mut s.columns,
             Source::Parquet(s) => &mut s.columns,
+            Source::Json(s) => &mut s.columns,
             Source::Duckdb(s) => &mut s.columns,
             Source::Xlsx(s) => &mut s.columns,
             Source::Visibooks(s) => &mut s.columns,
@@ -200,6 +210,7 @@ impl Source {
         match self {
             Source::Csv(s) => s.combine,
             Source::Parquet(s) => s.combine,
+            Source::Json(s) => s.combine,
             Source::Xlsx(s) => s.combine,
             Source::Duckdb(_) | Source::Visibooks(_) => false,
         }
@@ -210,6 +221,7 @@ impl Source {
         match self {
             Source::Csv(s) => s.combine = on,
             Source::Parquet(s) => s.combine = on,
+            Source::Json(s) => s.combine = on,
             Source::Xlsx(s) => s.combine = on,
             Source::Duckdb(_) | Source::Visibooks(_) => {}
         }
@@ -220,6 +232,7 @@ impl Source {
         match self {
             Source::Csv(_) => "CSV",
             Source::Parquet(_) => "Parquet",
+            Source::Json(_) => "JSON",
             Source::Duckdb(_) => "DuckDB",
             Source::Xlsx(_) => "Excel",
             Source::Visibooks(_) => "VisiBooks",
@@ -227,13 +240,16 @@ impl Source {
     }
 
     /// A new source of the kind a file's extension names, reading `path`:
-    /// `.parquet`, `.duckdb`/`.db` (with `table`), anything else as CSV.
+    /// `.parquet`, `.duckdb`/`.db` (with `table`), `.json`/`.jsonl`/`.ndjson`,
+    /// anything else as CSV.
     pub fn for_file(path: String, table: Option<String>) -> Source {
         let lower = path.to_lowercase();
         if [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e)) {
             Source::Xlsx(XlsxSource { path, sheet: table.unwrap_or_default(), header_row: 1, columns: Vec::new(), combine: false })
         } else if lower.ends_with(".parquet") {
             Source::Parquet(ParquetSource { path, columns: Vec::new(), combine: false })
+        } else if json::is_json(&lower) {
+            Source::Json(json::JsonSource::new(path))
         } else if lower.ends_with(".duckdb") || table.is_some() {
             Source::Duckdb(DuckdbSource { path, table: table.unwrap_or_default(), columns: Vec::new() })
         } else {
@@ -1664,6 +1680,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
     let read_one = |snap: &Snapshot| match &recipe.source {
         Source::Csv(src) => read_csv(src, snap),
         Source::Parquet(_) => read_parquet(snap),
+        Source::Json(src) => json::read_frame(src, snap).map(|(frame, _)| frame),
         #[cfg(feature = "native")]
         Source::Duckdb(src) => read_duckdb(src, snap),
         #[cfg(feature = "native")]
@@ -4501,6 +4518,35 @@ values_to = "Sales"
         // The merged recipe now reads another file: a new approval is needed
         std::fs::write(dir.path().join("regions.recipe.toml"), REGIONS_RECIPE.replace("regions.csv", "/etc/passwd")).unwrap();
         assert_ne!(crate::recipe_trust::approval_key(&path, &r), before);
+    }
+
+    #[test]
+    fn json_sources_read_files_patterns_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        for (name, body) in [
+            ("orders-01.jsonl", "{\"id\": 1, \"customer\": {\"name\": \"Acme\"}, \"amount\": 10.5, \"day\": \"2026-09-01\"}\n"),
+            ("orders-02.jsonl", "{\"id\": 2, \"customer\": {\"name\": \"Beta\"}, \"amount\": 3, \"day\": \"2026-09-02\", \"rush\": true}\n"),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        }
+        let text = "version = 1\n[source]\nkind = \"json\"\npath = \"orders-*.jsonl\"\ncombine = true\n[[step]]\nop = \"types\"\ncolumns = { day = \"date:ymd\" }\n";
+        let r = Recipe::from_toml(text).unwrap();
+        assert!(matches!(r.source, Source::Json(_)));
+        let res = run(&r, &r.read_snapshot(dir.path(), None).unwrap());
+        assert!(res.report.ok, "{}", res.report.summary());
+        assert_eq!(
+            res.output.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["id", "customer.name", "amount", "day", "rush", "Source file"]
+        );
+        assert_eq!(res.output.rows[1], vec!["2", "Beta", "3", "2026-09-02", "TRUE", "orders-02.jsonl"]);
+        assert_eq!(res.output.columns[2].rule, ColumnRule::Number);
+        assert_eq!(res.output.columns[3].rule, ColumnRule::Date(DateOrder::Ymd));
+        // A file name picks the kind; the round trip keeps defaults out
+        assert!(matches!(Source::for_file("export.ndjson".into(), None), Source::Json(_)));
+        assert!(!r.to_toml().contains("records"));
     }
 
     #[test]

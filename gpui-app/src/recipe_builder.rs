@@ -33,6 +33,7 @@ pub enum Pane {
 /// Source settings in the left column, in focus order.
 pub const CSV_ROWS: [&str; 6] = ["File", "Each refresh reads", "Delimiter", "Encoding", "Header line", "Decimal mark"];
 const PARQUET_ROWS: [&str; 2] = ["File", "Each refresh reads"];
+const JSON_ROWS: [&str; 3] = ["File", "Each refresh reads", "Records at"];
 const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
 const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
 const VISIBOOKS_DATE_ROWS: [&str; 5] = ["Report", "Entity", "As of", "Basis", "Server"];
@@ -429,6 +430,12 @@ impl RecipeBuilder {
         self.tables = match &self.recipe.source {
             Source::Duckdb(_) => duckdb_tables(&self.source_path),
             Source::Xlsx(_) => recipe::xlsx_sheet_names(&self.source_path).unwrap_or_default(),
+            // Where arrays of records sit in a .json file, largest first
+            Source::Json(_) if !recipe::json::is_lines(&self.source_path.to_string_lossy()) => Snapshot::read(&self.source_path)
+                .ok()
+                .and_then(|snap| recipe::json::record_paths(&snap.bytes).ok())
+                .map(|paths| paths.into_iter().map(|(p, _)| p).collect())
+                .unwrap_or_default(),
             // The entities the saved key reaches, as "id · name"
             Source::Visibooks(src) => recipe::visibooks::origin(&src.server)
                 .and_then(|o| recipe::visibooks::entities(&o))
@@ -443,6 +450,7 @@ impl RecipeBuilder {
         match &self.recipe.source {
             Source::Csv(_) => &CSV_ROWS,
             Source::Parquet(_) => &PARQUET_ROWS,
+            Source::Json(_) => &JSON_ROWS,
             Source::Duckdb(_) => &DUCKDB_ROWS,
             Source::Xlsx(_) => &XLSX_ROWS,
             Source::Visibooks(src) if src.report.is_period() => &VISIBOOKS_PERIOD_ROWS,
@@ -1148,6 +1156,19 @@ impl RecipeBuilder {
             self.changed();
             return;
         }
+        if name == "Records at" {
+            if let Source::Json(src) = &mut self.recipe.source {
+                // Found by itself (""), then each array of records in the file
+                let mut options: Vec<String> = vec![String::new()];
+                options.extend(self.tables.iter().filter(|t| !t.is_empty()).cloned());
+                let n = options.len();
+                let i = options.iter().position(|o| *o == src.records).unwrap_or(0);
+                src.records = options[if back { (i + n - 1) % n } else { (i + 1) % n }].clone();
+                src.columns.clear();
+                self.changed();
+            }
+            return;
+        }
         if name == "Table" {
             if let Source::Duckdb(src) = &mut self.recipe.source {
                 if self.tables.is_empty() {
@@ -1297,6 +1318,22 @@ impl RecipeBuilder {
                 _ => {}
             }
         }
+        if let Source::Json(src) = &self.recipe.source {
+            if name == "Records at" {
+                if recipe::json::is_lines(&self.source_path.to_string_lossy()) {
+                    return ("One per line".into(), "A .jsonl/.ndjson file has one record on each line.".into());
+                }
+                let found = self.tables.first().filter(|t| !t.is_empty());
+                return match (src.records.is_empty(), found) {
+                    (true, Some(path)) => ("Found by itself".into(), format!("Now {path}. Choose to fix the path.")),
+                    (true, None) => ("Found by itself".into(), "The whole file.".into()),
+                    (false, _) => (src.records.clone(), match self.tables.len() {
+                        1 => "The one array of records in this file.".into(),
+                        n => format!("{n} arrays of records in this file."),
+                    }),
+                };
+            }
+        }
         if let Source::Duckdb(src) = &self.recipe.source {
             if name == "Table" {
                 let hint = match self.tables.len() {
@@ -1442,11 +1479,11 @@ impl Spreadsheet {
     /// it was opened with some.
     pub fn new_recipe_from_file(&mut self, csv_path: &Path, options: Option<&CsvOptions>, cx: &mut Context<Self>) {
         let csv_path = std::path::absolute(csv_path).unwrap_or_else(|_| csv_path.to_path_buf());
-        // Parquet and DuckDB carry their own column names and types: no
+        // Parquet, DuckDB and JSON carry their own column names and types: no
         // source settings to guess (a DuckDB recipe starts on its first table)
         let lower = csv_path.to_string_lossy().to_lowercase();
         let excel = [".xlsx", ".xlsm", ".xls"].iter().any(|e| lower.ends_with(e));
-        if lower.ends_with(".parquet") || lower.ends_with(".duckdb") || excel {
+        if lower.ends_with(".parquet") || lower.ends_with(".duckdb") || excel || recipe::json::is_json(&lower) {
             // DuckDB starts on its first table; Excel on its first sheet, kept
             // by name, with the header row guessed below any title rows
             let table = if excel {
@@ -1891,7 +1928,7 @@ mod tests {
     use super::{cli_line, stored_source_path, EditorRow, RecipeBuilder};
     use gpui::{Keystroke, Modifiers};
     use std::path::Path;
-    use visigrid_io::recipe::{CsvSource, FilterOp, Missing, Recipe, Source, Step, RECIPE_VERSION};
+    use visigrid_io::recipe::{json::JsonSource, CsvSource, FilterOp, Missing, Recipe, Source, Step, RECIPE_VERSION};
 
     fn builder(csv: &str, steps: Vec<Step>) -> RecipeBuilder {
         let dir = tempfile::tempdir().unwrap();
@@ -1926,6 +1963,33 @@ mod tests {
         b.select(None);
         assert_eq!(b.preview.as_ref().unwrap().total_rows, 3);
         assert_eq!(b.file_columns, ["ID", "Amount"]);
+    }
+
+    #[test]
+    fn json_records_are_found_or_chosen_from_the_arrays_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.json");
+        std::fs::write(&path, r#"{"count": 3, "meta": {"tags": [{"k": 1}]}, "invoices": [{"id": 1, "total": 5}, {"id": 2, "total": 7}, {"id": 3}]}"#).unwrap();
+        let recipe = Recipe {
+            version: RECIPE_VERSION,
+            source: Source::Json(JsonSource::new(path.display().to_string())),
+            steps: vec![],
+        };
+        let mut b = RecipeBuilder::new(recipe, None, path, None);
+        assert_eq!(b.source_value(2), ("Found by itself".to_string(), "Now invoices. Choose to fix the path.".to_string()));
+        assert_eq!(b.preview.as_ref().unwrap().total_rows, 3);
+
+        // Then each array, largest first, then back round
+        b.change_source(2, false);
+        assert_eq!(b.source_value(2).0, "invoices");
+        b.change_source(2, false);
+        assert_eq!(b.source_value(2).0, "meta.tags");
+        assert_eq!(b.preview.as_ref().unwrap().total_rows, 1);
+        assert_eq!(b.file_columns, ["k"]);
+        b.change_source(2, false);
+        assert_eq!(b.source_value(2).0, "Found by itself");
+        b.change_source(2, true);
+        assert_eq!(b.source_value(2).0, "meta.tags");
     }
 
     #[test]

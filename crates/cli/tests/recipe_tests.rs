@@ -238,3 +238,46 @@ fn recipe_run_merges_another_recipe_on_a_key() {
     );
     assert!(String::from_utf8_lossy(&o.stderr).contains("matched 2; 1 only here; 0 only in budget"));
 }
+
+#[test]
+fn recipe_run_reads_nested_json_and_a_folder_of_json_lines() {
+    let d = dir("json");
+    // An API export: the records under a key, nested objects, an id too
+    // large for a double, an amount written as text
+    std::fs::write(
+        d.join("export.json"),
+        r#"{"count": 2, "invoices": [
+            {"id": 9007199254740993, "customer": {"name": "Acme", "city": "Austin"}, "total": 120.5, "paid": true, "lines": [1, 2]},
+            {"id": 7, "customer": {"name": "Bolt"}, "total": "n/a", "paid": false, "note": null}
+        ]}"#,
+    )
+    .unwrap();
+    std::fs::write(d.join("invoices.recipe.toml"), "version = 1\n[source]\nkind = \"json\"\npath = \"export.json\"\nrecords = \"invoices\"\n").unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("invoices.recipe.toml"))]);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(),
+        ["id,customer.name,customer.city,total,paid,lines,note", "9007199254740993,Acme,Austin,120.5,TRUE,\"[1,2]\",", "7,Bolt,,n/a,FALSE,,"]
+    );
+
+    // A path that isn't there fails the run
+    std::fs::write(d.join("bad.recipe.toml"), "version = 1\n[source]\nkind = \"json\"\npath = \"export.json\"\nrecords = \"data.items\"\n").unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("bad.recipe.toml"))]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("nothing at data.items"), "{}", String::from_utf8_lossy(&o.stderr));
+
+    // Every .jsonl matching the pattern, one record per line
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for (name, body) in [("events-01.jsonl", "{\"user\": \"a\", \"n\": 1}\n\n{\"user\": \"b\", \"n\": 2}\n"), ("events-02.jsonl", "{\"user\": \"a\", \"n\": 4, \"extra\": {\"x\": 1}}\n")] {
+        std::fs::write(d.join(name), body).unwrap();
+        std::fs::File::options().write(true).open(d.join(name)).unwrap().set_modified(old).unwrap();
+    }
+    std::fs::write(
+        d.join("events.recipe.toml"),
+        "version = 1\n[source]\nkind = \"json\"\npath = \"events-*.jsonl\"\ncombine = true\n[[step]]\nop = \"group\"\nby = [\"user\"]\ntotals = [{ fn = \"sum\", column = \"n\", as = \"Total\" }]\n",
+    )
+    .unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("events.recipe.toml"))]);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(), ["user,Total", "a,5", "b,2"]);
+}

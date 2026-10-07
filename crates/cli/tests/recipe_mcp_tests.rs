@@ -131,3 +131,19 @@ fn run_recipe_rejects_unknown_arguments() {
     let r = mcp(home.path(), &[serde_json::json!({"name": "run_recipe", "arguments": {"recipe": "x.recipe.toml", "preview": 2}})]);
     assert!(text(&r[0]).contains("unknown argument: preview"), "{}", r[0]);
 }
+
+#[test]
+fn run_recipe_reads_a_json_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("export.json"), r#"{"data": {"rows": [{"id": "001", "amount": {"value": 10}}, {"id": "002", "amount": {"value": 2.5}}]}}"#).unwrap();
+    let recipe = dir.path().join("export.recipe.toml");
+    std::fs::write(&recipe, "version = 1\n[source]\nkind = \"json\"\npath = \"export.json\"\n").unwrap();
+    approve(home.path(), &recipe);
+    let r = mcp(home.path(), &[serde_json::json!({"name": "run_recipe", "arguments": {"recipe": recipe}})]);
+    let body: serde_json::Value = serde_json::from_str(&text(&r[0])).unwrap();
+    assert_eq!(body["ok"], true, "{body}");
+    // Found by itself under data.rows, the nested value a dotted column
+    assert_eq!(body["columns"], serde_json::json!(["id", "amount.value"]));
+    assert_eq!(body["preview"], serde_json::json!([["001", "10"], ["002", "2.5"]]));
+}
