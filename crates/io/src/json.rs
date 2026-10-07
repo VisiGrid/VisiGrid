@@ -2307,15 +2307,55 @@ pub mod bands {
             f.write_str("a list of cells")
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<usize, A::Error> {
+            use serde::Deserialize;
             let mut n = 0;
-            let mut coords = std::collections::BTreeSet::new();
+            let mut coords = std::collections::HashSet::new();
+            // Formats repeat across a band; whether one survives the codec
+            // depends only on the format and on whether the cell has content.
+            let mut formats_checked: std::collections::HashMap<(String, bool, bool), bool> = std::collections::HashMap::new();
+            // The write pass reads cells the validate pass already checked:
+            // straight from the stream to the cell.
+            if !self.validate {
+                while let Some(cell) = seq.next_element::<FullCell>()? {
+                    if cell.row < self.r0 || cell.row >= self.r1 {
+                        return Err(serde::de::Error::custom("band holds a cell outside its rows"));
+                    }
+                    apply_cells(self.sheet, std::slice::from_ref(&cell));
+                    if cell.formula.is_some() {
+                        use visigrid_engine::formula::eval::Value;
+                        let cached = match &cell.value {
+                            Some(serde_json::Value::Number(n)) => n.as_f64().map(Value::Number),
+                            Some(serde_json::Value::String(t)) => Some(Value::Text(t.clone())),
+                            Some(serde_json::Value::Bool(b)) => Some(Value::Text(if *b { "TRUE".into() } else { "FALSE".into() })),
+                            _ => None,
+                        };
+                        if let Some(value) = cached { self.cached.push((cell.row,cell.col,value)); }
+                    }
+                    n += 1;
+                }
+                return Ok(n);
+            }
             while let Some(original) = seq.next_element::<Box<serde_json::value::RawValue>>()? {
-                if self.validate && crate::content_protection::band_cell_number_loss(original.get()).map_err(serde::de::Error::custom)? {
+                if crate::content_protection::band_cell_number_loss(original.get()).map_err(serde::de::Error::custom)? {
                     return Err(serde::de::Error::custom("Band numeric literal cannot be represented exactly"));
                 }
+                // Most cells are only a position and a value or formula. Such a
+                // cell round-trips through the codec by construction, so the
+                // generic projection check below can't find a loss in it.
+                if let Some((row, col)) = simple_band_cell(original.get()) {
+                    if self.sheet.merge_origin_coord(row, col) != (row, col) {
+                        return Err(serde::de::Error::custom("Band cell is not the merged region anchor"));
+                    }
+                    if !coords.insert((row, col)) { return Err(serde::de::Error::custom("Duplicate band cell")); }
+                    if row < self.r0 || row >= self.r1 {
+                        return Err(serde::de::Error::custom("band holds a cell outside its rows"));
+                    }
+                    n += 1;
+                    continue;
+                }
                 let raw: serde_json::Value = serde_json::from_str(original.get()).map_err(serde::de::Error::custom)?;
-                let cell: FullCell = serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
-                if self.validate {
+                let cell = FullCell::deserialize(&raw).map_err(serde::de::Error::custom)?;
+                {
                     if (cell.spill_from.is_some() && cell.fmt.is_some()) || (cell.stale_custom_fn && cell.formula.is_none()) {
                         return Err(serde::de::Error::custom("Band cell metadata cannot be preserved"));
                     }
@@ -2328,14 +2368,21 @@ pub mod bands {
                     }
                     if !coords.insert((cell.row, cell.col)) { return Err(serde::de::Error::custom("Duplicate band cell")); }
                     if let Some(fmt) = &cell.fmt {
+                        let key = (serde_json::to_string(fmt).map_err(serde::de::Error::custom)?, cell.value.is_some(), cell.formula.is_some());
+                        if let Some(&ok) = formats_checked.get(&key) {
+                            if !ok { return Err(serde::de::Error::custom("Unsupported band cell formatting")); }
+                        } else {
                         let mut scratch = Sheet::new(visigrid_engine::sheet::SheetId(1), 1, 1);
                         let mut local = raw.clone(); local["row"] = 0.into(); local["col"] = 0.into(); local.as_object_mut().unwrap().remove("spill_from");
                         let local: FullCell = serde_json::from_value(local).map_err(serde::de::Error::custom)?;
                         apply_cells(&mut scratch, std::slice::from_ref(&local));
                         let output = sheet_cells(&scratch, None);
                         let actual = output.first().and_then(|c| c.fmt.as_ref()).map(serde_json::to_value).transpose().map_err(serde::de::Error::custom)?.unwrap_or(serde_json::Value::Null);
-                        if crate::content_protection::first_loss(&serde_json::to_value(fmt).map_err(serde::de::Error::custom)?, &actual).is_some() {
+                        let ok = crate::content_protection::first_loss(&serde_json::to_value(fmt).map_err(serde::de::Error::custom)?, &actual).is_none();
+                        formats_checked.insert(key, ok);
+                        if !ok {
                             return Err(serde::de::Error::custom("Unsupported band cell formatting"));
+                        }
                         }
                     }
                     if cell.value.as_ref().is_some_and(|v| v.is_array() || v.is_object()) {
@@ -2353,23 +2400,37 @@ pub mod bands {
                 if cell.row < self.r0 || cell.row >= self.r1 {
                     return Err(serde::de::Error::custom("band holds a cell outside its rows"));
                 }
-                if !self.validate {
-                    apply_cells(self.sheet, std::slice::from_ref(&cell));
-                    if cell.formula.is_some() {
-                        use visigrid_engine::formula::eval::Value;
-                        let cached = match &cell.value {
-                            Some(serde_json::Value::Number(n)) => n.as_f64().map(Value::Number),
-                            Some(serde_json::Value::String(t)) => Some(Value::Text(t.clone())),
-                            Some(serde_json::Value::Bool(b)) => Some(Value::Text(if *b { "TRUE".into() } else { "FALSE".into() })),
-                            _ => None,
-                        };
-                        if let Some(value) = cached { self.cached.push((cell.row,cell.col,value)); }
-                    }
-                }
                 n += 1;
             }
             Ok(n)
         }
+    }
+
+    /// The position of a cell holding only `row`, `col` and a scalar `value`
+    /// and/or `formula`, or None for anything else (unknown, duplicate or null
+    /// members, structured values, formatting), which takes the full check.
+    fn simple_band_cell(text: &str) -> Option<(usize, usize)> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Simple<'a> {
+            row: usize,
+            col: usize,
+            #[serde(borrow, default)]
+            value: Option<&'a serde_json::value::RawValue>,
+            #[serde(borrow, default)]
+            formula: Option<std::borrow::Cow<'a, str>>,
+        }
+        let cell: Simple = serde_json::from_str(text).ok()?;
+        // An explicit null reads as None here, but the codec drops it.
+        if (cell.value.is_none() && text.contains("\"value\"")) || (cell.formula.is_none() && text.contains("\"formula\"")) {
+            return None;
+        }
+        if let Some(value) = cell.value {
+            if !matches!(value.get().as_bytes().first(), Some(b'"' | b'-' | b'0'..=b'9' | b't' | b'f')) {
+                return None;
+            }
+        }
+        Some((cell.row, cell.col))
     }
 
     /// After the last band: dependencies and one ordered recompute.

@@ -240,3 +240,72 @@ fn ordinary_native_float_values_remain_editable_after_json_round_trip() {
     let (wb,_,_) = import_any(&source).unwrap();
     wb.ensure_writable().unwrap();
 }
+
+fn tiny_band_raw(cell: &str) -> (String, Vec<u8>, String) {
+    use sha2::{Digest, Sha256};
+    let doc = format!(r#"{{"format":"visigrid-band","version":1,"sheet":0,"r0":0,"r1":2,"cells":[{cell}]}}"#);
+    let data = miniz_oxide::deflate::compress_to_vec(doc.as_bytes(), 6);
+    let key: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+    let manifest = serde_json::json!({"format":"visigrid-json","version":2,"sheets":[{"name":"Data","cells":[],"bands":[{"r0":0,"r1":2,"cells":1,"key":key,"bytes":data.len()}]}]}).to_string();
+    (manifest, data, key)
+}
+
+/// Band cells as literal text, accepted or refused exactly as the full
+/// content check decides. The fast paths for plain cells and f64-exact
+/// numbers must not change any of these.
+const BAND_CELL_DECISIONS: &[(&str, bool)] = &[
+    (r#"{"row":0,"col":0,"value":42}"#, true),
+    (r#"{"row":1,"col":3,"value":7}"#, true),
+    (r#"{"row":0,"col":0}"#, true),
+    (r#"{"row":0,"col":0,"value":1.5}"#, true),
+    (r#"{"row":0,"col":0,"value":0.1}"#, true),
+    (r#"{"row":0,"col":0,"value":1.10}"#, true),
+    (r#"{"row":0,"col":0,"value":-0.000123}"#, true),
+    (r#"{"row":0,"col":0,"value":1e5}"#, true),
+    (r#"{"row":0,"col":0,"value":1.0e-5}"#, true),
+    (r#"{"row":0,"col":0,"value":-0}"#, true),
+    (r#"{"row":0,"col":0,"value":123456789012345}"#, true),
+    (r#"{"row":0,"col":0,"value":1234567890123456}"#, true),
+    (r#"{"row":0,"col":0,"value":12345678901234567}"#, false),
+    (r#"{"row":0,"col":0,"value":9007199254740993}"#, false),
+    (r#"{"row":0,"col":0,"value":0.1234567890123456789}"#, false),
+    (r#"{"row":0,"col":0,"value":0.30000000000000004}"#, true),
+    (r#"{"row":0,"col":0,"value":1e400}"#, false),
+    (r#"{"row":0,"col":0,"value":2.5e-320}"#, true),
+    (r#"{"row":0,"col":0,"value":"text"}"#, true),
+    (r#"{"row":0,"col":0,"value":"007"}"#, true),
+    (r#"{"row":0,"col":0,"value":true}"#, true),
+    (r#"{"row":0,"col":0,"value":null}"#, false),
+    (r#"{"row":0,"col":0,"formula":null,"value":1}"#, false),
+    (r#"{"row":0,"col":0,"value":1,"value":2}"#, false),
+    (r#"{"row":0,"col":0,"value":[1]}"#, false),
+    (r#"{"row":0,"col":0,"formula":"=1+1","value":2}"#, true),
+    (r#"{"row":0,"col":0,"formula":"=1+1","value":0.1234567890123456789}"#, false),
+    (r#"{"row":0,"col":0,"formula":"=\"value\""}"#, true),
+    (r#"{"row":0,"col":0,"formula":"=1+1"}"#, true),
+    (r#"{"row":0,"col":0,"value":42,"fmt":{"bold":true}}"#, true),
+    (r#"{"row":0,"col":0,"value":42,"fmt":{"future":true}}"#, false),
+    (r#"{"row":0,"col":0,"value":42,"future":true}"#, false),
+    (r#"{"row":0,"col":0.0,"value":42}"#, false),
+    (r#"{"row":2,"col":0,"value":42}"#, false),
+];
+
+#[test]
+fn band_cell_decisions_match_the_full_check() {
+    let mut report = Vec::new();
+    for (cell, expected) in BAND_CELL_DECISIONS {
+        let (manifest, data, key) = tiny_band_raw(cell);
+        let (mut wb, _, _) = import_any(&manifest).unwrap();
+        let accepted = bands::apply(&mut wb, &data, Some(&key)).is_ok();
+        report.push(format!("    (r#\"{cell}\"#, {accepted}),"));
+        if !accepted {
+            assert!(wb.sheet(0).unwrap().cells_iter().next().is_none(), "{cell}: a refused band wrote cells");
+        }
+        if std::env::var_os("BAND_DECISIONS_PRINT").is_none() {
+            assert_eq!(accepted, *expected, "{cell}");
+        }
+    }
+    if std::env::var_os("BAND_DECISIONS_PRINT").is_some() {
+        eprintln!("{}", report.join("\n"));
+    }
+}
