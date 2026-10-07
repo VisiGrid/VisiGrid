@@ -7974,7 +7974,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visigrid-cli"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "atty",
  "base64 0.22.1",
@@ -8022,7 +8022,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-collab"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "rand 0.8.7",
  "serde",
@@ -8038,7 +8038,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-config"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "dirs 5.0.1",
  "keyring",
@@ -8049,14 +8049,14 @@ dependencies = [
 
 [[package]]
 name = "visigrid-core"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "visigrid-engine"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "chrono",
  "hashbrown 0.16.1",
@@ -8072,7 +8072,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-engine-wasm"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "blake3",
  "console_error_panic_hook",
@@ -8088,7 +8088,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-gpui"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -8132,7 +8132,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-hub-client"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "blake3",
  "dirs 6.0.0",
@@ -8144,7 +8144,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-io"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -8175,7 +8175,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-license"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -8190,7 +8190,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-print"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "ashpd",
  "cosmic-text",
@@ -8205,7 +8205,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-protocol"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "dirs 6.0.0",
  "rand 0.8.7",
@@ -8215,7 +8215,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-recon"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "chrono",
  "csv",
@@ -8227,7 +8227,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-scripting"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -8240,7 +8240,7 @@ dependencies = [
 
 [[package]]
 name = "visigrid-session-host"
-version = "0.50.1"
+version = "0.51.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
