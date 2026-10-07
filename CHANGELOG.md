@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Large cloud workbooks load about 3× faster again.** Since 0.50.0, each 16,384-row block of a large shared sheet was checked cell by cell with several costly conversions before loading, so a 1,000,000 × 20 sheet took about 7 minutes in the browser instead of about 80 seconds. Plain cells and ordinary numbers now take a fast path that reaches the same decision; anything unusual still gets the full check, so unsupported content is refused exactly as before. ([#124](https://github.com/VisiGrid/VisiGrid/pull/124))
+
 ## 0.50.0
 
 ### Workbook content protection
