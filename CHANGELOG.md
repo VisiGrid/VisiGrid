@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Import recipes
+
+- **JSON files as a source.** A recipe can read a `.json` export or a JSON Lines file (`.jsonl`, `.ndjson`) into a Table that Refresh updates. In a `.json` file the records are found by themselves (the top-level array, or the largest array of records inside, such as `invoices`), or read from a path you choose under **Records at**. Nested objects become dotted columns (`customer.name`) in the order they first appear; a column of JSON numbers is a number column, and IDs too large to be exact stay text with every digit. A file pattern reads the newest match or appends every match, as for CSV. ([#125](https://github.com/VisiGrid/VisiGrid/pull/125))
+
 ### Fixed
 
 - **Formulas on large cloud sheets follow edits again.** A sheet loaded in row bands stayed in manual calculation after loading, so editing a cell left every formula over it at its loaded value (a `=SUM` over the column didn't move) until a full recalculation. Since 0.50.0. ([#126](https://github.com/VisiGrid/VisiGrid/pull/126))
