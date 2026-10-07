@@ -260,6 +260,14 @@ fn recipe_run_reads_nested_json_and_a_folder_of_json_lines() {
         ["id,customer.name,customer.city,total,paid,lines,note", "9007199254740993,Acme,Austin,120.5,TRUE,\"[1,2]\",", "7,Bolt,,n/a,FALSE,,"]
     );
 
+    // A repeated key keeps its last value, and the run says so
+    std::fs::write(d.join("dup.json"), r#"[{"id": 1, "id": 2}]"#).unwrap();
+    std::fs::write(d.join("dup.recipe.toml"), "version = 1\n[source]\nkind = \"json\"\npath = \"dup.json\"\n").unwrap();
+    let o = vgrid(&["recipe", "run", s(&d.join("dup.recipe.toml"))]);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(), ["id", "2"]);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("\"id\" appears twice in one object"), "{}", String::from_utf8_lossy(&o.stderr));
+
     // A path that isn't there fails the run
     std::fs::write(d.join("bad.recipe.toml"), "version = 1\n[source]\nkind = \"json\"\npath = \"export.json\"\nrecords = \"data.items\"\n").unwrap();
     let o = vgrid(&["recipe", "run", s(&d.join("bad.recipe.toml"))]);

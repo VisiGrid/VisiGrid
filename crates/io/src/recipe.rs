@@ -1677,10 +1677,17 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         warnings: Vec::new(),
     };
 
-    let read_one = |snap: &Snapshot| match &recipe.source {
+    // Worth knowing about a file, not failures (repeated JSON keys)
+    let mut read_warnings: Vec<String> = Vec::new();
+    let mut read_one = |snap: &Snapshot| match &recipe.source {
         Source::Csv(src) => read_csv(src, snap),
         Source::Parquet(_) => read_parquet(snap),
-        Source::Json(src) => json::read_frame(src, snap).map(|(frame, _)| frame),
+        Source::Json(src) => json::read_frame(src, snap).map(|r| {
+            let more = !snapshot.more.is_empty();
+            let name = snap.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            read_warnings.extend(r.warnings.into_iter().map(|w| if more { format!("{name}: {w}") } else { w }));
+            r.frame
+        }),
         #[cfg(feature = "native")]
         Source::Duckdb(src) => read_duckdb(src, snap),
         #[cfg(feature = "native")]
@@ -1710,6 +1717,7 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
             None => Ok(append_frames(parts, &mut report.warnings)),
         }
     };
+    report.warnings.extend(read_warnings);
     if !snapshot.more.is_empty() {
         report.source = format!(
             "{} files in {}",

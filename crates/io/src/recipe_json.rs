@@ -39,13 +39,6 @@ impl Value {
         matches!(self, Value::Object(_))
     }
 
-    fn get(&self, key: &str) -> Option<&Value> {
-        match self {
-            Value::Object(m) => m.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
     /// Compact JSON, keys in file order.
     fn to_json(&self) -> String {
         match self {
@@ -64,14 +57,13 @@ impl Value {
 
 /// Parse JSON text. Containers are read as raw pieces (serde_json keeps
 /// their text), so object order and number text survive.
-fn parse(text: &str) -> Result<Value, serde_json::Error> {
-    use serde_json::value::RawValue;
-    let raw: Box<RawValue> = serde_json::from_str(text)?;
-    from_raw(raw.get(), 0)
+fn parse(text: &str, repeated: &mut Vec<String>) -> Result<Value, serde_json::Error> {
+    let raw: &serde_json::value::RawValue = serde_json::from_str(text)?;
+    from_raw(raw.get(), 0, repeated)
 }
 
-fn from_raw(text: &str, depth: usize) -> Result<Value, serde_json::Error> {
-    use serde_json::value::RawValue;
+/// `repeated`: keys that appeared twice in one object, each named once.
+fn from_raw(text: &str, depth: usize, repeated: &mut Vec<String>) -> Result<Value, serde_json::Error> {
     let t = text.trim();
     // Past this depth containers stay text; flatten keeps them as JSON
     if depth > 64 {
@@ -82,18 +74,24 @@ fn from_raw(text: &str, depth: usize) -> Result<Value, serde_json::Error> {
             let entries: OrderedMap = serde_json::from_str(t)?;
             let mut out: Vec<(String, Value)> = Vec::with_capacity(entries.0.len());
             for (k, v) in entries.0 {
-                let v = from_raw(v.get(), depth + 1)?;
+                let v = from_raw(v.get(), depth + 1, repeated)?;
                 // A repeated key: the last one wins, as in most readers
                 match out.iter_mut().find(|(e, _)| *e == k) {
-                    Some(e) => e.1 = v,
+                    Some(e) => {
+                        e.1 = v;
+                        if !repeated.contains(&k) {
+                            repeated.push(k);
+                        }
+                    }
                     None => out.push((k, v)),
                 }
             }
             Value::Object(out)
         }
         Some(b'[') => {
-            let items: Vec<Box<RawValue>> = serde_json::from_str(t)?;
-            Value::Array(items.iter().map(|i| from_raw(i.get(), depth + 1)).collect::<Result<_, _>>()?)
+            // Borrowed pieces of the text, not copies of it
+            let items: Vec<&serde_json::value::RawValue> = serde_json::from_str(t)?;
+            Value::Array(items.iter().map(|i| from_raw(i.get(), depth + 1, repeated)).collect::<Result<_, _>>()?)
         }
         Some(b'"') => Value::String(serde_json::from_str(t)?),
         Some(b't') | Some(b'f') => Value::Bool(serde_json::from_str(t)?),
@@ -102,18 +100,18 @@ fn from_raw(text: &str, depth: usize) -> Result<Value, serde_json::Error> {
     })
 }
 
-/// An object's members in file order, values left as raw text.
-struct OrderedMap(Vec<(String, Box<serde_json::value::RawValue>)>);
+/// An object's members in file order, values left as raw text (borrowed).
+struct OrderedMap<'a>(Vec<(String, &'a serde_json::value::RawValue)>);
 
-impl<'de> Deserialize<'de> for OrderedMap {
+impl<'de: 'a, 'a> Deserialize<'de> for OrderedMap<'a> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = OrderedMap;
+        struct V<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> Visitor<'de> for V<'a> {
+            type Value = OrderedMap<'a>;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a JSON object")
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<OrderedMap, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<OrderedMap<'a>, A::Error> {
                 let mut out = Vec::new();
                 while let Some(entry) = map.next_entry()? {
                     out.push(entry);
@@ -121,7 +119,7 @@ impl<'de> Deserialize<'de> for OrderedMap {
                 Ok(OrderedMap(out))
             }
         }
-        d.deserialize_map(V)
+        d.deserialize_map(V(std::marker::PhantomData))
     }
 }
 
@@ -170,11 +168,31 @@ fn text(bytes: &[u8]) -> Result<&str, String> {
 /// Every place in a `.json` file that holds an array of objects, as dotted
 /// paths ("" is the file itself), largest first: what Records at offers.
 pub fn record_paths(bytes: &[u8]) -> Result<Vec<(String, usize)>, String> {
-    let value = parse(text(bytes)?).map_err(|e| format!("not JSON: {e}"))?;
+    let value = parse(text(bytes)?, &mut Vec::new()).map_err(|e| format!("not JSON: {e}"))?;
     let mut found = Vec::new();
     find_arrays(&value, String::new(), 0, &mut found);
     found.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(found)
+}
+
+/// Where Found by itself reads in a `.json` file: a dotted path, or None
+/// when that is the file itself (an array or a single object). A new recipe
+/// saves it, so a later export that grows a larger array doesn't move it.
+pub fn found_records(bytes: &[u8]) -> Option<String> {
+    let root = parse(text(bytes).ok()?, &mut Vec::new()).ok()?;
+    auto_path(&root)
+}
+
+/// Found by itself: the file is the array, or its largest array of
+/// objects; a single object is one record.
+fn auto_path(root: &Value) -> Option<String> {
+    if matches!(root, Value::Array(_)) {
+        return None;
+    }
+    let mut found = Vec::new();
+    find_arrays(root, String::new(), 0, &mut found);
+    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found.into_iter().next().map(|(path, _)| path).filter(|p| !p.is_empty())
 }
 
 fn find_arrays(v: &Value, path: String, depth: usize, out: &mut Vec<(String, usize)>) {
@@ -193,57 +211,44 @@ fn find_arrays(v: &Value, path: String, depth: usize, out: &mut Vec<(String, usi
     }
 }
 
-/// The records of one file, each with the line (or position) it came from.
-fn records(src: &JsonSource, snapshot: &Snapshot) -> Result<(Vec<(usize, Value)>, Option<String>), String> {
+/// Each record of one file, with the line (or position) it came from, in
+/// order. JSON Lines are parsed one line at a time, so only one record is
+/// held at once.
+fn each_record(src: &JsonSource, snapshot: &Snapshot, repeated: &mut Vec<String>, mut each: impl FnMut(usize, Value)) -> Result<(), String> {
     let body = text(&snapshot.bytes)?;
     let name = snapshot.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if is_lines(name) {
-        let mut out = Vec::new();
         for (i, line) in body.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            let v = parse(line).map_err(|e| format!("line {}: not JSON: {e}", i + 1))?;
-            out.push((i + 1, v));
+            each(i + 1, parse(line, repeated).map_err(|e| format!("line {}: not JSON: {e}", i + 1))?);
         }
-        return Ok((out, None));
+        return Ok(());
     }
-    let root = parse(body).map_err(|e| format!("not JSON: {e}"))?;
-    let (at, found_path) = if !src.records.trim().is_empty() {
-        let mut v = &root;
-        for part in src.records.trim().split('.') {
-            v = match v {
-                Value::Object(_) => v.get(part),
-                Value::Array(a) => part.parse::<usize>().ok().and_then(|i| a.get(i)),
+    let root = parse(body, repeated).map_err(|e| format!("not JSON: {e}"))?;
+    let path = match src.records.trim() {
+        "" => auto_path(&root).unwrap_or_default(),
+        named => named.to_string(),
+    };
+    // Moved out of the tree, not copied: a large file is held once
+    let mut at = root;
+    if !path.is_empty() {
+        for part in path.split('.') {
+            at = match at {
+                Value::Object(entries) => entries.into_iter().find(|(k, _)| k == part).map(|(_, v)| v),
+                Value::Array(items) => part.parse::<usize>().ok().and_then(|i| items.into_iter().nth(i)),
                 _ => None,
             }
-            .ok_or_else(|| format!("the file has nothing at {}", src.records.trim()))?;
+            .ok_or_else(|| format!("the file has nothing at {path}"))?;
         }
-        (v, None)
-    } else {
-        // Found by itself: the file is the array, or its largest array of
-        // objects; a single object is one record
-        let mut found = Vec::new();
-        find_arrays(&root, String::new(), 0, &mut found);
-        found.sort_by(|a, b| b.1.cmp(&a.1));
-        match (&root, found.first()) {
-            (Value::Array(_), _) => (&root, None),
-            (_, Some((path, _))) => {
-                let mut v = &root;
-                for part in path.split('.') {
-                    v = v.get(part).expect("a path find_arrays reported");
-                }
-                (v, Some(path.clone()))
-            }
-            _ => (&root, None),
-        }
-    };
-    let list = match at {
-        Value::Array(items) => items.iter().cloned().enumerate().map(|(i, v)| (i + 1, v)).collect(),
-        other => vec![(1, other.clone())],
-    };
-    Ok((list, found_path))
+    }
+    match at {
+        Value::Array(items) => items.into_iter().enumerate().for_each(|(i, v)| each(i + 1, v)),
+        other => each(1, other),
+    }
+    Ok(())
 }
 
 /// One cell: (text, how the column should treat it).
@@ -276,24 +281,33 @@ fn flatten(prefix: &str, v: &Value, depth: usize, out: &mut Vec<(String, String,
     }
 }
 
-/// The snapshot's records as a frame. Also notes where the records were
-/// found when that was guessed.
-pub(super) fn read_frame(src: &JsonSource, snapshot: &Snapshot) -> Result<(Frame, Option<String>), String> {
-    let (recs, found) = records(src, snapshot)?;
+/// One file read: its frame, and what the run report should mention.
+pub(super) struct JsonRead {
+    pub frame: Frame,
+    pub warnings: Vec<String>,
+}
+
+/// The snapshot's records as a frame.
+pub(super) fn read_frame(src: &JsonSource, snapshot: &Snapshot) -> Result<JsonRead, String> {
+    let mut repeated = Vec::new();
+    // Two fields that flatten to one name: {"a.b": 1, "a": {"b": 2}}
+    let mut collided: Vec<String> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut numeric: Vec<bool> = Vec::new();
     let mut seen: Vec<bool> = Vec::new();
-    let mut rows: Vec<Vec<String>> = Vec::with_capacity(recs.len());
-    let mut lines = Vec::with_capacity(recs.len());
-    for (line, rec) in &recs {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut lines = Vec::new();
+    each_record(src, snapshot, &mut repeated, |line, rec| {
         let mut cells = Vec::new();
-        match rec {
-            Value::Object(_) => flatten("", rec, 0, &mut cells),
+        match &rec {
+            Value::Object(_) => flatten("", &rec, 0, &mut cells),
             // A record that isn't an object: one "value" column
             other => flatten("value", other, 0, &mut cells),
         }
+        drop(rec); // freed before the next record
         let mut row = vec![String::new(); names.len()];
+        let mut set = vec![false; names.len()];
         for (name, value, kind) in cells {
             let name = if name.is_empty() { "value".to_string() } else { name };
             let i = *index.entry(name.clone()).or_insert_with(|| {
@@ -304,7 +318,12 @@ pub(super) fn read_frame(src: &JsonSource, snapshot: &Snapshot) -> Result<(Frame
             });
             if row.len() < names.len() {
                 row.resize(names.len(), String::new());
+                set.resize(names.len(), false);
             }
+            if set[i] && !collided.contains(&names[i]) {
+                collided.push(names[i].clone());
+            }
+            set[i] = true;
             if !value.is_empty() {
                 seen[i] = true;
                 if kind == Kind::Text {
@@ -314,8 +333,8 @@ pub(super) fn read_frame(src: &JsonSource, snapshot: &Snapshot) -> Result<(Frame
             row[i] = value;
         }
         rows.push(row);
-        lines.push(*line);
-    }
+        lines.push(line);
+    })?;
     if names.len() > visigrid_engine::sheet::NUM_COLS {
         return Err(format!("the records have {} fields; a sheet holds {} columns", names.len(), visigrid_engine::sheet::NUM_COLS));
     }
@@ -334,7 +353,23 @@ pub(super) fn read_frame(src: &JsonSource, snapshot: &Snapshot) -> Result<(Frame
             }
         })
         .collect();
-    Ok((Frame { columns, rows, lines, files: Vec::new(), file_names: Vec::new(), decimal_comma: false }, found))
+    let mut warnings = Vec::new();
+    if !repeated.is_empty() {
+        warnings.push(format!("{} appears twice in one object; the last value was kept", quoted(&repeated)));
+    }
+    if !collided.is_empty() {
+        warnings.push(format!("two fields both make the column {}; the later value was kept", quoted(&collided)));
+    }
+    Ok(JsonRead { frame: Frame { columns, rows, lines, files: Vec::new(), file_names: Vec::new(), decimal_comma: false }, warnings })
+}
+
+/// Up to three names, quoted: `"id", "name" and 2 more`.
+fn quoted(names: &[String]) -> String {
+    let shown: Vec<String> = names.iter().take(3).map(|n| format!("\"{n}\"")).collect();
+    match names.len() {
+        0..=3 => shown.join(", "),
+        n => format!("{} and {} more", shown.join(", "), n - 3),
+    }
 }
 
 #[cfg(test)]
@@ -345,7 +380,9 @@ mod tests {
     fn frame(name: &str, body: &str, records: &str) -> (Frame, Option<String>) {
         let mut src = JsonSource::new(name.into());
         src.records = records.into();
-        read_frame(&src, &Snapshot::from_bytes(Path::new(name), body.as_bytes().to_vec())).unwrap()
+        let r = read_frame(&src, &Snapshot::from_bytes(Path::new(name), body.as_bytes().to_vec())).unwrap();
+        let found = if records.is_empty() && !is_lines(name) { found_records(body.as_bytes()) } else { None };
+        (r.frame, found)
     }
 
     fn names(f: &Frame) -> Vec<&str> {
@@ -409,5 +446,28 @@ mod tests {
         let (f, _) = frame("x.json", r#"[{"id": 123456789012345678901234567890, "amt": 10.50}]"#, "");
         assert_eq!(f.rows[0], vec!["123456789012345678901234567890", "10.50"], "the file's own text");
         assert_eq!(f.columns[0].rule, ColumnRule::Text);
+    }
+    #[test]
+    fn a_new_recipe_pins_the_records_it_found() {
+        assert_eq!(found_records(br#"{"count": 2, "data": {"items": [{"a": 1}, {"a": 2}]}}"#).as_deref(), Some("data.items"));
+        assert_eq!(found_records(br#"[{"a": 1}]"#), None, "the file itself");
+        assert_eq!(found_records(br#"{"a": 1}"#), None, "one object, one record");
+        assert_eq!(found_records(b"not json"), None);
+    }
+
+    #[test]
+    fn repeated_and_colliding_keys_are_reported() {
+        let src = JsonSource::new("x.json".into());
+        let read = |body: &str| read_frame(&src, &Snapshot::from_bytes(Path::new("x.json"), body.as_bytes().to_vec())).unwrap();
+        let r = read(r#"[{"id": 1, "id": 2, "a.b": "flat", "a": {"b": "nested"}}, {"id": 3}]"#);
+        assert_eq!(r.frame.rows, vec![vec!["2", "nested"], vec!["3", ""]], "the last value wins");
+        assert_eq!(
+            r.warnings,
+            vec![
+                "\"id\" appears twice in one object; the last value was kept".to_string(),
+                "two fields both make the column \"a.b\"; the later value was kept".to_string(),
+            ]
+        );
+        assert!(read(r#"[{"id": 1}, {"id": 2}]"#).warnings.is_empty());
     }
 }

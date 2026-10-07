@@ -1495,6 +1495,13 @@ impl Spreadsheet {
             if let (Source::Xlsx(src), Ok(snap)) = (&mut source, Snapshot::read(&csv_path)) {
                 src.header_row = recipe::guess_xlsx_header_row(&snap, &src.sheet);
             }
+            // A JSON recipe keeps the records it was made from: a later export
+            // that grows a larger array doesn't move it
+            if let (Source::Json(src), false) = (&mut source, recipe::json::is_lines(&lower)) {
+                if let Ok(snap) = Snapshot::read(&csv_path) {
+                    src.records = recipe::json::found_records(&snap.bytes).unwrap_or_default();
+                }
+            }
             let recipe = Recipe { version: RECIPE_VERSION, source, steps: Vec::new() };
             self.recipe_builder = Some(RecipeBuilder::new(recipe, None, csv_path, None));
             if let Some(b) = self.recipe_builder.as_mut() {
