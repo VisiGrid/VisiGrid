@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- **A total that rounds to zero no longer shows "-0.00".** A negative value too small to show at the displayed decimals (a few billionths left over from floating-point arithmetic, or -0.004 at two decimals) now displays as `0.00`: no minus sign, no parentheses, and not red under a red-negatives format. This applies to General, Number, Currency, Percent and custom formats such as `#,##0.00`; anything that shows a nonzero digit keeps its sign. ([#128](https://github.com/VisiGrid/VisiGrid/pull/128))
 - **Formulas on large cloud sheets follow edits again.** A sheet loaded in row bands stayed in manual calculation after loading, so editing a cell left every formula over it at its loaded value (a `=SUM` over the column didn't move) until a full recalculation. Since 0.50.0. ([#126](https://github.com/VisiGrid/VisiGrid/pull/126))
 
 ## 0.50.1
