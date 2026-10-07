@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **Formulas on large cloud sheets follow edits again.** A sheet loaded in row bands stayed in manual calculation after loading, so editing a cell left every formula over it at its loaded value (a `=SUM` over the column didn't move) until a full recalculation. Since 0.50.0. ([#125](https://github.com/VisiGrid/VisiGrid/pull/125))
+- **Formulas on large cloud sheets follow edits again.** A sheet loaded in row bands stayed in manual calculation after loading, so editing a cell left every formula over it at its loaded value (a `=SUM` over the column didn't move) until a full recalculation. Since 0.50.0. ([#126](https://github.com/VisiGrid/VisiGrid/pull/126))
 
 ## 0.50.1
 
