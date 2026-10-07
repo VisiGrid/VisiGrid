@@ -309,3 +309,38 @@ fn band_cell_decisions_match_the_full_check() {
         eprintln!("{}", report.join("\n"));
     }
 }
+
+/// A formula in the first band over a column that spans every band must
+/// follow an edit made after the load, as on any other sheet.
+#[test]
+fn edits_after_a_banded_load_recalculate_formulas_over_other_bands() {
+    let mut s = Sheet::new(SheetId(1), NUM_ROWS, NUM_COLS);
+    s.set_name("Data");
+    let rows = 210_000;
+    for r in 0..rows {
+        s.set_value_deferred(r, 1, &format!("{}", (r * 7 + 1) % 1000));
+    }
+    s.set_value_deferred(0, 20, &format!("=SUM(B1:B{rows})"));
+    let mut wb = Workbook::from_sheets(vec![s], 0);
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+    let before = wb.sheets()[0].get_display(0, 20);
+
+    let (manifest, out) = bands::export_banded(&wb, &[SheetLayout::default()], 0).unwrap();
+    assert!(out.len() >= 3, "the column spans several bands");
+    let (mut loaded, _, _) = import_any(&manifest).unwrap();
+    for b in &out {
+        bands::apply(&mut loaded, &b.data, Some(&b.reference.key)).unwrap();
+    }
+    bands::finish(&mut loaded).unwrap();
+    assert_eq!(loaded.sheets()[0].get_display(0, 20), before, "SUM after the load");
+
+    // B3 was (2*7+1)%1000 = 15; B40001 is in a later band.
+    let b3: i64 = loaded.sheets()[0].get_display(2, 1).parse().unwrap();
+    let late: i64 = loaded.sheets()[0].get_display(200_000, 1).parse().unwrap();
+    loaded.set_cell_value_tracked(0, 2, 1, "5000");
+    loaded.set_cell_value_tracked(0, 200_000, 1, "7000");
+    let expected = before.parse::<i64>().unwrap() + (5000 - b3) + (7000 - late);
+    assert_eq!(loaded.sheets()[0].get_display(0, 20), expected.to_string(), "SUM after edits in the first and a later band");
+}
+
