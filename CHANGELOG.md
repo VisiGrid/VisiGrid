@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A near-zero total takes a custom format's zero section.** With an accounting format such as `#,##0.00;(#,##0.00);"-"`, a total that rounds to zero now shows `-`, as an exact 0 does, instead of `0.00` (since 0.51.0). ([#129](https://github.com/VisiGrid/VisiGrid/pull/129))
+
 ## 0.51.0
 
 ### Import recipes

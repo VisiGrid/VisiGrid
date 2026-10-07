@@ -37,6 +37,13 @@ fn minus_0_004_at_two_decimals_has_no_sign() {
     assert_eq!(CellValue::format_number(-0.00004, &NumberFormat::Percent { decimals: 2 }), "0.00%");
     assert_eq!(CellValue::format_number(-0.0, &two_decimals(NegativeStyle::Minus)), "0.00", "negative zero");
 
+    // A custom code's zero section applies, as it does to a true 0
+    let accounting = NumberFormat::Custom("#,##0.00;(#,##0.00);\"-\"".into());
+    assert_eq!(CellValue::format_number(0.0, &accounting), "-");
+    assert_eq!(CellValue::format_number(n, &accounting), "-");
+    assert_eq!(CellValue::format_number(-2.7755575615628914e-17, &accounting), "-");
+    assert_eq!(CellValue::format_number(-12.5, &accounting), "(12.50)");
+
     // Anything that shows a digit keeps its sign
     assert_eq!(CellValue::format_number(-0.005, &two_decimals(NegativeStyle::Minus)), "-0.01");
     assert_eq!(CellValue::format_number(-0.004, &NumberFormat::Number { decimals: 3, thousands: false, negative: NegativeStyle::Minus }), "-0.004");

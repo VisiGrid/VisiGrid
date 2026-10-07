@@ -1220,7 +1220,12 @@ impl CellValue {
         if n.is_sign_negative() && !matches!(format, NumberFormat::Date { .. } | NumberFormat::Time | NumberFormat::DateTime) {
             let unsigned = Self::format_signed(-n, format);
             if shows_zero(&unsigned) {
-                return unsigned;
+                // A custom code renders it as 0, so a zero section applies:
+                // #,##0.00;(#,##0.00);"-" shows "-", as a true 0 does
+                return match format {
+                    NumberFormat::Custom(_) => Self::format_signed(0.0, format),
+                    _ => unsigned,
+                };
             }
         }
         Self::format_signed(n, format)
