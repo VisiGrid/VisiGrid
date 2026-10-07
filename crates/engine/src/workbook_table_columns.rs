@@ -269,7 +269,7 @@ impl Workbook {
         let before = sheet.tables().to_vec();
         let mut after = sheet.tables_after_column_edit(at, count, delete)?;
         let rules = self.column_rule_changes(index, at, count, delete, &before, &after)?;
-        let metadata_before = super::StructuralMetadata::capture(self);
+        let metadata_before = super::StructuralMetadata::capture(self, sheet.id);
         if before.is_empty() && rules.is_empty() && metadata_before.is_none() {
             return Ok(None);
         }

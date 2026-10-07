@@ -6,7 +6,11 @@ use serde::{Serialize, ser::*};
 
 pub fn serialized_bytes(value: &impl Serialize) -> usize {
     let mut counter = Counter(0, false);
-    value.serialize(&mut counter).expect("infallible size serializer");
+    // A failing Serialize must not panic while history is recorded. Keep the
+    // partial count and a small pad so the budget still sees the value.
+    if value.serialize(&mut counter).is_err() {
+        return counter.0.saturating_add(1024);
+    }
     counter.0
 }
 

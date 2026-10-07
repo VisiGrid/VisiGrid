@@ -125,9 +125,19 @@ impl TableCommit {
 #[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct StructuralMetadata(Vec<(SheetId, crate::validation::ValidationStore, crate::cond_format::CondFormatStore, Vec<crate::sheet::MergedRegion>)>);
 impl StructuralMetadata {
-    fn capture(wb: &Workbook) -> Option<Self> {
-        let sheets: Vec<_> = wb.sheets().iter().filter(|s| !s.validations.is_empty() || s.validations.exclusions_iter().next().is_some() || s.cond_formats.iter().next().is_some() || !s.merged_regions.is_empty())
-            .map(|s| (s.id, s.validations.clone(), s.cond_formats.clone(), s.merged_regions.clone())).collect();
+    fn capture(wb: &Workbook, edited: SheetId) -> Option<Self> {
+        let sheets: Vec<_> = wb.sheets().iter().filter(|s| {
+            let has_rules = !s.validations.is_empty()
+                || s.validations.exclusions_iter().next().is_some()
+                || s.cond_formats.iter().next().is_some()
+                || !s.merged_regions.is_empty();
+            if !has_rules {
+                return false;
+            }
+            // Ranges move only on the edited sheet. Another sheet is included
+            // when a validation source can be rewritten by that edit.
+            s.id == edited || s.validations.iter().any(|(_, rule)| rule.reference_origin.is_some())
+        }).map(|s| (s.id, s.validations.clone(), s.cond_formats.clone(), s.merged_regions.clone())).collect();
         (!sheets.is_empty()).then_some(Self(sheets))
     }
     fn restore(&self, wb: &mut Workbook) {
@@ -223,7 +233,7 @@ impl Workbook {
             count,
             delete,
         );
-        let metadata_before = StructuralMetadata::capture(self);
+        let metadata_before = StructuralMetadata::capture(self, sheet.id);
         if sheet.tables().is_empty() && rules.is_empty() && metadata_before.is_none() {
             return Ok(None);
         }
@@ -546,6 +556,9 @@ impl Workbook {
             // workbook runs a second full calculation and can leave the resize
             // in place when that undo fails.
             let mut candidate = self.clone();
+            // The clone inherits earlier settlement failures. A resize is a new
+            // calculation; a stale "not settled" must not refuse it.
+            candidate.incremental_errors.clear();
             let commit = candidate.resize_table_inner(id, range)?;
             if let Some(error) = candidate.incremental_errors.iter().find(|error| error.error.contains("not settled")) {
                 return Err(format!("Could not recalculate the resized Table: {error:?}"));
@@ -558,6 +571,7 @@ impl Workbook {
         let width_changed = before.range.end_col != range.end_col;
         let mut reference_guarded = false;
         let mut candidate = self.clone();
+        candidate.incremental_errors.clear();
         // Grow height before admitting new columns, so existing records in the
         // added columns never become a temporary footer. Shrink width first so
         // released footer cells stay in place when surviving columns move.
@@ -1357,6 +1371,12 @@ impl Workbook {
             dirty.extend(target.headers.iter().map(|c| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
             // New body cells can bring an existing SUBTOTAL range into a
             // filtered Table even when those cells were previously empty.
+            // A SUBTOTAL whose range already covered only the old body is not
+            // in this closure. Its filter-column precedent keeps the old end
+            // row. A full rebuild would extend that precedent to the new end.
+            // The value stays correct: visibility is decided per row, and the
+            // formula does not read the new rows. Scanning every formula to
+            // rebind those edges would walk the whole workbook on append.
             if let Some(region) = commit.append_region {
                 for row in region.start_row..=region.end_row {
                     for col in region.start_col..=region.end_col {

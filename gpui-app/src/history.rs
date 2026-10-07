@@ -880,6 +880,10 @@ pub struct History {
     last_record_too_large: bool,
     base_invalidated: bool,
     rewind_base: Option<(Workbook, crate::app::PreviewViewState)>,
+    /// Cell-walk size of `rewind_base`, cached so a keystroke does not rescan it.
+    rewind_base_bytes: usize,
+    /// Evicted edits were stored without calculation. Rewind recomputes once on open.
+    rewind_base_needs_calc: bool,
     pending_notice: Option<String>,
     /// Save point for dirty detection: undo_stack length when document was saved
     save_point: usize,
@@ -904,6 +908,8 @@ impl History {
             last_record_too_large: false,
             base_invalidated: false,
             rewind_base: None,
+            rewind_base_bytes: 0,
+            rewind_base_needs_calc: false,
             pending_notice: None,
             save_point: 0,
             next_id: 1,
@@ -1123,21 +1129,100 @@ impl History {
     }
 
     pub fn set_rewind_base(&mut self, workbook: &Workbook) {
+        self.rewind_base_bytes = visigrid_engine::history_size::workbook_bytes(workbook);
         self.rewind_base = Some((workbook.clone(), crate::app::PreviewViewState {
             per_sheet: vec![Default::default(); workbook.sheet_count()],
         }));
+        self.rewind_base_needs_calc = false;
         self.base_invalidated = false;
+        self.drop_rewind_if_over_budget();
     }
 
     pub fn take_notice(&mut self) -> Option<String> { self.pending_notice.take() }
 
-    fn advance_rewind_base(&mut self, action: &UndoAction) {
-        if let Some((workbook, view)) = &mut self.rewind_base {
-            if Self::apply_action_forward(workbook, view, action).is_ok() { return; }
+    fn note_rewind_unavailable(&mut self) {
+        if self.pending_notice.is_none() {
+            self.pending_notice = Some("Rewind is unavailable; ordinary undo still works for recent changes.".into());
         }
-        // Refuse a partial baseline if a replay invariant cannot be proven.
-        self.rewind_base = None;
+    }
+
+    /// Drop a captured baseline and say so. A baseline that was never captured
+    /// stays silent: eviction already marks rewind invalid.
+    fn fail_rewind(&mut self) {
+        let had_base = self.rewind_base.take().is_some();
+        self.rewind_base_bytes = 0;
+        self.rewind_base_needs_calc = false;
         self.base_invalidated = true;
+        if had_base {
+            self.note_rewind_unavailable();
+        }
+    }
+
+    fn drop_rewind_if_over_budget(&mut self) {
+        if self.rewind_base.is_some() && self.rewind_base_bytes > self.max_bytes {
+            self.fail_rewind();
+        }
+    }
+
+    fn charged_bytes(&self) -> usize {
+        let entries = self.entry_bytes.values().copied().sum::<usize>();
+        if self.rewind_base.is_some() { entries.saturating_add(self.rewind_base_bytes) } else { entries }
+    }
+
+    /// Byte change of applying `action` to the current baseline. `None` means
+    /// the action replaces workbook state, so the caller remeasures.
+    fn value_delta(&self, action: &UndoAction) -> Option<isize> {
+        match action {
+            UndoAction::Values { sheet_index, changes } => {
+                let (workbook, _) = self.rewind_base.as_ref()?;
+                let sheet = workbook.sheet(*sheet_index)?;
+                Some(changes.iter().map(|change| change.new_value.len() as isize - sheet.get_raw(change.row, change.col).len() as isize).sum())
+            }
+            UndoAction::Group { actions, .. } => {
+                let mut total = 0isize;
+                for action in actions {
+                    total = total.saturating_add(self.value_delta(action)?);
+                }
+                Some(total)
+            }
+            _ => None,
+        }
+    }
+
+    fn charge_advanced_base(&mut self, value_delta: Option<isize>) {
+        if let Some(delta) = value_delta {
+            self.rewind_base_bytes = self.rewind_base_bytes.saturating_add_signed(delta);
+            return;
+        }
+        if let Some((workbook, _)) = &self.rewind_base {
+            self.rewind_base_bytes = visigrid_engine::history_size::workbook_bytes(workbook);
+        }
+    }
+
+    fn advance_rewind_base(&mut self, action: &UndoAction) {
+        if self.rewind_base.is_none() {
+            self.base_invalidated = true;
+            return;
+        }
+        // Store the evicted edit. Calculating here repeated a workbook recalc
+        // on every keystroke once history held max_entries.
+        let value_delta = self.value_delta(action);
+        let applied = self.rewind_base.as_mut().is_some_and(|(workbook, view)| {
+            Self::apply_action_forward(workbook, view, action, false).is_ok()
+        });
+        if applied {
+            self.rewind_base_needs_calc = true;
+            self.charge_advanced_base(value_delta);
+            return;
+        }
+        self.fail_rewind();
+    }
+
+    fn evict_oldest_undo(&mut self) {
+        let removed = self.undo_stack.remove(0);
+        self.advance_rewind_base(&removed.action);
+        self.entry_bytes.remove(&removed.id);
+        self.save_point = if self.save_point == 0 { usize::MAX } else { self.save_point - 1 };
     }
 
     pub fn last_record_too_large(&self) -> bool { self.last_record_too_large }
@@ -1163,20 +1248,29 @@ impl History {
             // There is no safe undo path across an unrecorded mutation.
             self.undo_stack.clear(); self.redo_stack.clear(); self.entry_bytes.clear();
             self.save_point = usize::MAX;
+            self.drop_rewind_if_over_budget();
             return;
         }
-        let mut total = self.entry_bytes.values().copied().sum::<usize>();
-        // Discard the farthest redo first; the next redo remains replayable.
-        while total > self.max_bytes && !self.redo_stack.is_empty() {
+        // The baseline shares the budget with retained entries.
+        while self.charged_bytes() > self.max_bytes && !self.redo_stack.is_empty() {
             let removed = self.redo_stack.remove(0);
-            total = total.saturating_sub(self.entry_bytes.remove(&removed.id).unwrap_or(0));
+            self.entry_bytes.remove(&removed.id);
         }
-        while !self.undo_stack.is_empty() && (total > self.max_bytes || self.undo_stack.len() > self.max_entries) {
-            let removed = self.undo_stack.remove(0);
-            self.advance_rewind_base(&removed.action);
-            total = total.saturating_sub(self.entry_bytes.remove(&removed.id).unwrap_or(0));
-            self.save_point = if self.save_point == 0 { usize::MAX } else { self.save_point - 1 };
+        while self.undo_stack.len() > self.max_entries {
+            self.evict_oldest_undo();
         }
+        let mut guard = self.undo_stack.len().saturating_add(1);
+        while self.charged_bytes() > self.max_bytes && !self.undo_stack.is_empty() && guard > 0 {
+            guard -= 1;
+            let before = self.charged_bytes();
+            self.evict_oldest_undo();
+            // Replaying into the baseline can move the bytes instead of freeing
+            // them. Drop rewind and keep discarding entries without that copy.
+            if self.charged_bytes() >= before && self.rewind_base.is_some() {
+                self.fail_rewind();
+            }
+        }
+        self.drop_rewind_if_over_budget();
     }
 
     fn push_entry(&mut self, entry: HistoryEntry) {
@@ -1671,8 +1765,13 @@ impl History {
         let start = Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
 
-        // Start with a clone of base workbook
+        // Start with a clone of base workbook. Evicted edits were stored
+        // without calculation; one recompute here settles that prefix.
         let mut workbook = base.clone();
+        if self.rewind_base_needs_calc {
+            workbook.rebuild_dep_graph();
+            workbook.recompute_full_ordered();
+        }
 
         // Initialize preview view state (one entry per sheet, identity order)
         let sheet_count = workbook.sheet_count();
@@ -1687,7 +1786,7 @@ impl History {
                 return Err(PreviewBuildError::Timeout);
             }
             // Apply action with invariant checking - abort on violation
-            Self::apply_action_forward(&mut workbook, &mut view_state, &entry.action)?;
+            Self::apply_action_forward(&mut workbook, &mut view_state, &entry.action, true)?;
         }
 
         view_state.per_sheet.resize_with(workbook.sheet_count(), PreviewSheetView::default);
@@ -1798,6 +1897,7 @@ impl History {
         workbook: &mut Workbook,
         view_state: &mut crate::app::PreviewViewState,
         action: &UndoAction,
+        settle: bool,
     ) -> Result<(), PreviewBuildError> {
         crate::validation_ui::plan::validate_history(workbook, action, true)
             .map_err(PreviewBuildError::InvariantViolation)?;
@@ -1833,9 +1933,14 @@ impl History {
                 if workbook.sheet(*sheet_index).is_none() {
                     return Err(PreviewBuildError::InvariantViolation(format!("Values action references invalid sheet {}", sheet_index)));
                 }
-                workbook.begin_batch();
-                for change in changes { workbook.set_cell_value_tracked(*sheet_index, change.row, change.col, &change.new_value); }
-                workbook.end_batch();
+                if settle {
+                    workbook.begin_batch();
+                    for change in changes { workbook.set_cell_value_tracked(*sheet_index, change.row, change.col, &change.new_value); }
+                    workbook.end_batch();
+                } else {
+                    let sheet = workbook.sheet_mut(*sheet_index).unwrap();
+                    for change in changes { sheet.set_value(change.row, change.col, &change.new_value); }
+                }
             }
             UndoAction::Format { sheet_index, patches, .. } => {
                 crate::formatting::plan::validate_history(workbook, action, true)
@@ -1865,7 +1970,7 @@ impl History {
             }
             UndoAction::Group { actions, .. } => {
                 for sub_action in actions {
-                    Self::apply_action_forward(workbook, view_state, sub_action)?;
+                    Self::apply_action_forward(workbook, view_state, sub_action, settle)?;
                 }
             }
             UndoAction::PrintSetupChanged { sheet_id, after, .. } => {
@@ -2581,7 +2686,7 @@ mod tests {
                 commit: Box::new(commit.clone()),
                 description: "Table change".into(),
             };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert!(UndoActionKind::TableCommit.is_replay_supported());
         }
         assert_eq!(
@@ -2618,7 +2723,7 @@ mod tests {
         let action = UndoAction::TableCommit { header_layout: None,
             sheet_index: 0, commit: Box::new(append), description: "Append Table rows".into(),
         };
-        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
         for delete in [false, true] {
             let count = if delete { 3 } else { 1 };
             let history = workbook.prepare_table_row_history(0, 1, count, delete).unwrap().unwrap();
@@ -2636,7 +2741,7 @@ mod tests {
                     print_setup_before, formula_rewrites: vec![],
                 }
             };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
             for row in 0..5 {
                 assert_eq!(replay.active_sheet().get_raw(row, 0), workbook.active_sheet().get_raw(row, 0));
@@ -2660,14 +2765,14 @@ mod tests {
         }, "Sales").unwrap();
         let id = commit.table_id();
         let action = UndoAction::TableCommit { header_layout: None, sheet_index: 0, commit: Box::new(commit.clone()), description: "Create Table: Sales".into() };
-        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
         assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
         assert_eq!(replay.active_sheet().get_display(1,1), "84");
         assert_eq!(replay.active_sheet().get_raw(2,0), "17");
         replay.apply_table_commit(&commit, true).unwrap();
         assert!(replay.table(id).is_none());
         assert_eq!(replay.active_sheet().get_display(0,1), "84");
-        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
         assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
     }
 
@@ -2701,7 +2806,7 @@ mod tests {
                 UndoAction::ColsInserted { sheet_index: 0, at_col: at, count: 1, table_columns,
                     print_setup_before, formula_rewrites }
             };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
             for r in 0..4 { for c in 0..5 {
                 assert_eq!(replay.sheet(0).unwrap().get_raw(r,c), workbook.sheet(0).unwrap().get_raw(r,c));
@@ -2729,7 +2834,7 @@ mod tests {
         let mut view = crate::app::PreviewViewState::default();
         for (commit, expected) in [(show, "10"), (edit, "1"), (hide, "")] {
             let action = UndoAction::TableCommit { sheet_index: 0, commit: Box::new(commit.clone()), header_layout: None, description: "Totals".into() };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert_eq!(replay.sheet(0).unwrap().get_display(3, 0), expected);
             assert_eq!(replay.sheet(0).unwrap().table_view_spec(), Some(&spec));
             assert_eq!(replay.sheet(0).unwrap().manual_hidden_rows(), [2, 3].into());
@@ -2748,12 +2853,12 @@ mod tests {
         let mut replay = wb.clone();
         let mut view = crate::app::PreviewViewState::default();
         let rule = wb.set_calculated_column(id,1,1,"=A2*2",true).unwrap();
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}, true).unwrap();
         let before = wb.active_sheet().get_raw(2,1);
         wb.clear_cell_tracked(0,2,1);
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::Values {sheet_index:0,changes:vec![CellChange {row:2,col:1,old_value:before,new_value:String::new()}]}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::Values {sheet_index:0,changes:vec![CellChange {row:2,col:1,old_value:before,new_value:String::new()}]}, true).unwrap();
         let update = wb.set_calculated_column(id,1,1,"=A2*3",false).unwrap();
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(update),description:"Update rule".into()}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(update),description:"Update rule".into()}, true).unwrap();
         assert!(replay.active_sheet().is_calculated_exception(2,1));
         assert_eq!(replay.active_sheet().get_raw(2,1),"");
         assert_eq!(replay.active_sheet().get_raw(3,1),"=A4*3");
@@ -2789,7 +2894,8 @@ mod tests {
         assert!(History::apply_action_forward(
             &mut workbook,
             &mut crate::app::PreviewViewState::default(),
-            &action
+            &action,
+            true
         )
         .is_err());
         assert!(workbook.table_by_name("Changed").is_some());
@@ -2816,12 +2922,12 @@ mod tests {
         let sheet = workbook.take_sheet(index).unwrap();
         assert!(workbook.restore_sheet(0, sheet));
         let mut view = crate::app::PreviewViewState::default();
-        History::apply_action_forward(&mut workbook, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut workbook, &mut view, &action, true).unwrap();
         assert_eq!(workbook.sheet(0).unwrap().print_setup, after);
         assert!(workbook.sheet(1).unwrap().print_setup.is_default());
         assert_eq!(workbook.sheet(0).unwrap().get_raw(0, 0), "Title");
         workbook.take_sheet(0).unwrap();
-        assert!(History::apply_action_forward(&mut workbook, &mut view, &action).is_err());
+        assert!(History::apply_action_forward(&mut workbook, &mut view, &action, true).is_err());
     }
 
     /// Large workbooks keep no load-time copy (#18); preview must say so
@@ -3087,7 +3193,7 @@ mod comment_tests {
         assert!(wb.revision() > rev);
         let action = UndoAction::Comments { sheet_index: 0, patches, description: "Edit comment".into() };
         assert!(action.is_replay_supported());
-        History::apply_action_forward(&mut wb, &mut Default::default(), &action).unwrap();
+        History::apply_action_forward(&mut wb, &mut Default::default(), &action, true).unwrap();
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
         assert_eq!(wb.active_sheet().get_raw(0,0), "00123");
         let delete = vec![CommentPatch {remove_cell_on_undo: false,row:0,col:0,before:Some(after.clone()),after:None}];
@@ -3193,5 +3299,65 @@ mod byte_budget_tests {
         let oldest = history.build_workbook_before(0, None, 20, 10_000).expect("rewind after clear and eviction");
         assert_eq!(oldest.workbook.active_sheet().get_raw(0, 0), "b");
         assert_eq!(oldest.workbook.active_sheet().get_raw(1, 0), "");
+    }
+
+    #[test]
+    fn eviction_stores_values_without_recalculating_until_rewind_opens() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use visigrid_engine::custom_fns;
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn spike(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+            (name == "REWINDSPIKE").then(|| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                EvalResult::Number(1.0)
+            })
+        }
+        struct Reset(Option<custom_fns::CustomFnHandler>);
+        impl Drop for Reset {
+            fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
+        }
+        let _reset = Reset(custom_fns::default_custom_fn_handler());
+        custom_fns::set_default_custom_fn_handler(Some(spike));
+        let mut base = Workbook::new();
+        base.set_cell_value_tracked(0, 0, 1, "=REWINDSPIKE()+A1");
+        CALLS.store(0, Ordering::SeqCst);
+        let mut history = History::new();
+        history.max_entries = 1;
+        history.set_rewind_base(&base);
+        history.record_change(0, 0, 0, String::new(), "4".into());
+        history.record_change(0, 2, 0, String::new(), "z".into());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "eviction must not calculate");
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "4");
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 1), "5");
+    }
+
+    #[test]
+    fn failed_eviction_replay_reports_that_rewind_is_unavailable() {
+        let mut history = History::new();
+        history.set_rewind_base(&Workbook::new());
+        history.max_entries = 1;
+        history.record_change(5, 0, 0, String::new(), "a".into());
+        history.record_change(0, 0, 0, String::new(), "b".into());
+        assert!(history.base_invalidated);
+        assert!(history.rewind_base.is_none());
+        assert!(history.can_undo());
+        let notice = history.take_notice().unwrap_or_default();
+        assert!(notice.contains("Rewind is unavailable"), "{notice}");
+    }
+
+    #[test]
+    fn rewind_base_larger_than_the_budget_is_dropped_with_a_notice() {
+        let mut history = History::new();
+        history.set_rewind_base(&Workbook::new());
+        assert!(history.rewind_base_bytes > 1, "an empty workbook still occupies the baseline");
+        history.max_bytes = history.rewind_base_bytes - 1;
+        history.record_change(0, 0, 0, String::new(), "a".into());
+        assert!(history.base_invalidated);
+        assert!(history.rewind_base.is_none());
+        let notice = history.take_notice().unwrap_or_default();
+        assert!(notice.contains("Rewind is unavailable"), "{notice}");
     }
 }
