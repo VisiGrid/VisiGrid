@@ -2453,6 +2453,10 @@ pub mod bands {
             sheet.read_only_reason = None;
             sheet.canonical_content_protection = None;
         }
+        // The loading preview turned automatic recalculation off; a finished
+        // workbook recalculates edits like any other, or a formula over the
+        // banded cells keeps its loaded value forever.
+        wb.set_auto_recalc(true);
         wb.rebuild_dep_graph();
         wb.recompute_full_ordered();
         if let Some(pending) = pending {
