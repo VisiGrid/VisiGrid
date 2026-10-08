@@ -923,9 +923,6 @@ impl RecipeBuilder {
         self.changed();
     }
 
-    /// Insert a step of kind `kind` (an index into ADD_KINDS) after the
-    /// selected one, with settings that change nothing until edited where
-    /// that is possible.
     /// A click on a preview column's type: change it with a Set types step,
     /// the selected step if it is one, else a new one after it (at the start
     /// from the file's preview). The type moves on from the one the preview
@@ -958,6 +955,9 @@ impl RecipeBuilder {
         self.changed();
     }
 
+    /// Insert a step of kind `kind` (an index into ADD_KINDS) after the
+    /// selected one, with settings that change nothing until edited where
+    /// that is possible.
     pub fn add_step(&mut self, kind: usize) {
         let cols = self.step_columns_after_selected();
         let step = match kind {
