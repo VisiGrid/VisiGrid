@@ -5,6 +5,7 @@
 ### Fixed
 
 - **A near-zero total takes a custom format's zero section.** With an accounting format such as `#,##0.00;(#,##0.00);"-"`, a total that rounds to zero now shows `-`, as an exact 0 does, instead of `0.00` (since 0.51.0). ([#129](https://github.com/VisiGrid/VisiGrid/pull/129))
+- **LET, LAMBDA and newer functions open in Excel.** Excel offered to repair an .xlsx containing LET or LAMBDA, and a newer function typed in lowercase, such as `=xlookup(...)`, showed `#NAME?`. Export now writes Excel's stored forms. Importing an .xlsx with those forms no longer turns its newer-function formulas into errors. ([#89](https://github.com/VisiGrid/VisiGrid/issues/89))
 
 ## 0.51.0
 
