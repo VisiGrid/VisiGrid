@@ -64,7 +64,7 @@ pub struct HistoryDisplayEntry {
     pub ai_source: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CellChange {
     pub row: usize,
     pub col: usize,
@@ -72,8 +72,10 @@ pub struct CellChange {
     pub new_value: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CommentPatch {
+    /// The editor materialized an absent cell; undo must restore that absence.
+    pub remove_cell_on_undo: bool,
     pub row: usize,
     pub col: usize,
     pub before: Option<visigrid_engine::cell::CellComment>,
@@ -83,14 +85,21 @@ pub struct CommentPatch {
 /// Apply only the comment metadata; never replace cell values or formats.
 pub(crate) fn apply_comment_patches(workbook: &mut Workbook, sheet_index: usize, patches: &[CommentPatch], forward: bool) {
     if let Some(sheet) = workbook.sheet_mut(sheet_index) {
-        for p in patches { sheet.set_comment(p.row, p.col, if forward { p.after.clone() } else { p.before.clone() }); }
+        for p in patches {
+            sheet.set_comment(p.row, p.col, if forward { p.after.clone() } else { p.before.clone() });
+            if !forward && p.remove_cell_on_undo && p.before.is_none() {
+                sheet.remove_empty_metadata_cell(p.row, p.col);
+            }
+        }
         workbook.bump_revision_for_structure();
     }
 }
 
 /// A patch for a single cell's format (before/after snapshot)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CellFormatPatch {
+    /// Restore an absent cell when undo removes its only authored metadata.
+    pub remove_cell_on_undo: bool,
     pub row: usize,
     pub col: usize,
     pub before: CellFormat,
@@ -130,7 +139,7 @@ impl WorkbookSnapshotCommit {
 }
 
 /// Kind of format action (for coalescing)
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FormatActionKind {
     Bold,
     Italic,
@@ -152,7 +161,7 @@ pub enum FormatActionKind {
 }
 
 /// An undoable action
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum UndoAction {
     PrintSetupChanged {
         sheet_id: SheetId,
@@ -209,6 +218,7 @@ pub enum UndoAction {
     },
     /// Atomic Review Mode commit. Workbook and GUI-owned row state are kept
     /// as before/after snapshots for the first implementation.
+    #[serde(skip)]
     PlanCommit {
         commit: Box<visigrid_engine::operation_plan::PlanCommit>,
         sheet_id: SheetId,
@@ -219,12 +229,15 @@ pub enum UndoAction {
     },
     /// Atomic non-plan workbook mutation. Used when a cell/format patch cannot
     /// faithfully represent the action, such as cloning a complete sheet.
+    #[serde(skip)]
     WorkbookSnapshot {
         commit: Box<WorkbookSnapshotCommit>,
         before_row_view: visigrid_engine::filter::RowView,
         after_row_view: visigrid_engine::filter::RowView,
     },
+    #[serde(skip)]
     TableBatchChanged { sheet_index: usize, commit: Box<visigrid_engine::workbook::GuardedStructureCommit>, description: String },
+    #[serde(skip)]
     TableStructureChanged {
         sheet_index: usize,
         history: Box<crate::table_structure::TableStructureHistory>,
@@ -240,12 +253,15 @@ pub enum UndoAction {
         commit: Box<visigrid_engine::workbook::TableViewCommit>,
         description: String,
     },
+    #[serde(skip)]
     ReviewCopy { history: Box<crate::review_copy::ReviewCopyHistory> },
+    #[serde(skip)]
     TableAppend {
         sheet_index: usize,
         history: Box<crate::table_append::TableAppendHistory>,
         description: String,
     },
+    #[serde(skip)]
     TableCommit {
         header_layout: Option<Box<crate::table_create::HeaderLayout>>,
         sheet_index: usize,
@@ -254,6 +270,7 @@ pub enum UndoAction {
     },
     /// Pivot table action (create, apply fields, refresh, delete). Scoped to
     /// the pivot object and its output cells; never a workbook snapshot.
+    #[serde(skip)]
     PivotCommit {
         commit: Box<visigrid_engine::workbook::PivotCommit>,
         /// When the action created the pivot's output sheet: its index and the
@@ -266,6 +283,7 @@ pub enum UndoAction {
     RowsInserted {
         sheet_index: usize,
         table_rows: Option<visigrid_engine::workbook::TableRowHistory>,
+        row_layout: Option<Box<crate::table_structure::RowLayoutHistory>>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
@@ -280,6 +298,7 @@ pub enum UndoAction {
     RowsDeleted {
         sheet_index: usize,
         table_rows: Option<visigrid_engine::workbook::TableRowHistory>,
+        row_layout: Option<Box<crate::table_structure::RowLayoutHistory>>,
         print_setup_before: visigrid_engine::print_setup::PrintSetup,
         at_row: usize,
         count: usize,
@@ -375,6 +394,12 @@ pub enum UndoAction {
         /// Previous sort state (column, is_ascending)
         previous_sort_state: (usize, bool),
     },
+    /// Exact canonical metadata edit; legacy variants below retain their old semantics.
+    ValidationChanged {
+        sheet_index: usize,
+        commit: Box<crate::validation_ui::plan::Commit>,
+        description: String,
+    },
     /// Validation rule set (for undo: restore previous rules)
     ValidationSet {
         sheet_index: usize,
@@ -456,10 +481,27 @@ pub enum UndoAction {
 }
 
 impl UndoAction {
+    fn estimated_history_bytes(&self) -> usize {
+        use visigrid_engine::history_size::{serialized_bytes, workbook_bytes, sheet_bytes};
+        let payload = match self {
+            Self::TableCommit { commit, header_layout, description, .. } => commit.estimated_history_bytes() + serialized_bytes(header_layout) + description.capacity(),
+            Self::TableBatchChanged { commit, description, .. } => commit.estimated_history_bytes() + description.capacity(),
+            Self::TableAppend { history, description, .. } => history.estimated_history_bytes() + description.capacity(),
+            Self::TableStructureChanged { history, description, .. } => history.estimated_history_bytes() + description.capacity(),
+            Self::Group { actions, description } => actions.iter().map(Self::estimated_history_bytes).sum::<usize>() + description.capacity(),
+            Self::PlanCommit { commit, before_row_view, after_row_view, before_row_heights, after_row_heights, .. } => workbook_bytes(&commit.source) + workbook_bytes(&commit.applied) + commit.affected_cells.capacity() * std::mem::size_of::<visigrid_engine::cell_id::CellId>() + serialized_bytes(&commit.verification) + before_row_view.retained_bytes() + after_row_view.retained_bytes() + serialized_bytes(&(before_row_heights, after_row_heights)),
+            Self::WorkbookSnapshot { commit, before_row_view, after_row_view } => workbook_bytes(&commit.before) + workbook_bytes(&commit.after) + commit.description.capacity() + before_row_view.retained_bytes() + after_row_view.retained_bytes(),
+            Self::ReviewCopy { history } => history.estimated_history_bytes(),
+            Self::PivotCommit { commit, created_sheet, description } => commit.approx_bytes() + created_sheet.as_ref().map_or(0, |(_, s)| sheet_bytes(s)) + description.capacity(),
+            _ => serialized_bytes(self),
+        };
+        std::mem::size_of_val(self).saturating_add(payload)
+    }
+
     /// Generate a human-readable label for this action.
     pub fn label(&self) -> String {
         match self {
-            UndoAction::Comments { description, .. } => description.clone(),
+            UndoAction::Comments { description, .. } | UndoAction::ValidationChanged { description, .. } => description.clone(),
             UndoAction::CondFormatAdded { .. } => "Add conditional format".to_string(),
             UndoAction::CondFormatsCleared { rules, .. } => {
                 format!("Clear {} conditional format{}", rules.len(), if rules.len() == 1 { "" } else { "s" })
@@ -604,6 +646,7 @@ impl UndoAction {
     /// Returns None for simple actions where label is sufficient.
     pub fn summary(&self) -> Option<String> {
         match self {
+            UndoAction::ValidationChanged { commit, .. } => Some(crate::validation_ui::plan::range_summary(&commit.ranges)),
             UndoAction::ValidationSet { range, new_rule, .. } => {
                 let range_str = format_range(range.start_row, range.start_col, range.end_row, range.end_col);
                 let rule_desc = format_validation_rule(new_rule);
@@ -773,7 +816,7 @@ fn format_constraint_value(value: &visigrid_engine::validation::ConstraintValue)
 }
 
 /// Source of a mutation (for provenance tracking)
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub enum MutationSource {
     /// Human entered value manually (default)
     #[default]
@@ -790,7 +833,7 @@ pub enum MutationSource {
 }
 
 /// Metadata for AI-generated mutations (minimal, no prompts/context stored)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AiMutationMeta {
     /// Provider used (e.g., "openai")
     pub provider: String,
@@ -832,6 +875,16 @@ pub struct History {
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
     max_entries: usize,
+    max_bytes: usize,
+    entry_bytes: HashMap<u64, usize>,
+    last_record_too_large: bool,
+    base_invalidated: bool,
+    rewind_base: Option<(Workbook, crate::app::PreviewViewState)>,
+    /// Cell-walk size of `rewind_base`, cached so a keystroke does not rescan it.
+    rewind_base_bytes: usize,
+    /// Evicted edits were stored without calculation. Rewind recomputes once on open.
+    rewind_base_needs_calc: bool,
+    pending_notice: Option<String>,
     /// Save point for dirty detection: undo_stack length when document was saved
     save_point: usize,
     /// Monotonic counter for stable entry IDs
@@ -850,6 +903,14 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_entries: 100,
+            max_bytes: 1024 * 1024 * 1024,
+            entry_bytes: HashMap::new(),
+            last_record_too_large: false,
+            base_invalidated: false,
+            rewind_base: None,
+            rewind_base_bytes: 0,
+            rewind_base_needs_calc: false,
+            pending_notice: None,
             save_point: 0,
             next_id: 1,
         }
@@ -878,13 +939,14 @@ impl History {
     }
 
     /// Record a single cell value change (human source)
-    pub fn record_change(&mut self, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
-        self.record_change_with_source(sheet_index, row, col, old_value, new_value, MutationSource::Human);
+    pub fn record_change(&mut self, live: &Workbook, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
+        self.record_change_with_source(live, sheet_index, row, col, old_value, new_value, MutationSource::Human);
     }
 
     /// Record a single cell value change with explicit source
     pub fn record_change_with_source(
         &mut self,
+        live: &Workbook,
         sheet_index: usize,
         row: usize,
         col: usize,
@@ -907,39 +969,42 @@ impl History {
             provenance: None,  // Single cell edits don't need Lua provenance
             source,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record multiple cell value changes as a single undoable operation
-    pub fn record_batch(&mut self, sheet_index: usize, changes: Vec<CellChange>) {
-        self.record_batch_with_provenance(sheet_index, changes, None);
+    pub fn record_batch(&mut self, live: &Workbook, sheet_index: usize, changes: Vec<CellChange>) {
+        self.record_batch_with_provenance(live, sheet_index, changes, None);
     }
 
     /// Re-tag the most recent undo entry's source. Used after routing a
     /// session client's edit through a normal GUI mutation path.
-    pub fn retag_last_source(&mut self, source: MutationSource) {
+    pub fn retag_last_source(&mut self, live: &Workbook, source: MutationSource) {
         if let Some(entry) = self.undo_stack.last_mut() {
             entry.source = source;
+            self.entry_bytes.remove(&entry.id);
+            self.enforce_byte_budget(live);
         }
     }
 
     /// Record a value batch attributed to a specific source (session clients).
-    pub fn record_batch_from(&mut self, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
-        self.record_batch_with_provenance(sheet_index, changes, None);
-        self.retag_last_source(source);
+    pub fn record_batch_from(&mut self, live: &Workbook, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
+        self.record_batch_with_provenance(live, sheet_index, changes, None);
+        self.retag_last_source(live, source);
     }
 
     /// Record a format batch attributed to a specific source (session clients).
     pub fn record_format_from(
         &mut self,
+        live: &Workbook,
         sheet_index: usize,
         patches: Vec<CellFormatPatch>,
         kind: FormatActionKind,
         description: String,
         source: MutationSource,
     ) {
-        self.record_format(sheet_index, patches, kind, description);
-        self.retag_last_source(source);
+        self.record_format(live, sheet_index, patches, kind, description);
+        self.retag_last_source(live, source);
     }
 
     /// Source of the entry that `undo()` would revert next.
@@ -953,7 +1018,7 @@ impl History {
     }
 
     /// Record multiple cell value changes with optional Lua provenance
-    pub fn record_batch_with_provenance(&mut self, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<Provenance>) {
+    pub fn record_batch_with_provenance(&mut self, live: &Workbook, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<Provenance>) {
         if changes.is_empty() {
             return;
         }
@@ -966,11 +1031,11 @@ impl History {
             provenance,
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record format changes with coalescing support
-    pub fn record_format(&mut self, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
+    pub fn record_format(&mut self, live: &Workbook, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
         if patches.is_empty() {
             return;
         }
@@ -993,7 +1058,9 @@ impl History {
                         }
                         last.timestamp = now;
                         // Clear redo stack since we modified history
+                        self.entry_bytes.remove(&last.id);
                         self.redo_stack.clear();
+                        self.enforce_byte_budget(live);
                         return;
                     }
                 }
@@ -1009,12 +1076,13 @@ impl History {
             provenance: None,  // Format changes don't need Lua provenance
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record format changes with optional Lua provenance (for Paste Formats)
     pub fn record_format_with_provenance(
         &mut self,
+        live: &Workbook,
         sheet_index: usize,
         patches: Vec<CellFormatPatch>,
         kind: FormatActionKind,
@@ -1033,16 +1101,16 @@ impl History {
             provenance,
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record a named range action (create, delete, rename)
-    pub fn record_named_range_action(&mut self, action: UndoAction) {
-        self.record_action_with_provenance(action, None);
+    pub fn record_named_range_action(&mut self, live: &Workbook, action: UndoAction) {
+        self.record_action_with_provenance(live, action, None);
     }
 
     /// Record any action with optional Lua provenance
-    pub fn record_action_with_provenance(&mut self, action: UndoAction, provenance: Option<Provenance>) {
+    pub fn record_action_with_provenance(&mut self, live: &Workbook, action: UndoAction, provenance: Option<Provenance>) {
         let id = self.next_entry_id();
         let entry = HistoryEntry {
             id,
@@ -1051,7 +1119,7 @@ impl History {
             provenance,
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Check if two patch lists affect the same cells
@@ -1063,18 +1131,171 @@ impl History {
         a.iter().zip(b.iter()).all(|(pa, pb)| pa.row == pb.row && pa.col == pb.col)
     }
 
-    fn push_entry(&mut self, entry: HistoryEntry) {
+    pub fn has_rewind_base(&self) -> bool {
+        self.rewind_base.is_some()
+    }
+
+    pub fn set_rewind_base(&mut self, workbook: &Workbook) {
+        // The clone shares cells, pools and the dependency graph until an edit
+        // diverges, so it costs about nothing at any workbook size. Copies
+        // made for a previous baseline are not this baseline's bytes.
+        let cloned = workbook.clone_sharing_cell_cow();
+        cloned.reset_shared_cell_cow();
+        self.rewind_base = Some((cloned, crate::app::PreviewViewState {
+            per_sheet: vec![Default::default(); workbook.sheet_count()],
+        }));
+        self.rewind_base_needs_calc = false;
+        self.base_invalidated = false;
+        self.refresh_rewind_charge(workbook);
+        self.drop_rewind_if_over_budget();
+    }
+
+    pub fn take_notice(&mut self) -> Option<String> { self.pending_notice.take() }
+
+    fn note_rewind_unavailable(&mut self) {
+        const SENTENCE: &str = "Rewind is unavailable; ordinary undo still works for recent changes.";
+        match self.pending_notice.as_deref() {
+            Some(existing) if existing.contains("Rewind is unavailable") => {}
+            Some(existing) => self.pending_notice = Some(format!("{existing}. {SENTENCE}")),
+            None => self.pending_notice = Some(SENTENCE.into()),
+        }
+    }
+
+    /// Drop a captured baseline and say so. A baseline that was never captured
+    /// stays silent: eviction already marks rewind invalid.
+    fn fail_rewind(&mut self) {
+        let had_base = self.rewind_base.take().is_some();
+        self.rewind_base_bytes = 0;
+        self.rewind_base_needs_calc = false;
+        self.base_invalidated = true;
+        if had_base {
+            self.note_rewind_unavailable();
+        }
+    }
+
+    fn drop_rewind_if_over_budget(&mut self) {
+        if self.rewind_base.is_some() && self.rewind_base_bytes > self.max_bytes {
+            self.fail_rewind();
+        }
+    }
+
+    fn charged_bytes(&self) -> usize {
+        let entries = self.entry_bytes.values().copied().sum::<usize>();
+        if self.rewind_base.is_some() { entries.saturating_add(self.rewind_base_bytes) } else { entries }
+    }
+
+    /// Bytes of baseline allocations the live workbook no longer shares.
+    fn refresh_rewind_charge(&mut self, live: &Workbook) {
+        self.rewind_base_bytes = self.rewind_base.as_ref().map(|(workbook, _)| workbook.unshared_cow_bytes(live)).unwrap_or(0);
+    }
+
+    /// Recompute the retained-copy charge against the current workbook and drop
+    /// rewind when it no longer fits. Call this after a preview settles the
+    /// baseline, which can copy pages the last edit did not.
+    pub fn observe_live(&mut self, live: &Workbook) {
+        self.refresh_rewind_charge(live);
+        self.drop_rewind_if_over_budget();
+    }
+
+    fn evicted_baseline_error() -> PreviewBuildError {
+        PreviewBuildError::InvariantViolation("Older undo history was evicted to stay within the history limit. Rewind from the original snapshot is unavailable; ordinary undo is still available for retained changes.".into())
+    }
+
+    /// Evicted edits are stored without calculation. The first preview calculates
+    /// the baseline in place and clears the flag, so scrubbing does not do it again.
+    fn settle_rewind_base(&mut self) {
+        if !self.rewind_base_needs_calc {
+            return;
+        }
+        if let Some((workbook, _)) = self.rewind_base.as_mut() {
+            workbook.rebuild_dep_graph();
+            workbook.recompute_full_ordered();
+        }
+        self.rewind_base_needs_calc = false;
+        self.drop_rewind_if_over_budget();
+    }
+
+    fn advance_rewind_base(&mut self, live: &Workbook, action: &UndoAction) {
+        if self.rewind_base.is_none() {
+            self.base_invalidated = true;
+            return;
+        }
+        // Store the evicted edit. Calculating here repeated a workbook recalc
+        // on every keystroke once history held max_entries.
+        let applied = self.rewind_base.as_mut().is_some_and(|(workbook, view)| {
+            Self::apply_action_forward(workbook, view, action, false).is_ok()
+        });
+        if applied {
+            self.rewind_base_needs_calc = true;
+            self.refresh_rewind_charge(live);
+            return;
+        }
+        self.fail_rewind();
+    }
+
+    fn evict_oldest_undo(&mut self, live: &Workbook) {
+        let removed = self.undo_stack.remove(0);
+        self.advance_rewind_base(live, &removed.action);
+        self.entry_bytes.remove(&removed.id);
+        self.save_point = if self.save_point == 0 { usize::MAX } else { self.save_point - 1 };
+    }
+
+    pub fn last_record_too_large(&self) -> bool { self.last_record_too_large }
+
+    #[cfg(test)]
+    pub(crate) fn set_byte_budget_for_test(&mut self, bytes: usize) { self.max_bytes = bytes; }
+
+
+    fn enforce_byte_budget(&mut self, live: &Workbook) {
+        let ids: std::collections::HashSet<_> = self.undo_stack.iter().chain(&self.redo_stack).map(|e| e.id).collect();
+        self.entry_bytes.retain(|id, _| ids.contains(id));
+        for entry in self.undo_stack.iter().chain(&self.redo_stack) {
+            self.entry_bytes.entry(entry.id).or_insert_with(|| entry.action.estimated_history_bytes()
+                .saturating_add(visigrid_engine::history_size::serialized_bytes(&(&entry.provenance, &entry.source))));
+        }
+        self.last_record_too_large = self.undo_stack.last().is_some_and(|e| self.entry_bytes[&e.id] > self.max_bytes);
+        if self.last_record_too_large {
+            let conversion = matches!(self.undo_stack.last().map(|e| &e.action), Some(UndoAction::TableCommit { commit, .. }) if commit.is_conversion());
+            self.pending_notice = Some(if conversion { "Converted; this change is too large to undo" } else { "This change is too large to undo; earlier undo history was cleared" }.into());
+            // Advance across every discarded action, so the next retained
+            // change can still rewind to the state after this barrier.
+            for entry in std::mem::take(&mut self.undo_stack) { self.advance_rewind_base(live, &entry.action); }
+            // There is no safe undo path across an unrecorded mutation.
+            self.undo_stack.clear(); self.redo_stack.clear(); self.entry_bytes.clear();
+            self.save_point = usize::MAX;
+            self.drop_rewind_if_over_budget();
+            return;
+        }
+        // The baseline shares the budget with retained entries.
+        while self.charged_bytes() > self.max_bytes && !self.redo_stack.is_empty() {
+            let removed = self.redo_stack.remove(0);
+            self.entry_bytes.remove(&removed.id);
+        }
+        while self.undo_stack.len() > self.max_entries {
+            self.evict_oldest_undo(live);
+        }
+        let mut guard = self.undo_stack.len().saturating_add(1);
+        while self.charged_bytes() > self.max_bytes && !self.undo_stack.is_empty() && guard > 0 {
+            guard -= 1;
+            let before = self.charged_bytes();
+            self.evict_oldest_undo(live);
+            // Replaying into the baseline can move the bytes instead of freeing
+            // them. Drop rewind and keep discarding entries without that copy.
+            if self.charged_bytes() >= before && self.rewind_base.is_some() {
+                self.fail_rewind();
+            }
+        }
+        self.drop_rewind_if_over_budget();
+    }
+
+    fn push_entry(&mut self, live: &Workbook, entry: HistoryEntry) {
+        if self.save_point > self.undo_stack.len() { self.save_point = usize::MAX; }
+        // A live edit may already have copied a shared chunk. Count it before
+        // the new entry joins the budget.
+        self.refresh_rewind_charge(live);
         self.undo_stack.push(entry);
         self.redo_stack.clear();
-        // Note: save_point may now be unreachable (undo→edit diverges from saved state).
-        // That's correct - is_dirty() will return true until next save.
-
-        // Limit history size (remove oldest entries from front)
-        if self.undo_stack.len() > self.max_entries {
-            self.undo_stack.remove(0);
-            // Indices shifted down - adjust save_point (saturating to 0)
-            self.save_point = self.save_point.saturating_sub(1);
-        }
+        self.enforce_byte_budget(live);
     }
 
     /// Pop the last entry for undo
@@ -1207,6 +1428,7 @@ impl History {
     /// Extract sheet index, affected cells, and bounding range from an action.
     fn extract_action_details(action: &UndoAction) -> (Option<usize>, Vec<(usize, usize, String, String)>, Option<(usize, usize, usize, usize)>) {
         match action {
+            UndoAction::ValidationChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::TableCellsChanged { sheet_index, commit, .. } => {
                 let cells = commit.changes();
                 let range = Self::bounding_box(&cells);
@@ -1218,11 +1440,19 @@ impl History {
             UndoAction::TableViewChanged { sheet_index, .. } => (Some(*sheet_index), vec![], None),
             UndoAction::ReviewCopy { history } => (Some(history.index), vec![], None),
             UndoAction::TableAppend { sheet_index, history, .. } => {
-                let r = history.table.after_table().unwrap().range;
+                let r = history.table.after_table().unwrap().full_range();
                 (Some(*sheet_index), vec![], Some((r.start_row, r.start_col, r.end_row, r.end_col)))
             }
             UndoAction::TableCommit { sheet_index, commit, .. } => {
-                let range=commit.after_table().or_else(||commit.before_table()).map(|t| (t.range.start_row,t.range.start_col,t.range.end_row,t.range.end_col));
+                let range=commit.after_table().or_else(||commit.before_table()).map(|t| {
+                    let mut range = t.full_range();
+                    if let Some(before) = commit.before_table() {
+                        range.end_row = range.end_row.max(before.full_range().end_row);
+                        range.end_col = range.end_col.max(before.full_range().end_col);
+                    }
+                    if commit.is_totals_change() { range.end_row = t.range.end_row + 1; }
+                    (range.start_row,range.start_col,range.end_row,range.end_col)
+                });
                 (Some(*sheet_index),vec![],range)
             }
             UndoAction::Comments { sheet_index, patches, .. } => {
@@ -1367,6 +1597,13 @@ impl History {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.save_point = 0;
+        self.entry_bytes.clear();
+        self.last_record_too_large = false;
+        self.base_invalidated = false;
+        // The base stays, so a later eviction can still rewind. Load paths
+        // clear and then capture: capture may notice that the baseline does
+        // not fit, and a clear after that capture would erase the notice.
+        self.pending_notice = None;
         self.next_id = 1;
     }
 
@@ -1446,6 +1683,7 @@ impl History {
     /// * `preview_build_ms` - Time spent building preview (milliseconds)
     pub fn truncate_and_append_rewind(
         &mut self,
+        live: &Workbook,
         truncate_at: usize,
         target_entry_id: u64,
         target_index: usize,
@@ -1490,6 +1728,7 @@ impl History {
             source: MutationSource::Human,  // Rewind is always user-initiated
         };
         self.undo_stack.push(entry);
+        self.enforce_byte_budget(live);
 
         // Update save point if it was beyond truncation
         // (Document is now "dirty" relative to last save)
@@ -1509,7 +1748,7 @@ impl History {
     /// - too many actions to replay
     /// - unsupported action in replay prefix
     pub fn build_workbook_before(
-        &self,
+        &mut self,
         i: usize,
         base: Option<&Workbook>,
         max_replay: usize,
@@ -1528,9 +1767,9 @@ impl History {
             return Err(PreviewBuildError::TooManyActions(i));
         }
 
-        // No snapshot has been captured to replay from.
-        let base = base.ok_or(PreviewBuildError::NoBaseSnapshot)?;
-
+        if self.base_invalidated {
+            return Err(Self::evicted_baseline_error());
+        }
         // REPLAY GATE: Scan [0..i) for unsupported actions BEFORE starting replay.
         // This ensures deterministic failure - same history always fails the same way.
         for entry in self.undo_stack.iter().take(i) {
@@ -1539,17 +1778,25 @@ impl History {
             }
         }
 
+        // Evicted edits were stored without calculation. Settle that prefix
+        // once, on the stored baseline, so the next scrub clones the result.
+        self.settle_rewind_base();
+        if self.base_invalidated {
+            return Err(Self::evicted_baseline_error());
+        }
+        // No snapshot has been captured to replay from.
+        let base = self.rewind_base.as_ref().map(|(w, _)| w).or(base).ok_or(PreviewBuildError::NoBaseSnapshot)?;
+
         let start = Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
 
-        // Start with a clone of base workbook
         let mut workbook = base.clone();
 
         // Initialize preview view state (one entry per sheet, identity order)
         let sheet_count = workbook.sheet_count();
-        let mut view_state = PreviewViewState {
+        let mut view_state = self.rewind_base.as_ref().map(|(_, v)| v.clone()).unwrap_or_else(|| PreviewViewState {
             per_sheet: vec![PreviewSheetView::default(); sheet_count],
-        };
+        });
 
         // Apply actions [0..i)
         for (idx, entry) in self.undo_stack.iter().take(i).enumerate() {
@@ -1558,13 +1805,15 @@ impl History {
                 return Err(PreviewBuildError::Timeout);
             }
             // Apply action with invariant checking - abort on violation
-            Self::apply_action_forward(&mut workbook, &mut view_state, &entry.action)?;
+            Self::apply_action_forward(&mut workbook, &mut view_state, &entry.action, true)?;
         }
 
         view_state.per_sheet.resize_with(workbook.sheet_count(), PreviewSheetView::default);
         for (index, entry) in self.undo_stack.iter().enumerate().skip(i) {
             let source = match &entry.action {
                 UndoAction::TableStructureChanged { history, .. } => Some((history.commit.sheet, &history.before, history.source_frozen)),
+                UndoAction::RowsInserted { row_layout: Some(layout), .. }
+                | UndoAction::RowsDeleted { row_layout: Some(layout), .. } => Some((layout.sheet, &layout.before, None)),
                 UndoAction::TableCommit { commit, header_layout: Some(layout), .. } => Some((commit.sheet_id(), &layout.before, Some(layout.frozen_before))),
                 _ => None,
             };
@@ -1667,9 +1916,15 @@ impl History {
         workbook: &mut Workbook,
         view_state: &mut crate::app::PreviewViewState,
         action: &UndoAction,
+        settle: bool,
     ) -> Result<(), PreviewBuildError> {
+        // Nested groups each hold a guard. Depth stays above zero until the
+        // outermost evicted action returns, including inside a cloned replay.
+        let _defer_recalc = (!settle).then(visigrid_engine::workbook::DeferRecalcGuard::enter);
+        crate::validation_ui::plan::validate_history(workbook, action, true)
+            .map_err(PreviewBuildError::InvariantViolation)?;
         if view_state.per_sheet.iter().any(|v| v.structure_layout.is_some())
-            && matches!(action, UndoAction::RowsInserted { .. } | UndoAction::RowsDeleted { .. }
+            && matches!(action, UndoAction::RowsInserted { row_layout: None, .. } | UndoAction::RowsDeleted { row_layout: None, .. }
                 | UndoAction::ColsInserted { .. } | UndoAction::ColsDeleted { .. }
                 | UndoAction::WorkbookSnapshot { .. })
         {
@@ -1677,34 +1932,41 @@ impl History {
                 "Cannot reconstruct layout across older structural history.".into()));
         }
         match action {
+            UndoAction::ValidationChanged { commit, .. } => {
+                commit.apply(workbook, true).map_err(PreviewBuildError::InvariantViolation)?;
+            }
             UndoAction::Comments { sheet_index, patches, .. } => {
+                crate::comments::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
                 let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Missing comment sheet".into()))?;
                 for patch in patches { sheet.set_comment(patch.row, patch.col, patch.after.clone()); }
             }
             UndoAction::CondFormatAdded { sheet_index, rule } => {
-                if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
-                    let mut r = rule.clone();
-                    r.reparse();
-                    sheet.cond_formats.insert_at(usize::MAX, r);
-                }
+                crate::cond_format_ui::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
+                crate::cond_format_ui::plan::apply(workbook, *sheet_index, std::slice::from_ref(rule), true);
             }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                if let Some(sheet) = workbook.sheet_mut(*sheet_index) {
-                    for r in rules {
-                        sheet.cond_formats.remove(r.id);
-                    }
-                }
+                crate::cond_format_ui::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
+                crate::cond_format_ui::plan::apply(workbook, *sheet_index, rules, false);
             }
             UndoAction::Values { sheet_index, changes } => {
-                let sheet = workbook.sheet_mut(*sheet_index)
-                    .ok_or_else(|| PreviewBuildError::InvariantViolation(
-                        format!("Values action references invalid sheet {}", sheet_index)
-                    ))?;
-                for change in changes {
-                    sheet.set_value(change.row, change.col, &change.new_value);
+                if workbook.sheet(*sheet_index).is_none() {
+                    return Err(PreviewBuildError::InvariantViolation(format!("Values action references invalid sheet {}", sheet_index)));
+                }
+                if settle {
+                    workbook.begin_batch();
+                    for change in changes { workbook.set_cell_value_tracked(*sheet_index, change.row, change.col, &change.new_value); }
+                    workbook.end_batch();
+                } else {
+                    let sheet = workbook.sheet_mut(*sheet_index).unwrap();
+                    for change in changes { sheet.set_value_deferred(change.row, change.col, &change.new_value); }
                 }
             }
             UndoAction::Format { sheet_index, patches, .. } => {
+                crate::formatting::plan::validate_history(workbook, action, true)
+                    .map_err(PreviewBuildError::InvariantViolation)?;
                 let sheet = workbook.sheet_mut(*sheet_index)
                     .ok_or_else(|| PreviewBuildError::InvariantViolation(
                         format!("Format action references invalid sheet {}", sheet_index)
@@ -1730,7 +1992,7 @@ impl History {
             }
             UndoAction::Group { actions, .. } => {
                 for sub_action in actions {
-                    Self::apply_action_forward(workbook, view_state, sub_action)?;
+                    Self::apply_action_forward(workbook, view_state, sub_action, settle)?;
                 }
             }
             UndoAction::PrintSetupChanged { sheet_id, after, .. } => {
@@ -1757,12 +2019,19 @@ impl History {
                 }
             }
             UndoAction::TableViewChanged { commit, .. } => {
-                workbook.rebuild_dep_graph();
-                workbook.recompute_full_ordered();
+                if settle {
+                    workbook.rebuild_dep_graph();
+                    workbook.recompute_full_ordered();
+                }
                 workbook.apply_table_view_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::TableBatchChanged { commit, .. } => {
+                let ids: Vec<_> = workbook.sheets().iter().map(|s| s.id).collect();
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
+                let mut previous: std::collections::HashMap<_, _> = ids.into_iter()
+                    .zip(std::mem::take(&mut view_state.per_sheet)).collect();
+                view_state.per_sheet = workbook.sheets().iter()
+                    .map(|s| previous.remove(&s.id).unwrap_or_default()).collect();
             }
             UndoAction::TableStructureChanged {
                 sheet_index,
@@ -1779,13 +2048,17 @@ impl History {
                     .replay(workbook, false)
                     .map_err(PreviewBuildError::InvariantViolation)?;
                 if let Some(view) = view_state.per_sheet.get_mut(*sheet_index) {
-                    view.row_order = None;
-                    view.sort = None;
+                    // A visibility-only commit keeps worksheet sort history.
+                    // Structural row/column edits still invalidate that mapping.
+                    if !history.commit.steps.is_empty() {
+                        view.row_order = None;
+                        view.sort = None;
+                    }
                     view.structure_layout = Some(history.after.clone());
                 }
             }
             UndoAction::TableCellsChanged { commit, .. } => {
-                workbook.rebuild_dep_graph();
+                if settle { workbook.rebuild_dep_graph(); }
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::ReviewCopy { history } => {
@@ -1812,11 +2085,19 @@ impl History {
                     if let (Some(layout), Some(view)) = (header_layout, view_state.per_sheet.get_mut(*sheet_index)) {
                         view.structure_layout = Some(layout.after.clone());
                     }
+                } else if commit.is_calculated_change() {
+                    let candidate = crate::table_calculated::prepare_replay(workbook, commit, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
+                } else if commit.is_totals_change() {
+                    let candidate = crate::table_totals::prepare_replay(workbook, commit, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    workbook.restore_snapshot_monotonic(&candidate);
                 } else if crate::table_resize::is_resize(commit) {
                     let candidate = crate::table_resize::prepare_resize_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
                     workbook.restore_snapshot_monotonic(&candidate);
-                } else if crate::table_header_paste::is_header_rename(commit) {
+                } else if commit.is_name_change() {
                     let candidate = crate::table_header_paste::prepare_header_replay(workbook, commit, false)
                         .map_err(PreviewBuildError::InvariantViolation)?;
                     workbook.restore_snapshot_monotonic(&candidate);
@@ -1840,12 +2121,21 @@ impl History {
                     .apply_pivot_state(&commit.after)
                     .map_err(|e| PreviewBuildError::InvariantViolation(e.to_string()))?;
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, .. } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, row_layout, .. } => {
                 if let Some(history) = table_rows {
                     workbook.apply_table_row_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else if row_layout.is_some() {
+                    workbook.structural_edit(*sheet_index, visigrid_engine::structural::Axis::Row, *at_row, *count, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
                 } else {
                     let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
                     sheet.insert_rows(*at_row, *count);
+                }
+                if let Some(history) = row_layout {
+                    let layout = history.apply(workbook, *sheet_index, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    view_state.per_sheet.resize_with(workbook.sheet_count(), crate::app::PreviewSheetView::default);
+                    view_state.per_sheet[*sheet_index].structure_layout = Some(layout.clone());
                 }
                 // STRUCTURAL CHANGE: Invalidate sort for this sheet (Option B)
                 // Row structure changed, previous sort order is no longer valid
@@ -1854,12 +2144,21 @@ impl History {
                     sheet_view.sort = None;
                 }
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, .. } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, .. } => {
                 if let Some(history) = table_rows {
                     workbook.apply_table_row_history(history, false).map_err(PreviewBuildError::InvariantViolation)?;
+                } else if row_layout.is_some() {
+                    workbook.structural_edit(*sheet_index, visigrid_engine::structural::Axis::Row, *at_row, *count, true)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
                 } else {
                     let sheet = workbook.sheet_mut(*sheet_index).ok_or_else(|| PreviewBuildError::InvariantViolation("Sheet no longer exists".into()))?;
                     sheet.delete_rows(*at_row, *count);
+                }
+                if let Some(history) = row_layout {
+                    let layout = history.apply(workbook, *sheet_index, false)
+                        .map_err(PreviewBuildError::InvariantViolation)?;
+                    view_state.per_sheet.resize_with(workbook.sheet_count(), crate::app::PreviewSheetView::default);
+                    view_state.per_sheet[*sheet_index].structure_layout = Some(layout.clone());
                 }
                 // STRUCTURAL CHANGE: Invalidate sort for this sheet (Option B)
                 if let Some(sheet_view) = view_state.per_sheet.get_mut(*sheet_index) {
@@ -1923,6 +2222,12 @@ impl History {
                 }
             }
             UndoAction::RowVisibilityChanged { sheet_id, rows, hidden } => {
+                let sheet = workbook.sheet_by_id_mut(*sheet_id).ok_or_else(|| PreviewBuildError::InvariantViolation("Missing visibility sheet".into()))?;
+                let mut canonical = sheet.manual_hidden_rows();
+                for row in rows {
+                    if *hidden { canonical.insert(*row); } else { canonical.remove(row); }
+                }
+                sheet.set_manual_hidden_rows(canonical).map_err(PreviewBuildError::InvariantViolation)?;
                 if let Some(layout) = workbook.sheet_index_by_id(*sheet_id)
                     .and_then(|i| view_state.per_sheet.get_mut(i))
                     .and_then(|v| v.structure_layout.as_mut()) {
@@ -2024,6 +2329,7 @@ impl History {
 /// Classification of undo action types for replay support checking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoActionKind {
+    ValidationChanged,
     PrintSetupChanged,
     Comments,
     CondFormatAdded,
@@ -2071,6 +2377,7 @@ impl UndoActionKind {
     pub fn is_replay_supported(&self) -> bool {
         match self {
             // Fully supported
+            UndoActionKind::ValidationChanged => true,
             UndoActionKind::Values => true,
             UndoActionKind::CondFormatAdded => true,
             UndoActionKind::CondFormatsCleared => true,
@@ -2125,6 +2432,7 @@ impl UndoActionKind {
     /// Human-readable name for error messages
     pub fn display_name(&self) -> &'static str {
         match self {
+            UndoActionKind::ValidationChanged => "Validation",
             UndoActionKind::Values => "Edit",
             UndoActionKind::CondFormatAdded => "Add conditional format",
             UndoActionKind::CondFormatsCleared => "Clear conditional formats",
@@ -2173,6 +2481,7 @@ impl UndoActionKind {
         match self {
             UndoActionKind::CondFormatAdded => 0x18,
             UndoActionKind::CondFormatsCleared => 0x19,
+            UndoActionKind::ValidationChanged => 0x29,
             UndoActionKind::Values => 0x01,
             UndoActionKind::Format => 0x02,
             UndoActionKind::NamedRangeCreated => 0x03,
@@ -2219,6 +2528,7 @@ impl UndoAction {
         match self {
             UndoAction::CondFormatAdded { .. } => UndoActionKind::CondFormatAdded,
             UndoAction::CondFormatsCleared { .. } => UndoActionKind::CondFormatsCleared,
+            UndoAction::ValidationChanged { .. } => UndoActionKind::ValidationChanged,
             UndoAction::Values { .. } => UndoActionKind::Values,
             UndoAction::Format { .. } => UndoActionKind::Format,
             UndoAction::NamedRangeCreated { .. } => UndoActionKind::NamedRangeCreated,
@@ -2322,6 +2632,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_row_rewind_preserves_hidden_rows_and_layout_before_and_after_edits() {
+        use crate::table_structure::{RowLayoutHistory, StructureLayout};
+        use visigrid_engine::{structural::Axis, workbook::StructureStep};
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_manual_hidden_rows([2].into()).unwrap();
+        let base = wb.clone();
+        let mut layout = StructureLayout {
+            hidden_rows: [2].into(), heights: [(2, 40.0)].into(),
+            widths: [(4, 120.0)].into(), hidden_cols: [5].into(),
+        };
+        let mut layouts = vec![layout.clone()];
+        let mut history = History::new();
+        for (at, delete) in [(1, false), (3, true), (1, false)] {
+            let rows = RowLayoutHistory::capture(layout, wb.active_sheet(), StructureStep {
+                axis: Axis::Row, at, count: 1, delete,
+            }).unwrap();
+            let print_setup_before = wb.active_sheet().print_setup.clone();
+            wb.structural_edit(0, Axis::Row, at, 1, delete).unwrap();
+            layout = rows.after.clone();
+            layouts.push(layout.clone());
+            let action = if delete {
+                UndoAction::RowsDeleted {
+                    sheet_index: 0, table_rows: None, row_layout: Some(Box::new(rows)),
+                    print_setup_before, at_row: at, count: 1, formula_rewrites: vec![],
+                    deleted_cells: vec![], deleted_comments: vec![], deleted_row_heights: vec![(3, 40.0)],
+                }
+            } else {
+                UndoAction::RowsInserted {
+                    sheet_index: 0, table_rows: None, row_layout: Some(Box::new(rows)),
+                    print_setup_before, at_row: at, count: 1, formula_rewrites: vec![],
+                }
+            };
+            history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), action);
+        }
+        for (index, expected) in layouts.iter().enumerate() {
+            let preview = history.build_workbook_before(index, Some(&base), 100, 10_000).unwrap();
+            assert_eq!(preview.workbook.active_sheet().manual_hidden_rows(), expected.hidden_rows);
+            assert_eq!(preview.view_state.per_sheet[0].structure_layout.as_ref(), Some(expected));
+        }
+    }
+
+    #[test]
     fn table_history_replays_schema_formulas_and_style_without_body_snapshots() {
         use visigrid_engine::table::TableRange;
         let mut workbook = Workbook::new();
@@ -2358,7 +2710,7 @@ mod tests {
                 commit: Box::new(commit.clone()),
                 description: "Table change".into(),
             };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert!(UndoActionKind::TableCommit.is_replay_supported());
         }
         assert_eq!(
@@ -2395,7 +2747,7 @@ mod tests {
         let action = UndoAction::TableCommit { header_layout: None,
             sheet_index: 0, commit: Box::new(append), description: "Append Table rows".into(),
         };
-        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
         for delete in [false, true] {
             let count = if delete { 3 } else { 1 };
             let history = workbook.prepare_table_row_history(0, 1, count, delete).unwrap().unwrap();
@@ -2403,17 +2755,17 @@ mod tests {
             workbook.apply_table_row_history(&history, false).unwrap();
             let action = if delete {
                 UndoAction::RowsDeleted {
-                    sheet_index: 0, at_row: 1, count, table_rows: Some(history),
+                    sheet_index: 0, at_row: 1, count, table_rows: Some(history), row_layout: None,
                     print_setup_before, formula_rewrites: vec![], deleted_cells: vec![],
                     deleted_comments: vec![], deleted_row_heights: vec![],
                 }
             } else {
                 UndoAction::RowsInserted {
-                    sheet_index: 0, at_row: 1, count, table_rows: Some(history),
+                    sheet_index: 0, at_row: 1, count, table_rows: Some(history), row_layout: None,
                     print_setup_before, formula_rewrites: vec![],
                 }
             };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
             for row in 0..5 {
                 assert_eq!(replay.active_sheet().get_raw(row, 0), workbook.active_sheet().get_raw(row, 0));
@@ -2437,14 +2789,14 @@ mod tests {
         }, "Sales").unwrap();
         let id = commit.table_id();
         let action = UndoAction::TableCommit { header_layout: None, sheet_index: 0, commit: Box::new(commit.clone()), description: "Create Table: Sales".into() };
-        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
         assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
         assert_eq!(replay.active_sheet().get_display(1,1), "84");
         assert_eq!(replay.active_sheet().get_raw(2,0), "17");
         replay.apply_table_commit(&commit, true).unwrap();
         assert!(replay.table(id).is_none());
         assert_eq!(replay.active_sheet().get_display(0,1), "84");
-        History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
         assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
     }
 
@@ -2478,13 +2830,42 @@ mod tests {
                 UndoAction::ColsInserted { sheet_index: 0, at_col: at, count: 1, table_columns,
                     print_setup_before, formula_rewrites }
             };
-            History::apply_action_forward(&mut replay, &mut view, &action).unwrap();
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
             assert_eq!(replay.table(id).unwrap().1, workbook.table(id).unwrap().1);
             for r in 0..4 { for c in 0..5 {
                 assert_eq!(replay.sheet(0).unwrap().get_raw(r,c), workbook.sheet(0).unwrap().get_raw(r,c));
                 assert_eq!(replay.sheet(0).unwrap().get_display(r,c), workbook.sheet(0).unwrap().get_display(r,c));
             }}
             assert_eq!(replay.sheet(summary).unwrap().get_raw(0,0), workbook.sheet(summary).unwrap().get_raw(0,0));
+        }
+    }
+
+    #[test]
+    fn native_totals_rewind_with_active_filters_keeps_hidden_footer_and_criteria() {
+        use visigrid_engine::{table::TableRange, table_view::{TableViewSpec, TableFilter}, filter::{ColumnFilter, NormalizedFilterKey}};
+        let mut wb = Workbook::new();
+        for (row, value) in ["Amount", "10", "20"].iter().enumerate() { wb.set_cell_value_tracked(0, row, 0, value); }
+        let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row:0, start_col:0, end_row:2, end_col:0 }, "Sales").unwrap().table_id();
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter { column: wb.table(id).unwrap().1.columns[0].id,
+            criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Number(10.0.into())].into()), text_filter: None } });
+        wb.set_table_view_spec(wb.active_sheet_id(), Some(spec.clone())).unwrap();
+        let (mut wb, _) = wb.prepare_table_row_visibility(wb.active_sheet_id(), [2, 3].into()).unwrap();
+        let mut replay = wb.clone();
+        let show = wb.set_table_totals_visible(id, true, [2, 3].into()).unwrap();
+        let edit = wb.set_table_total(id, 0, crate::table_totals::total_setting("countNums", "").unwrap()).unwrap();
+        let hide = wb.set_table_totals_visible(id, false, [2, 3].into()).unwrap();
+        let mut view = crate::app::PreviewViewState::default();
+        for (commit, expected) in [(show, "10"), (edit, "1"), (hide, "")] {
+            let action = UndoAction::TableCommit { sheet_index: 0, commit: Box::new(commit.clone()), header_layout: None, description: "Totals".into() };
+            History::apply_action_forward(&mut replay, &mut view, &action, true).unwrap();
+            assert_eq!(replay.sheet(0).unwrap().get_display(3, 0), expected);
+            assert_eq!(replay.sheet(0).unwrap().table_view_spec(), Some(&spec));
+            assert_eq!(replay.sheet(0).unwrap().manual_hidden_rows(), [2, 3].into());
+            let before = crate::table_totals::prepare_replay(&replay, &commit, true).unwrap();
+            let after = crate::table_totals::prepare_replay(&before, &commit, false).unwrap();
+            assert_eq!(after.sheet(0).unwrap().get_display(3, 0), expected);
+            assert_eq!(after.sheet(0).unwrap().manual_hidden_rows(), [2, 3].into());
         }
     }
 
@@ -2496,12 +2877,12 @@ mod tests {
         let mut replay = wb.clone();
         let mut view = crate::app::PreviewViewState::default();
         let rule = wb.set_calculated_column(id,1,1,"=A2*2",true).unwrap();
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(rule),description:"Formula rule".into()}, true).unwrap();
         let before = wb.active_sheet().get_raw(2,1);
         wb.clear_cell_tracked(0,2,1);
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::Values {sheet_index:0,changes:vec![CellChange {row:2,col:1,old_value:before,new_value:String::new()}]}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::Values {sheet_index:0,changes:vec![CellChange {row:2,col:1,old_value:before,new_value:String::new()}]}, true).unwrap();
         let update = wb.set_calculated_column(id,1,1,"=A2*3",false).unwrap();
-        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(update),description:"Update rule".into()}).unwrap();
+        History::apply_action_forward(&mut replay,&mut view,&UndoAction::TableCommit { header_layout: None,sheet_index:0,commit:Box::new(update),description:"Update rule".into()}, true).unwrap();
         assert!(replay.active_sheet().is_calculated_exception(2,1));
         assert_eq!(replay.active_sheet().get_raw(2,1),"");
         assert_eq!(replay.active_sheet().get_raw(3,1),"=A4*3");
@@ -2537,7 +2918,8 @@ mod tests {
         assert!(History::apply_action_forward(
             &mut workbook,
             &mut crate::app::PreviewViewState::default(),
-            &action
+            &action,
+            true
         )
         .is_err());
         assert!(workbook.table_by_name("Changed").is_some());
@@ -2564,19 +2946,19 @@ mod tests {
         let sheet = workbook.take_sheet(index).unwrap();
         assert!(workbook.restore_sheet(0, sheet));
         let mut view = crate::app::PreviewViewState::default();
-        History::apply_action_forward(&mut workbook, &mut view, &action).unwrap();
+        History::apply_action_forward(&mut workbook, &mut view, &action, true).unwrap();
         assert_eq!(workbook.sheet(0).unwrap().print_setup, after);
         assert!(workbook.sheet(1).unwrap().print_setup.is_default());
         assert_eq!(workbook.sheet(0).unwrap().get_raw(0, 0), "Title");
         workbook.take_sheet(0).unwrap();
-        assert!(History::apply_action_forward(&mut workbook, &mut view, &action).is_err());
+        assert!(History::apply_action_forward(&mut workbook, &mut view, &action, true).is_err());
     }
 
     /// Large workbooks keep no load-time copy (#18); preview must say so
     /// rather than replay from something that isn't there.
     #[test]
     fn preview_without_a_base_snapshot_is_refused() {
-        let history = History::new();
+        let mut history = History::new();
         let result = history.build_workbook_before(0, None, 100, 1_000);
         assert!(matches!(result, Err(PreviewBuildError::NoBaseSnapshot)));
 
@@ -2626,7 +3008,7 @@ mod tests {
             old_value: "a".to_string(),
             new_value: "b".to_string(),
         }];
-        let patches = vec![CellFormatPatch {
+        let patches = vec![CellFormatPatch { remove_cell_on_undo: false,
             row: 0,
             col: 0,
             before: CellFormat::default(),
@@ -2634,12 +3016,12 @@ mod tests {
         }];
 
         // History 1: Values then Format
-        history1.record_batch(0, changes.clone());
-        history1.record_format(0, patches.clone(), FormatActionKind::Bold, "Bold".into());
+        history1.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes.clone());
+        history1.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches.clone(), FormatActionKind::Bold, "Bold".into());
 
         // History 2: Format then Values
-        history2.record_format(0, patches, FormatActionKind::Bold, "Bold".into());
-        history2.record_batch(0, changes);
+        history2.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::Bold, "Bold".into());
+        history2.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes);
 
         // Fingerprints should be different because action kind order differs:
         // history1: (id=1, Values), (id=2, Format)
@@ -2656,7 +3038,7 @@ mod tests {
     fn fingerprint_is_deterministic() {
         let mut history = History::new();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "x".to_string(),
             new_value: "y".to_string(),
@@ -2675,7 +3057,7 @@ mod tests {
 
         let fp_empty = history.fingerprint();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "test".to_string(),
@@ -2694,7 +3076,7 @@ mod tests {
 
         // Add some history entries
         for i in 0..5 {
-            history.record_batch(0, vec![CellChange {
+            history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
                 row: i, col: 0,
                 old_value: "".to_string(),
                 new_value: format!("value{}", i),
@@ -2706,6 +3088,7 @@ mod tests {
         // Truncate at index 2 (keep entries 0, 1; discard 2, 3, 4)
         let target_id = history.entry_at(2).unwrap().id;
         history.truncate_and_append_rewind(
+            &visigrid_engine::workbook::Workbook::new(),
             2,
             target_id,
             2,
@@ -2745,7 +3128,7 @@ mod tests {
     fn fingerprint_mismatch_detected() {
         let mut history = History::new();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "initial".to_string(),
@@ -2755,7 +3138,7 @@ mod tests {
         let fp_before = history.fingerprint();
 
         // Simulate concurrent change
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 1, col: 0,
             old_value: "".to_string(),
             new_value: "concurrent".to_string(),
@@ -2797,6 +3180,7 @@ mod tests {
             UndoActionKind::ColsDeleted,
             UndoActionKind::SortApplied,
             UndoActionKind::SortCleared,
+            UndoActionKind::ValidationChanged,
             UndoActionKind::ValidationSet,
             UndoActionKind::ValidationCleared,
             UndoActionKind::ValidationExcluded,
@@ -2825,7 +3209,7 @@ mod comment_tests {
         wb.active_sheet_mut().set_text(0, 0, "00123");
         let before = CellComment { text: "Original".into(), author: "Alice".into() };
         let after = CellComment { text: "Updated\n日本語".into(), author: "Alice".into() };
-        let patches = vec![CommentPatch { row: 0, col: 0, before: Some(before.clone()), after: Some(after.clone()) }];
+        let patches = vec![CommentPatch { remove_cell_on_undo: false, row: 0, col: 0, before: Some(before.clone()), after: Some(after.clone()) }];
         apply_comment_patches(&mut wb, 0, &patches, true);
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
         let rev = wb.revision();
@@ -2834,13 +3218,383 @@ mod comment_tests {
         assert!(wb.revision() > rev);
         let action = UndoAction::Comments { sheet_index: 0, patches, description: "Edit comment".into() };
         assert!(action.is_replay_supported());
-        History::apply_action_forward(&mut wb, &mut Default::default(), &action).unwrap();
+        History::apply_action_forward(&mut wb, &mut Default::default(), &action, true).unwrap();
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
         assert_eq!(wb.active_sheet().get_raw(0,0), "00123");
-        let delete = vec![CommentPatch {row:0,col:0,before:Some(after.clone()),after:None}];
+        let delete = vec![CommentPatch {remove_cell_on_undo: false,row:0,col:0,before:Some(after.clone()),after:None}];
         apply_comment_patches(&mut wb,0,&delete,true);
         assert!(wb.active_sheet().comment(0,0).is_none());
         apply_comment_patches(&mut wb,0,&delete,false);
         assert_eq!(wb.active_sheet().comment(0,0), Some(&after));
+    }
+}
+
+#[cfg(test)]
+mod byte_budget_tests {
+    use super::*;
+    static REWIND_SPIKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn retagging_a_source_reaccounts_its_retained_payload() {
+        let mut history = History::new();
+        history.max_bytes = 32_000;
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "a".into());
+        history.retag_last_source(&visigrid_engine::workbook::Workbook::new(), MutationSource::Agent { client: "x".repeat(40_000) });
+        assert!(history.last_record_too_large());
+        assert!(!history.can_undo());
+        assert!(history.is_dirty());
+    }
+
+    #[test]
+    fn oldest_entries_are_evicted_by_bytes_and_redo_transfers_keep_the_budget() {
+        let mut history = History::new();
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "a".repeat(4_000));
+        let first = history.undo_stack.last().map(|e| e.id);
+        let one = history.entry_bytes.values().sum::<usize>();
+        assert!(one > 4_000, "history bytes should count the stored text, got {one}");
+        // Two measured entries do not fit; the oldest one is dropped.
+        history.max_bytes = one + one / 2;
+        history.mark_saved();
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 1, 0, String::new(), "b".repeat(4_000));
+        assert!(history.undo_stack.iter().all(|e| Some(e.id) != first));
+        assert!(history.is_dirty());
+        assert!(matches!(history.build_workbook_before(0, Some(&Workbook::new()), 100, 1_000), Err(PreviewBuildError::InvariantViolation(_))));
+        let bytes = history.entry_bytes.values().sum::<usize>();
+        assert!(bytes <= history.max_bytes);
+        history.undo().unwrap();
+        assert_eq!(history.entry_bytes.values().sum::<usize>(), bytes);
+        history.redo().unwrap();
+        assert_eq!(history.entry_bytes.values().sum::<usize>(), bytes);
+        assert!(history.is_dirty());
+    }
+
+    #[test]
+    fn oversized_mutation_clears_both_stacks_and_cannot_jump_back_over_it() {
+        let mut history = History::new();
+        history.max_bytes = 32_000;
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "a".into());
+        history.mark_saved();
+        history.undo().unwrap();
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 1, 0, String::new(), "b".repeat(40_000));
+        assert!(history.last_record_too_large());
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+        assert!(history.is_dirty());
+        assert!(history.entry_bytes.is_empty());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 2, 0, String::new(), "c".into());
+        assert!(!history.last_record_too_large());
+        assert!(history.can_undo());
+    }
+
+    #[test]
+    fn count_eviction_keeps_rewind_to_the_oldest_retained_entry() {
+        assert_eq!(History::new().max_entries, 100);
+        let base = Workbook::new();
+        let mut history = History::new();
+        history.max_entries = 3;
+        history.set_rewind_base(&base);
+        for i in 0..8 {
+            history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, i, 0, String::new(), format!("v{i}"));
+        }
+        assert!(!history.base_invalidated);
+        assert!(history.rewind_base.is_some());
+        assert_eq!(history.undo_stack.len(), 3);
+        assert!(!history.last_record_too_large());
+        let oldest = history.build_workbook_before(0, None, 20, 10_000).expect("rewind after count eviction");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(4, 0), "v4");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(5, 0), "");
+        let current = history.build_workbook_before(history.undo_stack.len(), None, 20, 10_000).unwrap();
+        assert_eq!(current.workbook.active_sheet().get_raw(4, 0), "v4");
+        assert_eq!(current.workbook.active_sheet().get_raw(7, 0), "v7");
+    }
+
+    #[test]
+    fn clear_keeps_the_captured_base_so_later_eviction_still_rewinds() {
+        let base = Workbook::new();
+        let mut history = History::new();
+        history.set_rewind_base(&base);
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "stale".into());
+        history.clear();
+        assert!(history.rewind_base.is_some());
+        assert!(!history.base_invalidated);
+        assert!(!history.can_undo());
+        history.max_entries = 2;
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "b".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 1, 0, String::new(), "c".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 2, 0, String::new(), "d".into());
+        let oldest = history.build_workbook_before(0, None, 20, 10_000).expect("rewind after clear and eviction");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(0, 0), "b");
+        assert_eq!(oldest.workbook.active_sheet().get_raw(1, 0), "");
+    }
+
+    #[test]
+    fn eviction_stores_values_without_recalculating_until_rewind_opens() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use visigrid_engine::custom_fns;
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn spike(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+            (name == "REWINDSPIKE").then(|| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                EvalResult::Number(1.0)
+            })
+        }
+        struct Reset(Option<custom_fns::CustomFnHandler>);
+        impl Drop for Reset {
+            fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
+        }
+        let _lock = REWIND_SPIKE.lock().unwrap();
+        let _reset = Reset(custom_fns::default_custom_fn_handler());
+        custom_fns::set_default_custom_fn_handler(Some(spike));
+        let mut base = Workbook::new();
+        base.set_cell_value_tracked(0, 0, 1, "=REWINDSPIKE()+A1");
+        CALLS.store(0, Ordering::SeqCst);
+        let mut history = History::new();
+        history.max_entries = 1;
+        history.set_rewind_base(&base);
+        // A formula, not a literal: set_value would evaluate REWINDSPIKE here.
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "=REWINDSPIKE()".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 2, 0, String::new(), "z".into());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "eviction must not calculate");
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
+        let calls_after_open = CALLS.load(Ordering::SeqCst);
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "=REWINDSPIKE()");
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 0), "1");
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 1), "2");
+        let again = history.build_workbook_before(0, None, 20, 10_000).expect("second preview");
+        assert_eq!(CALLS.load(Ordering::SeqCst), calls_after_open, "a second preview must not recalculate the settled baseline");
+        assert_eq!(again.workbook.active_sheet().get_display(0, 1), "2");
+        let later = history.build_workbook_before(1, None, 20, 10_000).expect("scrub");
+        assert_eq!(CALLS.load(Ordering::SeqCst), calls_after_open, "scrubbing past the settled prefix must not recalculate it");
+        assert_eq!(later.workbook.active_sheet().get_raw(2, 0), "z");
+        assert_eq!(later.workbook.active_sheet().get_display(0, 1), "2");
+    }
+
+    #[test]
+    fn evicted_table_edits_wait_for_rewind_and_then_match_the_live_sheet() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use visigrid_engine::custom_fns;
+        use visigrid_engine::filter::{ColumnFilter, NormalizedFilterKey};
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        use visigrid_engine::table::TableRange;
+        use visigrid_engine::table_view::{TableFilter, TableViewSpec};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn spike(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+            (name == "TABLESPIKE").then(|| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                EvalResult::Number(1.0)
+            })
+        }
+        struct Reset(Option<custom_fns::CustomFnHandler>);
+        impl Drop for Reset {
+            fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
+        }
+        let _lock = REWIND_SPIKE.lock().unwrap();
+        let _reset = Reset(custom_fns::default_custom_fn_handler());
+        custom_fns::set_default_custom_fn_handler(Some(spike));
+
+        let mut base = Workbook::new();
+        base.set_cell_value_tracked(0, 0, 0, "Amount");
+        base.set_cell_value_tracked(0, 1, 0, "10");
+        base.set_cell_value_tracked(0, 2, 0, "20");
+        let id = base.create_table(base.active_sheet_id(), TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap().table_id();
+        base.set_cell_value_tracked(0, 0, 2, "=TABLESPIKE()+SUBTOTAL(109,Sales[Amount])");
+        CALLS.store(0, Ordering::SeqCst);
+
+        let mut live = base.clone();
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter {
+            column: live.table(id).unwrap().1.columns[0].id,
+            criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Number(10.0.into())].into()), text_filter: None },
+        });
+        let view = live.set_table_view_spec(live.active_sheet_id(), Some(spec)).unwrap();
+        let style = live.set_table_style(id, visigrid_engine::table::TableStyle { banded_rows: false, ..Default::default() }).unwrap();
+        let mut edited = live.clone();
+        edited.set_cell_value_tracked(0, 1, 0, "99");
+        let cells = crate::table_cell_history::TableCellsCommit::capture(live.active_sheet(), edited.active_sheet(), [(1, 0)]);
+        edited.recompute_full_ordered();
+        CALLS.store(0, Ordering::SeqCst);
+
+        let mut history = History::new();
+        history.max_entries = 1;
+        history.set_rewind_base(&base);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableViewChanged {
+            sheet_index: 0, commit: Box::new(view), description: "Filter".into(),
+        }, None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
+            header_layout: None, sheet_index: 0, commit: Box::new(style), description: "Banding".into(),
+        }, None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCellsChanged {
+            sheet_index: 0, commit: Box::new(cells), description: "Cell".into(),
+        }, None);
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 4, 0, String::new(), "kept".into());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "evicting Table edits must not calculate");
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
+        assert_eq!(opened.workbook.active_sheet().get_raw(1, 0), edited.active_sheet().get_raw(1, 0));
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 2), edited.active_sheet().get_display(0, 2));
+        assert_eq!(opened.workbook.active_sheet().table_view_spec(), edited.active_sheet().table_view_spec());
+        assert_eq!(opened.workbook.table(id).unwrap().1.style, edited.table(id).unwrap().1.style);
+        assert_eq!(opened.workbook.active_sheet().get_raw(4, 0), "");
+    }
+
+    #[test]
+    fn evicted_row_insert_waits_for_rewind_and_then_matches_the_live_sheet() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use visigrid_engine::custom_fns;
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        use visigrid_engine::table::TableRange;
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn spike(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+            (name == "TABLESPIKE").then(|| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                EvalResult::Number(1.0)
+            })
+        }
+        struct Reset(Option<custom_fns::CustomFnHandler>);
+        impl Drop for Reset {
+            fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
+        }
+        let _lock = REWIND_SPIKE.lock().unwrap();
+        let _reset = Reset(custom_fns::default_custom_fn_handler());
+        custom_fns::set_default_custom_fn_handler(Some(spike));
+
+        let mut base = Workbook::new();
+        base.set_cell_value_tracked(0, 0, 0, "Amount");
+        base.set_cell_value_tracked(0, 1, 0, "10");
+        base.set_cell_value_tracked(0, 2, 0, "20");
+        let id = base.create_table(base.active_sheet_id(), TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap().table_id();
+        // No cell references, so inserting a row does not rewrite this formula.
+        // Only a full recalculation evaluates it.
+        base.set_cell_value_tracked(0, 6, 0, "=TABLESPIKE()");
+        let rows = base.prepare_table_row_history(0, 2, 1, false).unwrap().expect("table row history");
+        let mut live = base.clone();
+        live.apply_table_row_history(&rows, false).unwrap();
+        CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(live.active_sheet().get_display(7, 0), "1");
+        assert!(live.table(id).unwrap().1.range.end_row > 2);
+
+        let mut history = History::new();
+        history.max_entries = 1;
+        history.set_rewind_base(&base);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::RowsInserted {
+            sheet_index: 0,
+            table_rows: Some(rows),
+            row_layout: None,
+            print_setup_before: visigrid_engine::print_setup::PrintSetup::default(),
+            at_row: 2,
+            count: 1,
+            formula_rewrites: vec![],
+        }, None);
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 8, 0, String::new(), "kept".into());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "evicting a row insert must not calculate");
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored insert");
+        assert_eq!(opened.workbook.table(id).unwrap().1.range, live.table(id).unwrap().1.range);
+        assert_eq!(opened.workbook.active_sheet().get_display(7, 0), live.active_sheet().get_display(7, 0));
+        assert_eq!(opened.workbook.active_sheet().get_raw(6, 0), "");
+        assert_eq!(opened.workbook.active_sheet().get_raw(8, 0), "");
+    }
+
+    #[test]
+    fn failed_eviction_replay_reports_that_rewind_is_unavailable() {
+        let mut history = History::new();
+        history.set_rewind_base(&Workbook::new());
+        history.max_entries = 1;
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 5, 0, 0, String::new(), "a".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "b".into());
+        assert!(history.base_invalidated);
+        assert!(history.rewind_base.is_none());
+        assert!(history.can_undo());
+        let notice = history.take_notice().unwrap_or_default();
+        assert!(notice.contains("Rewind is unavailable"), "{notice}");
+    }
+
+    #[test]
+    fn rewind_base_larger_than_the_budget_is_dropped_with_a_notice() {
+        let mut workbook = Workbook::new();
+        for row in 0..1024 {
+            workbook.set_cell_value_tracked(0, row, 0, "xxxxxxxxxx");
+        }
+        let mut history = History::new();
+        history.max_bytes = 1_000_000;
+        history.set_rewind_base(&workbook);
+        assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared column, got {}", history.rewind_base_bytes);
+        workbook.set_cell_value_tracked(0, 0, 0, "y");
+        history.record_change(&workbook, 0, 0, 0, "xxxxxxxxxx".into(), "y".into());
+        assert!(history.rewind_base_bytes > 2_000, "a one-character edit copies the whole chunk, got {}", history.rewind_base_bytes);
+        history.max_bytes = history.rewind_base_bytes - 1;
+        history.record_change(&workbook, 0, 1, 0, String::new(), "z".into());
+        assert!(history.base_invalidated);
+        assert!(history.rewind_base.is_none());
+        let notice = history.take_notice().unwrap_or_default();
+        assert!(notice.contains("Rewind is unavailable"), "{notice}");
+    }
+
+    #[test]
+    fn shared_baseline_keeps_rewind_for_a_workbook_larger_than_the_budget() {
+        let mut workbook = Workbook::new();
+        for row in 0..200 {
+            workbook.set_cell_value_tracked(0, row, 0, "xxxxxxxxxx");
+        }
+        let bytes = visigrid_engine::history_size::workbook_bytes(&workbook);
+        assert!(bytes > 1_000, "the fixture must be larger than the budget, got {bytes}");
+        let mut history = History::new();
+        history.max_bytes = 1_000;
+        history.max_entries = 1;
+        history.set_rewind_base(&workbook);
+        assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared cells, got {}", history.rewind_base_bytes);
+        assert!(history.rewind_base_bytes < bytes / 2);
+        history.record_change(&workbook, 0, 0, 1, String::new(), "a".into());
+        history.record_change(&workbook, 0, 0, 2, String::new(), "b".into());
+        assert!(history.rewind_base.is_some(), "a one-character divergence stays inside the budget");
+        assert!(!history.base_invalidated);
+        assert!(history.rewind_base_bytes < history.max_bytes);
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 1), "a");
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "xxxxxxxxxx");
+    }
+
+    #[test]
+    fn too_large_edit_also_says_rewind_is_unavailable() {
+        let live = Workbook::new();
+        let mut history = History::new();
+        history.set_rewind_base(&live);
+        history.max_bytes = 32_000;
+        history.record_change(&live, 0, 0, 0, String::new(), "a".into());
+        history.record_change(&live, 0, 1, 0, String::new(), "b".repeat(40_000));
+        let notice = history.take_notice().unwrap_or_default();
+        assert!(notice.contains("too large to undo"), "{notice}");
+        assert!(notice.contains("Rewind is unavailable"), "{notice}");
+        assert!(history.rewind_base.is_none());
+    }
+
+    #[test]
+    fn table_swap_keeps_the_copied_chunks_and_a_later_edit_on_the_charge() {
+        let mut workbook = Workbook::new();
+        for row in 0..2048 {
+            workbook.set_cell_value_tracked(0, row, 0, "xxxxxxxxxx");
+        }
+        let second = workbook.add_sheet();
+        for row in 0..1024 {
+            workbook.set_cell_value_tracked(second, row, 0, "yyyyyyyyyy");
+        }
+        let mut history = History::new();
+        history.set_rewind_base(&workbook);
+        assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared columns, got {}", history.rewind_base_bytes);
+        workbook.create_table_without_headers(workbook.active_sheet_id(), visigrid_engine::table::TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap();
+        history.record_change(&workbook, 0, 3, 0, String::new(), "n".into());
+        let after_insert = history.rewind_base_bytes;
+        assert!(after_insert > 8_000, "creating a table copies both chunks of the column, got {after_insert}");
+        workbook.set_cell_value_tracked(second, 0, 0, "z");
+        history.record_change(&workbook, second, 0, 0, "yyyyyyyyyy".into(), "z".into());
+        assert!(history.rewind_base_bytes > after_insert, "a later edit stays charged after the workbook is replaced, got {} then {after_insert}", history.rewind_base_bytes);
     }
 }

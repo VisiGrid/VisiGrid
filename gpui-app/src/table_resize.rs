@@ -187,6 +187,28 @@ mod tests {
     }
 
     #[test]
+    fn resize_moves_totals_with_saved_criteria_and_replays() {
+        let mut before = fixture(true);
+        let id = before.active_sheet().tables()[0].id;
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 8, 1, "West");
+        before.set_cell_value_tracked(0, 8, 3, "25");
+        let (before, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [7, 9].into()).unwrap();
+        let (after, commit) = resize(&before, 8, 3).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
+        assert_eq!(after.active_sheet().get_display(9, 3), "205");
+        assert_eq!(after.active_sheet().get_raw(7, 3), "");
+        assert_eq!(after.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        let restored = prepare_resize_replay(&after, &commit, true).unwrap();
+        assert_eq!(restored.table(id).unwrap().1.totals_row(), Some(7));
+        assert_eq!(restored.active_sheet().get_raw(8, 3), "25");
+        let redone = prepare_resize_replay(&restored, &commit, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(9, 3), "205");
+        assert_eq!(restored.active_sheet().manual_hidden_rows(), [7, 9].into());
+        assert_eq!(redone.active_sheet().manual_hidden_rows(), [7, 9].into());
+    }
+
+    #[test]
     fn includes_existing_records_without_filling_or_touching_hidden_overrides() {
         let mut before = fixture(true);
         let id = before.active_sheet().tables()[0].id;
@@ -370,7 +392,7 @@ mod tests {
         let before = fixture(true);
         let (after, commit) = resize(&before, 7, 4).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableCommit { header_layout: None,
                 sheet_index: 0,
                 commit: Box::new(commit),
@@ -477,9 +499,56 @@ mod tests {
             crate::table_filter_ui::desktop_layout_error(table, Some(&heights), None, 0).is_some()
         );
         assert!(
-            crate::table_filter_ui::desktop_layout_error(table, None, Some(&hidden), 0).is_some()
+            crate::table_filter_ui::desktop_layout_error(table, None, Some(&hidden), 0).is_none()
         );
-        assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 8).is_some());
+        assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 8).is_none());
         assert!(crate::table_filter_ui::desktop_layout_error(table, None, None, 3).is_none());
     }
+    #[test]
+    fn totals_width_resize_preserves_criteria_and_rewinds_after_total_edit_undo() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_cell_value_tracked(0, 2, 4, "Extra");
+        let spec = base.active_sheet().table_view_spec().cloned();
+        let (mut after, commit) = resize(&base, 6, 4).unwrap();
+        assert!(is_resize(&commit));
+        assert_eq!(after.active_sheet().tables()[0].totals.as_ref().unwrap().columns.len(), 4);
+        assert_eq!(after.active_sheet().get_display(7, 3), "180");
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        let total = after.set_table_total(id, 4, visigrid_engine::table::TableTotal {
+            function: Some("sum".into()), ..Default::default()
+        }).unwrap();
+        after.apply_table_commit(&total, true).unwrap();
+        let undone = prepare_resize_replay(&after, &commit, true).unwrap();
+        assert_eq!(undone.active_sheet().get_display(7, 3), "180");
+        assert_eq!(undone.active_sheet().tables()[0].columns.len(), 3);
+        let redone = prepare_resize_replay(&undone, &commit, false).unwrap();
+        let mut history = History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
+            header_layout: None, sheet_index: 0, commit: Box::new(commit), description: "Widen Table".into(),
+        }, None);
+        let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().tables(), redone.active_sheet().tables());
+        assert_eq!(preview.workbook.active_sheet().get_display(7, 3), "180");
+        let (shrunk, _) = resize(&redone, 6, 3).unwrap();
+        assert_eq!(shrunk.active_sheet().table_view_spec(), spec.as_ref());
+        assert_eq!(shrunk.active_sheet().tables()[0].columns.len(), 3);
+        assert!(resize(&redone, 6, 1).is_err()); // Amount is the sort field.
+    }
+
+    #[test]
+    fn totals_width_resize_refuses_occupied_footer_and_unsafe_released_records() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_cell_value_tracked(0, 7, 4, "Keep note");
+        let revision = base.revision();
+        assert!(resize(&base, 6, 4).is_err());
+        assert_eq!(base.revision(), revision);
+        assert_eq!(base.active_sheet().get_raw(7, 4), "Keep note");
+        assert!(resize(&base, 6, 2).is_err()); // Released Result cells would sit beside a projected Table.
+        assert_eq!(base.active_sheet().get_display(7, 3), "180");
+    }
+
 }

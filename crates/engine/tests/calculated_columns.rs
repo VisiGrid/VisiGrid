@@ -281,3 +281,98 @@ fn row_edit_on_plain_sheet_keeps_external_rule_history() {
     wb.append_table_rows(id, 1, &[]).unwrap();
     assert_eq!(wb.sheet(0).unwrap().get_display(4, 2), "8");
 }
+
+#[test]
+fn totals_rule_edits_preserve_overrides_and_footer_and_invalidate_dependents() {
+    use visigrid_engine::{filter::{ColumnFilter, NormalizedFilterKey}, table_view::{TableFilter, TableViewSpec}};
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        let totals = wb.table(id).unwrap().1.totals.clone();
+        let mut format = wb.sheet(0).unwrap().get_format(4, 2);
+        format.bold = true;
+        wb.sheet_mut(0).unwrap().set_format(4, 2, format.clone());
+        let first = wb.set_calculated_column(id, 2, 1, "=[@Qty]*10", true).unwrap();
+        assert!(first.is_calculated_change());
+        wb.set_cell_value_tracked(0, 2, 2, "777");
+        wb.clear_cell_tracked(0, 3, 2);
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter { column: wb.table(id).unwrap().1.columns[0].id,
+            criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Number(2.0.into()), NormalizedFilterKey::Number(4.0.into())].into()), text_filter: None }});
+        wb.set_table_view_spec(SheetId(1), Some(spec.clone())).unwrap();
+        let generation = wb.sheet(1).unwrap().edit_generation();
+        let update = wb.set_calculated_column(id, 2, 1, "=[@Qty]*20", false).unwrap();
+        assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "40");
+        assert_eq!(wb.sheet(0).unwrap().get_raw(2, 2), "777");
+        assert_eq!(wb.sheet(0).unwrap().get_raw(3, 2), "");
+        assert!(wb.sheet(1).unwrap().edit_generation() > generation);
+        assert_eq!(wb.table(id).unwrap().1.totals, totals);
+        assert_eq!(wb.sheet(0).unwrap().get_format(4, 2), format);
+        assert_eq!(wb.sheet(0).unwrap().get_display(4, 2), if visible { "40" } else { "" });
+        let replace = wb.set_calculated_column(id, 2, 1, "=[@Qty]*20", true).unwrap();
+        assert!(replace.is_calculated_change(), "same-rule replacement still owns body writes");
+        assert_eq!(wb.sheet(0).unwrap().get_display(2, 2), "60");
+        assert_eq!(wb.sheet(0).unwrap().get_display(3, 2), "80");
+        assert_eq!(wb.sheet(0).unwrap().get_display(4, 2), if visible { "120" } else { "" });
+        assert_eq!(wb.sheet(0).unwrap().table_view_spec(), Some(&spec));
+        wb.apply_table_commit(&replace, true).unwrap();
+        wb.apply_table_commit(&update, true).unwrap();
+        assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "20");
+        assert_eq!(wb.sheet(0).unwrap().get_raw(2, 2), "777");
+        assert_eq!(wb.sheet(0).unwrap().get_raw(3, 2), "");
+        wb.apply_table_commit(&update, false).unwrap();
+        wb.apply_table_commit(&replace, false).unwrap();
+        if !visible { wb.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(wb.sheet(0).unwrap().get_display(4, 2), "120");
+        assert_eq!(wb.sheet(0).unwrap().get_raw(4, 2), "=SUBTOTAL(109,[Amount])");
+    }
+}
+
+#[test]
+fn totals_inference_and_restore_never_fill_footer_and_reject_stale_history() {
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let footer = wb.sheet(0).unwrap().get_raw(4, 2);
+    assert!(wb.try_calculated_column(SheetId(1), 4, 2, "=999").unwrap().is_none());
+    assert!(wb.table(id).unwrap().1.columns[2].formula.is_none());
+    let first = wb.try_calculated_column(SheetId(1), 2, 2, "=A3*10").unwrap().unwrap();
+    assert!(first.is_calculated_change());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(1, 2), "=A2*10");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 2), footer);
+    assert!(wb.restore_calculated_cell(id, 4, 2).is_err());
+    wb.set_cell_value_tracked(0, 2, 2, "777");
+    let restore = wb.restore_calculated_cell(id, 2, 2).unwrap();
+    assert!(restore.is_calculated_change());
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 2), "90");
+    wb.apply_table_commit(&restore, true).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_raw(2, 2), "777");
+    wb.apply_table_commit(&restore, false).unwrap();
+    wb.set_cell_value_tracked(0, 2, 2, "888");
+    let revision = wb.revision();
+    assert!(wb.apply_table_commit(&restore, true).is_err());
+    assert_eq!(wb.revision(), revision);
+    assert_eq!(wb.sheet(0).unwrap().get_raw(2, 2), "888");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 2), footer);
+}
+
+#[test]
+fn totals_rule_rejects_array_formulas_atomically_and_supports_empty_body_template() {
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let revision = wb.revision();
+    assert!(wb.set_calculated_column(id, 2, 1, "=SEQUENCE(2)", true).is_err());
+    assert_eq!(wb.revision(), revision);
+    assert!(wb.table(id).unwrap().1.columns[2].formula.is_none());
+    assert_eq!(wb.sheet(0).unwrap().get_raw(1, 2), "");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(4, 2), "=SUBTOTAL(109,[Amount])");
+    let mut empty = Workbook::new();
+    empty.set_cell_value_tracked(0, 0, 0, "Value");
+    let id = empty.create_table(empty.active_sheet_id(), TableRange { start_row: 0, end_row: 0, start_col: 0, end_col: 0 }, "Empty").unwrap().table_id();
+    empty.set_table_totals_visible(id, true, Default::default()).unwrap();
+    empty.set_calculated_column(id, 0, 1, "=7", true).unwrap();
+    assert_eq!(empty.active_sheet().get_raw(1, 0), "=SUBTOTAL(109,[Value])");
+    empty.append_table_rows(id, 1, &[]).unwrap();
+    assert_eq!(empty.active_sheet().get_display(1, 0), "7");
+    assert_eq!(empty.active_sheet().get_display(2, 0), "7");
+}

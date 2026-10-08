@@ -359,7 +359,7 @@ struct ExtrasOutput {
 /// the real engine. Input mirrors `recompute` plus optional per-sheet
 /// `cond_formats` / `validations` stores in their engine serde forms (the
 /// same shapes visigrid-json will carry once the schema fields land).
-/// CF is evaluated at each provided cell; validation at each literal cell.
+/// CF and validation are evaluated at each provided cell using computed values.
 #[wasm_bindgen]
 pub fn evaluate_sheet_extras(input: JsValue) -> Result<JsValue, JsValue> {
     console_error_panic_hook::set_once();
@@ -405,12 +405,10 @@ fn evaluate_extras_core(extras: Vec<ExtrasSheet>) -> ExtrasOutput {
                 };
                 cond.push(CondHit { sheet: i, row: cell.row, col: cell.col, style });
             }
-            if !cell.raw.starts_with('=') {
-                if let visigrid_engine::validation::ValidationResult::Invalid { reason, .. } =
-                    sheet.validate_cell_input(cell.row, cell.col, &cell.raw)
-                {
-                    violations.push(Violation { sheet: i, row: cell.row, col: cell.col, reason });
-                }
+            if let visigrid_engine::validation::ValidationResult::Invalid { reason, .. } =
+                wb.validate_cell(i, cell.row, cell.col)
+            {
+                violations.push(Violation { sheet: i, row: cell.row, col: cell.col, reason });
             }
         }
     }
@@ -682,6 +680,36 @@ mod tests {
         assert_eq!(out.violations.len(), 1, "exactly the off-list cell violates");
         assert_eq!((out.violations[0].row, out.violations[0].col), (0, 1));
         assert!(!out.violations[0].reason.is_empty());
+    }
+
+    #[test]
+    fn validation_extras_check_formula_results_and_cross_sheet_bounds() {
+        use visigrid_engine::validation::{CellRange, ValidationRule};
+        let out = evaluate_extras_core(vec![
+            ExtrasSheet {
+                name: Some("Data".into()),
+                cells: vec![
+                    InCell { row: 0, col: 0, raw: "=2+3".into() },
+                    InCell { row: 1, col: 0, raw: "=3+4".into() },
+                ],
+                cond_formats: None,
+                validations: vec![ValidationEntry {
+                    range: CellRange::new(0, 0, 1, 0),
+                    rule: visigrid_engine::validation::ValidationRule {
+                        reference_origin: Some((0, 0)),
+                        ..ValidationRule::custom("=A1<Limits!$A$1")
+                    },
+                }],
+            },
+            ExtrasSheet {
+                name: Some("Limits".into()),
+                cells: vec![InCell { row: 0, col: 0, raw: "6".into() }],
+                cond_formats: None,
+                validations: vec![],
+            },
+        ]);
+        assert_eq!(out.violations.len(), 1);
+        assert_eq!((out.violations[0].sheet, out.violations[0].row, out.violations[0].col), (0, 1, 0));
     }
 
     #[test]

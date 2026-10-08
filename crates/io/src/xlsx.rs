@@ -86,7 +86,7 @@ pub struct ImportResult {
     pub import_duration_ms: u128,
     /// Total validations imported
     pub validations_imported: usize,
-    /// Total validations skipped (unsupported types)
+    /// Total validation definitions skipped (unsupported or malformed metadata)
     pub validations_skipped: usize,
     /// Total formula errors after recalc (Value::Error from evaluation)
     pub recalc_errors: usize,
@@ -406,6 +406,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         .map_err(|e| format!("Failed to open Excel file: {}", e))?;
 
     let mut result = ImportResult::default();
+    let modern_errors = crate::xlsx_rich_errors::read(path, &mut result.warnings);
     let mut sheets: Vec<Sheet> = Vec::new();
     let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
 
@@ -423,7 +424,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     // Some(CellValue::Empty) which means "Calamine had an explicit empty value").
     let mut cached_snapshots: Vec<HashMap<(usize, usize), (Option<CellValue>, String)>> = Vec::new();
 
-    for sheet_name in &sheet_names {
+    let mut formula_string_cells = None;
+    for (sheet_index, sheet_name) in sheet_names.iter().enumerate() {
         let range = workbook.worksheet_range(sheet_name)
             .map_err(|e| format!("Failed to read sheet '{}': {}", sheet_name, e))?;
 
@@ -440,7 +442,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             next_sheet_id += 1;
 
             // Import validations even for empty sheets
-            let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet);
+            let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet, &mut result.warnings);
             result.validations_imported += imported;
             result.validations_skipped += skipped;
 
@@ -513,11 +515,19 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                         // set_value would parse it back to 7 and lose the
                         // zeros silently. Formulas arrive separately from
                         // <f>, so nothing here needs the '=' branch.
-                        if !s.trim().is_empty() {
-                            sheet.set_text(target_row, target_col, s);
-                            stats.cells_imported += 1;
-                            total_cells += 1;
-                        }
+                        let decoded;
+                        let text = if s.contains("_x") && formula_string_cells.get_or_insert_with(|| {
+                            crate::xlsx_formula_cache::string_cells(path).unwrap_or_else(|e| {
+                                result.warnings.push(format!("Formula cached-text escapes could not be decoded: {e}"));
+                                Default::default()
+                            })
+                        }).contains(&(sheet_index, target_row, target_col)) {
+                            decoded = crate::xlsx_comments::decode_excel(s);
+                            &decoded
+                        } else { s };
+                        sheet.set_text_exact(target_row, target_col, text);
+                        stats.cells_imported += 1;
+                        total_cells += 1;
                     }
                     Data::Float(n) => {
                         // Format nicely: integers without decimals
@@ -544,7 +554,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     }
                     Data::Error(e) => {
                         // Store error as text representation
-                        let error_str = format!("#{:?}", e);
+                        let error_str = modern_errors.get(&(sheet_index, target_row, target_col))
+                            .map_or_else(|| e.to_string(), |code| (*code).to_owned());
                         sheet.set_value(target_row, target_col, &error_str);
                         stats.cells_imported += 1;
                         total_cells += 1;
@@ -735,7 +746,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         result.dates_imported += stats.dates_imported + stats.times_imported;
 
         // Import validation rules from worksheet XML
-        let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet);
+        let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet, &mut result.warnings);
         result.validations_imported += imported;
         result.validations_skipped += skipped;
 
@@ -752,13 +763,17 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     result.import_duration_ms = start_time.elapsed().as_millis();
 
     let mut workbook = Workbook::from_sheets(sheets, 0);
+    crate::xlsx_names::import(path, &mut workbook, &mut result.warnings);
 
     // Import formatting from styles.xml and per-cell style IDs
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
     result.warnings.extend(notes.warnings);
     result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
 
-    let table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, options.values_only);
+    let mut table_views = Vec::new();
+    if options.values_only {
+        table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, true);
+    }
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)
@@ -811,6 +826,9 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                 value_backfill_count, xml_values.len());
         }
 
+        // Install ownership only after formula/value backfill, including footer cells.
+        table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, false);
+        let array_caches = crate::xlsx_arrays::prepare(path, &mut workbook, &mut result.warnings)?;
         // Rebuild dependency graph after loading all data
         workbook.rebuild_dep_graph();
 
@@ -877,7 +895,11 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         // read yet. This pass evaluates each once with its dependencies present,
         // and places any spills afterwards — which is also what stops a spill
         // overwriting a cell purely because it happened to be listed first.
-        let recalc_report = workbook.recompute_full_ordered();
+        let mut recalc_report = workbook.recompute_full_ordered();
+        if crate::xlsx_arrays::finish(array_caches, &mut workbook, &mut result.warnings)? {
+            workbook.rebuild_dep_graph();
+            recalc_report = workbook.recompute_full_ordered();
+        }
         eprintln!("[XLSX import] Recomputed {} formulas in topo order (cycles: {})",
             recalc_report.cells_recomputed, recalc_report.had_cycles);
 
@@ -933,6 +955,28 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     }
 
     crate::xlsx_table_filters::finish_import(table_views, &mut workbook, &mut result);
+    // Remaining hidden rows are manual (filter masks were consumed above).
+    // Keep them in the engine even when no Table has a totals definition.
+    let mut visibility_changed = false;
+    for index in 0..workbook.sheet_count() {
+        if let Some(layout) = result.imported_layouts.get_mut(index) {
+            let before = layout.hidden_rows.len();
+            layout.hidden_rows.retain(|row| *row < visigrid_engine::sheet::NUM_ROWS);
+            let skipped = before - layout.hidden_rows.len();
+            if skipped > 0 {
+                result.warnings.push(format!("Sheet '{}': ignored {skipped} hidden row(s) outside the worksheet.", workbook.sheet(index).unwrap().name));
+            }
+        }
+        let hidden = result.imported_layouts.get(index)
+            .map(|layout| layout.hidden_rows.iter().copied().collect()).unwrap_or_default();
+        let sheet = workbook.sheet_mut(index).unwrap();
+        visibility_changed |= sheet.manual_hidden_rows() != hidden;
+        sheet.set_manual_hidden_rows(hidden)?;
+    }
+    if visibility_changed && !options.values_only {
+        workbook.rebuild_dep_graph();
+        workbook.recompute_full_ordered();
+    }
     Ok((workbook, result))
 }
 
@@ -1511,6 +1555,9 @@ fn export_to_buffer_impl(
         .map_err(|e| format!("Failed to serialize XLSX: {e}"))?;
     let bytes = crate::xlsx_comments::finish(bytes, workbook)?;
     let bytes = crate::xlsx_tables::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_names::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_cond_formats::finish(bytes, workbook)?;
+    let bytes = crate::xlsx_formula_cache::finish(bytes, workbook, &mut result.warnings)?;
     result.export_duration_ms = start_time.elapsed().as_millis();
     Ok((bytes, result))
 }
@@ -1529,10 +1576,11 @@ pub fn table_export_warnings_with_order(
     order: ExportOrder,
 ) -> Result<Vec<String>, String> {
     workbook.ensure_writable()?;
-    let warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
-    if order == ExportOrder::Sorted {
-        crate::xlsx_sorted_export::prepare(workbook, layouts)?;
-    }
+    let mut warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
+    let prepared = if order == ExportOrder::Sorted {
+        crate::xlsx_sorted_export::prepare(workbook, layouts)?
+    } else { std::borrow::Cow::Borrowed(workbook) };
+    warnings.extend(crate::xlsx_formula_cache::warnings(prepared.as_ref()));
     Ok(warnings)
 }
 
@@ -1547,6 +1595,7 @@ fn build_export(
     result.warnings = crate::xlsx_tables::export_warnings(workbook, order)?;
 
     let mut xlsx_workbook = XlsxWorkbook::new();
+    crate::xlsx_names::export(workbook, &mut xlsx_workbook)?;
 
     for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
         let worksheet = xlsx_workbook
@@ -1593,6 +1642,7 @@ fn build_export(
         }
 
         crate::xlsx_tables::write(sheet, worksheet, &mut result)?;
+        crate::xlsx_cond_formats::write(sheet, worksheet)?;
 
         // Export cells (skips merge-hidden cells; origin cells overwrite the
         // blank written by merge_range above)
@@ -1636,6 +1686,14 @@ fn build_export(
             result.hidden_rows_exported += layout.hidden_rows.len();
         }
 
+        // Canonical manual visibility survives headless export without a host
+        // layout. Filter-hidden rows remain a separate mask.
+        for row in sheet.manual_hidden_rows() {
+            worksheet.set_row_hidden(row as u32).map_err(|e| e.to_string())?;
+            if !layout.is_some_and(|l| l.hidden_rows.contains(&row)) {
+                result.hidden_rows_exported += 1;
+            }
+        }
         crate::xlsx_table_filters::write_hidden_rows(sheet, worksheet, &mut result)?;
         result.sheets_exported += 1;
     }
@@ -1718,6 +1776,36 @@ fn cell_address(row: usize, col: usize) -> String {
     format!("{}{}", col_to_letter(col), row + 1)
 }
 
+fn demoted_totals_cell(sheet: &Sheet, row: usize, col: usize) -> bool {
+    sheet.tables().iter().any(|table| {
+        crate::xlsx_tables::totals_exported_as_values(table)
+            && table.totals_row() == Some(row)
+            && col >= table.range.start_col
+            && col <= table.range.end_col
+    })
+}
+
+fn write_computed_value(
+    worksheet: &mut Worksheet,
+    sheet: &Sheet,
+    row: usize,
+    col: usize,
+    format: &Format,
+) -> Result<(), String> {
+    let row32 = row as u32;
+    let col16 = col as u16;
+    let write = match sheet.get_computed_value(row, col) {
+        Value::Number(n) if n.is_finite() => {
+            worksheet.write_number_with_format(row32, col16, n, format)
+        }
+        Value::Boolean(b) => worksheet.write_boolean_with_format(row32, col16, b, format),
+        Value::Text(s) => worksheet.write_string_with_format(row32, col16, &s, format),
+        Value::Empty => worksheet.write_blank(row32, col16, format),
+        other => worksheet.write_string_with_format(row32, col16, &other.to_text(), format),
+    };
+    write.map(|_| ()).map_err(|e| format!("Failed to write cell ({row}, {col}): {e}"))
+}
+
 /// Export cells from a VisiGrid sheet to an Excel worksheet
 /// Returns (cells_exported, formulas_exported, formulas_as_values, converted_formulas, precision_warnings)
 fn export_sheet_cells(
@@ -1732,7 +1820,7 @@ fn export_sheet_cells(
 
     // Iterate over all cells in the sheet
     for ((row, col), cell) in sheet.cells_iter() {
-        // Skip spill receiver cells - they'll be filled by Excel when recalculating
+        // Write receivers after all array masters, whose writer pads their ranges.
         if cell.is_spill_receiver() {
             continue;
         }
@@ -1796,26 +1884,43 @@ fn export_sheet_cells(
                 cells_exported += 1;
             }
             ValueRef::Formula { source, ast } => {
+                // A zero-record table's visible footer cannot stay a formula:
+                // that row is exported as the table's only data row.
+                if ast.is_some() && demoted_totals_cell(sheet, row, col) {
+                    let format = apply_number_format(format, &cell.format().number_format);
+                    write_computed_value(worksheet, sheet, row, col, &format)?;
                 // Try to export as formula if it has a valid AST
-                if ast.is_some() {
+                } else if ast.is_some() {
                     // Export the formula string (strip leading '=')
                     let excel_source = crate::xlsx_tables::excel_formula(source);
                     let formula_str = excel_source.strip_prefix('=').unwrap_or(&excel_source);
                     let format = apply_number_format(format, &cell.format().number_format);
 
-                    // Save the computed result with the formula. Excel
-                    // recalculates on open, but readers that use saved results
-                    // (pandas, previews, other spreadsheets) otherwise see 0.
-                    let result = match sheet.get_computed_value(row, col) {
-                        visigrid_engine::formula::eval::Value::Number(n) if n.is_finite() => n.to_string(),
-                        visigrid_engine::formula::eval::Value::Text(t) => t,
-                        visigrid_engine::formula::eval::Value::Boolean(b) => if b { "TRUE" } else { "FALSE" }.to_string(),
-                        visigrid_engine::formula::eval::Value::Error(e) => e,
-                        _ => String::new(),
-                    };
-                    worksheet
-                        .write_formula_with_format(row32, col16, rust_xlsxwriter::Formula::new(formula_str).set_result(result), &format)
-                        .map_err(|e| format!("Failed to write formula ({}, {}): {}", row, col, e))?;
+                    if let Some(spill) = cell.spill_info() {
+                        let end_row = row.checked_add(spill.rows.saturating_sub(1));
+                        let end_col = col.checked_add(spill.cols.saturating_sub(1));
+                        if spill.rows == 0 || spill.cols == 0
+                            || !end_row.is_some_and(|r| r < 1_048_576)
+                            || !end_col.is_some_and(|c| c < 16_384)
+                        {
+                            return Err(format!("Spill at {} exceeds Excel's worksheet limits.", cell_address(row, col)));
+                        }
+                        worksheet.write_dynamic_array_formula_with_format(
+                            row32, col16, end_row.unwrap() as u32,
+                            end_col.unwrap() as u16, formula_str, &format,
+                        )
+                            .map_err(|e| format!("Failed to write array formula ({row}, {col}): {e}"))?;
+                    } else if cell.spill_error().is_some() {
+                        // A blocked array still needs Excel's array flag even
+                        // when its source has no dynamic function (e.g. B1:B3*2).
+                        // Only write the anchor: the blocking cells must survive.
+                        worksheet.write_dynamic_array_formula_with_format(
+                            row32, col16, row32, col16, formula_str, &format,
+                        ).map_err(|e| format!("Failed to write blocked array formula ({row}, {col}): {e}"))?;
+                    } else {
+                        worksheet.write_formula_with_format(row32, col16, formula_str, &format)
+                            .map_err(|e| format!("Failed to write formula ({}, {}): {}", row, col, e))?;
+                    }
                     formulas_exported += 1;
                 } else {
                     // Invalid formula - export computed value instead
@@ -1846,13 +1951,22 @@ fn export_sheet_cells(
         }
     }
 
+    // The array writer pads receivers with zeroes using the parent's format.
+    // Restore their own formats here; the typed-cache pass replaces the zeroes.
+    for (row, col) in sheet.spill_receiver_coords() {
+        let cell_format = sheet.get_format(row, col);
+        let format = apply_number_format(build_excel_format(&cell_format), &cell_format.number_format);
+        worksheet.write_number_with_format(row as u32, col as u16, 0.0, &format)
+            .map_err(|e| format!("Failed to write spilled result ({row}, {col}): {e}"))?;
+        cells_exported += 1;
+    }
     Ok((cells_exported, formulas_exported, formulas_as_values, converted_formulas, precision_warnings))
 }
 
 /// Export validation rules for a sheet
 ///
 /// Returns (exported_count, skipped_count).
-/// Skipped rules are those with unsupported types (Date, Time, TextLength, Custom).
+/// Skipped rules contain unrepresentable or malformed validation metadata.
 fn export_validation_rules(
     worksheet: &mut Worksheet,
     sheet: &Sheet,
@@ -1862,8 +1976,9 @@ fn export_validation_rules(
     let mut exported = 0;
     let mut skipped = 0;
 
-    for (range, rule) in sheet.validations.iter() {
-        match rule_to_xlsx(rule) {
+    for (range, rule) in sheet.validations.effective_ranges()? {
+        let rule = rule.for_xlsx_range(range.start_row, range.start_col);
+        match rule_to_xlsx(&rule) {
             Some(dv) => {
                 // rust_xlsxwriter uses 0-based row/col as u32/u16
                 worksheet
@@ -1878,7 +1993,7 @@ fn export_validation_rules(
                 exported += 1;
             }
             None => {
-                // Unsupported validation type (Date, Time, TextLength, Custom)
+                // The rule cannot be represented by the XLSX writer.
                 skipped += 1;
             }
         }
@@ -1890,26 +2005,30 @@ fn export_validation_rules(
 /// Import validation rules for a sheet from XLSX
 ///
 /// Returns (imported_count, skipped_count).
-/// Skipped rules are those with unsupported types (Date, Time, TextLength, Custom).
+/// Skipped rules contain unrepresentable or malformed validation metadata.
 fn import_validation_rules(
     xlsx_path: &Path,
     sheet_name: &str,
     sheet: &mut Sheet,
+    warnings: &mut Vec<String>,
 ) -> (usize, usize) {
-    use crate::xlsx_validation::parse_sheet_validations;
-
-    match parse_sheet_validations(xlsx_path, sheet_name) {
-        Ok(validations) => {
-            let mut imported = 0;
-            for v in validations {
-                sheet.validations.set(v.range, v.rule);
-                imported += 1;
+    // This XML pass does not apply to the other calamine formats.
+    if xlsx_path.extension().and_then(|s| s.to_str()).is_some_and(|s|
+        matches!(s.to_ascii_lowercase().as_str(), "xls" | "xlsb" | "ods")) {
+        return (0, 0);
+    }
+    match crate::xlsx_validation::parse_sheet_validations_report(xlsx_path, sheet_name) {
+        Ok(report) => {
+            let imported = report.rules.len();
+            for v in report.rules { sheet.validations.set(v.range, v.rule); }
+            if report.skipped > 0 {
+                warnings.push(format!("Sheet {sheet_name:?}: {} unsupported or malformed validation rules were omitted.", report.skipped));
             }
-            (imported, 0) // Skipping is handled in parse_sheet_validations
+            (imported, report.skipped)
         }
-        Err(_) => {
-            // Validation parsing failed - not fatal, just skip
-            // This can happen if the sheet has no validations or XML structure differs
+        Err(error) => {
+            warnings.push(format!("Sheet {sheet_name:?}: validation rules could not be restored: {error}"));
+            // The failed XML pass cannot give a reliable per-rule skip count.
             (0, 0)
         }
     }
@@ -1963,7 +2082,7 @@ fn count_shared_formula_groups(path: &Path) -> usize {
 }
 
 /// Read a file from a ZIP archive, returning None on error.
-fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
+pub(super) fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Option<String> {
@@ -1975,7 +2094,7 @@ fn read_zip_file_for_shared<R: std::io::Read + std::io::Seek>(
 }
 
 /// Resolve worksheet XML paths from workbook.xml + workbook.xml.rels
-fn resolve_worksheet_paths(workbook_xml: &str, rels_xml: &str) -> Vec<String> {
+pub(super) fn resolve_worksheet_paths(workbook_xml: &str, rels_xml: &str) -> Vec<String> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -2757,8 +2876,15 @@ fn build_number_pattern(decimals: u8, thousands: bool) -> String {
 
 /// Apply number format to an Excel Format
 fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
-    match number_format {
-        NumberFormat::General => format,
+    match excel_number_format(number_format) {
+        Some(code) => format.set_num_format(code),
+        None => format,
+    }
+}
+
+pub(crate) fn excel_number_format(number_format: &NumberFormat) -> Option<String> {
+    Some(match number_format {
+        NumberFormat::General => return None,
         NumberFormat::Number { decimals, thousands, negative } => {
             let pos = build_number_pattern(*decimals, *thousands);
             let neg = match negative {
@@ -2768,7 +2894,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
                 visigrid_engine::cell::NegativeStyle::RedParens => format!("[Red]({})", pos),
             };
             let pattern = format!("{};{};{};@", pos, neg, pos);
-            format.set_num_format(&pattern)
+            pattern
         }
         NumberFormat::Currency { decimals, thousands, negative, symbol } => {
             let sym = excel_literal_prefix(symbol.as_deref().unwrap_or("$"));
@@ -2781,7 +2907,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
                 visigrid_engine::cell::NegativeStyle::RedParens => format!("[Red]({})", pos),
             };
             let pattern = format!("{};{};{};@", pos, neg, pos);
-            format.set_num_format(&pattern)
+            pattern
         }
         NumberFormat::Percent { decimals } => {
             let pattern = if *decimals == 0 {
@@ -2789,7 +2915,7 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
             } else {
                 format!("0.{}%", "0".repeat(*decimals as usize))
             };
-            format.set_num_format(&pattern)
+            pattern
         }
         NumberFormat::Date { style } => {
             let pattern = match style {
@@ -2797,12 +2923,12 @@ fn apply_number_format(format: Format, number_format: &NumberFormat) -> Format {
                 DateStyle::Long => "mmmm d, yyyy",
                 DateStyle::Iso => "yyyy-mm-dd",
             };
-            format.set_num_format(pattern)
+            pattern.to_string()
         }
-        NumberFormat::Time => format.set_num_format("h:mm:ss"),
-        NumberFormat::DateTime => format.set_num_format("m/d/yyyy h:mm:ss"),
-        NumberFormat::Custom(code) => format.set_num_format(code),
-    }
+        NumberFormat::Time => "h:mm:ss".into(),
+        NumberFormat::DateTime => "m/d/yyyy h:mm:ss".into(),
+        NumberFormat::Custom(code) => code.clone(),
+    })
 }
 
 /// Check if a CellFormat has any non-default formatting
@@ -3319,7 +3445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_export_with_unsupported_validation() {
+    fn test_export_with_text_length_validation() {
         use visigrid_engine::validation::{CellRange, NumericConstraint, ValidationRule, ValidationType};
 
         let mut workbook = Workbook::new();
@@ -3328,7 +3454,7 @@ mod tests {
         sheet.set_value(0, 0, "Text");
         sheet.set_value(1, 0, "Hello");
 
-        // Add text length validation (not yet supported)
+        // Text-length metadata is retained.
         let rule = ValidationRule::new(ValidationType::TextLength(NumericConstraint::between(1, 50)));
         let range = CellRange::new(1, 0, 9, 0);
         sheet.validations.set(range, rule);
@@ -3338,9 +3464,8 @@ mod tests {
 
         let result = export(&workbook, &export_path, None).unwrap();
 
-        // TextLength is skipped in Phase 5A
-        assert_eq!(result.validations_exported, 0);
-        assert_eq!(result.validations_skipped, 1);
+        assert_eq!(result.validations_exported, 1);
+        assert_eq!(result.validations_skipped, 0);
     }
 
     #[test]
@@ -3360,7 +3485,7 @@ mod tests {
         let decimal_rule = ValidationRule::decimal(NumericConstraint::greater_than(0.0));
         sheet.validations.set(CellRange::new(0, 2, 4, 2), decimal_rule);
 
-        // Unsupported: Date, Time, TextLength, Custom
+        // Additional rule types.
         let date_rule = ValidationRule::new(ValidationType::Date(NumericConstraint::between(0, 100)));
         sheet.validations.set(CellRange::new(0, 3, 4, 3), date_rule);
 
@@ -3372,9 +3497,8 @@ mod tests {
 
         let result = export(&workbook, &export_path, None).unwrap();
 
-        // 3 supported (List, WholeNumber, Decimal), 2 skipped (Date, Custom)
-        assert_eq!(result.validations_exported, 3);
-        assert_eq!(result.validations_skipped, 2);
+        assert_eq!(result.validations_exported, 5);
+        assert_eq!(result.validations_skipped, 0);
     }
 
     // ========================================================================
@@ -5333,7 +5457,7 @@ fn dxf_to_cond_style(dxf: &xlsx_styles::ParsedDxf) -> visigrid_engine::cond_form
     use visigrid_engine::cell::CellFormatOverride;
     use visigrid_engine::cond_format::CondStyle;
 
-    CondStyle::Inline(CellFormatOverride {
+    let mut style = CellFormatOverride {
         bold: dxf.bold,
         italic: dxf.italic,
         underline: dxf.underline,
@@ -5342,7 +5466,9 @@ fn dxf_to_cond_style(dxf: &xlsx_styles::ParsedDxf) -> visigrid_engine::cond_form
         font_color: dxf.font_color.map(Some),
         background_color: dxf.fill_color.map(Some),
         ..Default::default()
-    })
+    };
+    style.merge_from(&dxf.extra);
+    CondStyle::Inline(style)
 }
 
 /// Apply parsed conditional-formatting rules to a sheet.
@@ -5374,10 +5500,14 @@ fn apply_cond_formats(
         };
 
         let style = match rule.dxf_id.and_then(|id| dxfs.get(id)) {
-            Some(dxf) if !dxf.is_empty() => dxf_to_cond_style(dxf),
+            Some(dxf) => {
+                if dxf.has_unmapped && !unsupported.iter().any(|s| s == "conditional formatting style (unsupported properties)") {
+                    unsupported.push("conditional formatting style (unsupported properties)".into());
+                }
+                dxf_to_cond_style(dxf)
+            }
             _ => {
-                // A rule whose dxf carries nothing we model would render as a
-                // no-op; skip it rather than add an invisible rule.
+                // A missing or invalid style reference cannot be reconstructed.
                 if !unsupported.iter().any(|s| s.starts_with("conditional formatting style")) {
                     unsupported
                         .push("conditional formatting style (no supported properties)".to_string());
@@ -5386,19 +5516,14 @@ fn apply_cond_formats(
             }
         };
 
-        let ranges: Vec<CellRange> = rule
-            .ranges
-            .iter()
-            .map(|&(sr, sc, er, ec)| CellRange {
-                start_row: sr,
-                start_col: sc,
-                end_row: er,
-                end_col: ec,
-            })
-            .collect();
-
-        sheet.cond_formats.add(ranges, predicate, style);
-        imported += 1;
+        // Excel shares the first sqref anchor across the rule; native ranges
+        // have their own anchors. Rebase each range before storing it.
+        for &(sr, sc, er, ec) in &rule.ranges {
+            let source = visigrid_engine::formula::parser::adjust_formula_refs(&predicate,
+                sr as i32 - top_row as i32, sc as i32 - top_col as i32);
+            sheet.cond_formats.add(vec![CellRange::new(sr, sc, er, ec)], source, style.clone());
+            imported += 1;
+        }
     }
 
     imported

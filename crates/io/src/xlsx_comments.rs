@@ -185,7 +185,7 @@ fn read_into(path: &Path, notes: &mut ReadNotes) -> Result<(), String> {
 
 // SpreadsheetML's escaped UTF-16 code units. Decode once so _x005F_x0041_
 // stays the literal string _x0041_, rather than becoming A.
-fn decode_excel(text: &str) -> String {
+pub(super) fn decode_excel(text: &str) -> String {
     let mut units = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
@@ -404,7 +404,7 @@ pub(crate) fn write(
     Ok(count)
 }
 
-fn xml_text(text: &str) -> String {
+pub(super) fn xml_text(text: &str) -> String {
     let literal = encode_literals(text);
     let mut result = String::new();
     for c in literal.chars() {

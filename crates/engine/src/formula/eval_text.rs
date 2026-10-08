@@ -502,6 +502,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if grid.len() == 1 && width == 1 {
                 return Some(EvalResult::Text(grid.remove(0).remove(0)));
             }
+            if let Err(error) = super::eval_budget::array(grid.len(), width) { return Some(EvalResult::Error(error)); }
             let mut out = Array2D::new(grid.len(), width);
             for (r, row) in grid.into_iter().enumerate() {
                 let filled = row.len();

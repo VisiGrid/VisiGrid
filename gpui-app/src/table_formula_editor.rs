@@ -165,8 +165,9 @@ pub fn suggestions(
         .map(|c| (c.name.clone(), format!("Column · {}", table.name), false))
         .collect();
     if atom_start == open + 1 || text[..atom_start].ends_with("[[") {
-        for label in ["#Data", "#Headers", "#All", "#This Row"] {
-            if label != "#This Row" || this_row_available {
+        for label in ["#Data", "#Headers", "#All", "#Totals", "#This Row"] {
+            if (label != "#This Row" || this_row_available)
+                && (label != "#Totals" || table.totals_row().is_some()) {
                 names.push((label.into(), "Table selector".into(), true));
             }
         }

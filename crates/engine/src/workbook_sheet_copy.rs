@@ -1,7 +1,7 @@
 //! Copy a reviewed sheet with fresh workbook-owned identities.
 use super::Workbook;
 use crate::{
-    cell::ValueRef,
+    cell::{CellValue, ValueRef},
     formula::structured,
     sheet::SheetId,
     table::TableId,
@@ -74,7 +74,9 @@ impl Workbook {
                     .tables()
                     .iter()
                     .flat_map(|t| t.columns.iter().filter_map(|c| c.formula.as_deref()));
-                for formula in cell_formulas.chain(rules) {
+                let totals = sheet.tables().iter().filter_map(|t| t.totals.as_ref())
+                    .flat_map(|totals| totals.columns.iter().filter_map(|c| c.formula.as_deref()));
+                for formula in cell_formulas.chain(rules).chain(totals) {
                     for (_, _, reference) in structured::source_references(formula) {
                         if let Some(name) = reference.table {
                             reserved.insert(name.to_ascii_lowercase());
@@ -109,7 +111,9 @@ impl Workbook {
             })
             .collect();
         for (r, c, value) in formulas {
-            sheet.set_value(r, c, &value);
+            // This detached copy owns every authored formula, including protected
+            // footer cells. Defer evaluation until new Table identities exist.
+            sheet.write_table_header(r, c, CellValue::from_input(&value));
         }
         let rules: Vec<_> = sheet
             .cond_formats
@@ -161,10 +165,20 @@ impl Workbook {
                 .checked_add(1)
                 .ok_or("Table identities exhausted.")?;
             ids.insert(old, table.id);
+            for saved in &mut table.saved_views {
+                saved.view.table = table.id;
+            }
             table.name = names[&table.name.to_ascii_lowercase()].clone();
             for col in &mut table.columns {
                 if let Some(formula) = &mut col.formula {
                     *formula = rewrite(formula, &names);
+                }
+            }
+            if let Some(totals) = &mut table.totals {
+                for total in &mut totals.columns {
+                    if let Some(formula) = &mut total.formula {
+                        *formula = rewrite(formula, &names);
+                    }
                 }
             }
             allocators.insert(
@@ -387,4 +401,94 @@ mod tests {
         );
         assert!(!copy.has_external_table_references(copy.sheet(index).unwrap().id));
     }
+    #[test]
+    fn totals_copy_rewrites_visible_and_dormant_settings_and_keeps_original_independent() {
+        use crate::{cell::CellComment, table::TableTotal};
+        for visible in [true, false] {
+            let mut wb = book();
+            let alpha = wb.active_sheet().tables()[0].id;
+            let beta = wb.active_sheet().tables()[1].id;
+            wb.set_table_totals_visible(alpha, true, [2].into_iter().collect()).unwrap();
+            wb.set_table_totals_visible(beta, true, Default::default()).unwrap();
+            let formula = "=SUM([Amount])+SUM(Beta[Amount])+Data!A2";
+            wb.set_table_total(alpha, 0, TableTotal {
+                function: Some("custom".into()), formula: Some(formula.into()), label: None,
+            }).unwrap();
+            wb.active_sheet_mut().toggle_bold(3, 0);
+            wb.active_sheet_mut().set_comment(3, 0, Some(CellComment { text: "Keep footer".into(), author: "QA".into() }));
+            wb.set_cell_value_tracked(0, 10, 0, "=SUM(Alpha[#Totals])");
+            if !visible {
+                wb.set_table_totals_visible(alpha, false, [2].into_iter().collect()).unwrap();
+                wb.set_table_totals_visible(beta, false, Default::default()).unwrap();
+            }
+            let original = wb.active_sheet().tables().to_vec();
+            let (mut copy, index) = wb.prepare_sheet_copy(&wb, SheetId(7), "Result").unwrap();
+            let copied = copy.sheet(index).unwrap().tables().to_vec();
+            let copied_alpha = copied.iter().find(|t| t.name == "Alpha_Copy").unwrap();
+            let copied_beta = copied.iter().find(|t| t.name == "Beta_Copy").unwrap();
+            assert_ne!(copied_alpha.id, alpha);
+            assert_ne!(copied_beta.id, beta);
+            assert_eq!(copied_alpha.columns, wb.table(alpha).unwrap().1.columns);
+            let totals = copied_alpha.totals.as_ref().unwrap();
+            assert_eq!(totals.visible, visible);
+            assert_eq!(totals.hidden_rows, [2].into_iter().collect());
+            assert_eq!(totals.columns[0].formula.as_deref(), Some("=SUM([Amount])+SUM(Beta_Copy[Amount])+Data!A2"));
+            assert_eq!(copy.active_sheet().tables(), original);
+            assert_eq!(copy.sheet(index).unwrap().get_raw(10, 0), "=SUM(Alpha_Copy[#Totals])");
+            assert_eq!(copy.sheet(index).unwrap().get_format(3, 0), wb.active_sheet().get_format(3, 0));
+            assert_eq!(copy.sheet(index).unwrap().comment(3, 0).unwrap().text, "Keep footer");
+            if !visible {
+                // Hiding releases footer cells. Retained comments still protect
+                // those cells from being claimed again, including after a copy.
+                assert!(copy.set_table_totals_visible(copied_alpha.id, true, [2].into_iter().collect()).is_err());
+                copy.sheet_mut(index).unwrap().set_comment(3, 0, None);
+                assert_eq!(copy.active_sheet().comment(3, 0).unwrap().text, "Keep footer");
+                copy.set_table_totals_visible(copied_alpha.id, true, [2].into_iter().collect()).unwrap();
+                copy.set_table_totals_visible(copied_beta.id, true, Default::default()).unwrap();
+            }
+            assert_eq!(copy.sheet(index).unwrap().get_raw(3, 0), "=SUM([Amount])+SUM(Beta_Copy[Amount])+Data!A2");
+            assert_eq!(copy.sheet(index).unwrap().get_display(3, 0), "45");
+            copy.set_cell_value_tracked(index, 6, 0, "50");
+            assert_eq!(copy.sheet(index).unwrap().get_display(3, 0), "90");
+            assert_eq!(copy.sheet(index).unwrap().get_display(10, 0), "90");
+            assert_eq!(copy.active_sheet().get_raw(6, 0), "5");
+            assert_eq!(copy.active_sheet().tables(), original);
+        }
+    }
+
+    #[test]
+    fn copied_standard_total_keeps_manual_visibility_and_local_binding() {
+        let mut wb = book();
+        let alpha = wb.active_sheet().tables()[0].id;
+        wb.set_table_totals_visible(alpha, true, [2].into_iter().collect()).unwrap();
+        let (mut copy, index) = wb.prepare_sheet_copy(&wb, SheetId(7), "Result").unwrap();
+        assert_eq!(copy.sheet(index).unwrap().get_display(3, 0), "10");
+        copy.set_cell_value_tracked(index, 1, 0, "70");
+        assert_eq!(copy.sheet(index).unwrap().get_display(3, 0), "70");
+        assert_eq!(copy.active_sheet().get_display(3, 0), "10");
+    }
+
+    #[test]
+    fn dormant_total_names_are_reserved_and_prevent_removing_referenced_sheets() {
+        use crate::table::TableTotal;
+        let mut wb = book();
+        let beta = wb.active_sheet().tables()[1].id;
+        wb.set_table_totals_visible(beta, true, Default::default()).unwrap();
+        wb.set_table_total(beta, 0, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM(Alpha_Copy[Amount])".into()), label: None,
+        }).unwrap();
+        wb.set_table_totals_visible(beta, false, Default::default()).unwrap();
+        let (mut copy, index) = wb.prepare_sheet_copy(&wb, SheetId(7), "Result").unwrap();
+        assert_eq!(copy.sheet(index).unwrap().tables()[0].name, "Alpha_Copy2");
+        assert!(copy.take_sheet(index).is_some());
+        let (mut copy, index) = wb.prepare_sheet_copy(&wb, SheetId(7), "Result").unwrap();
+        copy.set_table_totals_visible(beta, true, Default::default()).unwrap();
+        copy.set_table_total(beta, 0, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM(Alpha_Copy2[Amount])".into()), label: None,
+        }).unwrap();
+        copy.set_table_totals_visible(beta, false, Default::default()).unwrap();
+        assert!(copy.take_sheet(index).is_none());
+        assert_eq!(copy.sheet_count(), 2);
+    }
+
 }

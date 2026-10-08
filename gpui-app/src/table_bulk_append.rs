@@ -45,6 +45,9 @@ pub(crate) fn plan_bulk_append(
     }) else {
         return Ok(None);
     };
+    if table.totals_row() == Some(data_row) {
+        return Err("The totals row is protected. Use Add row or paste from an existing body record to add records above it.".into());
+    }
     if !rows.is_view_row_visible(start.0) {
         return Err("Select a visible cell before pasting.".into());
     }
@@ -218,7 +221,7 @@ impl Spreadsheet {
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
                 let description = format!("Paste and append {} Table row(s)", plan.count);
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     UndoAction::TableAppend {
                         sheet_index: index,
                         history: Box::new(history),
@@ -230,7 +233,7 @@ impl Spreadsheet {
                 self.is_modified = true;
                 self.clipboard_visual_range = None;
                 self.status_message = Some(if hidden > 0 {
-                    format!("{description}; {hidden} new row(s) hidden by the current filter.")
+                    format!("{description}; {hidden} new row(s) hidden by the current view.")
                 } else {
                     description
                 });
@@ -277,10 +280,128 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn bulk_append_moves_hidden_footer_without_writing_existing_hidden_records() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let (before, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [7, 9].into()).unwrap();
+        let append = plan(&before, (6, 1), 3, 2);
+        assert_eq!(append.count, 2);
+        let writes = table_paste_writes(
+            &grid(&[&["West", "5"], &["West", "7"], &["West", "11"]]),
+            None, TablePasteKind::Contents, append.targets,
+        );
+        let (after, history) = prepare_append_writes(&before, id, 2, &writes).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
+        assert_eq!(after.active_sheet().manual_hidden_rows(), [7, 9].into());
+        assert_eq!(after.active_sheet().get_display(7, 3), "14");
+        assert_eq!(after.active_sheet().get_display(8, 3), "22");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        let view = after.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        assert!(view.rows().data_to_view(7).is_none());
+        assert!(view.rows().data_to_view(8).is_some());
+        assert!(prepare_append_writes(&before, id, 2, &[TableCellWrite::value(4, 2, "99".into())]).is_err());
+        let undone = history.replay(&after, true).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(6, 2), before.active_sheet().get_raw(6, 2));
+        let redone = history.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().manual_hidden_rows(), [7, 9].into());
+        assert_eq!(redone.active_sheet().get_display(9, 3), after.active_sheet().get_display(9, 3));
+    }
+
     fn grid(rows: &[&[&str]]) -> Vec<Vec<String>> {
         rows.iter()
             .map(|r| r.iter().map(|s| s.to_string()).collect())
             .collect()
+    }
+
+    #[test]
+    fn linked_footer_and_overflow_paste_replay_in_one_history_entry() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=D8");
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=D10");
+        assert_eq!(after.active_sheet().get_display(0, 0), "100");
+        let undone = entry.replay(&after, true).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(0, 0), "=D8");
+        assert_eq!(undone.active_sheet().get_raw(4, 3), "999");
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(0, 0), "100");
+    }
+
+    #[test]
+    fn dynamic_footer_readers_survive_filtered_overflow_paste_and_replay() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=OFFSET(D8,0,0)");
+        before.set_cell_value_tracked(0, 1, 0, "=INDIRECT(\"D8\")");
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=OFFSET(D10, 0, 0)");
+        assert_eq!(after.active_sheet().get_display(0, 0), "100");
+        assert_eq!(after.active_sheet().get_display(1, 0), "28");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        let undone = entry.replay(&after, true).unwrap();
+        for row in [0, 1] {
+            assert_eq!(undone.active_sheet().get_raw(row, 0), before.active_sheet().get_raw(row, 0));
+            assert_eq!(undone.active_sheet().get_display(row, 0), before.active_sheet().get_display(row, 0));
+        }
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(0, 0), "100");
+        assert_eq!(redone.active_sheet().get_display(1, 0), "28");
+        assert_eq!(redone.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+    }
+
+    #[test]
+    fn footer_rules_follow_filtered_overflow_paste_and_replay() {
+        use visigrid_engine::{cond_format::CondStyle, validation::{CellRange, ValidationRule}};
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.active_sheet_mut().validations.set(CellRange::single(7, 3), ValidationRule::custom("=$D$8>0"));
+        before.active_sheet_mut().cond_formats.add(vec![CellRange::single(7, 3)], "=$D$8>0", CondStyle::Inline(Default::default()));
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        let undone = entry.replay(&after, true).unwrap();
+        let redone = entry.replay(&undone, false).unwrap();
+        for (wb, row) in [(&after, 9), (&undone, 7), (&redone, 9)] {
+            assert!(wb.active_sheet().validations.has_validation(row, 3));
+            assert_eq!(wb.active_sheet().cond_formats.iter().next().unwrap().predicate_at(row, 3), Some(format!("=$D${}>0", row + 1)));
+            assert_eq!(wb.active_sheet().get_raw(4, 3), "999");
+            assert_eq!(wb.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        }
+        assert_eq!(after.active_sheet().get_display(9, 3), "100");
+        assert!(!after.active_sheet().validations.has_validation(7, 3));
+    }
+
+    #[test]
+    fn filtered_overflow_paste_moves_footer_and_replays_all_values() {
+        let (mut before, id) = book();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let footer = before.active_sheet().get_raw(7, 3);
+        let plan = plan(&before, (4, 1), 5, 2);
+        let values = grid(&[ &["West", "11"], &["West", "12"], &["West", "13"], &["West", "14"], &["East", "15"] ]);
+        let writes = table_paste_writes(&values, None, TablePasteKind::Contents, plan.targets);
+        let (after, entry) = prepare_append_writes(&before, id, plan.count, &writes).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(9));
+        assert_eq!(after.active_sheet().get_raw(9, 3), footer);
+        assert_eq!(after.active_sheet().get_display(9, 3), "100");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        assert_eq!(after.active_sheet().get_raw(10, 1), "Notes stay below");
+        let restored = entry.replay(&after, true).unwrap();
+        for row in 2..=10 { for col in 1..=3 {
+            assert_eq!(restored.active_sheet().get_raw(row, col), before.active_sheet().get_raw(row, col));
+        } }
+        let redone = entry.replay(&restored, false).unwrap();
+        assert_eq!(redone.active_sheet().get_display(9, 3), "100");
+        let rows = before.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        assert!(plan_bulk_append(before.active_sheet(), rows.rows(), (7, 1), 1, 2).is_err());
     }
 
     #[test]
@@ -500,7 +621,7 @@ mod tests {
         ];
         let (after, commit) = prepare_append_writes(&before, id, 1, &writes).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableAppend {
                 sheet_index: 0,
                 history: Box::new(commit),

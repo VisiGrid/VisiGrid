@@ -47,22 +47,22 @@ pub fn render_impact_preview(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         Some(ImpactAction::Rename { old_name, new_name }) => (
             format!("Rename \"{}\" → \"{}\"", old_name, new_name),
             if usage_count == 0 {
-                "No formulas reference this name".to_string()
+                "No parsed references use this name".to_string()
             } else if usage_count == 1 {
-                "This will update 1 formula".to_string()
+                "This will update 1 reference".to_string()
             } else {
-                format!("This will update {} formulas", usage_count)
+                format!("This will update {} references", usage_count)
             },
             false,
         ),
         Some(ImpactAction::Delete { name }) => (
             format!("Delete \"{}\"", name),
             if usage_count == 0 {
-                "No formulas reference this name".to_string()
+                "No parsed references use this name".to_string()
             } else if usage_count == 1 {
-                "Warning: 1 formula will show #NAME? error".to_string()
+                "1 reference may become unresolved".to_string()
             } else {
-                format!("Warning: {} formulas will show #NAME? error", usage_count)
+                format!("{} references may become unresolved", usage_count)
             },
             true,
         ),
@@ -84,6 +84,8 @@ pub fn render_impact_preview(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
             .overflow_hidden()
             .flex()
             .flex_col()
+            .when_some(app.name_draft_error.clone(), |el, error| el.child(
+                div().px_5().py_2().text_sm().text_color(app.token(TokenKey::Error)).child(error)))
             // Header
                 .child(
                     div()
@@ -94,6 +96,8 @@ pub fn render_impact_preview(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .child(div().text_xs().text_color(text_muted)
+                            .child("All sheets, including hidden records and Table rules. Text inside formulas stays unchanged."))
                         // Title
                         .child(
                             div()

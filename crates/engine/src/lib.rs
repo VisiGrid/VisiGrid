@@ -28,3 +28,5 @@ pub mod workbook;
 pub mod harness;
 
 pub mod print_setup;
+
+pub mod history_size;

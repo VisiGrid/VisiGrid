@@ -11,6 +11,20 @@ pub enum NamedRangeResolution {
 }
 
 pub trait CellLookup {
+    /// Runtime reference targets, for workbook dependency tracking. Validation
+    /// and standalone lookups can leave this as a no-op.
+    fn record_dynamic_reference(&self, _sheet: &SheetRef, _r0: usize, _c0: usize, _r1: usize, _c1: usize) {}
+
+    /// Parse reference text in this lookup's sheet namespace. Standalone
+    /// lookups keep cross-sheet references as explicit reference errors.
+    fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> {
+        super::parser::parse(&format!("={}", text.trim().trim_start_matches('=')))
+            .map(|expr| super::parser::bind_expr(&expr, |name| self.sheet_id_by_name(name)))
+    }
+
+    /// SUBTOTAL excludes filtered records and nested subtotal formulas.
+    fn subtotal_skip_cell(&self, _sheet: &SheetRef, _row: usize, _col: usize, _ignore_hidden: bool) -> bool { false }
+
     /// Exclusive data bounds on the requested sheet. Empty lookups default
     /// to no data; real sheet lookups include formulas and spill receivers.
     fn data_bounds(&self, _sheet: &SheetRef) -> (usize, usize) { (0, 0) }
@@ -113,6 +127,10 @@ pub trait CellLookup {
         None
     }
 
+    /// Workbook names retain their target sheet. Legacy single-sheet lookups
+    /// may continue implementing only resolve_named_range.
+    fn resolve_named_reference(&self, _name: &str) -> Option<BoundExpr> { None }
+
     fn is_table_name(&self, _name: &str) -> bool { false }
 
     fn resolve_table_reference(&self, _reference: &super::structured::StructuredReference, _cell: Option<(usize, usize)>) -> BoundExpr {
@@ -184,6 +202,11 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> LookupWithN
 }
 
 impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup for LookupWithNamedRanges<'a, L, F> {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool { self.inner.subtotal_skip_cell(sheet, row, col, ignore_hidden) }
+    fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> { self.inner.bind_reference_text(text) }
+    fn record_dynamic_reference(&self, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize) {
+        self.inner.record_dynamic_reference(sheet, r0, c0, r1, c1)
+    }
     fn whole_column_start(&self) -> usize { self.inner.whole_column_start() }
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
 
@@ -279,6 +302,11 @@ impl<'a, L: CellLookup> LookupWithContext<'a, L> {
 }
 
 impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool { self.inner.subtotal_skip_cell(sheet, row, col, ignore_hidden) }
+    fn bind_reference_text(&self, text: &str) -> Result<BoundExpr, String> { self.inner.bind_reference_text(text) }
+    fn record_dynamic_reference(&self, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize) {
+        self.inner.record_dynamic_reference(sheet, r0, c0, r1, c1)
+    }
     fn whole_column_start(&self) -> usize { self.column_start.unwrap_or_else(|| self.inner.whole_column_start()) }
     fn data_bounds(&self, sheet: &SheetRef) -> (usize, usize) { self.inner.data_bounds(sheet) }
 
@@ -320,6 +348,10 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         self.inner.resolve_named_range(name)
+    }
+
+    fn resolve_named_reference(&self, name: &str) -> Option<BoundExpr> {
+        self.inner.resolve_named_reference(name)
     }
 
     fn is_table_name(&self, name: &str) -> bool { self.inner.is_table_name(name) }
@@ -723,6 +755,7 @@ pub fn evaluate<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
         }
         Expr::NamedRange(name) => {
             if lookup.is_table_name(name) { return evaluate_table_reference(expr, lookup); }
+            if let Some(reference) = lookup.resolve_named_reference(name) { return evaluate(&reference, lookup); }
             // Resolve the named range and evaluate
             match lookup.resolve_named_range(name) {
                 None => EvalResult::Error(format!("#NAME? '{}'", name)),
@@ -798,11 +831,14 @@ fn operand<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
             }
             operand(&bounded, lookup)
         }
-        Expr::NamedRange(name) => match lookup.resolve_named_range(name) {
+        Expr::NamedRange(name) => {
+            if let Some(reference) = lookup.resolve_named_reference(name) { return operand(&reference, lookup); }
+            match lookup.resolve_named_range(name) {
             Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
                 range_array(lookup, &SheetRef::Current, start_row, start_col, end_row, end_col)
             }
             _ => evaluate(expr, lookup),
+            }
         },
         _ => evaluate(expr, lookup),
     }
@@ -821,6 +857,9 @@ fn range_array<L: CellLookup>(
     let (c0, c1) = (start_col.min(end_col), start_col.max(end_col));
     if r0 == r1 && c0 == c1 {
         return EvalResult::from_value(&super::eval_helpers::read_cell_value(lookup, sheet, r0, c0));
+    }
+    if let Err(error) = super::eval_budget::array(r1 - r0 + 1, c1 - c0 + 1) {
+        return EvalResult::Error(error);
     }
     let data = (r0..=r1)
         .map(|r| (c0..=c1).map(|c| super::eval_helpers::read_cell_value(lookup, sheet, r, c)).collect())
@@ -856,6 +895,7 @@ fn broadcast(op: Op, left: &EvalResult, right: &EvalResult) -> EvalResult {
     }
     let (ld, rd) = (dims(left), dims(right));
     let (rows, cols) = (size(ld.0, rd.0), size(ld.1, rd.1));
+    if let Err(error) = super::eval_budget::array(rows, cols) { return EvalResult::Error(error); }
     let mut out = Array2D::new(rows, cols);
     for r in 0..rows {
         for c in 0..cols {
@@ -1052,10 +1092,15 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
     if let Some(result) = super::eval_let::try_evaluate(name, args, lookup) {
         return result;
     }
+    // Reference producers need the original geometry, before whole columns
+    // are clipped to occupied data for value-consuming functions.
+    if matches!(name, "OFFSET" | "INDIRECT") {
+        return super::reference::evaluate_reference(&Expr::Function { name: name.into(), args: args.to_vec() }, lookup);
+    }
     // Keep open ranges in the stored AST. Only the arguments being consumed
     // are bounded, so nested/lazy functions still evaluate through this path.
     let table_args;
-    let args = if args.iter().any(|arg| matches!(arg, Expr::StructuredRef(_)) || matches!(arg, Expr::NamedRange(n) if lookup.is_table_name(n))) {
+    let args = if args.iter().any(|arg| matches!(arg, Expr::StructuredRef(_) | Expr::NamedRange(_))) {
         table_args = args.iter().map(|arg| super::structured::resolve(arg, lookup)).collect::<Vec<_>>();
         table_args.as_slice()
     } else { args };
@@ -1081,6 +1126,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         super::lift::Lifted::No => args,
     };
     let result = None
+        .or_else(|| super::eval_subtotal::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_math::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_logical::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_text::try_evaluate(name, args, lookup))

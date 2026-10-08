@@ -20,46 +20,8 @@ impl Spreadsheet {
     fn find_named_range_usages(&self, name: &str, cx: &App) -> Vec<crate::views::impact_preview::ImpactedFormula> {
         use crate::views::impact_preview::ImpactedFormula;
 
-        let name_upper = name.to_uppercase();
-        let mut usages = Vec::new();
-
-        // Scan all cells for formulas containing the name
-        for ((row, col), cell) in self.sheet(cx).cells_iter() {
-            let raw = cell.value().raw_display();
-            if !raw.starts_with('=') {
-                continue;
-            }
-
-            let formula_upper = raw.to_uppercase();
-
-            // Check if name appears as a standalone identifier
-            let contains_name = formula_upper
-                .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-                .any(|word| word == name_upper);
-
-            if contains_name {
-                // Format cell reference
-                let cell_ref = {
-                    let mut col_name = String::new();
-                    let mut c = col;
-                    loop {
-                        col_name.insert(0, (b'A' + (c % 26) as u8) as char);
-                        if c < 26 { break; }
-                        c = c / 26 - 1;
-                    }
-                    format!("{}{}", col_name, row + 1)
-                };
-
-                usages.push(ImpactedFormula {
-                    cell_ref,
-                    formula: raw.to_string(),
-                });
-            }
-        }
-
-        // Sort by cell reference for consistent display
-        usages.sort_by(|a, b| a.cell_ref.cmp(&b.cell_ref));
-        usages
+        self.wb(cx).named_range_usages(name).into_iter()
+            .map(|(cell_ref, formula)| ImpactedFormula { cell_ref, formula }).collect()
     }
 
     /// Show impact preview for a rename operation
@@ -80,6 +42,8 @@ impl Spreadsheet {
     pub fn show_impact_preview_for_delete(&mut self, name: &str, cx: &mut Context<Self>) {
         use crate::views::impact_preview::ImpactAction;
 
+        self.name_draft_error = None;
+        self.name_draft = self.wb(cx).get_named_range(name).cloned().map(|range| crate::named_ranges::plan::NameDraft { revision: self.wb(cx).revision(), range });
         let usages = self.find_named_range_usages(name, cx);
         self.impact_preview_action = Some(ImpactAction::Delete {
             name: name.to_string(),
@@ -91,6 +55,8 @@ impl Spreadsheet {
 
     /// Hide the impact preview modal
     pub fn hide_impact_preview(&mut self, cx: &mut Context<Self>) {
+        self.name_draft_error = None;
+        self.name_draft = None;
         self.impact_preview_action = None;
         self.impact_preview_usages.clear();
         self.mode = Mode::Navigation;
@@ -101,14 +67,14 @@ impl Spreadsheet {
     pub fn apply_impact_preview(&mut self, cx: &mut Context<Self>) {
         use crate::views::impact_preview::ImpactAction;
 
-        let action = self.impact_preview_action.take();
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        let action = self.impact_preview_action.clone();
         let usage_count = self.impact_preview_usages.len();
-        self.impact_preview_usages.clear();
 
         match action {
             Some(ImpactAction::Rename { old_name, new_name }) => {
                 // Perform the rename
-                self.apply_rename_internal(&old_name, &new_name, cx);
+                if !self.apply_rename_internal(&old_name, &new_name, cx) { return; }
                 self.mode = Mode::Navigation;
 
                 // Show one-time F12 hint after first rename
@@ -122,7 +88,7 @@ impl Spreadsheet {
                     ));
                 } else {
                     self.status_message = Some(if usage_count > 0 {
-                        format!("Renamed \"{}\" → \"{}\", updated {} formula{}",
+                        format!("Renamed \"{}\" → \"{}\", updated {} reference{}",
                             old_name, new_name, usage_count, if usage_count == 1 { "" } else { "s" })
                     } else {
                         format!("Renamed \"{}\" → \"{}\"", old_name, new_name)
@@ -131,10 +97,10 @@ impl Spreadsheet {
             }
             Some(ImpactAction::Delete { name }) => {
                 // Perform the delete
-                self.delete_named_range_internal(&name, usage_count, cx);
+                if !self.delete_named_range_internal(&name, usage_count, cx) { return; }
                 self.mode = Mode::Navigation;
                 self.status_message = Some(if usage_count > 0 {
-                    format!("Deleted \"{}\", {} formula{} affected",
+                    format!("Deleted \"{}\", {} reference{} affected",
                         name, usage_count, if usage_count == 1 { "" } else { "s" })
                 } else {
                     format!("Deleted \"{}\"", name)
@@ -144,6 +110,8 @@ impl Spreadsheet {
                 self.mode = Mode::Navigation;
             }
         }
+        self.impact_preview_action = None;
+        self.impact_preview_usages.clear();
         cx.notify();
     }
 

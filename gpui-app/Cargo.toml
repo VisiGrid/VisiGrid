@@ -110,6 +110,7 @@ commercial = ["visigrid-license/commercial"]
 core-text = "21"
 
 [dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0", features = ["test-support"] }
 tempfile = "3"
 
 [build-dependencies]

@@ -319,31 +319,10 @@ impl Spreadsheet {
 
     /// Go to the definition of a named range (F12 on named range in formula)
     pub fn go_to_named_range_definition(&mut self, name: &str, cx: &mut Context<Self>) {
-        use visigrid_engine::named_range::NamedRangeTarget;
-
-        // Extract data from named range before mutable borrows
-        let target_info = self.wb(cx).get_named_range(name).map(|nr| {
-            let (row, col) = match &nr.target {
-                NamedRangeTarget::Cell { row, col, .. } => (*row, *col),
-                NamedRangeTarget::Range { start_row, start_col, .. } => (*start_row, *start_col),
-            };
-            (row, col, nr.reference_string())
-        });
-
-        if let Some((row, col, ref_str)) = target_info {
-            // Exit edit mode and jump to the named range's target
-            self.mode = Mode::Navigation;
-            self.edit_value.clear();
-            self.edit_cursor = 0;
-            self.view_state.selected = (row, col);
-            self.view_state.selection_end = None;
-            self.ensure_cell_visible(row, col);
-            self.status_message = Some(format!("'{}' → {}", name, ref_str));
-            cx.notify();
-        } else {
-            self.status_message = Some(format!("Named range '{}' not found", name));
-            cx.notify();
-        }
+        self.mode = Mode::Navigation;
+        self.edit_value.clear();
+        self.edit_cursor = 0;
+        self.jump_to_named_range(name, cx);
     }
 
     /// Show all formulas that use a named range (Shift+F12 on named range)
@@ -536,6 +515,7 @@ impl Spreadsheet {
                 .into_iter()
                 .map(|nr| {
                     let (row, col) = match &nr.target {
+                        NamedRangeTarget::RefError => (0, 0),
                         NamedRangeTarget::Cell { row, col, .. } => (*row, *col),
                         NamedRangeTarget::Range { start_row, start_col, .. } => (*start_row, *start_col),
                     };

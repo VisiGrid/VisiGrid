@@ -647,7 +647,7 @@ impl Spreadsheet {
                     });
                 }
                 if let Some(before) = self.sheet(cx).comment(data_row, col).cloned() {
-                    comment_patches.push(CommentPatch { row: data_row, col, before: Some(before), after: None });
+                    comment_patches.push(CommentPatch { remove_cell_on_undo: false, row: data_row, col, before: Some(before), after: None });
                     self.active_sheet_mut(cx, |s| s.set_comment(data_row, col, None));
                 }
                 self.set_cell_value(data_row, col, "", cx);
@@ -689,7 +689,7 @@ impl Spreadsheet {
             self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
             actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Cut comments".into() });
         }
-        self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Cut".into() }, None);
+        self.record_action_with_provenance(cx, UndoAction::Group { actions, description: "Cut".into() }, None);
 
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
@@ -753,7 +753,7 @@ impl Spreadsheet {
         }
         if before != format {
             self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
-            patches.push(CellFormatPatch { row, col, before, after: format });
+            patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after: format });
         }
     }
 
@@ -929,7 +929,7 @@ impl Spreadsheet {
                         let before = self.sheet(cx).comment(*data_row, *col).cloned();
                         if before != after {
                             self.active_sheet_mut(cx, |s| s.set_comment(*data_row, *col, after.clone()));
-                            comment_patches.push(CommentPatch { row: *data_row, col: *col, before, after });
+                            comment_patches.push(CommentPatch { remove_cell_on_undo: false, row: *data_row, col: *col, before, after });
                         }
                     }
                     if with_formats {
@@ -965,7 +965,7 @@ impl Spreadsheet {
                     if !format_patches.is_empty() {
                         actions.push(UndoAction::Format { sheet_index, patches: format_patches, kind: FormatActionKind::PasteFormats, description: "Paste formats".into() });
                     }
-                    self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
+                    self.record_action_with_provenance(cx, UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                     self.bump_cells_rev();
                     self.is_modified = true;
                 }
@@ -1095,7 +1095,7 @@ impl Spreadsheet {
                             let before = self.sheet(cx).comment(target_data_row, col).cloned();
                             if before != after {
                                 self.active_sheet_mut(cx, |s| s.set_comment(target_data_row, col, after.clone()));
-                                comment_patches.push(CommentPatch { row: target_data_row, col, before, after });
+                                comment_patches.push(CommentPatch { remove_cell_on_undo: false, row: target_data_row, col, before, after });
                             }
                         }
                         if with_formats {
@@ -1200,7 +1200,7 @@ impl Spreadsheet {
                 if !format_patches.is_empty() {
                     actions.push(UndoAction::Format { sheet_index, patches: format_patches, kind: FormatActionKind::PasteFormats, description: "Paste formats".into() });
                 }
-                self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
+                self.record_action_with_provenance(cx, UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                 self.bump_cells_rev();
                 self.is_modified = true;
             }
@@ -1522,7 +1522,7 @@ impl Spreadsheet {
                 mode: PasteMode::Values,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
@@ -1808,7 +1808,7 @@ impl Spreadsheet {
                 mode: PasteMode::Formulas,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
         }
@@ -1907,7 +1907,7 @@ impl Spreadsheet {
 
                     // Track change for history
                     if old_format != *format {
-                        format_patches.push(CellFormatPatch {
+                        format_patches.push(CellFormatPatch { remove_cell_on_undo: false,
                             row: target_data_row,
                             col,
                             before: old_format,
@@ -1928,7 +1928,7 @@ impl Spreadsheet {
                 mode: PasteMode::Formats,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_format_with_provenance(
+            self.record_format_with_provenance(cx,
                 self.sheet_index(cx),
                 format_patches,
                 FormatActionKind::PasteFormats,
@@ -2045,7 +2045,7 @@ impl Spreadsheet {
             } else {
                 None  // Discontiguous selection - no provenance
             };
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, provenance);
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, provenance);
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
         }

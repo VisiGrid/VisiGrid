@@ -151,7 +151,7 @@ impl Spreadsheet {
 
     /// Insert rows at position with undo support
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
                     axis: visigrid_engine::structural::Axis::Row,
@@ -173,6 +173,16 @@ impl Spreadsheet {
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };
         let print_setup_before = self.sheet(cx).print_setup.clone();
+        let row_layout = match crate::table_structure::RowLayoutHistory::capture(
+            self.structure_layout(self.sheet(cx).id), self.sheet(cx),
+            visigrid_engine::workbook::StructureStep {
+                axis: visigrid_engine::structural::Axis::Row, at: at_row, count, delete: false,
+            },
+        ) {
+            Ok(layout) => Some(Box::new(layout)),
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+
 
         // Perform the insert through the engine's structural entry point so
         // formulas, validations, and named ranges follow the moved cells.
@@ -210,10 +220,15 @@ impl Spreadsheet {
             }
         }
 
+        if let Some(layout) = &row_layout {
+            self.install_structure_layout(self.sheet(cx).id, &layout.after);
+        }
+
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::RowsInserted {
+        self.record_named_range_action(cx, crate::history::UndoAction::RowsInserted {
             sheet_index,
             table_rows,
+            row_layout,
             at_row,
             count,
             print_setup_before,
@@ -228,7 +243,7 @@ impl Spreadsheet {
 
     /// Delete rows at position with undo support
     pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
                     axis: visigrid_engine::structural::Axis::Row,
@@ -250,6 +265,16 @@ impl Spreadsheet {
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };
         let print_setup_before = self.sheet(cx).print_setup.clone();
+        let row_layout = match crate::table_structure::RowLayoutHistory::capture(
+            self.structure_layout(self.sheet(cx).id), self.sheet(cx),
+            visigrid_engine::workbook::StructureStep {
+                axis: visigrid_engine::structural::Axis::Row, at: at_row, count, delete: true,
+            },
+        ) {
+            Ok(layout) => Some(Box::new(layout)),
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+
 
         // Capture cells to be deleted for undo
         // Only cells that exist can be deleted, so ask the sparse store rather
@@ -298,10 +323,15 @@ impl Spreadsheet {
             self.row_view.delete_row(at_row + i);
         }
 
+        if let Some(layout) = &row_layout {
+            self.install_structure_layout(self.sheet(cx).id, &layout.after);
+        }
+
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
+        self.record_named_range_action(cx, crate::history::UndoAction::RowsDeleted {
             sheet_index,
             table_rows,
+            row_layout,
             at_row,
             count,
             deleted_cells,
@@ -326,7 +356,7 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
                     axis: visigrid_engine::structural::Axis::Col,
@@ -377,7 +407,7 @@ impl Spreadsheet {
         }
 
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::ColsInserted {
+        self.record_named_range_action(cx, crate::history::UndoAction::ColsInserted {
             sheet_index,
             table_columns,
             at_col,
@@ -394,7 +424,7 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
-        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+        if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
                     axis: visigrid_engine::structural::Axis::Col,
@@ -456,7 +486,7 @@ impl Spreadsheet {
         }
 
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {
+        self.record_named_range_action(cx, crate::history::UndoAction::ColsDeleted {
             sheet_index,
             table_columns,
             at_col,
@@ -487,13 +517,23 @@ impl Spreadsheet {
 
     /// Hide selected rows (Ctrl+9)
     pub(crate) fn hide_rows(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         if self.mode.is_editing() { return; }
+        if self.wb(cx).sheets().iter().any(|s| s.tables().iter().any(|t| t.totals.is_some()))
+            || crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.change_table_row_visibility(true, cx);
+            return;
+        }
 
         let ((min_row, _), (max_row, _)) = self.selection_range();
-        let rows: Vec<usize> = (min_row..=max_row)
-            .filter(|r| !self.is_row_hidden(*r))
-            .collect();
+        let empty = Default::default();
+        let manual = self.display_hidden_rows().unwrap_or(&empty);
+        let rows = match crate::table_visibility::selected_row_visibility(
+            &self.row_view, manual, min_row, max_row, true,
+        ) {
+            Ok(rows) => rows,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
 
         if rows.is_empty() { return; }
 
@@ -503,7 +543,8 @@ impl Spreadsheet {
             set.insert(r);
         }
 
-        self.history.record_action_with_provenance(
+        if !self.sync_manual_row_visibility(sheet_id, cx) { return; }
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::RowVisibilityChanged {
                 sheet_id,
                 rows: rows.clone(),
@@ -521,14 +562,24 @@ impl Spreadsheet {
     /// Excel behavior: select rows spanning the hidden range, then unhide.
     /// E.g., if rows 5-8 are hidden, select rows 4-9 and press Ctrl+Shift+9.
     pub(crate) fn unhide_rows(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         if self.mode.is_editing() { return; }
+        if self.wb(cx).sheets().iter().any(|s| s.tables().iter().any(|t| t.totals.is_some()))
+            || crate::table_filter_ui::has_table_criteria(self.wb(cx)) {
+            self.change_table_row_visibility(false, cx);
+            return;
+        }
 
         let ((min_row, _), (max_row, _)) = self.selection_range();
         let sheet_id = self.cached_sheet_id();
-        let rows: Vec<usize> = (min_row..=max_row)
-            .filter(|r| self.is_row_hidden(*r))
-            .collect();
+        let empty = Default::default();
+        let manual = self.display_hidden_rows().unwrap_or(&empty);
+        let rows = match crate::table_visibility::selected_row_visibility(
+            &self.row_view, manual, min_row, max_row, false,
+        ) {
+            Ok(rows) => rows,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
 
         if rows.is_empty() {
             self.status_message = Some("No hidden rows in selection".to_string());
@@ -541,7 +592,8 @@ impl Spreadsheet {
             set.remove(&r);
         }
 
-        self.history.record_action_with_provenance(
+        if !self.sync_manual_row_visibility(sheet_id, cx) { return; }
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::RowVisibilityChanged {
                 sheet_id,
                 rows: rows.clone(),
@@ -572,7 +624,7 @@ impl Spreadsheet {
             set.insert(c);
         }
 
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::ColVisibilityChanged {
                 sheet_id,
                 cols: cols.clone(),
@@ -607,7 +659,7 @@ impl Spreadsheet {
             set.remove(&c);
         }
 
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::ColVisibilityChanged {
                 sheet_id,
                 cols: cols.clone(),

@@ -1,9 +1,8 @@
 //! Bounded Table sort/filter projections. Cells and formula coordinates never move.
 //!
-//! This is the Phase 2 engine foundation, not an installed desktop view. Hosts must
-//! retain one owner per sheet, use the workbook's saved spec, rebuild after calculation, and
-//! preflight every mutation before exposing this through editing UI. The desktop
-//! Table sort/filter refusal remains until that integration is complete.
+//! Hosts retain one active owner per sheet, rebuild after calculation, and
+//! preflight edits through the projection. Named presets retain criteria and
+//! stable column identities; only the active spec controls the displayed rows.
 
 use crate::{
     cell::{CellFormat, ValueRef},
@@ -22,14 +21,14 @@ pub enum ViewOwner {
     Table(TableId),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableSort {
     pub column: TableColumnId,
     pub direction: SortDirection,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableFilter {
     pub column: TableColumnId,
@@ -38,13 +37,33 @@ pub struct TableFilter {
 
 /// Persist intent, never column offsets or a cached permutation. IDs are
 /// resolved on every build; the Table catalog stores this in format version 3.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableViewSpec {
     pub table: TableId,
     pub sort: Option<TableSort>,
     pub filters: Vec<TableFilter>,
     pub show_filter_buttons: bool,
+}
+
+/// A reusable criteria setup, scoped to one Table. Manual visibility, record
+/// contents and computed row order are deliberately not part of the preset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedTableView {
+    pub name: String,
+    pub view: TableViewSpec,
+}
+
+pub const MAX_NAMED_TABLE_VIEWS: usize = 64;
+
+pub fn validate_view_name(name: &str) -> Result<(), String> {
+    if name.trim() != name || name.is_empty() || name.chars().count() > 80
+        || name.chars().any(char::is_control)
+    {
+        return Err("Use a view name of 1–80 characters, without control characters or leading/trailing spaces.".into());
+    }
+    Ok(())
 }
 
 impl TableViewSpec {
@@ -85,7 +104,7 @@ impl TableViewSpec {
         self.resolve(table).map(|_| ())
     }
 
-    fn resolve(&self, table: &DataTable) -> Result<FilterState, String> {
+    pub(crate) fn resolve(&self, table: &DataTable) -> Result<FilterState, String> {
         let column = |id| {
             table
                 .columns
@@ -226,7 +245,18 @@ impl TableView {
             range,
             rows,
             filters,
-        })
+        }.with_manual_hidden_rows(&sheet.manual_hidden_rows()))
+    }
+
+    /// Compose host manual visibility with this immutable filter projection.
+    /// Row identities/order and the saved filter criteria are unchanged.
+    pub fn with_manual_hidden_rows(mut self, hidden: &std::collections::BTreeSet<usize>) -> Self {
+        let mut visible = self.rows.visible_mask().to_vec();
+        for &row in hidden {
+            if let Some(show) = visible.get_mut(row) { *show = false; }
+        }
+        self.rows.apply_filter(visible);
+        self
     }
 
     pub fn spec(&self) -> &TableViewSpec {
@@ -428,7 +458,7 @@ pub fn validate_table_view_layout(sheet: &Sheet, id: TableId) -> Result<(), Stri
         return refuse("merged cells in the Table's body rows");
     }
     if sheet.tables().iter().any(|other| {
-        other.id != id && body_rows_overlap(range, other.range.start_row, other.range.end_row)
+        other.id != id && body_rows_overlap(range, other.range.start_row, other.full_range().end_row)
     }) {
         return refuse("another Table");
     }

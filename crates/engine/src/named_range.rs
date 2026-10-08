@@ -22,6 +22,8 @@ pub struct NamedRange {
 /// The target of a named range - either a single cell or a rectangular range
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NamedRangeTarget {
+    /// A deleted target. The name remains reserved until explicitly removed.
+    RefError,
     /// Single cell reference
     Cell {
         sheet: usize,
@@ -79,6 +81,7 @@ impl NamedRange {
     /// Get the cell reference string (e.g., "A1" or "A1:B10")
     pub fn reference_string(&self) -> String {
         match &self.target {
+            NamedRangeTarget::RefError => "#REF!".into(),
             NamedRangeTarget::Cell { row, col, .. } => {
                 format!("{}{}", col_to_letter(*col), row + 1)
             }
@@ -103,6 +106,7 @@ impl NamedRange {
     /// Check if this named range references the given cell
     pub fn references_cell(&self, sheet: usize, row: usize, col: usize) -> bool {
         match &self.target {
+            NamedRangeTarget::RefError => false,
             NamedRangeTarget::Cell {
                 sheet: s,
                 row: r,
@@ -131,7 +135,7 @@ impl NamedRange {
 /// - Can contain letters, numbers, underscores, and dots (for namespaces)
 /// - Cannot be a cell reference (A1, BC23)
 /// - Cannot be a range (A1:B2)
-/// - Cannot be a function name (SUM, IF, VLOOKUP)
+/// - Cannot be an R1C1 reference or its reserved R/C shorthand
 /// - Cannot be a boolean or error literal (TRUE, FALSE, #REF!)
 pub fn is_valid_name(name: &str) -> Result<(), String> {
     // Trim whitespace
@@ -193,31 +197,21 @@ pub fn is_valid_name(name: &str) -> Result<(), String> {
         ));
     }
 
-    // Check for error literals (with or without #)
-    let error_literals = [
-        "REF", "DIV", "NAME", "VALUE", "NUM", "NA", "NULL", "ERROR",
-        "#REF!", "#DIV/0!", "#NAME?", "#VALUE!", "#NUM!", "#N/A", "#NULL!", "#ERROR!",
-    ];
-    if error_literals.iter().any(|e| upper == *e || upper == e.replace(['#', '!', '?', '/'], "")) {
-        return Err(format!(
-            "'{}' conflicts with an error value. Choose a different name.",
-            name
-        ));
+    // Function names are valid identifiers: Rate and RATE(...) have distinct
+    // grammar. Bare error labels such as Value are also ordinary names.
+    let r1c1 = upper.strip_prefix('R').is_some_and(|rest| {
+        rest.split_once('C').is_some_and(|(row, col)| {
+            row.bytes().all(|b| b.is_ascii_digit()) && col.bytes().all(|b| b.is_ascii_digit())
+        })
+    });
+    if upper == "R" || upper == "C" || r1c1 {
+        return Err(format!("'{name}' looks like an R1C1 reference. Choose a different name."));
     }
-
-    // Check for function names (comprehensive list of common spreadsheet functions)
-    if is_function_name(&upper) {
-        return Err(format!(
-            "'{}' is a function name. Choose a different name to avoid confusion.",
-            name
-        ));
-    }
-
     Ok(())
 }
 
-/// Check if name matches a known spreadsheet function (case-insensitive)
-fn is_function_name(upper_name: &str) -> bool {
+/// Preserve the stricter Table policy for function and error names.
+pub(crate) fn is_reserved_table_word(upper_name: &str) -> bool {
     // Comprehensive list of Excel/spreadsheet function names
     // Organized by category for maintainability
     const FUNCTIONS: &[&str] = &[
@@ -303,7 +297,7 @@ fn is_function_name(upper_name: &str) -> bool {
         "AGGREGATE", "SUBTOTAL", "GETPIVOTDATA",
     ];
 
-    FUNCTIONS.contains(&upper_name)
+    FUNCTIONS.contains(&upper_name) || matches!(upper_name, "REF" | "DIV" | "DIV0" | "NA" | "NAME" | "NUM" | "NULL" | "ERROR")
 }
 
 /// Check if a string looks like a range reference (e.g., A1:B2, $A$1:$B$2)
@@ -468,6 +462,19 @@ impl NamedRangeStore {
         self.ranges.remove(&name.to_lowercase())
     }
 
+    /// Keep names reserved, permanently invalidating targets on a deleted tab.
+    pub(crate) fn remove_sheet(&mut self, index: usize) {
+        for range in self.ranges.values_mut() {
+            match &mut range.target {
+                NamedRangeTarget::RefError => {},
+                NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => {
+                    if *sheet == index { range.target = NamedRangeTarget::RefError; }
+                    else if *sheet > index { *sheet -= 1; }
+                }
+            }
+        }
+    }
+
     /// Update the description of a named range
     pub fn set_description(&mut self, name: &str, description: Option<String>) -> Result<(), String> {
         let key = name.to_lowercase();
@@ -588,19 +595,13 @@ mod tests {
     }
 
     #[test]
-    fn test_function_name_blocking() {
-        // Common functions should be blocked
-        assert!(is_valid_name("SUM").is_err());
-        assert!(is_valid_name("sum").is_err()); // case insensitive
-        assert!(is_valid_name("VLOOKUP").is_err());
-        assert!(is_valid_name("IF").is_err());
-        assert!(is_valid_name("Average").is_err());
-        assert!(is_valid_name("COUNT").is_err());
-        assert!(is_valid_name("INDEX").is_err());
-        assert!(is_valid_name("MATCH").is_err());
-        // Check error message is helpful
-        let err = is_valid_name("SUM").unwrap_err();
-        assert!(err.contains("function name"), "Error should mention function: {}", err);
+    fn function_names_are_valid_but_r1c1_references_are_reserved() {
+        for name in ["SUM", "Rate", "Date", "Value", "VLOOKUP", "Average", "RCdata"] {
+            assert!(is_valid_name(name).is_ok(), "{name}");
+        }
+        for name in ["R", "c", "RC", "r1c", "RC12", "R10C2", "r1048576c16384"] {
+            assert!(is_valid_name(name).is_err(), "{name}");
+        }
     }
 
     #[test]
@@ -615,14 +616,13 @@ mod tests {
     }
 
     #[test]
-    fn test_error_literal_blocking() {
-        // Error values should be blocked
-        assert!(is_valid_name("REF").is_err());
-        assert!(is_valid_name("NA").is_err());
-        assert!(is_valid_name("VALUE").is_err());
-        assert!(is_valid_name("DIV").is_err());
-        assert!(is_valid_name("NUM").is_err());
-        // Note: #REF! etc. would fail on # character anyway
+    fn bare_error_labels_are_names_but_error_literals_are_not() {
+        for name in ["REF", "NA", "VALUE", "DIV", "NUM"] {
+            assert!(is_valid_name(name).is_ok());
+        }
+        for name in ["#REF!", "#VALUE!", "#N/A"] {
+            assert!(is_valid_name(name).is_err());
+        }
     }
 
     #[test]
@@ -749,8 +749,8 @@ mod tests {
         let mut store = NamedRangeStore::new();
         store.set(NamedRange::cell("Valid", 0, 0, 0)).unwrap();
 
-        // Try to rename to a function name
-        let result = store.rename("Valid", "SUM");
+        // Try to rename to an R1C1 reference
+        let result = store.rename("Valid", "R1C1");
         assert!(result.is_err());
 
         // Try to rename to a cell reference

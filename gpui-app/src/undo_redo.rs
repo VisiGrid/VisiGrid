@@ -40,7 +40,19 @@ impl Spreadsheet {
         }
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.undo() {
-            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+            if let Err(error) = crate::validation_ui::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::formatting::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, false) {
+                self.history.redo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::cond_format_ui::plan::validate_history(self.wb(cx), &entry.action, false) {
                 self.history.redo(); self.status_message = Some(error); cx.notify(); return;
             }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
@@ -53,7 +65,7 @@ impl Spreadsheet {
                     &entry.action,
                     UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. } | UndoAction::ReviewCopy { .. }
                 )
-                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if commit.is_conversion() || commit.is_totals_change() || commit.is_calculated_change() || commit.is_name_change() || commit.is_saved_view_change() || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
@@ -72,28 +84,18 @@ impl Spreadsheet {
                 }
             }
             match entry.action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, false, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
                 self.bump_cells_rev();
             }
 
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            sheet.cond_formats.remove(rule.id);
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), false));
                 self.bump_cf_rules_rev();
                 }
                 UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for mut r in rules {
-                                r.reparse();
-                                sheet.cond_formats.insert_at(usize::MAX, r);
-                            }
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, true));
                 self.bump_cf_rules_rev();
                 }
                 UndoAction::Values { sheet_index, changes } => {
@@ -107,14 +109,8 @@ impl Spreadsheet {
                     self.status_message = Some("Undo".to_string());
                 }
                 UndoAction::Format { sheet_index, patches, description, .. } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for patch in patches {
-                                sheet.set_format(patch.row, patch.col, patch.before);
-                            }
-                            sheet.scan_border_flag();
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, false));
+                    self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: {}", description));
                 }
                 UndoAction::NamedRangeDeleted { named_range } => {
@@ -214,7 +210,7 @@ impl Spreadsheet {
                     self.pivot_undo(&commit, &created_sheet, cx);
                     self.status_message = Some(format!("Undo: {}", description));
                 }
-                UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, print_setup_before, formula_rewrites } => {
+                UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, row_layout, print_setup_before, formula_rewrites } => {
                     // Undo insert by deleting the rows
                     if let Some(history) = &table_rows {
                         let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
@@ -248,10 +244,11 @@ impl Spreadsheet {
                             }
                         });
                     }
+                    self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
                 }
-                UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
+                UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
                     // Undo delete by re-inserting rows and restoring data
                     if let Some(history) = &table_rows {
                         let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
@@ -305,6 +302,7 @@ impl Spreadsheet {
                             }
                         });
                     }
+                    self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                     self.bump_cells_rev();
                     self.status_message = Some(format!("Undo: deleted {} row(s)", count));
                 }
@@ -527,6 +525,7 @@ impl Spreadsheet {
                             set.insert(*row); // Was unhidden → re-hide
                         }
                     }
+                    self.sync_manual_row_visibility(sheet_id, cx);
                     let action = if hidden { "hide" } else { "unhide" };
                     self.status_message = Some(format!("Undo: {} {} row(s)", action, rows.len()));
                 }
@@ -581,28 +580,18 @@ impl Spreadsheet {
     /// Apply a single undo action (helper for Group handling)
     fn apply_undo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, false, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, false));
                 self.bump_cells_rev();
             }
 
             UndoAction::CondFormatAdded { sheet_index, rule } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        sheet.cond_formats.remove(rule.id);
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), false));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        for mut r in rules {
-                            r.reparse();
-                            sheet.cond_formats.insert_at(usize::MAX, r);
-                        }
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, true));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::Values { sheet_index, changes } => {
@@ -617,14 +606,8 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::Format { sheet_index, patches, .. } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        for patch in patches {
-                            sheet.set_format(patch.row, patch.col, patch.before);
-                        }
-                        sheet.scan_border_flag();
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, false));
+                self.bump_cells_rev();
             }
             UndoAction::NamedRangeDeleted { named_range } => {
                 self.workbook.update(cx, |wb, _| { let _ = wb.named_ranges_mut().set(named_range); });
@@ -693,7 +676,7 @@ impl Spreadsheet {
             } => {
                 self.pivot_undo(&commit, &created_sheet, cx);
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, print_setup_before, formula_rewrites } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, row_layout, print_setup_before, formula_rewrites } => {
                 if let Some(history) = &table_rows {
                     let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
                     if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
@@ -724,9 +707,10 @@ impl Spreadsheet {
                         }
                     });
                 }
+                self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
                 if let Some(history) = &table_rows {
                     let result = self.workbook.update(cx, |wb, _| wb.apply_table_row_history(history, true));
                     if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
@@ -776,6 +760,7 @@ impl Spreadsheet {
                         }
                     });
                 }
+                self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                 self.bump_cells_rev();
             }
             UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, print_setup_before, formula_rewrites } => {
@@ -886,6 +871,7 @@ impl Spreadsheet {
                 for row in &rows {
                     if hidden { set.remove(row); } else { set.insert(*row); }
                 }
+                self.sync_manual_row_visibility(sheet_id, cx);
             }
             UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
                 let set = self.hidden_cols.entry(sheet_id).or_default();
@@ -995,29 +981,18 @@ impl Spreadsheet {
     /// Apply a single redo action (helper for Group handling)
     fn apply_redo_action(&mut self, action: UndoAction, cx: &mut Context<Self>) -> bool {
         match action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, true, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
                 self.bump_cells_rev();
             }
 
             UndoAction::CondFormatAdded { sheet_index, rule } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        let mut r = rule;
-                        r.reparse();
-                        sheet.cond_formats.insert_at(usize::MAX, r);
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), true));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                self.workbook.update(cx, |wb, _| {
-                    if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                        for r in rules {
-                            sheet.cond_formats.remove(r.id);
-                        }
-                    }
-                });
+                self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, false));
                 self.bump_cf_rules_rev();
                 }
             UndoAction::Values { sheet_index, changes } => {
@@ -1030,12 +1005,8 @@ impl Spreadsheet {
                 self.bump_cells_rev();
             }
             UndoAction::Format { sheet_index, patches, .. } => {
-                self.sheet_mut(sheet_index, cx, |sheet| {
-                    for patch in patches {
-                        sheet.set_format(patch.row, patch.col, patch.after);
-                    }
-                    sheet.scan_border_flag();
-                });
+                self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, true));
+                self.bump_cells_rev();
             }
             UndoAction::NamedRangeDeleted { named_range } => {
                 let name = named_range.name.clone();
@@ -1116,7 +1087,7 @@ impl Spreadsheet {
             } => {
                 self.pivot_redo(&commit, &created_sheet, cx);
             }
-            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, formula_rewrites, .. } => {
+            UndoAction::RowsInserted { sheet_index, at_row, count, table_rows, row_layout, formula_rewrites, .. } => {
                 let _ = formula_rewrites;
                 // Redo re-runs the edit through the structural entry point so
                 // formulas, validations, and named ranges are re-adjusted.
@@ -1138,9 +1109,10 @@ impl Spreadsheet {
                         sheet_heights.insert(r + count, h);
                     }
                 }
+                self.replay_row_layout(row_layout.as_deref(), sheet_index, false, cx);
                 self.bump_cells_rev();
             }
-            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, .. } => {
+            UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, .. } => {
                 if let Err(error) = self.workbook.update(cx, |wb, _| {
                     if let Some(history) = &table_rows { wb.apply_table_row_history(history, false) } else { wb.structural_edit(sheet_index, visigrid_engine::structural::Axis::Row, at_row, count, true) }
                 }) { self.status_message = Some(error); cx.notify(); return false; }
@@ -1158,6 +1130,7 @@ impl Spreadsheet {
                 for (r, h) in heights_to_shift {
                     sheet_heights.insert(r - count, h);
                 }
+                self.replay_row_layout(row_layout.as_deref(), sheet_index, false, cx);
                 self.bump_cells_rev();
             }
             UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, formula_rewrites, .. } => {
@@ -1228,6 +1201,7 @@ impl Spreadsheet {
                 for row in &rows {
                     if hidden { set.insert(*row); } else { set.remove(row); }
                 }
+                self.sync_manual_row_visibility(sheet_id, cx);
             }
             UndoAction::ColVisibilityChanged { sheet_id, cols, hidden } => {
                 // Redo: re-apply the visibility change
@@ -1330,7 +1304,19 @@ impl Spreadsheet {
         }
         if self.block_if_previewing_only(cx) { return; }
         if let Some(entry) = self.history.redo() {
-            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action) {
+            if let Err(error) = crate::validation_ui::plan::validate_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::table_command_scope::validate_freeze_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::formatting::plan::validate_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::comments::plan::validate_history(self.wb(cx), &entry.action, true) {
+                self.history.undo(); self.status_message = Some(error); cx.notify(); return;
+            }
+            if let Err(error) = crate::cond_format_ui::plan::validate_history(self.wb(cx), &entry.action, true) {
                 self.history.undo(); self.status_message = Some(error); cx.notify(); return;
             }
             if crate::pivot_ui::is_pivot_history(&entry.action) {
@@ -1343,7 +1329,7 @@ impl Spreadsheet {
                     &entry.action,
                     UndoAction::TableBatchChanged { .. } | UndoAction::TableCellsChanged { .. } | UndoAction::TableStructureChanged { .. } | UndoAction::TableAppend { .. } | UndoAction::ReviewCopy { .. }
                 )
-                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if crate::table_header_paste::is_header_rename(commit) || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
+                && !matches!(&entry.action, UndoAction::TableCommit { commit, .. } if commit.is_conversion() || commit.is_totals_change() || commit.is_calculated_change() || commit.is_name_change() || commit.is_saved_view_change() || crate::table_resize::is_resize(commit) || crate::table_create::is_creation(commit))
                 && !crate::pivot_ui::is_pivot_history(&entry.action)
                 && !crate::table_command_scope::metadata_history_allowed(self.wb(cx), &entry.action)
                 && self.block_table_view_edit(cx) {
@@ -1362,29 +1348,18 @@ impl Spreadsheet {
                 }
             }
             match entry.action {
+            UndoAction::ValidationChanged { commit, .. } => self.replay_validation_edit(&commit, true, cx),
             UndoAction::Comments { sheet_index, patches, .. } => {
                 self.workbook.update(cx, |wb, _| crate::history::apply_comment_patches(wb, sheet_index, &patches, true));
                 self.bump_cells_rev();
             }
 
                 UndoAction::CondFormatAdded { sheet_index, rule } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            let mut r = rule;
-                            r.reparse();
-                            sheet.cond_formats.insert_at(usize::MAX, r);
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, std::slice::from_ref(&rule), true));
                     self.bump_cf_rules_rev();
                 }
                 UndoAction::CondFormatsCleared { sheet_index, rules } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for r in rules {
-                                sheet.cond_formats.remove(r.id);
-                            }
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::cond_format_ui::plan::apply(wb, sheet_index, &rules, false));
                 self.bump_cf_rules_rev();
                 }
                 UndoAction::Values { sheet_index, changes } => {
@@ -1398,14 +1373,8 @@ impl Spreadsheet {
                     self.status_message = Some("Redo".to_string());
                 }
                 UndoAction::Format { sheet_index, patches, description, .. } => {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(sheet) = wb.sheet_mut(sheet_index) {
-                            for patch in patches {
-                                sheet.set_format(patch.row, patch.col, patch.after);
-                            }
-                            sheet.scan_border_flag();
-                        }
-                    });
+                    self.workbook.update(cx, |wb, _| crate::formatting::plan::apply(wb, sheet_index, &patches, true));
+                    self.bump_cells_rev();
                     self.status_message = Some(format!("Redo: {}", description));
                 }
                 UndoAction::NamedRangeDeleted { named_range } => {
@@ -1561,6 +1530,7 @@ impl Spreadsheet {
                     for row in &rows {
                         if hidden { set.insert(*row); } else { set.remove(row); }
                     }
+                    self.sync_manual_row_visibility(sheet_id, cx);
                     let action = if hidden { "hide" } else { "unhide" };
                     self.status_message = Some(format!("Redo: {} {} row(s)", action, rows.len()));
                 }
@@ -1701,7 +1671,7 @@ impl Spreadsheet {
                 if display_value.is_empty() {
                     continue;
                 }
-                let result = self.wb(cx).validate_cell_input(sheet_index, row, col, &display_value);
+                let result = self.wb(cx).validate_cell(sheet_index, row, col);
                 if let ValidationResult::Invalid { reason, .. } = result {
                     let failure_reason = Workbook::classify_failure_reason(&reason);
                     self.invalid_cells.insert((row, col), failure_reason);

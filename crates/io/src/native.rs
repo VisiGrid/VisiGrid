@@ -10,6 +10,8 @@ use visigrid_engine::formula::eval::Value;
 use visigrid_engine::sheet::{MergedRegion, Sheet, SheetId, NUM_COLS, NUM_ROWS};
 use visigrid_engine::workbook::Workbook;
 use visigrid_engine::named_range::{NamedRange, NamedRangeTarget};
+#[path = "native_validation.rs"]
+mod native_validation;
 
 // ============================================================================
 // Semantic Verification (persisted expected fingerprint)
@@ -32,7 +34,8 @@ pub struct SemanticVerification {
 /// Fingerprint format version. Increment on breaking changes to fingerprint computation.
 /// v2: includes iteration settings (enabled, max_iters, tolerance).
 /// Table-bearing workbooks use v3, which also includes their semantic schema.
-/// Table-free workbooks retain v2 for existing verification stamps.
+/// Totals use v4. Additional manual visibility uses v5 because it affects SUBTOTAL.
+/// Workbooks without those semantic additions retain their existing stamps.
 const FINGERPRINT_VERSION: u32 = 2;
 
 /// Compute semantic fingerprint of a workbook.
@@ -50,6 +53,7 @@ const FINGERPRINT_VERSION: u32 = 2;
 pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
     let mut hasher = blake3::Hasher::new();
     let mut op_count = 0;
+    let mut has_extra_manual_visibility = false;
 
     // Include iteration settings — these affect computed results
     let iter_settings = format!(
@@ -64,6 +68,17 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
     // Iterate all sheets
     for sheet_idx in 0..workbook.sheet_count() {
         if let Some(sheet) = workbook.sheet(sheet_idx) {
+            // Totals metadata already covers its legacy visibility copy.
+            // Other manual hides now affect SUBTOTAL and need semantic coverage.
+            let legacy: std::collections::BTreeSet<_> = sheet.tables().iter()
+                .filter_map(|t| t.totals.as_ref()).flat_map(|t| t.hidden_rows.iter().copied()).collect();
+            let hidden: Vec<_> = sheet.manual_hidden_rows().difference(&legacy).copied().collect();
+            if !hidden.is_empty() {
+                has_extra_manual_visibility = true;
+                hasher.update(b"manual-hidden-rows:");
+                hasher.update(&serde_json::to_vec(&(sheet_idx, hidden)).unwrap());
+                hasher.update(b"\n");
+            }
             // Collect cells and sort for deterministic order
             let mut cells: Vec<((usize, usize), String)> = Vec::new();
             for ((row, col), cell) in sheet.cells_iter() {
@@ -99,6 +114,11 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
         hasher.update(b"\n");
     }
     for (_, table) in &tables {
+        if let Some(totals) = &table.totals {
+            hasher.update(b"totals-row:");
+            hasher.update(&serde_json::to_vec(&(&table.name, totals)).unwrap());
+            hasher.update(b"\n");
+        }
         for column in &table.columns {
             if let Some(formula) = &column.formula {
                 hasher.update(b"calculated-column:");
@@ -107,7 +127,7 @@ pub fn compute_semantic_fingerprint(workbook: &Workbook) -> String {
             }
         }
     }
-    let fingerprint_version = if tables.is_empty() { FINGERPRINT_VERSION } else { 3 };
+    let fingerprint_version = if has_extra_manual_visibility { 5 } else if tables.is_empty() { FINGERPRINT_VERSION } else if tables.iter().any(|(_, t)| t.totals.is_some()) { 4 } else { 3 };
     let hash = hasher.finalize();
     let hash_hex = &hash.to_hex()[0..16]; // First 16 hex chars (64 bits)
     format!("v{}:{}:{}", fingerprint_version, op_count, hash_hex)
@@ -696,8 +716,12 @@ fn write_sheet(conn: &Connection, sheet: &Sheet) -> Result<(), String> {
     let json = serde_json::to_string(&comments).map_err(|e| e.to_string())?;
     conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('sheet_comments_0', ?1)", params![json]).map_err(|e| e.to_string())?;
     save_cond_formats_sheet(&conn, 0, &sheet.cond_formats)?;
+    native_validation::save(&conn, 0, sheet)?;
     save_print_setup(&conn, 0, &sheet.print_setup)?;
     save_sheet_merges(&conn, 0, sheet)?;
+    for row in sheet.manual_hidden_rows() {
+        conn.execute("INSERT INTO hidden_rows (sheet_idx, row) VALUES (0, ?1)", [row as i64]).map_err(|e| e.to_string())?;
+    }
 
     conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
 
@@ -827,7 +851,11 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
         "SELECT row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline FROM cells"
     };
 
-    let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+    let query = if conn.prepare("SELECT formula_source FROM cells LIMIT 1").is_ok() {
+        query.replace(" FROM cells", ", formula_source FROM cells")
+    } else { query.to_owned() };
+    let mut cached_formula_values = Vec::new();
+    let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
 
     let cell_iter = stmt
         .query_map([], |row| {
@@ -846,14 +874,23 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
             let fmt_thousands: i32 = row.get(12).unwrap_or(0);
             let fmt_negative: i32 = row.get(13).unwrap_or(0);
             let fmt_currency_symbol: Option<String> = row.get(14).ok().and_then(|v: Option<String>| v);
-            Ok((r as usize, c as usize, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol))
+            let formula_source = row.get::<_, Option<String>>("formula_source").ok().flatten();
+            Ok((r as usize, c as usize, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, formula_source))
         })
         .map_err(|e| e.to_string())?;
 
     for cell_result in cell_iter {
-        let (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol) =
+        let (row, col, value_type, value_num, value_text, fmt_bold, fmt_italic, fmt_underline, fmt_alignment, fmt_number_type, fmt_decimals, fmt_font_family, fmt_thousands, fmt_negative, fmt_currency_symbol, formula_source) =
             cell_result.map_err(|e| e.to_string())?;
 
+        if value_type == TYPE_FORMULA && formula_source.is_some() {
+            let cached = match (value_num, value_text.as_deref()) {
+                (Some(n), _) => Some(crate::CachedFormulaValue::Number(n)),
+                (None, Some(text)) if !text.is_empty() => Some(crate::CachedFormulaValue::Text(text.to_owned())),
+                _ => None,
+            };
+            if let Some(cached) = cached { cached_formula_values.push((0, row, col, cached)); }
+        }
         let value = match value_type {
             TYPE_NUMBER => {
                 if let Some(n) = value_num {
@@ -866,14 +903,15 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
                     String::new()
                 }
             }
-            TYPE_TEXT | TYPE_FORMULA => value_text.unwrap_or_default(),
+            TYPE_FORMULA => formula_source.or(value_text).unwrap_or_default(),
+            TYPE_TEXT => value_text.unwrap_or_default(),
             _ => String::new(),
         };
 
         if value_type == TYPE_TEXT {
             sheet.set_text(row, col, &value);
         } else if !value.is_empty() {
-            sheet.set_value(row, col, &value);
+            sheet.set_value_deferred(row, col, &value);
         }
 
         // Apply formatting
@@ -943,7 +981,13 @@ pub fn load(path: &Path) -> Result<Sheet, String> {
 
     sheet.print_setup = load_print_setup(&conn, 0)?;
     load_sheet_merges(&conn, 0, 0, &mut sheet)?;
-    Ok(sheet)
+    load_manual_hidden_rows(&conn, 0, &mut sheet)?;
+    if let Some(error) = native_validation::load(&conn, 0, &mut sheet) { sheet.read_only_reason = Some(error); }
+    let mut workbook = Workbook::from_sheets(vec![sheet], 0);
+    workbook.rebuild_dep_graph();
+    workbook.recompute_full_ordered();
+    crate::keep_uncomputable_values(&mut workbook, &cached_formula_values);
+    Ok(workbook.active_sheet().clone())
 }
 
 /// Save a complete workbook including all sheets and named ranges
@@ -1080,6 +1124,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) ->
 
         for nr in workbook.list_named_ranges() {
             let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::RefError => (0i32, -1i64, 0i64, 0i64, None::<i64>, None::<i64>),
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
                 }
@@ -1118,7 +1163,7 @@ fn write_workbook(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) ->
         }
     }
 
-    save_cond_formats(&conn, workbook)?;
+    save_sheet_rules(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
     save_tables(&conn, workbook, dir)?;
     save_tab_colors(&conn, workbook)?;
@@ -1256,6 +1301,7 @@ fn write_workbook_with_metadata(
 
         for nr in workbook.list_named_ranges() {
             let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::RefError => (0i32, -1i64, 0i64, 0i64, None::<i64>, None::<i64>),
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
                 }
@@ -1294,7 +1340,7 @@ fn write_workbook_with_metadata(
         }
     }
 
-    save_cond_formats(&conn, workbook)?;
+    save_sheet_rules(&conn, workbook)?;
     save_pivots(&conn, workbook)?;
     save_tables(&conn, workbook, dir)?;
     save_tab_colors(&conn, workbook)?;
@@ -1564,7 +1610,11 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
             let (name, target_type, sheet, start_row, start_col, end_row, end_col, description) =
                 nr_result.map_err(|e| e.to_string())?;
 
-            let target = if target_type == 0 {
+            // A deleted target uses the existing cell schema with a missing
+            // sheet sentinel. Older sheet-aware readers also evaluate #REF!.
+            let target = if sheet == -1 {
+                NamedRangeTarget::RefError
+            } else if target_type == 0 {
                 // Cell
                 NamedRangeTarget::Cell {
                     sheet: sheet as usize,
@@ -1604,7 +1654,7 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
         }
     }
 
-    load_cond_formats(&conn, &mut workbook);
+    let validation_issues = load_sheet_rules(&conn, &mut workbook);
     load_tab_colors(&conn, &mut workbook);
     load_sheet_defaults(&conn, &mut workbook);
     for i in 0..workbook.sheet_count() {
@@ -1618,6 +1668,12 @@ fn load_workbook_impl(path: &Path, recovery: bool) -> Result<(Workbook, Option<c
         Err(issue) if recovery => Some(issue),
         Err(issue) => return Err(issue.to_string()),
     };
+    for index in 0..workbook.sheet_count() {
+        load_manual_hidden_rows(&conn, index, workbook.sheet_mut(index).unwrap())?;
+    }
+    for (index, error) in validation_issues {
+        workbook.sheet_mut(index).unwrap().read_only_reason = Some(error);
+    }
     if let Some(issue) = &issue {
         crate::table_recovery::finish_recovery(&mut workbook, issue, &cached_formula_values);
         return Ok((workbook, Some(issue.clone())));
@@ -1813,7 +1869,31 @@ fn save_tables(conn: &Connection, workbook: &Workbook, dir: Option<&Path>) -> Re
         conn.execute("INSERT INTO meta (key, value) VALUES ('tables', ?1)", params![json])
             .map_err(|e| e.to_string())?;
     }
+    // Headless saves have no separate host layout. Persist canonical manual
+    // hides, including the legacy totals copy, in the existing layout table.
+    for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
+        for row in sheet.manual_hidden_rows() {
+            conn.execute("INSERT OR IGNORE INTO hidden_rows (sheet_idx, row) VALUES (?1, ?2)",
+                params![sheet_idx as i64, row as i64]).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(())
+}
+
+fn load_manual_hidden_rows(conn: &Connection, index: usize, sheet: &mut Sheet) -> Result<(), String> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hidden_rows')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if !exists { return Ok(()); }
+    let mut hidden = sheet.manual_hidden_rows();
+    let mut stmt = conn.prepare("SELECT row FROM hidden_rows WHERE sheet_idx=?1").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([index as i64], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())?;
+    for row in rows {
+        let row = row.map_err(|e| e.to_string())?;
+        if row < 0 || row >= visigrid_engine::sheet::NUM_ROWS as i64 {
+            return Err("Hidden rows exceed the worksheet boundary.".into());
+        }
+        hidden.insert(row as usize);
+    }
+    sheet.set_manual_hidden_rows(hidden)
 }
 
 /// `recipe` relative to `dir` when it lies inside it; otherwise unchanged.
@@ -1918,19 +1998,21 @@ fn load_pivots(conn: &Connection, workbook: &mut Workbook) {
     }
 }
 
-fn save_cond_formats(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
+fn save_sheet_rules(conn: &Connection, workbook: &Workbook) -> Result<(), String> {
     for (sheet_idx, sheet) in workbook.sheets().iter().enumerate() {
         save_cond_formats_sheet(conn, sheet_idx, &sheet.cond_formats)?;
+        native_validation::save(conn, sheet_idx, sheet)?;
     }
     Ok(())
 }
 
-/// Restore conditional formatting rules from meta blobs. Missing keys or
-/// unparseable blobs (from newer versions) leave the store empty rather
-/// than failing the load.
-fn load_cond_formats(conn: &Connection, workbook: &mut Workbook) {
+/// Restore sheet rules. Validation corruption opens read-only recovery;
+/// conditional formats retain their legacy best-effort loading behavior.
+fn load_sheet_rules(conn: &Connection, workbook: &mut Workbook) -> Vec<(usize, String)> {
+    let mut issues = Vec::new();
     let sheet_count = workbook.sheets().len();
     for sheet_idx in 0..sheet_count {
+        if let Some(error) = native_validation::load(conn, sheet_idx, workbook.sheet_mut(sheet_idx).unwrap()) { issues.push((sheet_idx, error)); }
         let json: Option<String> = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
@@ -1951,6 +2033,7 @@ fn load_cond_formats(conn: &Connection, workbook: &mut Workbook) {
             }
         }
     }
+    issues
 }
 
 /// Load semantic metadata from a .sheet file.
@@ -2326,8 +2409,8 @@ pub fn delete_cloud_identity(path: &Path) -> Result<(), String> {
 
 /// Layout data (column widths, row heights, hidden rows/cols) keyed by sheet index.
 ///
-/// Hidden rows/cols are visual-only state (like formatting) and do NOT affect
-/// the semantic fingerprint. They persist across save/close/reopen cycles.
+/// Hidden columns are presentation only. Manual hidden rows also affect
+/// SUBTOTAL and are mirrored in the engine's canonical visibility state.
 pub struct SheetLayout {
     /// sheet_idx -> (col -> width_px)
     pub col_widths: HashMap<usize, HashMap<usize, f32>>,
@@ -2369,7 +2452,7 @@ pub fn save_layout(path: &Path, layout: &SheetLayout) -> Result<(), String> {
 
     // Save hidden rows
     let mut hr_stmt = conn.prepare(
-        "INSERT INTO hidden_rows (sheet_idx, row) VALUES (?1, ?2)"
+        "INSERT OR IGNORE INTO hidden_rows (sheet_idx, row) VALUES (?1, ?2)"
     ).map_err(|e| e.to_string())?;
 
     for (sheet_idx, rows) in &layout.hidden_rows {
@@ -2877,6 +2960,7 @@ fn write_workbook_full(
 
         for nr in workbook.list_named_ranges() {
             let (target_type, sheet_idx, start_row, start_col, end_row, end_col) = match &nr.target {
+                NamedRangeTarget::RefError => (0i32, -1i64, 0i64, 0i64, None::<i64>, None::<i64>),
                 NamedRangeTarget::Cell { sheet, row, col } => {
                     (0i32, *sheet as i64, *row as i64, *col as i64, None::<i64>, None::<i64>)
                 }
@@ -2909,7 +2993,7 @@ fn write_workbook_full(
 
     save_sheet_defaults(conn, workbook)?;
 
-    save_cond_formats(conn, workbook)?;
+    save_sheet_rules(conn, workbook)?;
     save_pivots(conn, workbook)?;
     save_tables(conn, workbook, dir)?;
 

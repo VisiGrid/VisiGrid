@@ -26,7 +26,7 @@ use crate::formula::parser::{parse, Expr, ParsedExpr};
 use crate::sheet::UnboundSheetRef;
 
 /// Which axis a structural edit operates on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Axis {
     Row,
     Col,
@@ -83,6 +83,21 @@ pub fn shift_span(start: usize, end: usize, at: usize, count: usize, delete: boo
         count,
         delete,
     })
+}
+
+/// Metadata ranges reaching the grid edge remain attached to it in both
+/// directions. A start pushed off the sheet still has no surviving range.
+/// An anchored delete that consumes the range through the sheet edge drops
+/// it, so the inverse insert is not blocked by a range that should be gone.
+pub(crate) fn shift_edge_span(start: usize, end: usize, at: usize, count: usize, delete: bool, limit: usize) -> Option<(usize, usize)> {
+    let anchored = end == limit - 1;
+    if anchored && delete && start >= at && at.saturating_add(count) >= limit {
+        return None;
+    }
+    let (start, end) = if anchored && delete {
+        (if start >= at.saturating_add(count) { start - count } else if start >= at { at } else { start }, end)
+    } else { shift_span(start, end, at, count, delete)? };
+    (start < limit).then_some((start, if anchored { limit - 1 } else { end.min(limit - 1) }))
 }
 
 /// Adjust a range's [start, end] span. Returns None if the whole span died.

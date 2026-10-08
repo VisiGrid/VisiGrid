@@ -58,6 +58,10 @@ impl Default for RowView {
 }
 
 impl RowView {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of_val(self) + (self.row_order.capacity() + self.data_to_view_map.capacity() + self.visible_rows.capacity()) * std::mem::size_of::<usize>() + self.visible_mask.capacity() + self.data_to_visible.capacity() * 4
+    }
+
     /// Initialize identity mapping for N rows
     pub fn new(row_count: usize) -> Self {
         Self {
@@ -603,7 +607,7 @@ pub struct UniqueValueEntry {
 }
 
 /// Text filter mode
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextFilterMode {
     Contains,
     NotContains,
@@ -614,7 +618,7 @@ pub enum TextFilterMode {
 }
 
 /// Text filter predicate
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextFilter {
     pub mode: TextFilterMode,
     pub value: String,
@@ -641,14 +645,26 @@ impl TextFilter {
 }
 
 /// Per-column filter criteria
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnFilter {
     /// Selected normalized filter keys to INCLUDE (None = all pass)
     /// Uses NormalizedFilterKey for consistent comparison
+    #[serde(serialize_with = "serialize_selected")]
     pub selected: Option<HashSet<NormalizedFilterKey>>,
 
     /// Optional text predicate (AND with selected)
     pub text_filter: Option<TextFilter>,
+}
+
+fn serialize_selected<S: serde::Serializer>(
+    selected: &Option<HashSet<NormalizedFilterKey>>, serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let ordered = selected.as_ref().map(|values| {
+        let mut values: Vec<_> = values.iter().collect();
+        values.sort_unstable();
+        values
+    });
+    ordered.serialize(serializer)
 }
 
 impl ColumnFilter {

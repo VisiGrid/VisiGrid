@@ -12,6 +12,10 @@ use crate::history::{CellFormatPatch, FormatActionKind, UndoAction};
 use crate::mode::Mode;
 use crate::repeat::RepeatAction;
 
+#[path = "format_plan.rs"]
+pub(crate) mod plan;
+use plan::Operation;
+
 /// Format Painter state: captured format + locked flag.
 #[derive(Debug, Clone)]
 pub struct FormatPaintState {
@@ -61,13 +65,58 @@ const MAX_FORMAT_STATE_CELLS: usize = 10_000;
 const MAX_FORMAT_APPLY_CELLS: usize = MAX_FORMAT_STATE_CELLS;
 
 impl Spreadsheet {
+    fn try_table_format(
+        &mut self,
+        operation: Operation,
+        kind: FormatActionKind,
+        repeat: Option<RepeatAction>,
+        description: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        if !self.wb(cx).has_table_criteria() { return None; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return Some(false); }
+        self.sync_table_view(cx);
+        let ranges = self.format_apply_ranges(cx);
+        let index = self.sheet_index(cx);
+        let result = self.validate_saved_view_layout(self.wb(cx)).and_then(|_| {
+            plan::plan(self.wb(cx), index, &self.row_view, self.display_hidden_rows(),
+                self.hidden_cols.get(&self.cached_sheet_id()), &ranges, &operation)
+        });
+        let patches = match result {
+            Ok(patches) => patches,
+            Err(error) => {
+                self.status_message = Some(error);
+                cx.notify();
+                return Some(false);
+            }
+        };
+        if let Some(repeat) = repeat { self.set_repeat(repeat); }
+        let count = patches.len();
+        if count > 0 {
+            self.workbook.update(cx, |wb, _| plan::apply(wb, index, &patches, true));
+            self.record_format(cx, index, patches, kind, description.into());
+            self.bump_cells_rev();
+            self.is_modified = true;
+            self.request_title_refresh(cx);
+        }
+        self.status_message = Some(if count == 0 { "No visible formatting changes".into() }
+            else { format!("{description} → {count} cell{}", if count == 1 { "" } else { "s" }) });
+        cx.notify();
+        Some(true)
+    }
+
     /// The bounding box of every populated cell, or None on an empty sheet.
     ///
     /// Cheap regardless of grid size: the cell map is sparse, so this walks
     /// what exists, not the 16.7M coordinates that could exist.
     fn populated_bounds(&self, cx: &App) -> Option<(usize, usize, usize, usize)> {
         let mut bounds: Option<(usize, usize, usize, usize)> = None;
+        let mapped = self.display_workbook(cx).has_table_criteria();
         for ((row, col), _) in self.sheet(cx).cells_iter() {
+            let row = if mapped {
+                let Some(view) = self.row_view.data_to_view(row).filter(|_| !self.is_row_hidden(row) && !self.is_col_hidden(col)) else { continue };
+                view
+            } else { row };
             bounds = Some(match bounds {
                 None => (row, col, row, col),
                 Some((r0, c0, r1, c1)) => (r0.min(row), c0.min(col), r1.max(row), c1.max(col)),
@@ -110,15 +159,24 @@ impl Spreadsheet {
         let mut scanned = 0usize;
 
         let ranges = self.all_selection_ranges();
+        let mapped = self.display_workbook(cx).has_table_criteria();
         // True cell count, independent of the scan cap below
         state.cell_count = ranges
             .iter()
-            .map(|((r1, c1), (r2, c2))| (r2 - r1 + 1) * (c2 - c1 + 1))
+            .map(|((r1, c1), (r2, c2))| {
+                let row_count = if mapped { plan::visible_count(&self.row_view, self.display_hidden_rows(), *r1, *r2) } else { r2-r1+1 };
+                let col_count = if mapped { (*c1..=*c2).filter(|c| !self.is_col_hidden(*c)).count() } else { c2-c1+1 };
+                row_count.saturating_mul(col_count)
+            })
             .sum();
 
         'scan: for ((min_row, min_col), (max_row, max_col)) in ranges {
-            for row in min_row..=max_row {
+            let rows: Box<dyn Iterator<Item = usize> + '_> = if mapped {
+                Box::new(plan::visible_rows(&self.row_view, self.display_hidden_rows(), min_row, max_row).map(|(_, row)| row))
+            } else { Box::new(min_row..=max_row) };
+            for row in rows {
                 for col in min_col..=max_col {
+                    if mapped && self.is_col_hidden(col) { continue; }
                     if scanned >= MAX_FORMAT_STATE_CELLS {
                         break 'scan;
                     }
@@ -128,6 +186,11 @@ impl Spreadsheet {
                     let format = self.sheet(cx).get_format(row, col);
 
                     if first {
+                        if mapped && state.cell_count == 1 {
+                            if let visigrid_engine::cell::CellValue::Number(n) = self.sheet(cx).get_cell(row, col).value {
+                                state.preview_value = Some(n);
+                            }
+                        }
                         state.raw_value = TriState::Uniform(raw.clone());
                         state.bold = TriState::Uniform(format.bold);
                         state.italic = TriState::Uniform(format.italic);
@@ -191,8 +254,9 @@ impl Spreadsheet {
         }
 
         // Extract active cell numeric value for format preview
-        if state.cell_count == 1 {
+        if state.cell_count == 1 && !mapped {
             let (row, col) = self.view_state.active_cell();
+            let row = if mapped { self.row_view.view_to_data(row) } else { row };
             if let visigrid_engine::cell::CellValue::Number(n) = self.sheet(cx).get_cell(row, col).value {
                 state.preview_value = Some(n);
             }
@@ -203,6 +267,7 @@ impl Spreadsheet {
 
     /// Set bold on all selected cells (explicit value, not toggle)
     pub fn set_bold(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Bold(value), FormatActionKind::Bold, Some(RepeatAction::Bold(value)), "Bold", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Bold(value));
         let mut patches = Vec::new();
@@ -213,7 +278,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_bold(row, col, value));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -221,7 +286,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Bold {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Bold, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Bold, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -230,6 +295,7 @@ impl Spreadsheet {
 
     /// Set italic on all selected cells (explicit value, not toggle)
     pub fn set_italic(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Italic(value), FormatActionKind::Italic, Some(RepeatAction::Italic(value)), "Italic", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Italic(value));
         let mut patches = Vec::new();
@@ -240,7 +306,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_italic(row, col, value));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -248,7 +314,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Italic {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Italic, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Italic, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -257,6 +323,7 @@ impl Spreadsheet {
 
     /// Set underline on all selected cells (explicit value, not toggle)
     pub fn set_underline(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Underline(value), FormatActionKind::Underline, Some(RepeatAction::Underline(value)), "Underline", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Underline(value));
         let mut patches = Vec::new();
@@ -267,7 +334,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_underline(row, col, value));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -275,7 +342,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Underline {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Underline, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Underline, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -284,6 +351,7 @@ impl Spreadsheet {
 
     /// Set strikethrough on all selected cells (explicit value, not toggle)
     pub fn set_strikethrough(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Strike(value), FormatActionKind::Strikethrough, Some(RepeatAction::Strikethrough(value)), "Strikethrough", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Strikethrough(value));
         let mut patches = Vec::new();
@@ -294,7 +362,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_strikethrough(row, col, value));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -302,7 +370,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Strikethrough {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Strikethrough, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Strikethrough, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -311,6 +379,7 @@ impl Spreadsheet {
 
     /// Set font family on all selected cells
     pub fn set_font_family_selection(&mut self, font: Option<String>, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Font(font.clone()), FormatActionKind::Font, Some(RepeatAction::FontFamily(font.clone())), "Font", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::FontFamily(font.clone()));
         let mut patches = Vec::new();
@@ -321,7 +390,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_font_family(row, col, font.clone()));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -330,7 +399,7 @@ impl Spreadsheet {
         if count > 0 {
             let font_name = font.as_deref().unwrap_or("default");
             let desc = format!("Font '{}'", font_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Font, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Font, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -339,6 +408,7 @@ impl Spreadsheet {
 
     /// Set horizontal alignment on all selected cells
     pub fn set_alignment_selection(&mut self, alignment: Alignment, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Align(alignment), FormatActionKind::Alignment, Some(RepeatAction::Alignment(alignment)), "Alignment", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Alignment(alignment));
         let mut patches = Vec::new();
@@ -349,7 +419,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_alignment(row, col, alignment));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -364,7 +434,7 @@ impl Spreadsheet {
                 Alignment::CenterAcrossSelection => "Center Across",
             };
             let desc = format!("Align {}", align_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Alignment, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Alignment, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -376,6 +446,20 @@ impl Spreadsheet {
     /// The merge-free alternative to Merge & Center — sorting, filtering,
     /// and formulas keep working because no cells are actually merged.
     pub fn center_across_selection_toggle(&mut self, cx: &mut Context<Self>) {
+        if self.wb(cx).has_table_criteria() {
+            if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+            self.sync_table_view(cx);
+            if self.single_row_merges_in(Some(self.all_selection_ranges()), cx).is_empty() {
+                let result = plan::plan(self.wb(cx), self.sheet_index(cx), &self.row_view,
+                    self.display_hidden_rows(), self.hidden_cols.get(&self.cached_sheet_id()),
+                    &self.format_apply_ranges(cx), &Operation::Align(Alignment::CenterAcrossSelection));
+                match result {
+                    Ok(patches) => self.set_alignment_selection(if patches.is_empty() { Alignment::General } else { Alignment::CenterAcrossSelection }, cx),
+                    Err(error) => { self.status_message = Some(error); cx.notify(); }
+                }
+                return;
+            }
+        }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         // On merged titles, the useful answer is the conversion: same look,
         // and the sheet sorts and filters again.
@@ -488,7 +572,7 @@ impl Spreadsheet {
                 self.active_sheet_mut(cx, |s| s.set_alignment(row, col, Alignment::CenterAcrossSelection));
                 let after = self.sheet(cx).get_format(row, col);
                 if before != after {
-                    patches.push(CellFormatPatch { row, col, before, after });
+                    patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                 }
             }
         }
@@ -501,7 +585,7 @@ impl Spreadsheet {
             format!("{n} merged titles")
         };
         let description = format!("Convert {what} to Center Across");
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::Group {
                 actions: vec![
                     UndoAction::SetMerges {
@@ -535,6 +619,7 @@ impl Spreadsheet {
 
     /// Set vertical alignment on all selected cells
     pub fn set_vertical_alignment_selection(&mut self, valign: VerticalAlignment, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Vertical(valign), FormatActionKind::VerticalAlignment, Some(RepeatAction::VerticalAlignment(valign)), "Vertical alignment", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::VerticalAlignment(valign));
         let mut patches = Vec::new();
@@ -545,7 +630,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_vertical_alignment(row, col, valign));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -558,7 +643,7 @@ impl Spreadsheet {
                 VerticalAlignment::Bottom => "Bottom",
             };
             let desc = format!("V-Align {}", valign_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::VerticalAlignment, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::VerticalAlignment, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -567,6 +652,7 @@ impl Spreadsheet {
 
     /// Set text overflow on all selected cells
     pub fn set_text_overflow_selection(&mut self, overflow: TextOverflow, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Overflow(overflow), FormatActionKind::TextOverflow, None, "Text overflow", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -576,7 +662,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_text_overflow(row, col, overflow));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -589,7 +675,7 @@ impl Spreadsheet {
                 TextOverflow::Overflow => "Overflow",
             };
             let desc = overflow_name.to_string();
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::TextOverflow, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::TextOverflow, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -598,6 +684,7 @@ impl Spreadsheet {
 
     /// Set number format on all selected cells
     pub fn set_number_format_selection(&mut self, format: NumberFormat, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Number(format.clone()), FormatActionKind::NumberFormat, Some(RepeatAction::NumberFormat(format.clone())), "Number format", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         if self.block_number_format_conversion(&format, cx) { return; }
         self.set_repeat(RepeatAction::NumberFormat(format.clone()));
@@ -617,7 +704,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_number_format(row, col, fmt));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -635,7 +722,7 @@ impl Spreadsheet {
                 NumberFormat::Custom(_) => "Custom",
             };
             let desc = format!("{} format", format_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::NumberFormat, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::NumberFormat, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -647,7 +734,9 @@ impl Spreadsheet {
         use crate::app::NumberFormatEditorState;
         use visigrid_engine::cell::CellValue;
 
+        self.sync_table_view(cx);
         let (row, col) = self.view_state.active_cell();
+        let row = self.row_view.view_to_data(row);
         let format = self.sheet(cx).get_format(row, col);
         let cell = self.sheet(cx).get_cell(row, col);
         let sample = match cell.value {
@@ -675,6 +764,7 @@ impl Spreadsheet {
 
     /// Adjust decimal places on selected cells - uses DecimalPlaces kind for coalescing
     pub fn adjust_decimals_selection(&mut self, delta: i8, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Decimals(delta), FormatActionKind::DecimalPlaces, None, "Decimal places", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
@@ -700,7 +790,7 @@ impl Spreadsheet {
                         self.active_sheet_mut(cx, |s| s.set_number_format(row, col, fmt));
                         let after = self.sheet(cx).get_format(row, col);
                         if before != after {
-                            patches.push(CellFormatPatch { row, col, before, after });
+                            patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                         }
                     }
                 }
@@ -709,7 +799,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Decimal {}", if delta > 0 { "+" } else { "-" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::DecimalPlaces, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::DecimalPlaces, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -718,6 +808,7 @@ impl Spreadsheet {
 
     /// Set background color on all selected cells
     pub fn set_background_color(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Background(color), FormatActionKind::BackgroundColor, Some(RepeatAction::BackgroundColor(color)), "Fill color", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::BackgroundColor(color));
         let mut patches = Vec::new();
@@ -728,7 +819,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_background_color(row, col, color));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -736,7 +827,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = if color.is_some() { "Background color" } else { "Clear background" };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::BackgroundColor, desc.to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::BackgroundColor, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -745,6 +836,7 @@ impl Spreadsheet {
 
     /// Set font size on all selected cells
     pub fn set_font_size_selection(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Size(size), FormatActionKind::FontSize, Some(RepeatAction::FontSize(size)), "Font size", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::FontSize(size));
         let mut patches = Vec::new();
@@ -755,7 +847,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_font_size(row, col, size));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -767,7 +859,7 @@ impl Spreadsheet {
             } else {
                 "Clear font size".to_string()
             };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontSize, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::FontSize, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -776,6 +868,7 @@ impl Spreadsheet {
 
     /// Set font color on all selected cells
     pub fn set_font_color_selection(&mut self, color: Option<[u8; 4]>, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Color(color), FormatActionKind::FontColor, Some(RepeatAction::FontColor(color)), "Font color", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::FontColor(color));
         let mut patches = Vec::new();
@@ -786,7 +879,7 @@ impl Spreadsheet {
                     self.active_sheet_mut(cx, |s| s.set_font_color(row, col, color));
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -794,7 +887,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = if color.is_some() { "Text color" } else { "Clear text color" };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontColor, desc.to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::FontColor, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -802,6 +895,7 @@ impl Spreadsheet {
     }
 
     pub fn set_cell_style_selection(&mut self, style: CellStyle, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Style(style), FormatActionKind::CellStyle, Some(RepeatAction::CellStyle(style)), "Cell style", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::CellStyle(style));
         let mut patches = Vec::new();
@@ -819,7 +913,7 @@ impl Spreadsheet {
                     });
                     let after = self.sheet(cx).get_format(row, col);
                     if before != after {
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -831,7 +925,7 @@ impl Spreadsheet {
             } else {
                 format!("Cell Style: {}", style.label())
             };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::CellStyle, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::CellStyle, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -840,18 +934,20 @@ impl Spreadsheet {
 
     /// Start Format Painter (single-shot): capture the active cell's format.
     pub fn start_format_painter(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.start_format_painter_inner(false, cx);
     }
 
     /// Start Format Painter in locked mode: stays active until Esc.
     pub fn start_format_painter_locked(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.start_format_painter_inner(true, cx);
     }
 
     fn start_format_painter_inner(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.sync_table_view(cx);
         let (row, col) = self.view_state.selected;
+        let row = self.row_view.view_to_data(row);
         let snapshot = self.sheet(cx).get_format(row, col);
         self.format_painter = Some(FormatPaintState { snapshot, locked });
         self.mode = crate::mode::Mode::FormatPainter;
@@ -865,7 +961,9 @@ impl Spreadsheet {
 
     /// Copy format from active cell without entering FormatPainter mode (Ctrl+Shift+C).
     pub fn copy_format(&mut self, cx: &mut Context<Self>) {
+        self.sync_table_view(cx);
         let (row, col) = self.view_state.selected;
+        let row = self.row_view.view_to_data(row);
         let snapshot = self.sheet(cx).get_format(row, col);
         self.format_painter = Some(FormatPaintState { snapshot, locked: false });
         self.status_message = Some("Format copied \u{00b7} Ctrl+Shift+V to paste it".to_string());
@@ -874,7 +972,7 @@ impl Spreadsheet {
 
     /// Paste the format copied with Ctrl+Shift+C onto the selection (Ctrl+Shift+V right after it).
     pub fn paste_format(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let snapshot = match &self.format_painter {
             Some(state) => state.snapshot.clone(),
             None => {
@@ -884,7 +982,7 @@ impl Spreadsheet {
             }
         };
         // Paste format does not enter/exit FormatPainter mode — it's a one-shot apply
-        self.apply_format_to_selection(&snapshot, cx);
+        if !self.apply_format_to_selection(&snapshot, cx) { return; }
         // Clear the captured format after paste (single-shot behavior)
         self.format_painter = None;
         cx.notify();
@@ -892,13 +990,13 @@ impl Spreadsheet {
 
     /// Apply Format Painter: set captured format on current selection.
     pub fn apply_format_painter(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         let (snapshot, locked) = match &self.format_painter {
             Some(state) => (state.snapshot.clone(), state.locked),
             None => return,
         };
 
-        self.apply_format_to_selection(&snapshot, cx);
+        if !self.apply_format_to_selection(&snapshot, cx) { return; }
 
         if locked {
             // Stay in FormatPainter mode — don't clear state
@@ -912,7 +1010,8 @@ impl Spreadsheet {
     }
 
     /// Shared helper: apply a format snapshot to all selected cells with undo.
-    fn apply_format_to_selection(&mut self, format: &CellFormat, cx: &mut Context<Self>) {
+    fn apply_format_to_selection(&mut self, format: &CellFormat, cx: &mut Context<Self>) -> bool {
+        if let Some(applied) = self.try_table_format(Operation::Replace(format.clone()), FormatActionKind::PasteFormats, None, "Format Painter", cx) { return applied; }
         let mut patches = Vec::new();
         for ((min_row, min_col), (max_row, max_col)) in self.format_apply_ranges(cx) {
             for row in min_row..=max_row {
@@ -921,19 +1020,20 @@ impl Spreadsheet {
                     if before != *format {
                         self.active_sheet_mut(cx, |s| s.set_format(row, col, format.clone()));
                         let after = self.sheet(cx).get_format(row, col);
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
         }
         let count = patches.len();
         if count > 0 {
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::PasteFormats, "Format Painter".to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::PasteFormats, "Format Painter".to_string());
             self.is_modified = true;
             self.status_message = Some(format!("Format Painter → {} cell{}", count, if count == 1 { "" } else { "s" }));
         } else {
             self.status_message = None;
         }
+        true
     }
 
     /// Cancel Format Painter mode.
@@ -947,6 +1047,7 @@ impl Spreadsheet {
     /// Clear all formatting on selected cells, resetting to CellFormat::default().
     /// Records a single undo step regardless of cell count.
     pub fn clear_formatting_selection(&mut self, cx: &mut Context<Self>) {
+        if self.try_table_format(Operation::Clear, FormatActionKind::ClearFormatting, Some(RepeatAction::ClearFormatting), "Clear formatting", cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::ClearFormatting);
         let mut patches = Vec::new();
@@ -958,7 +1059,7 @@ impl Spreadsheet {
                     if before != default {
                         self.active_sheet_mut(cx, |s| s.set_format(row, col, default.clone()));
                         let after = self.sheet(cx).get_format(row, col);
-                        patches.push(CellFormatPatch { row, col, before, after });
+                        patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                     }
                 }
             }
@@ -968,7 +1069,7 @@ impl Spreadsheet {
             // Rescan border flag: clearing formats may have removed the only bordered cells
             self.active_sheet_mut(cx, |s| s.scan_border_flag());
             let desc = "Clear Formatting".to_string();
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::ClearFormatting, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::ClearFormatting, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -980,6 +1081,13 @@ impl Spreadsheet {
     /// Canonicalization: UI commands set BOTH sides of every shared edge they touch
     /// to prevent conflicting border states from normal use.
     pub fn apply_borders(&mut self, mode: BorderApplyMode, cx: &mut Context<Self>) {
+        let description = match mode {
+            BorderApplyMode::All => "All borders", BorderApplyMode::Outline => "Outline",
+            BorderApplyMode::Inside => "Inside borders", BorderApplyMode::Top => "Top border",
+            BorderApplyMode::Bottom => "Bottom border", BorderApplyMode::Left => "Left border",
+            BorderApplyMode::Right => "Right border", BorderApplyMode::Clear => "Clear borders",
+        };
+        if self.try_table_format(Operation::Borders(mode, CellBorder { style: visigrid_engine::cell::BorderStyle::Thin, color: self.current_border_color }), FormatActionKind::Border, Some(RepeatAction::Borders(mode)), description, cx).is_some() { return; }
         if self.block_active_sheet_metadata_edit(cx) { return; }
         self.set_repeat(RepeatAction::Borders(mode));
         // Use current_border_color if set, otherwise None (Automatic = theme default)
@@ -1001,7 +1109,7 @@ impl Spreadsheet {
                             self.active_sheet_mut(cx, |s| s.set_borders(row, col, thin, thin, thin, thin));
                             let after = self.sheet(cx).get_format(row, col);
                             if before != after {
-                                patches.push(CellFormatPatch { row, col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                             }
                         }
                     }
@@ -1038,7 +1146,7 @@ impl Spreadsheet {
                             if changed {
                                 let after = self.sheet(cx).get_format(row, col);
                                 if before != after {
-                                    patches.push(CellFormatPatch { row, col, before, after });
+                                    patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                                 }
                             }
                         }
@@ -1063,7 +1171,7 @@ impl Spreadsheet {
                             }
                             let after = self.sheet(cx).get_format(row, col);
                             if before != after {
-                                patches.push(CellFormatPatch { row, col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                             }
                         }
                     }
@@ -1075,7 +1183,7 @@ impl Spreadsheet {
                         self.active_sheet_mut(cx, |s| s.set_border_top(min_row, col, thin));
                         let after = self.sheet(cx).get_format(min_row, col);
                         if before != after {
-                            patches.push(CellFormatPatch { row: min_row, col, before, after });
+                            patches.push(CellFormatPatch { remove_cell_on_undo: false, row: min_row, col, before, after });
                         }
                     }
                 }
@@ -1086,7 +1194,7 @@ impl Spreadsheet {
                         self.active_sheet_mut(cx, |s| s.set_border_bottom(max_row, col, thin));
                         let after = self.sheet(cx).get_format(max_row, col);
                         if before != after {
-                            patches.push(CellFormatPatch { row: max_row, col, before, after });
+                            patches.push(CellFormatPatch { remove_cell_on_undo: false, row: max_row, col, before, after });
                         }
                     }
                 }
@@ -1097,7 +1205,7 @@ impl Spreadsheet {
                         self.active_sheet_mut(cx, |s| s.set_border_left(row, min_col, thin));
                         let after = self.sheet(cx).get_format(row, min_col);
                         if before != after {
-                            patches.push(CellFormatPatch { row, col: min_col, before, after });
+                            patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col: min_col, before, after });
                         }
                     }
                 }
@@ -1108,7 +1216,7 @@ impl Spreadsheet {
                         self.active_sheet_mut(cx, |s| s.set_border_right(row, max_col, thin));
                         let after = self.sheet(cx).get_format(row, max_col);
                         if before != after {
-                            patches.push(CellFormatPatch { row, col: max_col, before, after });
+                            patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col: max_col, before, after });
                         }
                     }
                 }
@@ -1120,7 +1228,7 @@ impl Spreadsheet {
                             self.active_sheet_mut(cx, |s| s.set_borders(row, col, none, none, none, none));
                             let after = self.sheet(cx).get_format(row, col);
                             if before != after {
-                                patches.push(CellFormatPatch { row, col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                             }
                         }
                     }
@@ -1134,7 +1242,7 @@ impl Spreadsheet {
                             self.active_sheet_mut(cx, |s| s.set_border_bottom(adj_row, col, none));
                             let after = self.sheet(cx).get_format(adj_row, col);
                             if before != after {
-                                patches.push(CellFormatPatch { row: adj_row, col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row: adj_row, col, before, after });
                             }
                         }
                     }
@@ -1146,7 +1254,7 @@ impl Spreadsheet {
                             self.active_sheet_mut(cx, |s| s.set_border_top(adj_row, col, none));
                             let after = self.sheet(cx).get_format(adj_row, col);
                             if before != after {
-                                patches.push(CellFormatPatch { row: adj_row, col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row: adj_row, col, before, after });
                             }
                         }
                     }
@@ -1158,7 +1266,7 @@ impl Spreadsheet {
                             self.active_sheet_mut(cx, |s| s.set_border_right(row, adj_col, none));
                             let after = self.sheet(cx).get_format(row, adj_col);
                             if before != after {
-                                patches.push(CellFormatPatch { row, col: adj_col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col: adj_col, before, after });
                             }
                         }
                     }
@@ -1170,7 +1278,7 @@ impl Spreadsheet {
                             self.active_sheet_mut(cx, |s| s.set_border_left(row, adj_col, none));
                             let after = self.sheet(cx).get_format(row, adj_col);
                             if before != after {
-                                patches.push(CellFormatPatch { row, col: adj_col, before, after });
+                                patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col: adj_col, before, after });
                             }
                         }
                     }
@@ -1195,7 +1303,7 @@ impl Spreadsheet {
                 BorderApplyMode::Right => "Right border",
                 BorderApplyMode::Clear => "Clear borders",
             };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Border, desc.to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Border, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -1359,7 +1467,7 @@ impl Spreadsheet {
         );
 
         // Record undo
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::SetMerges {
                 sheet_index,
                 before,
@@ -1429,7 +1537,7 @@ impl Spreadsheet {
         let count = origins_to_remove.len();
 
         // Record undo
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::SetMerges {
                 sheet_index,
                 before,
@@ -1514,6 +1622,9 @@ impl Spreadsheet {
         // perimeter cells also draw bottom/right for merge edges that touch the boundary.
 
         let sheet = self.sheet(cx);
+        let mapped = self.display_workbook(cx).has_table_criteria();
+        let left_col = if mapped { (0..col).rev().find(|c| !self.is_col_hidden(*c)) } else { col.checked_sub(1) };
+        let right_col = if mapped { (col.saturating_add(1)..sheet.cols).find(|c| !self.is_col_hidden(*c)) } else { (col + 1 < NUM_COLS).then_some(col + 1) };
 
         // Helper: effective border contribution for a cell on a given side,
         // accounting for merges (interior cells contribute None, perimeter cells
@@ -1571,8 +1682,8 @@ impl Spreadsheet {
         // Resolve LEFT edge: max(my_left, left_neighbor_right)
         let left = {
             let my_left = effective_side(row, col, 3);
-            let left_right = if col > 0 {
-                effective_side(row, col - 1, 1)
+            let left_right = if let Some(left_col) = left_col {
+                effective_side(row, left_col, 1)
             } else {
                 none
             };
@@ -1591,8 +1702,8 @@ impl Spreadsheet {
         // Resolve RIGHT edge: only at viewport boundary (last visible col)
         let right = if boundary_right {
             let my_right = effective_side(row, col, 1);
-            let right_left = if col + 1 < NUM_COLS {
-                effective_side(row, col + 1, 3)
+            let right_left = if let Some(right_col) = right_col {
+                effective_side(row, right_col, 3)
             } else {
                 none
             };

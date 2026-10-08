@@ -1206,6 +1206,17 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "SUBTOTAL",
+        signature: "SUBTOTAL(function_num, ref1, [ref2], ...)",
+        description: "Aggregate cells while excluding filtered Table records and nested subtotals. Imported totals also retain manual row hiding.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "function_num", description: "1–11 select average, count, counta, max, min, product, standard deviation (sample/population), sum, or variance (sample/population). Add 100 to exclude imported manually hidden rows.", optional: false, repeatable: false },
+            ParameterInfo { name: "ref1", description: "The first cell or range to aggregate.", optional: false, repeatable: false },
+            ParameterInfo { name: "ref2", description: "Additional cells or ranges.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
         name: "SUMPRODUCT",
         signature: "SUMPRODUCT(array1, [array2], ...)",
         description: "Multiply corresponding values in two or more ranges and sum the results — and, with a condition inside, count or total the rows that meet it.",

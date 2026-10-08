@@ -665,7 +665,7 @@ impl Spreadsheet {
             ));
         }
         if let (Some(client), true) = (client, self.wb(cx).revision() != revision) {
-            self.history.retag_last_source(crate::history::MutationSource::Agent { client });
+            self.retag_last_source(cx, crate::history::MutationSource::Agent { client });
         }
         Ok(self.status_message.clone().unwrap_or_else(|| format!("Refreshed {}", target.name)))
     }

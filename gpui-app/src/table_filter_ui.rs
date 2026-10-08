@@ -13,6 +13,12 @@ pub(crate) const TABLE_VIEW_EDIT_MESSAGE: &str =
     "This operation is unavailable while any Table in this workbook is sorted or filtered, including Tables on other sheets. Clear Table sorting and filters, then try again.";
 const VALUE_LIMIT: usize = 500;
 
+fn grid_table_view(sheet: &visigrid_engine::sheet::Sheet) -> Result<Option<visigrid_engine::table_view::TableView>, String> {
+    // Imports can have a smaller logical extent than the desktop grid. The
+    // engine requires the projection to fit inside that sheet's bounds.
+    sheet.build_saved_table_view(crate::app::NUM_ROWS.min(sheet.rows))
+}
+
 pub(crate) fn has_table_criteria(wb: &Workbook) -> bool {
     wb.sheets().iter().any(|s| {
         s.table_view_spec()
@@ -37,15 +43,13 @@ pub(crate) struct TableFilterDropdown {
 pub(crate) fn desktop_layout_error(
     table: &DataTable,
     heights: Option<&std::collections::HashMap<usize, f32>>,
-    hidden: Option<&std::collections::BTreeSet<usize>>,
-    frozen_rows: usize,
+    _hidden: Option<&std::collections::BTreeSet<usize>>,
+    _frozen_rows: usize,
 ) -> Option<String> {
     let body = table.range.start_row + 1..=table.range.end_row;
     if heights.is_some_and(|h| h.keys().any(|r| body.contains(r)))
-        || hidden.is_some_and(|h| h.iter().any(|r| body.contains(r)))
-        || (frozen_rows > table.range.start_row + 1 && frozen_rows <= table.range.end_row)
     {
-        Some("Table views need uniform, visible body rows with no freeze boundary through the records. Reset row heights, unhide rows or unfreeze the body first.".into())
+        Some("Table views need uniform body row heights. Reset body row heights first.".into())
     } else {
         None
     }
@@ -81,8 +85,13 @@ impl Spreadsheet {
             .iter()
             .find(|t| t.id == spec.table)?;
         let total = table.range.data_rows();
+        // The mask also includes manual hides outside this Table. Exclude
+        // those from the badge without rescanning every record on each render.
+        let outside_hidden = self.sheet(cx).manual_hidden_rows().iter().filter(|&&row| {
+            row < self.row_view.row_count() && (row <= table.range.start_row || row > table.range.end_row)
+        }).count();
         let hidden = self.row_view.row_count() - self.row_view.visible_count();
-        Some((total.saturating_sub(hidden), total))
+        Some((total.saturating_sub(hidden.saturating_sub(outside_hidden)), total))
     }
 
     pub(crate) fn block_table_view_edit(&mut self, cx: &mut Context<Self>) -> bool {
@@ -172,7 +181,7 @@ impl Spreadsheet {
                         self.table_layout_check(table)?;
                     }
                 }
-                sheet.build_saved_table_view(crate::app::NUM_ROWS)
+                grid_table_view(sheet)
             })();
             let row_count = crate::app::NUM_ROWS;
             match result {
@@ -182,7 +191,7 @@ impl Spreadsheet {
                             self.view_state
                                 .select_cell(focus.view_row, self.view_state.selected.1);
                             if focus.record_hidden {
-                                self.status_message = Some("The selected record is filtered out; moved to the nearest visible row.".into());
+                                self.status_message = Some("The selected record is hidden; moved to the nearest visible row.".into());
                             }
                         }
                     }
@@ -343,7 +352,7 @@ impl Spreadsheet {
             }
             Ok(commit) => {
                 if !commit.is_noop() {
-                    self.history.record_action_with_provenance(
+                    self.record_action_with_provenance(cx,
                         UndoAction::TableViewChanged {
                             sheet_index: self.sheet_index(cx),
                             commit: Box::new(commit),
@@ -579,6 +588,48 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn imported_csv_grid_filters_records_and_keeps_moving_totals_visible() {
+        let imported = visigrid_io::csv::import_text(
+            "Region,Amount\nWest,10\nEast,20\nWest,30\nWest,40\n",
+            &Default::default(),
+        ).unwrap();
+        assert!(imported.sheet.rows < crate::app::NUM_ROWS);
+        let mut wb = Workbook::from_sheets(vec![imported.sheet], 0);
+        let sheet_id = wb.active_sheet_id();
+        let id = wb.create_table(sheet_id, TableRange {
+            start_row: 0, start_col: 0, end_row: 4, end_col: 1,
+        }, "Sales").unwrap().table_id();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let table = wb.table(id).unwrap().1;
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter {
+            column: table.columns[0].id,
+            criteria: ColumnFilter {
+                selected: Some([visigrid_engine::filter::FilterKey::Text("West".into()).normalized()].into()),
+                text_filter: None,
+            },
+        });
+        spec.sort = Some(TableSort { column: table.columns[1].id, direction: SortDirection::Descending });
+        wb.set_table_view_spec(sheet_id, Some(spec)).unwrap();
+        let view = grid_table_view(wb.active_sheet()).unwrap().unwrap();
+        assert_eq!(view.rows().view_to_data(1), 4);
+        assert!(!view.rows().is_data_row_visible(2));
+        assert!(view.rows().is_data_row_visible(5));
+        assert_eq!(wb.active_sheet().get_display(5, 1), "80");
+        let append = wb.append_table_rows(id, 1, &[]).unwrap();
+        let view = grid_table_view(wb.active_sheet()).unwrap().unwrap();
+        assert!(!view.rows().is_data_row_visible(2));
+        assert!(!view.rows().is_data_row_visible(5));
+        assert!(view.rows().is_data_row_visible(6));
+        assert_eq!(wb.active_sheet().get_display(6, 1), "80");
+        wb.apply_table_commit(&append, true).unwrap();
+        let view = grid_table_view(wb.active_sheet()).unwrap().unwrap();
+        assert!(!view.rows().is_data_row_visible(2));
+        assert!(view.rows().is_data_row_visible(5));
+        assert_eq!(wb.active_sheet().get_display(5, 1), "80");
+    }
+
+    #[::core::prelude::v1::test]
     fn table_view_edit_gate_covers_other_sheets_and_hidden_buttons() {
         let (mut wb, mut spec) = fixture();
         wb.set_table_view_spec(SheetId(7), Some(spec.clone()))
@@ -608,8 +659,8 @@ mod tests {
             desktop_layout_error(table, Some(&[(2, 32.0)].into()), Some(&[1].into()), 3).is_none()
         );
         assert!(desktop_layout_error(table, Some(&[(3, 32.0)].into()), None, 0).is_some());
-        assert!(desktop_layout_error(table, None, Some(&[5].into()), 0).is_some());
-        assert!(desktop_layout_error(table, None, None, 4).is_some());
+        assert!(desktop_layout_error(table, None, Some(&[5].into()), 0).is_none());
+        assert!(desktop_layout_error(table, None, None, 4).is_none());
         assert!(desktop_layout_error(table, None, None, 6).is_none());
     }
 
@@ -656,7 +707,7 @@ mod tests {
             .set_table_view_spec(SheetId(7), Some(spec.clone()))
             .unwrap();
         let mut history = crate::history::History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableViewChanged {
                 sheet_index: 0,
                 commit: Box::new(commit),

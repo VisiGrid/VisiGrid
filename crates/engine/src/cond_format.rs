@@ -29,7 +29,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::cell::{CellFormat, CellFormatOverride, CellStyle};
-use crate::formula::eval::{evaluate, CellLookup};
+use crate::formula::eval::{evaluate, CellLookup, LookupWithContext};
 use crate::formula::parser::{bind_expr_same_sheet, parse, Expr, ParsedExpr};
 use crate::validation::CellRange;
 
@@ -156,9 +156,9 @@ impl CondFormatRule {
         let dr = row as i64 - anchor_row as i64;
         let dc = col as i64 - anchor_col as i64;
         let shifted = offset_expr(ast, dr, dc)?;
-        let bound = bind_expr_same_sheet(&shifted);
-        // format_expr includes the leading '='
-        Some(crate::formula::parser::format_expr(&bound, |name| Some(name.to_string())))
+        // Keep sheet qualifiers symbolic for the inspector. Binding without
+        // workbook context would turn every cross-sheet address into #REF!.
+        Some(crate::formula::parser::format_parsed_expr(&shifted))
     }
 
     /// Evaluate the predicate for a cell. True = the rule's style applies.
@@ -183,7 +183,7 @@ impl CondFormatRule {
         };
 
         let bound = bind_expr_same_sheet(&shifted);
-        evaluate(&bound, lookup).to_bool().unwrap_or(false)
+        evaluate(&bound, &LookupWithContext::new(lookup, row, col)).to_bool().unwrap_or(false)
     }
 }
 
@@ -277,6 +277,19 @@ impl CondFormatStore {
         self.next_id += 1;
         self.rules.push(CondFormatRule::new(id, ranges, predicate, style));
         id
+    }
+
+    /// Reserve fragment identities above both the persisted high-water mark
+    /// and every existing rule. Imported stores need not have a current counter.
+    pub(crate) fn fragment_id_start(&self) -> Result<u64, String> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.rules.iter().try_fold(self.next_id, |next, rule| {
+            if !seen.insert(rule.id) {
+                return Err("Conditional-format rule IDs are duplicated. Nothing was changed.".into());
+            }
+            rule.id.checked_add(1).map(|after| next.max(after))
+                .ok_or_else(|| "Conditional-format rule IDs are exhausted. Nothing was changed.".into())
+        })
     }
 
     /// Remove a rule by id. Returns it if it existed.
@@ -413,27 +426,7 @@ impl CondFormatStore {
     }
 
     fn shift_insert(&mut self, at: usize, count: usize, rows: bool) {
-        for rule in &mut self.rules {
-            for r in &mut rule.ranges {
-                let (start, end) = if rows {
-                    (&mut r.start_row, &mut r.end_row)
-                } else {
-                    (&mut r.start_col, &mut r.end_col)
-                };
-                if at <= *start {
-                    // Insertion at or before range → shift whole range
-                    *start += count;
-                    *end += count;
-                } else if at <= *end {
-                    // Insertion inside range → expand
-                    *end += count;
-                }
-            }
-        }
-    }
-
-    fn shift_delete(&mut self, del_start: usize, count: usize, rows: bool) {
-        let del_end = del_start + count; // exclusive
+        let limit = if rows { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
         for rule in &mut self.rules {
             rule.ranges.retain_mut(|r| {
                 let (start, end) = if rows {
@@ -441,31 +434,29 @@ impl CondFormatStore {
                 } else {
                     (&mut r.start_col, &mut r.end_col)
                 };
-                if del_end <= *start {
-                    // Deletion entirely before → shift toward origin
-                    *start -= count;
-                    *end -= count;
-                    true
-                } else if del_start > *end {
-                    // Deletion entirely after → no effect
-                    true
-                } else if del_start <= *start && del_end > *end {
-                    // Deletion engulfs range → drop it
-                    false
-                } else if del_start <= *start {
-                    // Deletion clips leading edge
-                    *start = del_start;
-                    *end -= count;
-                    true
-                } else if del_end > *end {
-                    // Deletion clips trailing edge
-                    *end = del_start - 1;
-                    true
-                } else {
-                    // Deletion entirely inside → shrink
-                    *end -= count;
-                    true
+                if at <= *start {
+                    // Insertion at or before range → shift whole range
+                    *start = start.saturating_add(count);
+                    *end = end.saturating_add(count);
+                } else if at <= *end {
+                    // Insertion inside range → expand
+                    *end = end.saturating_add(count);
                 }
+                *end = (*end).min(limit - 1);
+                *start < limit
+            });
+        }
+    }
+
+    fn shift_delete(&mut self, at: usize, count: usize, rows: bool) {
+        let limit = if rows { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
+        for rule in &mut self.rules {
+            rule.ranges.retain_mut(|r| {
+                let (start, end) = if rows { (&mut r.start_row, &mut r.end_row) }
+                    else { (&mut r.start_col, &mut r.end_col) };
+                if let Some((s, e)) = crate::structural::shift_edge_span(*start, *end, at, count, true, limit) {
+                    *start = s; *end = e; true
+                } else { false }
             });
         }
     }

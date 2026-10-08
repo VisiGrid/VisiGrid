@@ -39,6 +39,8 @@ impl Spreadsheet {
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);
+        // Clear first so a notice from this capture is not wiped.
+        self.history.clear();
         self.capture_base_workbook(cx); // Capture base state for replay
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.cycle_banner.reset_for_new_file();
@@ -56,7 +58,6 @@ impl Spreadsheet {
         self.view_state.selection_end = None;
         self.view_state.scroll_row = self.view_state.frozen_rows;
         self.view_state.scroll_col = self.view_state.frozen_cols;
-        self.history.clear();
         self.bump_cells_rev();  // Invalidate cell search cache
 
         // Reset document meta for new document
@@ -207,7 +208,6 @@ impl Spreadsheet {
                 }
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
-                self.capture_base_workbook(cx); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_result = None;
                 self.import_filename = None;
@@ -253,7 +253,9 @@ impl Spreadsheet {
                 self.view_state.selection_end = None;
                 self.view_state.scroll_row = self.view_state.frozen_rows;
                 self.view_state.scroll_col = self.view_state.frozen_cols;
+                // Fingerprint above still sees the history this file was opened with.
                 self.history.clear();
+                self.capture_base_workbook(cx);
                 self.bump_cells_rev();
                 self.add_recent_file(path);
 
@@ -420,7 +422,6 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.capture_base_workbook(cx); // Capture base state for replay
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
@@ -430,6 +431,7 @@ impl Spreadsheet {
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
+                        this.capture_base_workbook(cx); // Capture base state for replay
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 
@@ -608,7 +610,6 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.capture_base_workbook(cx);
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_result = None;
                         this.import_filename = Some(filename_for_completion.clone());
@@ -621,6 +622,7 @@ impl Spreadsheet {
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
+                        this.capture_base_workbook(cx);
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 
@@ -671,7 +673,6 @@ impl Spreadsheet {
         self.workbook = cx.new(|_| workbook);
         self.update_cached_sheet_id(cx);
         self.debug_assert_sheet_cache_sync(cx);
-        self.capture_base_workbook(cx);
         self.rewind_preview = crate::app::RewindPreviewState::Off;
         self.cycle_banner.reset_for_new_file();
         self.import_result = None;
@@ -689,6 +690,7 @@ impl Spreadsheet {
         self.view_state.frozen_rows = 0;
         self.view_state.frozen_cols = 0;
         self.history.clear();
+        self.capture_base_workbook(cx);
         self.bump_cells_rev();
         self.add_recent_file(&path.to_path_buf());
         self.finalize_load(path);
@@ -809,7 +811,6 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.capture_base_workbook(cx);
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
@@ -819,6 +820,7 @@ impl Spreadsheet {
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
+                        this.capture_base_workbook(cx);
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 
@@ -1588,5 +1590,41 @@ impl Spreadsheet {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod row_roundtrip_tests {
+    use crate::app::Spreadsheet;
+    use gpui::BorrowAppContext;
+
+    #[gpui::test]
+    fn insert_save_reopen_keeps_only_the_shifted_hidden_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hidden-insert.sheet");
+        view.update(cx, |app, _, cx| {
+            app.session_window_id = cx.update_global::<crate::session::SessionManager, _>(|mgr, _| mgr.next_window_id());
+            let id = app.wb(cx).active_sheet_id();
+            app.workbook.update(cx, |wb, _| {
+                wb.active_sheet_mut().set_manual_hidden_rows([5].into()).unwrap();
+                wb.set_cell_value_tracked(0, 5, 0, "hidden record");
+            });
+            app.hidden_rows.insert(id, [5].into());
+            app.insert_rows(1, 1, cx);
+            assert_eq!(app.wb(cx).active_sheet().manual_hidden_rows(), [6].into());
+            assert!(app.save_to_path(&path, cx), "{:?}", app.status_message);
+            // Exercise the synchronous native-open path used by the desktop.
+            app.load_file(&path, cx);
+            assert_eq!(app.wb(cx).active_sheet().manual_hidden_rows(), [6].into());
+            assert_eq!(app.hidden_rows.get(&app.wb(cx).active_sheet_id()), Some(&[6].into()));
+            assert_eq!(app.wb(cx).active_sheet().get_raw(6, 0), "hidden record");
+        }).unwrap();
     }
 }

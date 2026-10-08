@@ -52,6 +52,123 @@ mod tests {
     use visigrid_engine::sheet::SheetId;
 
     #[test]
+    fn full_json_preserves_validation_exclusions_after_exact_range_edits() {
+        use visigrid_engine::{validation::{CellRange, ValidationEdit, ValidationRule}, workbook::Workbook};
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
+        let store = &mut wb.active_sheet_mut().validations;
+        store.set(CellRange::new(0, 0, 20, 0), ValidationRule::list_inline(vec!["Yes".into(), "No".into()]));
+        store.exclude(CellRange::new(3, 0, 9, 0));
+        let patch = store.plan_edit(&[CellRange::single(5, 0)], ValidationEdit::ClearExclusions, 30, 10).unwrap();
+        patch.apply(store, true).unwrap();
+        for json in [export_full(wb.active_sheet()).unwrap(), export_workbook(&wb, &[], 0).unwrap()] {
+            assert!(json.contains("validation_exclusions"));
+            let mut loaded = import_any(&json).unwrap().0;
+            assert_eq!(loaded.active_sheet().validations, wb.active_sheet().validations);
+            assert!(loaded.active_sheet().validations.get(4, 0).is_none());
+            assert!(loaded.active_sheet().validations.get(5, 0).is_some());
+            assert!(loaded.active_sheet().validations.get(6, 0).is_none());
+            patch.apply(&mut loaded.active_sheet_mut().validations, false).unwrap();
+            assert!(loaded.active_sheet().validations.get(5, 0).is_none());
+        }
+        // Exclusions are meaningful metadata even if there are currently no rules.
+        wb.active_sheet_mut().validations.clear();
+        let json = export_full(wb.active_sheet()).unwrap();
+        assert!(!json.contains("\"validations\""));
+        assert_eq!(import_any(&json).unwrap().0.active_sheet().validations, wb.active_sheet().validations);
+        let empty = export_full(&Sheet::new(SheetId(1), 30, 10)).unwrap();
+        assert!(!empty.contains("validation_exclusions"));
+        assert!(import_any(&empty).unwrap().0.active_sheet().validations.exclusions_is_empty());
+    }
+
+    #[test]
+    fn full_json_rejects_invalid_validation_ranges_and_duplicate_rules() {
+        use visigrid_engine::validation::{CellRange, ValidationRule};
+        let blank = serde_json::json!({"format":"visigrid-json", "version":1, "cells":[]});
+        for range in [
+            CellRange::single(visigrid_engine::sheet::NUM_ROWS, 0),
+            CellRange::single(0, visigrid_engine::sheet::NUM_COLS),
+            CellRange { start_row: 5, end_row: 1, start_col: 0, end_col: 0 },
+            CellRange { start_row: 0, end_row: 1, start_col: 2, end_col: 0 },
+        ] {
+            for excluded in [false, true] {
+                let mut doc = blank.clone();
+                if excluded {
+                    doc["validation_exclusions"] = serde_json::json!([range]);
+                } else {
+                    doc["validations"] = serde_json::json!([{"range":range, "rule":ValidationRule::list_inline(vec!["Y".into()])}]);
+                }
+                let error = import_any(&doc.to_string()).err().unwrap();
+                assert!(error.contains("validation range"), "{error}");
+            }
+        }
+        let mut doc = blank.clone();
+        let entry = serde_json::json!({"range":CellRange::single(0,0), "rule":ValidationRule::list_inline(vec!["Y".into()])});
+        doc["validations"] = serde_json::json!([entry, entry]);
+        assert!(import_any(&doc.to_string()).err().unwrap().contains("duplicate"));
+        doc = blank;
+        doc["validation_exclusions"] = serde_json::json!(vec![CellRange::single(0, 0); 100_001]);
+        assert!(import_any(&doc.to_string()).err().unwrap().contains("range limit"));
+    }
+
+    #[test]
+    fn full_json_freeze_state_uses_engine_defaults_and_explicit_host_overrides() {
+        let mut wb = visigrid_engine::workbook::Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
+        wb.active_sheet_mut().frozen_panes = (5, 2);
+        for json in [export_full(wb.active_sheet()).unwrap(), export_workbook(&wb, &[], 0).unwrap()] {
+            let (loaded, layouts, _) = import_any(&json).unwrap();
+            assert_eq!(loaded.active_sheet().frozen_panes, (5, 2));
+            assert_eq!((layouts[0].frozen_rows, layouts[0].frozen_cols), (5, 2));
+        }
+        for panes in [(0, 0), (3, 1)] {
+            let layout = SheetLayout { frozen_rows: panes.0, frozen_cols: panes.1, ..Default::default() };
+            for json in [export_full_with_layout(wb.active_sheet(), &layout).unwrap(), export_workbook(&wb, &[layout], 0).unwrap()] {
+                let loaded = import_any(&json).unwrap().0;
+                assert_eq!(loaded.active_sheet().frozen_panes, panes);
+            }
+        }
+        let legacy = r#"{"format":"visigrid-json","version":1,"cells":[]}"#;
+        assert_eq!(import_any(legacy).unwrap().0.active_sheet().frozen_panes, (0, 0));
+        assert!(import_any(&legacy.replace("\"cells\":[]", "\"frozen_rows\":999999999")).is_err());
+        assert!(import_any(&legacy.replace("\"cells\":[]", "\"frozen_cols\":999999999")).is_err());
+    }
+
+    #[test]
+    fn full_json_comments_preserve_empty_text_formula_and_spill_cells() {
+        use visigrid_engine::{cell::CellComment, workbook::Workbook};
+        let mut wb = Workbook::from_sheets(vec![Sheet::new(SheetId(1), 30, 10)], 0);
+        wb.set_cell_text_exact_tracked(0, 1, 1, "00123");
+        wb.set_cell_value_tracked(0, 2, 1, "=1+2");
+        wb.set_cell_value_tracked(0, 4, 1, "=SEQUENCE(2,1)");
+        wb.active_sheet_mut().set_bold(5, 1, true);
+        for (row, col) in [(0, 0), (1, 1), (2, 1), (5, 1)] {
+            wb.active_sheet_mut().set_comment(row, col, Some(CellComment {
+                text: format!("  Note {row}\n\u{65e5}\u{672c}\u{8a9e}  "),
+                author: "Author".into(),
+            }));
+        }
+        for json in [export_full(wb.active_sheet()).unwrap(), export_workbook(&wb, &[], 0).unwrap()] {
+            let loaded = import_any(&json).unwrap().0;
+            assert!(loaded.read_only_reason().is_none(), "{:?}", loaded.read_only_reason());
+            for (row, col) in [(0, 0), (1, 1), (2, 1), (5, 1)] {
+                assert_eq!(loaded.active_sheet().comment(row, col), wb.active_sheet().comment(row, col));
+            }
+            assert_eq!(loaded.active_sheet().get_raw(0, 0), "");
+            assert_eq!(loaded.active_sheet().get_raw(1, 1), "00123");
+            assert_eq!(loaded.active_sheet().get_raw(2, 1), "=1+2");
+            assert_eq!(loaded.active_sheet().get_display(5, 1), "2");
+            assert!(loaded.active_sheet().get_format(5, 1).bold);
+            let (single, _) = import_full_with_layout(&export_full(loaded.active_sheet()).unwrap()).unwrap();
+            assert_eq!(single.comment(0, 0), wb.active_sheet().comment(0, 0));
+        }
+        // Absent additive fields do not change existing JSON or its version.
+        let legacy = r#"{"format":"visigrid-json","version":1,"cells":[{"row":0,"col":0,"value":"Old"}]}"#;
+        let loaded = import_any(legacy).unwrap().0;
+        let exported: serde_json::Value = serde_json::from_str(&export_full(loaded.active_sheet()).unwrap()).unwrap();
+        assert!(exported["cells"][0].get("comment").is_none());
+        assert_eq!(exported["version"], 1);
+    }
+
+    #[test]
     fn test_json_export() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.json");
@@ -76,9 +193,11 @@ mod tests {
     }
 }
 
-// =====================================================================// visigrid-json v1 — full-fidelity JSON interchange
-// =====================================================================//
-// A stable, versioned schema carrying values, formulas, formats, and merges,
+// ============================================================================
+// visigrid-json — full-fidelity JSON interchange
+// ============================================================================
+//
+// A versioned schema carrying values, formulas, formats, comments and merges,
 // so external tools (the web app, VisiAPI, scripts) can round-trip sheets
 // through the engine without parsing xlsx or the native SQLite format.
 //
@@ -142,9 +261,17 @@ pub const FULL_JSON_VERSION: u32 = 1;
 pub const FULL_JSON_WORKBOOK_VERSION: u32 = 2;
 /// Table-bearing documents require v3; ordinary exports retain v1/v2.
 pub const FULL_JSON_TABLE_VERSION: u32 = 3;
+/// Relative validation origins require readers that preserve their semantics.
+pub const FULL_JSON_VALIDATION_VERSION: u32 = 4;
+/// Workbook names must not be silently discarded by older readers.
+pub const FULL_JSON_NAMES_VERSION: u32 = 5;
+
+#[path = "json_names.rs"]
+mod names;
 
 /// Per-sheet presentation state that lives outside the engine (the GUI and
-/// the web mapper own it). BTreeMap for deterministic serialization.
+/// the web mapper own it). Frozen panes also live in the engine; an explicit
+/// host layout overrides those defaults on export. BTreeMap for deterministic serialization.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SheetLayout {
     pub col_widths: BTreeMap<usize, f32>,
@@ -376,6 +503,8 @@ fn keys_to_usize(m: &BTreeMap<String, f32>) -> BTreeMap<usize, f32> {
 
 #[derive(Serialize, Deserialize)]
 struct FullDoc {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    named_ranges: Vec<visigrid_engine::named_range::NamedRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     collab_sheet_ids: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -435,6 +564,9 @@ struct SheetBody {
     cond_formats: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     validations: Vec<ValidationSpec>,
+    /// Explicit opt-outs from validation; exclusions take precedence over rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    validation_exclusions: Vec<visigrid_engine::validation::CellRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     filter: Option<FilterSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +587,8 @@ struct FullCell {
     formula: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fmt: Option<FullFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comment: Option<visigrid_engine::cell::CellComment>,
     /// True when this value was kept rather than recomputed, because the build
     /// that wrote the file had no definition for the formula's function.
     ///
@@ -589,7 +723,8 @@ fn parse_hex(s: &str) -> Option<[u8; 4]> {
 
 /// Export a sheet as visigrid-json v1 (no layout side-car).
 pub fn export_full(sheet: &Sheet) -> Result<String, String> {
-    export_full_with_layout(sheet, &SheetLayout::default())
+    export_full_with_layout(sheet, &SheetLayout { frozen_rows: sheet.frozen_panes.0,
+        frozen_cols: sheet.frozen_panes.1, ..SheetLayout::default() })
 }
 
 /// Export a sheet as visigrid-json v1 with presentation state.
@@ -610,9 +745,10 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
     let doc = FullDoc {
         collab_sheet_ids: sheet.canonical_wire_identity.then(|| vec![sheet.id.0]),
         format: FULL_JSON_FORMAT.to_string(),
-        version: if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
+        version: if sheet.validations.iter().any(|(_, r)| r.reference_origin.is_some()) { FULL_JSON_VALIDATION_VERSION } else if sheet.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_VERSION },
         table_catalog: sheet.has_table_history().then(||
             serde_json::to_value(visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0).saved_tables()).unwrap()),
+        named_ranges: Vec::new(),
         body: sheet_body(sheet, layout, true),
         sheets: Vec::new(),
         active_sheet: None,
@@ -622,7 +758,7 @@ pub fn export_full_with_layout(sheet: &Sheet, layout: &SheetLayout) -> Result<St
 
 /// Export a whole workbook as visigrid-json v2 (workbook form).
 /// `layouts` is per-sheet, parallel to `wb.sheets()`; missing entries mean
-/// no presentation state.
+/// no host presentation state; engine-owned frozen panes are retained.
 pub fn export_workbook(
     wb: &visigrid_engine::workbook::Workbook,
     layouts: &[SheetLayout],
@@ -654,12 +790,13 @@ fn workbook_doc(
     if wb.sheets().iter().zip(layouts).any(|(sheet, layout)| sheet.table_view_spec().is_some() && layout.filter.is_some()) {
         return Err("A sheet cannot save both a Table view and a worksheet-range filter.".into());
     }
-    let default_layout = SheetLayout::default();
     let sheets: Vec<SheetBody> = wb
         .sheets()
         .iter()
         .enumerate()
         .map(|(i, s)| {
+            let default_layout = SheetLayout { frozen_rows: s.frozen_panes.0,
+                frozen_cols: s.frozen_panes.1, ..SheetLayout::default() };
             let mut body = sheet_body(s, layouts.get(i).unwrap_or(&default_layout), inline(i));
             let saved = wb.saved_pivots(i);
             if !saved.is_empty() {
@@ -668,11 +805,13 @@ fn workbook_doc(
             body
         })
         .collect();
+    let named_ranges = names::export(wb)?;
     let doc = FullDoc {
         collab_sheet_ids: wb.sheets().iter().any(|s| s.canonical_wire_identity).then(|| wb.sheets().iter().map(|s| s.id.0).collect()),
         format: FULL_JSON_FORMAT.to_string(),
-        version: if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
+        version: if !named_ranges.is_empty() { FULL_JSON_NAMES_VERSION } else if wb.sheets().iter().any(|s| s.validations.iter().any(|(_, r)| r.reference_origin.is_some())) { FULL_JSON_VALIDATION_VERSION } else if wb.has_table_history() { FULL_JSON_TABLE_VERSION } else { FULL_JSON_WORKBOOK_VERSION },
         table_catalog: wb.has_table_history().then(|| serde_json::to_value(wb.saved_tables()).unwrap()),
+        named_ranges,
         body: SheetBody::default(),
         active_sheet: Some(active_sheet.min(sheets.len().saturating_sub(1))),
         sheets,
@@ -716,7 +855,8 @@ fn collect_cells(sheet: &Sheet, coords: Vec<(usize, usize)>, keep_receiver: &dyn
         let raw = sheet.get_raw(row, col);
         let format = sheet.get_format(row, col);
         let has_format = !format.is_default();
-        if raw.is_empty() && !has_format {
+        let comment = sheet.comment(row, col).cloned();
+        if raw.is_empty() && !has_format && comment.is_none() {
             continue;
         }
 
@@ -802,13 +942,16 @@ fn collect_cells(sheet: &Sheet, coords: Vec<(usize, usize)>, keep_receiver: &dyn
         };
 
         let stale_custom_fn = sheet.kept_uncomputable.contains(&(row, col));
-        cells.push(FullCell { row, col, value, formula, fmt, spill_from: None, stale_custom_fn });
+        cells.push(FullCell { row, col, value, formula, fmt, comment, spill_from: None, stale_custom_fn });
     }
 
     // Cells a formula spilled into. They hold no Cell of their own, so the loop
     // above never sees them.
     let mut receivers: Vec<(usize, usize)> = sheet.spill_receiver_coords().filter(|&(r, c)| keep_receiver(r, c)).collect();
     receivers.sort_unstable();
+    if receivers.is_empty() { return cells; }
+    let authored: BTreeMap<_, _> = cells.iter().enumerate()
+        .map(|(index, cell)| ((cell.row, cell.col), index)).collect();
     for (row, col) in receivers {
         {
             let Some(parent) = sheet.get_spill_parent(row, col) else {
@@ -822,15 +965,18 @@ fn collect_cells(sheet: &Sheet, coords: Vec<(usize, usize)>, keep_receiver: &dyn
                 Some(EvalValue::Error(e)) => Some(serde_json::json!(e)),
                 Some(EvalValue::Empty) | None => None,
             };
-            cells.push(FullCell {
-                row,
-                col,
-                value,
-                formula: None,
-                fmt: None,
-                spill_from: Some([parent.0, parent.1]),
-                stale_custom_fn: false,
-            });
+            if let Some(&index) = authored.get(&(row, col)) {
+                // A spill receiver may also own formatting or a comment.
+                // Emit one complete cell, so loss detection and band readers
+                // never have to choose between duplicate coordinates.
+                cells[index].value = value;
+                cells[index].spill_from = Some([parent.0, parent.1]);
+            } else {
+                cells.push(FullCell {
+                    row, col, value, formula: None, fmt: None, comment: None,
+                    spill_from: Some([parent.0, parent.1]), stale_custom_fn: false,
+                });
+            }
         }
     }
 
@@ -858,7 +1004,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout, with_cells: bool) -> SheetBod
         merges,
         col_widths: keys_to_string(&layout.col_widths),
         row_heights: keys_to_string(&layout.row_heights),
-        hidden_rows: layout.hidden_rows.iter().copied().collect(),
+        hidden_rows: layout.hidden_rows.union(&sheet.manual_hidden_rows()).copied().collect(),
         hidden_cols: layout.hidden_cols.iter().copied().collect(),
         frozen_rows: layout.frozen_rows,
         frozen_cols: layout.frozen_cols,
@@ -872,6 +1018,7 @@ fn sheet_body(sheet: &Sheet, layout: &SheetLayout, with_cells: bool) -> SheetBod
             .iter()
             .map(|(range, rule)| ValidationSpec { range: *range, rule: rule.clone() })
             .collect(),
+        validation_exclusions: sheet.validations.exclusions_iter().copied().collect(),
         filter: layout.filter.clone(),
         charts: layout.charts.clone(),
         pivots: None,
@@ -889,7 +1036,7 @@ pub(crate) fn protection_projection(sheet: &Sheet) -> Result<serde_json::Value, 
         "reason": sheet.read_only_reason,
         "rows": sheet.rows,
         "cols": sheet.cols,
-        "body": sheet_body(sheet, &SheetLayout::default(), true),
+        "body": sheet_body(sheet, &SheetLayout { frozen_rows: sheet.frozen_panes.0, frozen_cols: sheet.frozen_panes.1, ..SheetLayout::default() }, true),
         "tables": workbook.saved_tables(),
     })).map_err(|e| e.to_string())
 }
@@ -982,7 +1129,7 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     if doc.format != FULL_JSON_FORMAT {
         return Err(format!("not a visigrid-json document (format: {:?})", doc.format));
     }
-    if doc.version > FULL_JSON_TABLE_VERSION {
+    if doc.version > FULL_JSON_NAMES_VERSION {
         let shape: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
         let recognizable = shape.get("cells").is_some_and(serde_json::Value::is_array)
             || shape.get("sheets").and_then(serde_json::Value::as_array)
@@ -1004,6 +1151,9 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     let mut sheets = Vec::with_capacity(bodies.len());
     let mut layouts = Vec::with_capacity(bodies.len());
     for (i, body) in bodies.iter().enumerate() {
+        if doc.version < FULL_JSON_VALIDATION_VERSION && body.validations.iter().any(|v| v.rule.reference_origin.is_some()) {
+            return Err("Relative validation rules require visigrid-json v4.".into());
+        }
         let id = doc.collab_sheet_ids.as_ref().map_or(i as u64 + 1, |ids| ids[i]);
         let (mut sheet, layout) = apply_body(body, SheetId(id), i)?;
         sheet.canonical_wire_identity = doc.collab_sheet_ids.is_some();
@@ -1029,14 +1179,18 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
         return Ok((wb, layouts, active));
     }
 
-    if doc.version > FULL_JSON_TABLE_VERSION {
+    if doc.version > FULL_JSON_NAMES_VERSION {
         let cached = cached_formula_values(&doc, &wb);
-        let reason = format!("visigrid-json version {} is newer than supported ({}). Opened read-only; original content is retained.", doc.version, FULL_JSON_TABLE_VERSION);
+        let reason = format!("visigrid-json version {} is newer than supported ({}). Opened read-only; original content is retained.", doc.version, FULL_JSON_NAMES_VERSION);
         crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
         retain_protected_source(&mut wb, content, &layouts)?;
         return Ok((wb, layouts, active));
     }
 
+    if !doc.named_ranges.is_empty() && doc.version < FULL_JSON_NAMES_VERSION {
+        return Err("Named ranges require visigrid-json v5.".into());
+    }
+    names::restore(&mut wb, &doc.named_ranges)?;
     // Pivots after cells, so ownership never blocks loading their output.
     for (i, body) in bodies.iter().enumerate() {
         if let Some(p) = &body.pivots {
@@ -1166,7 +1320,7 @@ fn retain_protected_source(wb: &mut visigrid_engine::workbook::Workbook, content
     let source = std::sync::Arc::new(content.to_owned());
     let sheet_ids = wb.sheets().iter().map(|s| s.id).collect::<Vec<_>>();
     for index in 0..wb.sheet_count() {
-        let fingerprint = crate::content_protection::fingerprint(wb.sheet(index).unwrap())?;
+        let fingerprint = crate::content_protection::fingerprint(wb, wb.sheet(index).unwrap())?;
         wb.sheet_mut(index).unwrap().canonical_content_protection = Some(
             visigrid_engine::sheet::CanonicalContentProtection {
                 source: source.clone(), sheet_ids: sheet_ids.clone(), fingerprint,
@@ -1227,44 +1381,44 @@ fn cached_formula_values(doc: &FullDoc, wb: &visigrid_engine::workbook::Workbook
 fn apply_cells(sheet: &mut Sheet, cells: &[FullCell]) -> usize {
     let mut quoted_numerics = 0usize;
     for cell in cells {
-        // Spill receivers are written for readers without an engine. Loading
-        // them would occupy the range the spill needs and turn it into #SPILL!,
-        // so they are skipped and the recompute puts them back.
-        if cell.spill_from.is_some() {
-            continue;
+        if let Some(comment) = &cell.comment {
+            sheet.set_comment(cell.row, cell.col, Some(comment.clone()));
         }
-
-        // Content: formula wins; else typed value
-        if let Some(f) = &cell.formula {
-            // Deferred: import_any runs an ordered recompute afterwards, which
-            // evaluates once with every dependency present and places spills
-            // against a finished sheet.
-            sheet.set_value_deferred(cell.row, cell.col, f);
-        } else if let Some(v) = &cell.value {
-            match v {
-                // A quoted value is text, and stays text even when it reads
-                // like a number. The document already told us the type; this
-                // used to flatten it to a string and hand it to set_value,
-                // which inferred the type over again — so "007" came back as
-                // 7 with nothing to say a zip code had become an integer.
-                //
-                // Writers only quote what was text, so our own round trips are
-                // exact. A foreign document quoting a number gets text, which
-                // is visible and fixable; the previous behaviour was neither.
-                serde_json::Value::String(s) => {
-                    if !s.is_empty() && s.parse::<f64>().is_ok() {
-                        quoted_numerics += 1;
+        // Recompute spilled values instead of occupying their destination.
+        // Formatting and comments on those destinations still belong to users.
+        if cell.spill_from.is_none() {
+            // Content: formula wins; else typed value
+            if let Some(f) = &cell.formula {
+                // Deferred: import_any runs an ordered recompute afterwards, which
+                // evaluates once with every dependency present and places spills
+                // against a finished sheet.
+                sheet.set_value_deferred(cell.row, cell.col, f);
+            } else if let Some(v) = &cell.value {
+                match v {
+                    // A quoted value is text, and stays text even when it reads
+                    // like a number. The document already told us the type; this
+                    // used to flatten it to a string and hand it to set_value,
+                    // which inferred the type over again — so "007" came back as
+                    // 7 with nothing to say a zip code had become an integer.
+                    //
+                    // Writers only quote what was text, so our own round trips are
+                    // exact. A foreign document quoting a number gets text, which
+                    // is visible and fixable; the previous behaviour was neither.
+                    serde_json::Value::String(s) => {
+                        if !s.is_empty() && s.parse::<f64>().is_ok() {
+                            quoted_numerics += 1;
+                        }
+                        sheet.set_text(cell.row, cell.col, s);
                     }
-                    sheet.set_text(cell.row, cell.col, s);
-                }
-                serde_json::Value::Number(n) => {
-                    sheet.set_value_deferred(cell.row, cell.col, &n.to_string());
-                }
-                serde_json::Value::Bool(b) => {
-                    sheet.set_value_deferred(cell.row, cell.col, if *b { "TRUE" } else { "FALSE" });
-                }
-                other => {
-                    sheet.set_value_deferred(cell.row, cell.col, &other.to_string());
+                    serde_json::Value::Number(n) => {
+                        sheet.set_value_deferred(cell.row, cell.col, &n.to_string());
+                    }
+                    serde_json::Value::Bool(b) => {
+                        sheet.set_value_deferred(cell.row, cell.col, if *b { "TRUE" } else { "FALSE" });
+                    }
+                    other => {
+                        sheet.set_value_deferred(cell.row, cell.col, &other.to_string());
+                    }
                 }
             }
         }
@@ -1347,6 +1501,9 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         sheet.set_name(&format!("Sheet{}", index + 1));
     }
 
+    if body.cells.iter().any(|cell| cell.comment.is_some() && (cell.row >= sheet.rows || cell.col >= sheet.cols)) {
+        return Err("Comment cell is outside the worksheet.".into());
+    }
     quoted_numerics += apply_cells(&mut sheet, &body.cells);
 
     for m in &body.merges {
@@ -1361,10 +1518,35 @@ fn apply_body(body: &SheetBody, id: visigrid_engine::sheet::SheetId, index: usiz
         store.reparse_all();
         sheet.cond_formats = store;
     }
+    if body.validations.len().saturating_add(body.validation_exclusions.len()) > 100_000 {
+        return Err("Validation metadata exceeds the supported range limit.".into());
+    }
+    for range in body.validations.iter().map(|v| &v.range).chain(&body.validation_exclusions) {
+        if range.start_row > range.end_row || range.start_col > range.end_col
+            || range.end_row >= sheet.rows || range.end_col >= sheet.cols
+        {
+            return Err("A validation range is outside the worksheet.".into());
+        }
+    }
+    let mut validation_ranges = BTreeSet::new();
     for v in &body.validations {
+        if v.rule.reference_origin.is_some_and(|(r, c)| r >= sheet.rows || c >= sheet.cols) {
+            return Err("A validation reference origin is outside the worksheet.".into());
+        }
+        if !validation_ranges.insert(v.range) {
+            return Err("Validation metadata contains duplicate rule ranges.".into());
+        }
         sheet.validations.set(v.range, v.rule.clone());
     }
+    for range in &body.validation_exclusions {
+        sheet.validations.exclude(*range);
+    }
 
+    sheet.set_manual_hidden_rows(body.hidden_rows.iter().copied().collect())?;
+    if body.frozen_rows > sheet.rows || body.frozen_cols > sheet.cols {
+        return Err("Freeze boundary is outside the worksheet.".into());
+    }
+    sheet.frozen_panes = (body.frozen_rows, body.frozen_cols);
     let layout = SheetLayout {
         col_widths: keys_to_usize(&body.col_widths),
         row_heights: keys_to_usize(&body.row_heights),

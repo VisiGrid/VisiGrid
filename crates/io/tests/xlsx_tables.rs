@@ -49,6 +49,66 @@ fn book() -> (Workbook, TableId) {
     );
     (wb, id)
 }
+
+#[test]
+fn native_authored_totals_survive_native_and_excel_roundtrip() {
+    use visigrid_engine::table::TableTotal;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 1, TableTotal { label: Some("Grand total".into()), ..Default::default() }).unwrap();
+    wb.set_table_total(id, 2, TableTotal { function: Some("custom".into()), formula: Some("=SUM([Price])*2".into()), label: None }).unwrap();
+    let expected = wb.sheet(0).unwrap().get_display(8, 3);
+    let path = dir.path().join("native-totals.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let wb = native::load_workbook(&path).unwrap();
+    let path = dir.path().join("native-totals.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let table_xml = xml(&path, "xl/tables/table1.xml");
+    assert!(table_xml.contains("totalsRowCount=\"1\""));
+    assert!(table_xml.contains("totalsRowLabel=\"Grand total\""));
+    assert!(table_xml.contains("totalsRowFunction=\"sum\""));
+    let (mut wb, _) = xlsx::import(&path).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 3), expected);
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 2), "100");
+    let id = wb.tables().next().unwrap().1.id;
+    wb.set_table_totals_visible(id, false, Default::default()).unwrap();
+    let path = dir.path().join("dormant-native-totals.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (mut wb, _) = xlsx::import(&path).unwrap();
+    let id = wb.tables().next().unwrap().1.id;
+    assert!(wb.table(id).unwrap().1.totals_row().is_none());
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 3), expected);
+    assert_eq!(wb.sheet(0).unwrap().get_display(8, 2), "100");
+    assert_eq!(wb.sheet(0).unwrap().get_raw(8, 1), "Grand total");
+}
+
+#[test]
+fn moved_totals_survive_native_and_excel_with_comments_and_custom_formulas() {
+    use visigrid_engine::table::TableTotal;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(id, 2, TableTotal { function: Some("custom".into()), formula: Some("=SUM([Price])*2".into()), label: None }).unwrap();
+    wb.sheet_mut(0).unwrap().set_comment(8, 2, Some(CellComment { text: "Custom total".into(), author: "QA".into() }));
+    wb.sheet_mut(0).unwrap().toggle_bold(8, 2);
+    wb.append_table_rows(id, 2, &[(8, 1, "8".into()), (8, 2, "15".into()), (9, 1, "9".into()), (9, 2, "20".into())]).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(10, 2), "170");
+    let native_path = dir.path().join("moved.sheet");
+    native::save_workbook(&wb, &native_path).unwrap();
+    let wb = native::load_workbook(&native_path).unwrap();
+    let path = dir.path().join("moved.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (loaded, _) = xlsx::import(&path).unwrap();
+    assert_eq!(loaded.tables().next().unwrap().1.totals_row(), Some(10));
+    assert_eq!(loaded.sheet(0).unwrap().get_display(10, 2), "170");
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(10, 2), "=SUM([Price])*2");
+    assert!(loaded.sheet(0).unwrap().get_format(10, 2).bold);
+    assert_eq!(loaded.sheet(0).unwrap().comment(10, 2).unwrap().text, "Custom total");
+    assert!(loaded.sheet(0).unwrap().comment(8, 2).is_none());
+    assert_eq!(loaded.sheet(0).unwrap().get_display(9, 3), "180");
+}
 fn xml(path: &Path, name: &str) -> String {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
     let mut out = String::new();
@@ -223,7 +283,11 @@ fn unsupported_or_corrupt_tables_keep_cells_and_report_loss() {
     let (wb, _) = book();
     xlsx::export(&wb, &file, None).unwrap();
     for (before, after, reason) in [
-        ("totalsRowShown=\"0\"", "totalsRowCount=\"1\"", "totals row"),
+        (
+            "totalsRowShown=\"0\"",
+            "totalsRowCount=\"2\"",
+            "totals-row count",
+        ),
         (
             "totalsRowShown=\"0\"",
             "headerRowCount=\"0\"",
@@ -769,6 +833,11 @@ fn importing_filters_respects_adjacent_cells_row_heights_and_freeze_boundaries()
             "mode {mode}: {:?}",
             report.warnings
         );
+        if mode == 2 {
+            assert!(!loaded.sheet(0).unwrap().table_view_spec().unwrap().filters.is_empty());
+            assert_eq!(loaded.sheet(0).unwrap().frozen_panes, (4, 0));
+            continue;
+        }
         assert!(
             loaded.sheet(0).unwrap().table_view_spec().is_none(),
             "mode {mode}"
@@ -897,8 +966,15 @@ fn boolean_and_error_values_and_values_only_import_keep_filter_membership() {
     assert!(xml(&file, "xl/tables/table1.xml").contains("val=\"#DIV/0!\""));
     let (loaded, _) = xlsx::import(&file).unwrap();
     assert_eq!(loaded.sheet(0).unwrap().table_view_spec(), Some(&expected));
-    // Values-only imports use the writer's cached formula results. Verify
-    // that criteria survive without assuming those caches contain live results.
+    // Values-only import consumes actual typed caches. Its static boolean/error
+    // representation is text, so verify membership rather than identical key types.
+    let (values, report) = xlsx::import_with_options(&file, &xlsx::ImportOptions { values_only: true, ..Default::default() }).unwrap();
+    assert_eq!(values.sheet(0).unwrap().get_raw(3, 1), "TRUE");
+    assert_eq!(values.sheet(0).unwrap().get_raw(4, 1), "#DIV/0!");
+    let sheet = values.sheet(0).unwrap();
+    let view = visigrid_engine::table_view::TableView::build(sheet, sheet.table_view_spec().unwrap().clone(), 20, None).unwrap();
+    assert_eq!((3..8).filter(|r| view.rows().is_data_row_visible(*r)).collect::<Vec<_>>(), vec![3, 4], "{:?}", report.warnings);
+    // Numeric calculated-column results and blank overrides retain their criteria.
     let (mut wb, id) = book();
     select_values(&mut wb, id, 2, &[3, 5], true);
     xlsx::export(&wb, &file, None).unwrap();
@@ -966,7 +1042,7 @@ fn excel_string_escape_sequences_in_filter_values_are_decoded_once() {
 }
 
 #[test]
-fn imported_filter_warns_before_revealing_manually_hidden_matching_records() {
+fn imported_filter_preserves_manually_hidden_matching_records() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("base.xlsx");
     let changed = dir.path().join("manual-hidden.xlsx");
@@ -988,15 +1064,15 @@ fn imported_filter_warns_before_revealing_manually_hidden_matching_records() {
         loaded.sheet(0).unwrap().table_view_spec(),
         wb.sheet(0).unwrap().table_view_spec()
     );
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains("manually hidden or stale hidden")),
-        "{:?}",
-        report.warnings
-    );
-    assert!(report.imported_layouts[0].hidden_rows.is_empty());
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(report.imported_layouts[0].hidden_rows.contains(&3));
+    let sheet = loaded.sheet(0).unwrap();
+    assert!(sheet.manual_hidden_rows().contains(&3));
+    assert!(!sheet.build_saved_table_view(sheet.rows).unwrap().unwrap().rows().is_data_row_visible(3));
+    let mut cleared = loaded.clone();
+    cleared.set_table_view_spec(sheet.id, None).unwrap();
+    assert!(cleared.sheet(0).unwrap().manual_hidden_rows().contains(&3));
+
 }
 
 #[test]
@@ -1356,20 +1432,17 @@ fn sort_only_import_refuses_unsafe_layouts_and_preserves_manual_hidden_rows() {
         });
         let (loaded, report) = xlsx::import(&changed).unwrap();
         assert_eq!(report.tables_imported, 1);
-        assert!(
-            loaded.sheet(0).unwrap().table_view_spec().is_none(),
-            "mode {mode}"
-        );
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains("saved sort/filter/button settings were not imported")),
-            "mode {mode}: {:?}",
-            report.warnings
-        );
         if mode == 0 {
+            let sheet = loaded.sheet(0).unwrap();
+            assert!(sheet.table_view_spec().unwrap().sort.is_some());
             assert!(report.imported_layouts[0].hidden_rows.contains(&3));
+            assert!(!sheet.build_saved_table_view(sheet.rows).unwrap().unwrap().rows().is_data_row_visible(3));
+        } else if mode == 2 {
+            assert!(loaded.sheet(0).unwrap().table_view_spec().unwrap().sort.is_some());
+            assert_eq!(loaded.sheet(0).unwrap().frozen_panes, (4, 0));
+        } else {
+            assert!(loaded.sheet(0).unwrap().table_view_spec().is_none(), "mode {mode}");
+            assert!(report.warnings.iter().any(|w| w.contains("saved sort/filter/button settings were not imported")), "mode {mode}: {:?}", report.warnings);
         }
         assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "6");
     }
@@ -1551,7 +1624,7 @@ fn sorted_export_refuses_discontiguous_ranges_and_coordinate_or_dynamic_function
         ("=OFFSET(Sheet1!B4,1,0)", "Function OFFSET"),
         ("=INDEX(Sales[Qty],1)", "Function INDEX"),
         ("=RAND()", "Function RAND"),
-        ("=UnknownName", "Named-range"),
+        ("=UnknownName", "Unresolved named reference"),
         ("=1+", "Unexpected"),
     ] {
         let (mut wb, id) = book();
@@ -1573,14 +1646,13 @@ fn sorted_export_refuses_nonuniform_calculated_rules_before_writing() {
 fn sorted_export_refuses_unsafe_host_layout_before_writing() {
     let (mut wb, id) = book();
     set_saved_sort(&mut wb, id, 0, true, true);
-    for mode in 0..4 {
+    for mode in 0..3 {
         let mut layout = xlsx::ExportLayout::default();
         match mode {
             0 => {
                 layout.row_heights.insert(4, 30.0);
             }
             1 => layout.hidden_rows.push(4),
-            2 => layout.frozen_rows = 4,
             _ => layout.autofilter_range = Some((2, 1, 7, 3)),
         }
         assert_sorted_export_refuses(&wb, "row layout", Some(&[layout]));
@@ -1691,13 +1763,13 @@ fn sorted_export_refuses_stale_results_without_changing_live_caches() {
 }
 
 #[test]
-fn sorted_export_refuses_validation_conditional_format_spills_and_native_freeze_boundaries() {
+fn sorted_export_refuses_validation_conditional_format_and_spills() {
     use visigrid_engine::{
         cell::CellStyle,
         cond_format::CondStyle,
         validation::{CellRange, ValidationRule},
     };
-    for mode in 0..4 {
+    for mode in 0..3 {
         let (mut wb, id) = book();
         set_saved_sort(&mut wb, id, 0, true, true);
         let expected = match mode {
@@ -1719,14 +1791,11 @@ fn sorted_export_refuses_validation_conditional_format_spills_and_native_freeze_
                 );
                 "conditional-format"
             }
-            2 => {
+            _ => {
                 wb.set_cell_value_tracked(1, 2, 0, "=SEQUENCE(2,1)");
                 "Spilled formulas"
             }
-            _ => {
-                wb.sheet_mut(0).unwrap().frozen_panes = (4, 0);
-                "freeze boundary"
-            }
+
         };
         assert_sorted_export_refuses(&wb, expected, None);
     }
@@ -1841,7 +1910,11 @@ fn stored_order_is_explicit_fallback_for_unsupported_materialization_with_loss_w
         }
         set_saved_sort(&mut wb, id, 0, true, true);
         let before = authored_snapshot(&wb);
-        assert!(xlsx::export(&wb, &file, None).is_err());
+        if mode == 3 {
+            xlsx::export(&wb, &file, None).unwrap();
+        } else {
+            assert!(xlsx::export(&wb, &file, None).is_err());
+        }
         let report = xlsx::export_with_order(&wb, &file, None, ExportOrder::Stored).unwrap();
         if mode == 1 {
             assert!(report
@@ -1850,10 +1923,7 @@ fn stored_order_is_explicit_fallback_for_unsupported_materialization_with_loss_w
                 .any(|w| w.contains("Conditional formatting")));
         }
         if mode == 3 {
-            assert!(report
-                .warnings
-                .iter()
-                .any(|w| w.contains("Named-range definitions")));
+            assert!(!report.warnings.iter().any(|w| w.contains("Named-range definitions")));
         }
         let (loaded, _) = xlsx::import(&file).unwrap();
         assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), "2");
@@ -1965,7 +2035,7 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
             assert!(report
                 .warnings
                 .iter()
-                .any(|w| w.contains("Conditional formatting is not exported")));
+                .any(|w| w.contains("semantic styles")));
         }
         std::fs::write(&file, bytes).unwrap();
         let (loaded, _) = xlsx::import(&file).unwrap();
@@ -2000,6 +2070,773 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
     }
 }
 
+fn external_totals_file(path: &Path, hidden: bool) {
+    use rust_xlsxwriter::{Formula, Table, TableColumn, TableFunction, Workbook as Excel};
+    let mut wb = Excel::new();
+    let sheet = wb.add_worksheet();
+    sheet.write_string(1, 0, "West").unwrap();
+    sheet.write_number(1, 1, 10).unwrap();
+    sheet.write_number(1, 2, 2).unwrap();
+    sheet.write_string(2, 0, "East").unwrap();
+    sheet.write_number(2, 1, 20).unwrap();
+    sheet.write_number(2, 2, 3).unwrap();
+    if hidden {
+        sheet.set_row_hidden(2).unwrap();
+    }
+    sheet
+        .add_table(
+            0,
+            0,
+            3,
+            2,
+            &Table::new()
+                .set_name("Sales")
+                .set_total_row(true)
+                .set_columns(&[
+                    TableColumn::new()
+                        .set_header("Region")
+                        .set_total_label("Grand & total"),
+                    TableColumn::new()
+                        .set_header("Amount")
+                        .set_total_function(TableFunction::Sum),
+                    TableColumn::new()
+                        .set_header("Qty")
+                        .set_total_function(TableFunction::Custom(Formula::new("SUM([Qty])*2"))),
+                ]),
+        )
+        .unwrap();
+    sheet
+        .write_formula(0, 5, Formula::new("Sales[[#Totals],[Amount]]"))
+        .unwrap();
+    sheet
+        .write_formula(0, 6, Formula::new("SUM(Sales[Amount])"))
+        .unwrap();
+    wb.save(path).unwrap();
+}
+
+#[test]
+fn excel_totals_roundtrip_preserves_body_footer_formulas_metadata_and_native_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("external.xlsx");
+    let native_path = dir.path().join("totals.sheet");
+    external_totals_file(&input, false);
+    let (mut wb, report) = xlsx::import(&input).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(report.tables_skipped, 0);
+    assert_eq!(wb.saved_tables().version, 5);
+    let table = wb.tables().next().unwrap().1;
+    assert_eq!(table.range.data_rows(), 2);
+    assert_eq!(table.totals_row(), Some(3));
+    assert_eq!(
+        table.totals.as_ref().unwrap().columns[1]
+            .function
+            .as_deref(),
+        Some("sum")
+    );
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "30");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 2), "10");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "30");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 6), "30");
+    // Body editing recalculates both totals and dependent #Totals formulas.
+    wb.set_cell_value_tracked(0, 1, 1, "15");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "35");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 5), "35");
+    native::save_workbook(&wb, &native_path).unwrap();
+    wb = native::load_workbook(&native_path).unwrap();
+    let json = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    let (loaded, _, _) = visigrid_io::json::import_any(&json).unwrap();
+    assert_eq!(loaded.saved_tables().version, 5);
+    assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "35");
+    assert_eq!(loaded.sheet(0).unwrap().get_display(0, 5), "35");
+    wb = loaded;
+    for _ in 0..2 {
+        let output = dir.path().join("output.xlsx");
+        xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+        let metadata = xml(&output, "xl/tables/table1.xml");
+        assert!(metadata.contains("ref=\"A1:C4\""), "{metadata}");
+        assert!(metadata.contains("totalsRowCount=\"1\""), "{metadata}");
+        assert!(metadata.contains("totalsRowFunction=\"sum\""), "{metadata}");
+        assert!(
+            metadata.contains("totalsRowLabel=\"Grand &amp; total\""),
+            "{metadata}"
+        );
+        assert!(
+            metadata.contains("<totalsRowFormula>SUM([Qty])*2</totalsRowFormula>"),
+            "{metadata}"
+        );
+        assert!(metadata.contains("<autoFilter ref=\"A1:C3\""), "{metadata}");
+        let (loaded, report) = xlsx::import(&output).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "35");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(0, 5), "35");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(3, 2), "10");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 0), "Grand & total");
+        wb = loaded;
+    }
+}
+
+#[test]
+fn imported_totals_remain_visible_and_recalculate_when_filter_fields_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("external.xlsx");
+    external_totals_file(&input, false);
+    let (mut wb, _) = xlsx::import(&input).unwrap();
+    let (sid, table) = wb.tables().next().unwrap();
+    let id = table.id;
+    let column = table.columns[0].id;
+    let mut spec = visigrid_engine::table_view::TableViewSpec::new(id);
+    spec.filters.push(visigrid_engine::table_view::TableFilter {
+        column,
+        criteria: visigrid_engine::filter::ColumnFilter {
+            selected: Some(
+                [visigrid_engine::filter::NormalizedFilterKey::Text(
+                    "west".into(),
+                )]
+                .into(),
+            ),
+            text_filter: None,
+        },
+    });
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    let view = wb
+        .sheet(0)
+        .unwrap()
+        .build_saved_table_view(5)
+        .unwrap()
+        .unwrap();
+    assert!(
+        view.rows().data_to_view(3).is_some(),
+        "footer stays visible"
+    );
+    let filtered_path = dir.path().join("filtered-totals.xlsx");
+    xlsx::export_with_order(&wb, &filtered_path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (roundtrip, report) = xlsx::import(&filtered_path).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(roundtrip.sheet(0).unwrap().get_display(3, 1), "10");
+    assert!(
+        roundtrip
+            .tables()
+            .next()
+            .unwrap()
+            .1
+            .totals
+            .as_ref()
+            .unwrap()
+            .hidden_rows
+            .is_empty(),
+        "filter masks must not become manual hiding"
+    );
+    // Changing a different column still invalidates the subtotal.
+    wb.set_cell_value_tracked(0, 2, 0, "West");
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "30");
+    wb.set_table_view_spec(sid, None).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "30");
+    let output = dir.path().join("filtered.xlsx");
+    xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+}
+
+#[test]
+fn totals_keep_manual_hidden_rows_and_refuse_unsafe_authoring() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("hidden.xlsx");
+    external_totals_file(&input, true);
+    let (mut wb, report) = xlsx::import(&input).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    let native_path = dir.path().join("hidden.sheet");
+    native::save_workbook(&wb, &native_path).unwrap();
+    assert!(native::load_layout(&native_path).hidden_rows[&0].contains(&2));
+    wb = native::load_workbook(&native_path).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    let (sid, t) = wb.tables().next().unwrap();
+    let id = t.id;
+    let range = t.range;
+    let resize = wb.resize_table(id, TableRange { end_row: 4, ..range }).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(5, 1), "10");
+    wb.apply_table_commit(&resize, true).unwrap();
+    let append = wb.append_table_rows(id, 1, &[]).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(4, 1), "10");
+    wb.apply_table_commit(&append, true).unwrap();
+    let converted = wb.remove_table(id).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().get_display(3, 1), "10");
+    assert!(wb.sheet(0).unwrap().manual_hidden_rows().contains(&2));
+    wb.apply_table_commit(&converted, true).unwrap();
+    assert!(wb
+        .sheet(0)
+        .unwrap()
+        .table_structural_error(true, 2, 1, false)
+        .is_none());
+    assert!(wb.sheet(0).unwrap().table_value_write_error(3, 1).is_some());
+    assert!(wb
+        .create_table(
+            sid,
+            TableRange {
+                start_row: 3,
+                end_row: 4,
+                start_col: 0,
+                end_col: 2
+            },
+            "Overlap"
+        )
+        .is_err());
+    let output = dir.path().join("output.xlsx");
+    xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+    let (loaded, report) = xlsx::import(&output).unwrap();
+    assert!(report.imported_layouts[0].hidden_rows.contains(&2));
+    assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "10");
+}
+
+#[test]
+fn empty_body_and_dormant_totals_metadata_roundtrip() {
+    use rust_xlsxwriter::{Table, TableColumn as Column, TableFunction};
+    let dir = tempfile::tempdir().unwrap();
+    for empty in [true, false] {
+        let changed = dir.path().join("external.xlsx");
+        let mut external = rust_xlsxwriter::Workbook::new();
+        let sheet = external.add_worksheet();
+        if !empty {
+            sheet.write_string(1, 0, "West").unwrap();
+            sheet.write_number(1, 1, 10).unwrap();
+            sheet.write_number(1, 2, 2).unwrap();
+            sheet.write_string(2, 0, "East").unwrap();
+            sheet.write_number(2, 1, 20).unwrap();
+            sheet.write_number(2, 2, 3).unwrap();
+        }
+        sheet
+            .add_table(
+                0,
+                0,
+                if empty { 1 } else { 2 },
+                2,
+                &Table::new()
+                    .set_name("Sales")
+                    .set_total_row(empty)
+                    .set_columns(&[
+                        Column::new().set_header("Region").set_total_label("Total"),
+                        Column::new()
+                            .set_header("Amount")
+                            .set_total_function(TableFunction::Sum),
+                        Column::new()
+                            .set_header("Qty")
+                            .set_total_function(TableFunction::Custom("SUM([Qty])*2".into())),
+                    ]),
+            )
+            .unwrap();
+        external.save(&changed).unwrap();
+        let (wb, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let t = wb.tables().next().unwrap().1;
+        assert!(t.totals.is_some(), "dormant function settings must survive");
+        assert_eq!(t.totals_row(), empty.then_some(1));
+        if empty {
+            assert_eq!(t.range.data_rows(), 0);
+            assert_eq!(wb.sheet(0).unwrap().get_display(1, 1), "0");
+            assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "0");
+        }
+        let output = dir.path().join("out.xlsx");
+        let report = xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+        let metadata = xml(&output, "xl/tables/table1.xml");
+        if empty {
+            let warning = "Table Sales has no records; its totals row is exported as values.";
+            assert!(report.warnings.iter().any(|w| w == warning), "{:?}", report.warnings);
+            assert!(!metadata.contains("totalsRow"), "{metadata}");
+            // The filter covers the footer row exported as data, as the Table does.
+            assert!(metadata.contains("<autoFilter ref=\"A1:C2\""), "{metadata}");
+            assert!(!report.warnings.iter().any(|w| w.contains("filter range")), "{:?}", report.warnings);
+            let sheet = xml(&output, "xl/worksheets/sheet1.xml");
+            assert!(!sheet.contains("<f"), "{sheet}");
+            let (loaded, report) = xlsx::import(&output).unwrap();
+            assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+            assert!(!report.warnings.iter().any(|w| w.contains("filter range")), "{:?}", report.warnings);
+            assert!(loaded.tables().next().unwrap().1.totals_row().is_none());
+            assert_eq!(loaded.sheet(0).unwrap().get_display(1, 0), "Total");
+            assert_eq!(loaded.sheet(0).unwrap().get_display(1, 1), "0");
+            assert_eq!(loaded.sheet(0).unwrap().get_display(1, 2), "0");
+            assert!(!loaded.sheet(0).unwrap().get_raw(1, 1).starts_with('='));
+        } else {
+            assert!(metadata.contains("totalsRowFunction"), "{metadata}");
+            let (loaded, report) = xlsx::import(&output).unwrap();
+            assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+            assert_eq!(loaded.tables().next().unwrap().1.totals, t.totals);
+        }
+    }
+}
+
+#[test]
+fn totals_sort_export_uses_explicit_stored_order_or_headless_fallback() {
+    use visigrid_engine::{
+        filter::SortDirection,
+        table_view::{TableSort, TableViewSpec},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("external.xlsx");
+    external_totals_file(&input, false);
+    let (mut wb, _) = xlsx::import(&input).unwrap();
+    let (sid, t) = wb.tables().next().unwrap();
+    let mut spec = TableViewSpec::new(t.id);
+    spec.sort = Some(TableSort {
+        column: t.columns[1].id,
+        direction: SortDirection::Descending,
+    });
+    wb.set_table_view_spec(sid, Some(spec)).unwrap();
+    let output = dir.path().join("out.xlsx");
+    assert!(xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Sorted).is_err());
+    assert!(!output.exists());
+    let (bytes, report) = xlsx::export_to_buffer_with_stored_fallback(&wb, None).unwrap();
+    std::fs::write(&output, bytes).unwrap();
+    assert!(
+        report.warnings.iter().any(|w| w.contains("stored")),
+        "{:?}",
+        report.warnings
+    );
+    let (loaded, report) = xlsx::import(&output).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 1), "10");
+    assert_eq!(loaded.sheet(0).unwrap().get_display(3, 1), "30");
+    assert_eq!(
+        loaded.sheet(0).unwrap().table_view_spec().unwrap().sort,
+        wb.sheet(0).unwrap().table_view_spec().unwrap().sort
+    );
+}
+
+#[test]
+fn renamed_totals_keep_custom_settings_and_calculated_rules_through_native_and_xlsx() {
+    use visigrid_engine::table::TableTotal;
+    for visible in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 2, TableTotal { function: Some("custom".into()),
+            formula: Some("=SUM([Price])+SUM(Sales[Price])".into()), label: None }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.rename_table(id, "Orders").unwrap();
+        wb.rename_table_columns(id, &["Units".into(), "Cost".into(), "Revenue".into()]).unwrap();
+        let path = dir.path().join("rename.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("rename.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let xml = xml(&path, "xl/tables/table1.xml");
+        assert!(xml.contains("name=\"Orders\""), "{xml}");
+        assert!(xml.contains("SUM([Cost])+SUM(Orders[Cost])"), "{xml}");
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 2), "100");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 2), "=SUM([Cost])+SUM(Orders[Cost])");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+        assert!(loaded.table(id).unwrap().1.columns[2].formula.as_ref().unwrap().contains("Units"));
+        loaded.set_table_totals_visible(id, false, Default::default()).unwrap();
+        loaded.set_table_totals_visible(id, true, Default::default()).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 2), "100");
+    }
+}
+
+#[test]
+fn edited_calculated_rules_with_totals_roundtrip_and_fill_after_append() {
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.set_calculated_column(id, 3, 3, "=[@Qty]*[@Price]*2", false).unwrap();
+        let rule = wb.table(id).unwrap().1.columns[2].formula.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edited.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        assert_eq!(wb.table(id).unwrap().1.columns[2].formula, rule);
+        let path = dir.path().join("edited.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        assert_eq!(loaded.table(id).unwrap().1.columns[2].formula.as_deref(), Some("=[[#This Row],[Qty]]*[[#This Row],[Price]]*2"));
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(5, 3), "");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(6, 3), "=1+2");
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        let total = loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap();
+        loaded.append_table_rows(id, 1, &[(8, 1, "5".into()), (8, 2, "10".into())]).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3), "100");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(9, 3).parse::<f64>().unwrap(), total + 100.0);
+    }
+}
+
+#[test]
+fn totals_column_structure_roundtrips_through_native_and_excel() {
+    use visigrid_engine::{structural::Axis, table::TableTotal};
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 3, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM([Qty])+C4".into()), label: None,
+        }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.structural_edit(0, Axis::Col, 2, 1, false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("columns.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("columns.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        let table = loaded.table(id).unwrap().1;
+        assert_eq!(table.columns.len(), 4);
+        assert_eq!(table.totals.as_ref().unwrap().columns[3].formula.as_deref(), Some("=SUM([Qty])+D4"));
+        assert_eq!(table.totals.as_ref().unwrap().visible, visible);
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 4), "=SUM([Qty])+D4");
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 4), "30");
+        loaded.structural_edit(0, Axis::Col, 2, 1, true).unwrap();
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 3), "=SUM([Qty])+C4");
+    }
+}
+
+
+#[test]
+fn totals_worksheet_row_edits_keep_native_and_excel_metadata_aligned() {
+    use visigrid_engine::{structural::Axis, table::TableTotal};
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 3, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM([Qty])+C4".into()), label: None,
+        }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.structural_edit(0, Axis::Row, 0, 2, false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("rows.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        let table = loaded.table(id).unwrap().1;
+        assert_eq!(table.range.start_row, 4);
+        assert_eq!(table.range.end_row, 9);
+        assert_eq!(table.totals.as_ref().unwrap().columns[2].formula.as_deref(), Some("=SUM([Qty])+C6"));
+        assert_eq!(table.totals.as_ref().unwrap().visible, visible);
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(loaded.sheet(0).unwrap().get_display(10, 3), "30");
+        loaded.structural_edit(0, Axis::Row, 10, 1, false).unwrap();
+        assert_eq!(loaded.table(id).unwrap().1.totals_row(), Some(11));
+        assert_eq!(loaded.sheet(0).unwrap().get_display(11, 3), "30");
+        assert!(loaded.sheet(0).unwrap().get_raw(10, 3).starts_with('='));
+    }
+}
+
+
+#[test]
+fn horizontally_resized_totals_survive_native_and_xlsx_roundtrips() {
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        wb.set_cell_value_tracked(0, 2, 4, "Extra");
+        wb.set_cell_value_tracked(0, 3, 4, "17");
+        let original = wb.table(id).unwrap().1.range;
+        wb.resize_table(id, TableRange { end_col: 4, ..original }).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("width.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("width.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        let id = loaded.tables().next().unwrap().1.id;
+        assert_eq!(loaded.table(id).unwrap().1.columns.len(), 4);
+        let totals = loaded.table(id).unwrap().1.totals.as_ref().unwrap();
+        assert_eq!(totals.visible, visible);
+        assert_eq!(totals.columns.len(), 4);
+        assert_eq!(totals.columns[2].function.as_deref(), Some("sum"));
+        assert_eq!(totals.columns[3].function.as_deref().unwrap_or("none"), "none");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 4), "17");
+        if !visible { loaded.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        loaded.resize_table(id, original).unwrap();
+        assert_eq!(loaded.table(id).unwrap().1.totals.as_ref().unwrap().columns.len(), 3);
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 4), "17");
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(8, 4), "");
+    }
+}
+
+#[test]
+fn copied_totals_keep_independent_bindings_through_native_and_excel() {
+    use visigrid_engine::table::TableTotal;
+    let dir = tempfile::tempdir().unwrap();
+    for visible in [true, false] {
+        let (mut wb, id) = book();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 3, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM(Sales[Amount])+SUM([Price])".into()), label: None,
+        }).unwrap();
+        let original = wb.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        let (wb, index) = wb.prepare_sheet_copy(&wb, SheetId(1), "Copied data").unwrap();
+        let path = dir.path().join("copied-totals.sheet");
+        native::save_workbook(&wb, &path).unwrap();
+        let wb = native::load_workbook(&path).unwrap();
+        let path = dir.path().join("copied-totals.xlsx");
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        let (mut loaded, report) = xlsx::import(&path).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let table = loaded.sheet(index).unwrap().tables()[0].clone();
+        assert_eq!(table.name, "Sales_Copy");
+        assert_ne!(table.id, loaded.sheet(0).unwrap().tables()[0].id);
+        assert_eq!(table.totals.as_ref().unwrap().visible, visible);
+        assert_eq!(table.totals.as_ref().unwrap().columns[2].formula.as_deref(), Some("=SUM(Sales_Copy[Amount])+SUM([Price])"));
+        assert_eq!(loaded.sheet(index).unwrap().comment(4, 3).unwrap().text, "Manual override");
+        if !visible {
+            loaded.set_table_totals_visible(table.id, true, Default::default()).unwrap();
+            let original_id = loaded.sheet(0).unwrap().tables()[0].id;
+            loaded.set_table_totals_visible(original_id, true, Default::default()).unwrap();
+        }
+        assert_eq!(loaded.sheet(index).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
+        loaded.set_cell_value_tracked(index, 4, 3, "999");
+        assert_eq!(loaded.sheet(index).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original + 222.0);
+        assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
+    }
+}
+
+#[test]
+fn large_plain_sheets_do_not_enter_table_parser_or_hide_later_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    for unrelated_links in [false, true] {
+        let path = dir.path().join("large-plain-source.xlsx");
+        let changed = dir.path().join("large-plain.xlsx");
+        let mut file = rust_xlsxwriter::Workbook::new();
+        let plain = file.add_worksheet();
+        plain.set_name("Large plain").unwrap();
+        plain.write_string(0, 0, "Keep ordinary cells").unwrap();
+        if unrelated_links { plain.write_url(2, 0, "https://example.com").unwrap(); }
+        let sheet = file.add_worksheet();
+        sheet.set_name("With Tables").unwrap();
+        sheet.write_number(1, 0, 17).unwrap();
+        sheet.add_table(0, 0, 1, 0, &rust_xlsxwriter::Table::new().set_name("LaterData")).unwrap();
+        file.save(&path).unwrap();
+        rewrite(&path, &changed, |name, data| {
+            (name.into(), if name == "xl/worksheets/sheet1.xml" {
+                data.replace("</worksheet>", &format!("<!--{}--></worksheet>", " ".repeat(33 * 1024 * 1024)))
+            } else { data })
+        });
+        let (loaded, report) = xlsx::import(&changed).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        assert_eq!(report.tables_skipped, 0);
+        assert!(report.warnings.iter().all(|w| !w.contains("Table metadata")), "{:?}", report.warnings);
+        assert_eq!(loaded.sheet(0).unwrap().get_raw(0, 0), "Keep ordinary cells");
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "17");
+        assert!(loaded.table_by_name("LaterData").is_some());
+    }
+}
+
+#[test]
+fn table_import_count_budget_is_global_and_keeps_cells_and_valid_definitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("many-tables.xlsx");
+    let mut file = rust_xlsxwriter::Workbook::new();
+    for (start, count) in [(0, 513), (513, 512)] {
+        let sheet = file.add_worksheet();
+        for i in 0..count {
+            let row = i * 3;
+            sheet.write_number(row + 1, 0, (start + i) as f64).unwrap();
+            sheet.add_table(row, 0, row + 1, 0, &rust_xlsxwriter::Table::new().set_name(format!("ImportedData{}", start + i))).unwrap();
+        }
+    }
+    file.save(&path).unwrap();
+    for values_only in [false, true] {
+        let (loaded, report) = xlsx::import_with_options(&path, &xlsx::ImportOptions { values_only, ..Default::default() }).unwrap();
+        assert_eq!(report.tables_imported, 1024, "{:?}", report.warnings);
+        assert_eq!(report.tables_skipped, 1);
+        assert_eq!(loaded.tables().count(), 1024);
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(511 * 3 + 1, 0), "1024");
+        assert!(loaded.table_by_name("ImportedData1023").is_some());
+        assert!(loaded.table_by_name("ImportedData1024").is_none());
+        assert!(report.warnings.iter().any(|w| w.contains("workbook limit of 1024")));
+        let path = dir.path().join(format!("many-{values_only}.sheet"));
+        native::save_workbook(&loaded, &path).unwrap();
+        assert_eq!(native::load_workbook(&path).unwrap().tables().count(), 1024);
+    }
+    let damaged = dir.path().join("many-damaged.xlsx");
+    rewrite(&path, &damaged, |name, data| {
+        (name.into(), if name == "xl/tables/table1.xml" { data.replace("name=\"Column1\"", "name=\"Wrong header\"") } else { data })
+    });
+    let (loaded, report) = xlsx::import(&damaged).unwrap();
+    assert_eq!(report.tables_imported, 1023);
+    assert_eq!(report.tables_skipped, 2); // A corrupt definition still consumes an attempt.
+    assert!(loaded.table_by_name("ImportedData1023").is_some());
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 0), "0");
+}
+
+#[test]
+fn table_metadata_byte_budget_skips_large_parts_but_keeps_later_small_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata-source.xlsx");
+    let changed = dir.path().join("metadata-budget.xlsx");
+    let mut file = rust_xlsxwriter::Workbook::new();
+    let sheet = file.add_worksheet();
+    for i in 0..4 {
+        sheet.write_number(i * 3 + 1, 0, (i + 1) as f64).unwrap();
+        sheet.add_table(i * 3, 0, i * 3 + 1, 0, &rust_xlsxwriter::Table::new().set_name(format!("BudgetData{i}"))).unwrap();
+    }
+    file.save(&path).unwrap();
+    rewrite(&path, &changed, |name, data| {
+        (name.into(), if ["xl/tables/table1.xml", "xl/tables/table2.xml", "xl/tables/table3.xml"].contains(&name) {
+            data.replace("</table>", &format!("<!--{}--></table>", " ".repeat(24 * 1024 * 1024)))
+        } else { data })
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 3, "{:?}", report.warnings);
+    assert_eq!(report.tables_skipped, 1);
+    assert!(report.warnings.iter().any(|w| w.contains("64 MiB Table metadata budget")));
+    assert!(loaded.table_by_name("BudgetData2").is_none());
+    assert!(loaded.table_by_name("BudgetData3").is_some());
+    assert_eq!(loaded.active_sheet().get_raw(7, 0), "3");
+
+    // Lie about Table uncompressed sizes while retaining the compressed bytes
+    // and CRCs. Limits must charge decompression, not just ZIP declarations.
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let end = bytes.windows(4).rposition(|b| b == b"PK\x05\x06").unwrap();
+    let mut at = u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap()) as usize;
+    while bytes.get(at..at + 4) == Some(b"PK\x01\x02") {
+        let name_len = u16::from_le_bytes(bytes[at + 28..at + 30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(bytes[at + 30..at + 32].try_into().unwrap()) as usize;
+        let comment_len = u16::from_le_bytes(bytes[at + 32..at + 34].try_into().unwrap()) as usize;
+        if bytes[at + 46..at + 46 + name_len].starts_with(b"xl/tables/table") {
+            let local = u32::from_le_bytes(bytes[at + 42..at + 46].try_into().unwrap()) as usize;
+            bytes[at + 24..at + 28].copy_from_slice(&1u32.to_le_bytes());
+            bytes[local + 22..local + 26].copy_from_slice(&1u32.to_le_bytes());
+        }
+        at += 46 + name_len + extra_len + comment_len;
+    }
+    let forged = dir.path().join("forged-metadata-sizes.xlsx");
+    std::fs::write(&forged, bytes).unwrap();
+    let (loaded, report) = xlsx::import(&forged).unwrap();
+    // A ZIP reader may reject a size mismatch itself. Either layer must keep
+    // these declarations from admitting all four Tables past the byte budget.
+    assert!(report.tables_imported <= 2, "{:?}", report.warnings);
+    assert_eq!(report.tables_skipped, 4 - report.tables_imported);
+    assert!(!report.warnings.is_empty());
+    assert_eq!(loaded.active_sheet().get_raw(10, 0), "4");
+}
+
+#[test]
+fn unreadable_table_sheet_does_not_discard_valid_tables_on_later_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two-table-sheets.xlsx");
+    let changed = dir.path().join("malformed-table-sheet.xlsx");
+    let mut file = rust_xlsxwriter::Workbook::new();
+    for name in ["MalformedData", "LaterValidData"] {
+        let sheet = file.add_worksheet();
+        sheet.set_name(name).unwrap();
+        sheet.write_number(1, 0, 42).unwrap();
+        sheet.add_table(0, 0, 1, 0, &rust_xlsxwriter::Table::new().set_name(name)).unwrap();
+    }
+    file.save(&path).unwrap();
+    rewrite(&path, &changed, |name, data| {
+        (name.into(), if name == "xl/worksheets/sheet1.xml" {
+            // Large worksheets are now valid; exercise failure isolation with
+            // an actually unreadable Table link, while keeping the cell XML.
+            assert!(data.contains("<tablePart r:id="));
+            data.replace("<tablePart r:id=", "<tablePart missingId=")
+        } else { data })
+    });
+    let (loaded, report) = xlsx::import(&changed).unwrap();
+    assert_eq!(report.tables_imported, 1);
+    assert_eq!(report.tables_skipped, 1);
+    assert!(loaded.table_by_name("LaterValidData").is_some());
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(1, 0), "42");
+    assert!(report.warnings.iter().any(|w| w.contains("on MalformedData") && w.contains("Missing Table relationship")));
+}
+
+#[test]
+fn changed_manual_visibility_recalculates_and_roundtrips_native_and_excel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let original = wb.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap();
+    let (hidden, _) = wb.prepare_table_row_visibility(SheetId(1), [4].into_iter().collect()).unwrap();
+    assert_eq!(hidden.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original - 777.0);
+    let path = dir.path().join("manual-visibility.sheet");
+    native::save_workbook(&hidden, &path).unwrap();
+    let hidden = native::load_workbook(&path).unwrap();
+    let path = dir.path().join("manual-visibility.xlsx");
+    xlsx::export_with_order(&hidden, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (loaded, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
+    assert_eq!(loaded.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original - 777.0);
+    assert!(loaded.sheet(0).unwrap().tables()[0].totals.as_ref().unwrap().hidden_rows.contains(&4));
+    let (shown, _) = loaded.prepare_table_row_visibility(loaded.sheet(0).unwrap().id, Default::default()).unwrap();
+    assert_eq!(shown.sheet(0).unwrap().get_display(8, 3).parse::<f64>().unwrap(), original);
+}
+
+#[test]
+fn relocated_footer_links_and_names_survive_native_and_stored_excel_roundtrips() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let name = wb.sheet(0).unwrap().name.clone();
+    wb.set_cell_value_tracked(1, 1, 0, &format!("='{name}'!$D$9"));
+    wb.define_name_for_cell("SalesTotal", 0, 8, 3).unwrap();
+    wb.set_cell_value_tracked(1, 2, 0, "=SalesTotal");
+    wb.append_table_rows(id, 1, &[(8, 1, "2".into()), (8, 2, "10".into())]).unwrap();
+    let expected = wb.sheet(0).unwrap().get_display(9, 3);
+    assert_eq!(wb.sheet(1).unwrap().get_display(1, 0), expected);
+    assert_eq!(wb.sheet(1).unwrap().get_display(2, 0), expected);
+    let path = dir.path().join("footer-links.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let wb = native::load_workbook(&path).unwrap();
+    assert_eq!(wb.named_ranges().get("SalesTotal").unwrap().reference_string(), "D10");
+    assert_eq!(wb.sheet(1).unwrap().get_display(2, 0), expected);
+    let path = dir.path().join("footer-links.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (mut loaded, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(loaded.sheet(1).unwrap().get_raw(1, 0).ends_with("!$D$10"));
+    assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
+    assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
+    let id = loaded.sheet(0).unwrap().tables()[0].id;
+    loaded.append_table_rows(id, 1, &[]).unwrap();
+    assert!(loaded.sheet(1).unwrap().get_raw(1, 0).ends_with("!$D$11"));
+    assert_eq!(loaded.named_ranges().get("SalesTotal").unwrap().reference_string(), "D11");
+    assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
+    assert_eq!(loaded.sheet(1).unwrap().get_display(1, 0), expected);
+}
+
+#[test]
+fn freeze_boundaries_roundtrip_through_sorted_and_stored_table_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    for host in [false, true] {
+        for order in [xlsx::ExportOrder::Sorted, xlsx::ExportOrder::Stored] {
+            let (mut wb, id) = book();
+            set_saved_sort(&mut wb, id, 0, true, true);
+            wb.sheet_mut(0).unwrap().frozen_panes = (4, 2);
+            let before = authored_snapshot(&wb);
+            let mut layout = xlsx::ExportLayout::default();
+            layout.frozen_rows = 5;
+            layout.frozen_cols = 3;
+            let layouts = [layout];
+            let file = dir.path().join(format!("freeze-{host}-{order:?}.xlsx"));
+            xlsx::export_with_order(&wb, &file, host.then_some(&layouts[..]), order).unwrap();
+            let (loaded, report) = xlsx::import(&file).unwrap();
+            let expected = if host { (5, 3) } else { (4, 2) };
+            assert_eq!(loaded.sheet(0).unwrap().frozen_panes, expected);
+            assert_eq!((report.imported_layouts[0].frozen_rows, report.imported_layouts[0].frozen_cols), expected);
+            assert!(loaded.sheet(0).unwrap().table_view_spec().unwrap().sort.is_some());
+            assert_eq!(loaded.sheet(0).unwrap().get_raw(3, 1), if order == xlsx::ExportOrder::Sorted { "6" } else { "2" });
+            assert!(!report.warnings.iter().any(|w| w.contains("settings were not imported")));
+            assert_eq!(authored_snapshot(&wb), before);
+            assert_eq!(wb.sheet(0).unwrap().frozen_panes, (4, 2));
+        }
+    }
+}
+
 /// Formulas are saved with their computed results. Excel recalculates on
 /// open, but readers of saved results (pandas, previews, recipes) used to
 /// see 0 for every formula.
@@ -2017,7 +2854,7 @@ fn exported_formulas_carry_their_computed_results() {
     let sheet = xml(&path, "xl/worksheets/sheet1.xml");
     assert!(sheet.contains("<f>A1*3</f><v>21</v>"), "{sheet}");
     assert!(sheet.contains("<v>id-7</v>"), "{sheet}");
-    assert!(sheet.contains("<v>TRUE</v>"), "{sheet}");
+    assert!(sheet.contains("t=\"b\"") && sheet.contains("<v>1</v>"), "{sheet}");
     assert!(sheet.contains("<v>#DIV/0!</v>"), "{sheet}");
     // And they import as formulas again, with the same results
     let (back, _) = xlsx::import(&path).unwrap();
@@ -2047,4 +2884,89 @@ fn large_worksheet_parts_do_not_block_table_import() {
     assert!(!result.warnings.iter().any(|w| w.contains("too large")), "{:?}", result.warnings);
     assert_eq!(result.tables_imported, 1, "{:?}", result.warnings);
     assert_eq!(imported.tables().count(), 1);
+}
+
+#[test]
+fn dynamic_footer_references_survive_native_json_and_stored_excel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.define_name_for_cell("Footer", 0, 8, 3).unwrap();
+    wb.set_cell_value_tracked(1, 1, 0, "=OFFSET(Sheet1!$D$9,0,0)");
+    wb.set_cell_value_tracked(1, 2, 0, "=INDIRECT(\"Footer\")");
+    wb.set_cell_value_tracked(1, 3, 0, "=INDIRECT(\"Sheet1!D9\")");
+    wb.append_table_rows(id, 1, &[(8, 1, "2".into()), (8, 2, "10".into())]).unwrap();
+    let expected = wb.sheet(0).unwrap().get_display(9, 3);
+    let path = dir.path().join("dynamic-footer.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let native = native::load_workbook(&path).unwrap();
+    let json = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    let (json, _, _) = visigrid_io::json::import_any(&json).unwrap();
+    let path = dir.path().join("dynamic-footer.xlsx");
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (excel, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    for mut loaded in [native, json, excel] {
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(1, 0), "=OFFSET(Sheet1!$D$10, 0, 0)");
+        assert_eq!(loaded.sheet(1).unwrap().get_raw(3, 0), "=INDIRECT(\"Sheet1!D9\")");
+        for row in [1, 2] {
+            assert_eq!(loaded.sheet(1).unwrap().get_display(row, 0), expected);
+        }
+        assert_eq!(loaded.sheet(1).unwrap().get_display(3, 0), "20");
+        let id = loaded.sheet(0).unwrap().tables()[0].id;
+        let commit = loaded.append_table_rows(id, 1, &[(9, 1, "3".into()), (9, 2, "10".into())]).unwrap();
+        let new_total = loaded.sheet(0).unwrap().get_display(10, 3);
+        assert_ne!(expected, new_total);
+        for row in [1, 2] {
+            assert_eq!(loaded.sheet(1).unwrap().get_display(row, 0), new_total);
+        }
+        assert_eq!(loaded.sheet(1).unwrap().get_display(3, 0), "20");
+        loaded.apply_table_commit(&commit, true).unwrap();
+        assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), expected);
+        loaded.apply_table_commit(&commit, false).unwrap();
+        assert_eq!(loaded.sheet(1).unwrap().get_display(2, 0), new_total);
+    }
+}
+
+#[test]
+fn moved_footer_rules_survive_native_json_and_stored_excel() {
+    use visigrid_engine::{cond_format::CondStyle, cell::CellStyle, validation::{CellRange, ValidationRule, ValidationType}};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wb, id) = book();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let mut validation = ValidationRule::custom("=D9>0");
+    validation.reference_origin = Some((8, 3));
+    wb.sheet_mut(0).unwrap().validations.set(CellRange::single(8, 3), validation);
+    wb.sheet_mut(0).unwrap().cond_formats.add(vec![CellRange::single(8, 3)], "=D9>0", CondStyle::Named(CellStyle::Warning));
+    wb.append_table_rows(id, 1, &[(8, 1, "2".into()), (8, 2, "10".into())]).unwrap();
+    let path = dir.path().join("footer-rules.sheet");
+    native::save_workbook(&wb, &path).unwrap();
+    let native = native::load_workbook(&path).unwrap();
+    let json = visigrid_io::json::export_workbook(&wb, &[], 0).unwrap();
+    let (json, _, _) = visigrid_io::json::import_any(&json).unwrap();
+    let path = dir.path().join("footer-rules.xlsx");
+    let exported = xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    assert!(exported.warnings.iter().any(|w| w.contains("semantic styles")));
+    let (excel, report) = xlsx::import(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    for mut loaded in [native, json, excel] {
+        let check = |wb: &Workbook, row: usize| {
+            let sheet = wb.sheet(0).unwrap();
+            let expected = format!("=D{}>0", row + 1);
+            let rule = sheet.validations.get(row, 3).unwrap().at(row, 3);
+            assert_eq!(rule.rule_type, ValidationType::Custom(expected.clone()));
+            assert!(!sheet.validations.has_validation(row - 1, 3));
+            let predicates: Vec<_> = sheet.cond_formats.iter().filter_map(|r| r.predicate_at(row, 3)).collect();
+            assert_eq!(predicates, [expected]);
+            assert!(!sheet.cond_formats.any_rule_covers(row - 1, 3));
+        };
+        check(&loaded, 9);
+        let id = loaded.sheet(0).unwrap().tables()[0].id;
+        let commit = loaded.append_table_rows(id, 1, &[]).unwrap();
+        check(&loaded, 10);
+        loaded.apply_table_commit(&commit, true).unwrap();
+        check(&loaded, 9);
+        loaded.apply_table_commit(&commit, false).unwrap();
+        check(&loaded, 10);
+    }
 }

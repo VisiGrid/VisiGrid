@@ -21,16 +21,8 @@ pub fn render_validation_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
     let state = &app.validation_dialog;
     let has_error = state.error.is_some();
 
-    // Calculate target range display
-    let range_display = state.target_range.as_ref().map(|r| {
-        if r.start_row == r.end_row && r.start_col == r.end_col {
-            app.cell_ref_at(r.start_row, r.start_col)
-        } else {
-            format!("{}:{}",
-                app.cell_ref_at(r.start_row, r.start_col),
-                app.cell_ref_at(r.end_row, r.end_col))
-        }
-    }).unwrap_or_else(|| "Selection".to_string());
+    let range_display = state.draft.as_ref().map(|d| crate::validation_ui::plan::range_summary(&d.ranges))
+        .unwrap_or_else(|| "Selection".into());
 
     div()
         .absolute()
@@ -112,7 +104,9 @@ pub fn render_validation_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                             div()
                                 .text_sm()
                                 .text_color(text_muted)
+                                .whitespace_normal()
                                 .child(SharedString::from(range_display))
+                                .child(div().text_xs().child("Visible cells only; hidden records keep their rules."))
                         )
                 )
                 // Content
@@ -122,6 +116,13 @@ pub fn render_validation_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                         .flex()
                         .flex_col()
                         .gap_4()
+                        .when(state.anchor_excluded, |el| el.child(div().text_xs().text_color(text_muted)
+                            .whitespace_normal().child("The starting cell is excluded. Its exclusion stays in place.")))
+                        .when_some(state.original_rule.as_ref().filter(|r| r.has_relative_references()).and_then(|r| r.reference_origin), |el, (row, col)| {
+                            el.child(div().text_xs().text_color(text_muted).whitespace_normal()
+                                .child(format!("Relative references are written for {} and adjust for each cell.",
+                                    crate::validation_ui::plan::range_summary(&[visigrid_engine::validation::CellRange::single(row, col)]))))
+                        })
                         // Validation Type selector
                         .child(render_type_selector(app, text_primary, text_muted, accent, editor_bg, panel_border, cx))
                         // Type-specific fields
@@ -152,7 +153,7 @@ pub fn render_validation_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>
                             // Clear button (only if has existing validation)
                             div()
                                 .when(state.has_existing_validation, |el| {
-                                    el.child(render_button("Clear All", false, text_primary, panel_border, cx, |this, cx| {
+                                    el.child(render_button("Clear rules", false, text_primary, panel_border, cx, |this, cx| {
                                         this.clear_validation_dialog(cx);
                                     }))
                                 })
@@ -221,7 +222,7 @@ fn render_type_selector(
                             div()
                                 .text_sm()
                                 .text_color(text_primary)
-                                .child(state.validation_type.label())
+                                .child(if state.preserves_imported_type() { "Existing imported rule" } else { state.validation_type.label() })
                         )
                         .child(
                             div()
@@ -268,6 +269,7 @@ fn render_type_dropdown(
                 .hover(|s| s.bg(accent.opacity(0.1)))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     this.validation_dialog.validation_type = opt;
+                    this.validation_dialog.type_changed = true;
                     this.validation_dialog.type_dropdown_open = false;
                     this.validation_dialog.error = None;
                     // Reset focus to appropriate field

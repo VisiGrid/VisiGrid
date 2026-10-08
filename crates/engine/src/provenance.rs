@@ -16,7 +16,7 @@ use crate::sheet::SheetId;
 ///
 /// Each variant maps to a single user action that may affect multiple cells.
 /// This is the "what happened" that gets converted to Lua.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum MutationOp {
     /// Single cell edit (shown as "Manual edit", minimal Lua)
     SetCell {
@@ -79,7 +79,7 @@ pub enum MutationOp {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PasteMode {
     Values,
     Formulas,
@@ -87,7 +87,7 @@ pub enum PasteMode {
     Both,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum FillDirection {
     Down,
     Right,
@@ -95,20 +95,20 @@ pub enum FillDirection {
     Left,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum FillMode {
     Values,
     Formulas,
     Both,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SortKey {
     pub col: usize,
     pub ascending: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ClearMode {
     Values,
     Formats,
@@ -116,7 +116,7 @@ pub enum ClearMode {
 }
 
 /// Provenance record attached to a history entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Provenance {
     /// The operation that was performed
     pub op: MutationOp,

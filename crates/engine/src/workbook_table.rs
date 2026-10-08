@@ -9,8 +9,18 @@ mod columns;
 pub use columns::TableColumnHistory;
 #[path = "workbook_table_create.rs"]
 mod create;
+#[path = "workbook_table_totals.rs"]
+mod totals;
+#[path = "workbook_table_footer.rs"]
+mod footer;
+#[path = "workbook_table_footer_refs.rs"]
+mod footer_refs;
+#[path = "workbook_named_table_views.rs"]
+mod named_views;
+#[path = "workbook_table_conversion.rs"]
+mod conversion;
 
-use super::table_refs::TableFormulaChange;
+use super::table_refs::{names_only, TableFormulaChange, TotalsReferenceChange};
 use super::Workbook;
 use crate::cell::{CellValue, ValueRef};
 use crate::sheet::SheetId;
@@ -18,14 +28,15 @@ use crate::table::{self, DataTable, TableColumn, TableColumnId, TableId, TableRa
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct HeaderCell {
     row: usize,
     col: usize,
+    #[serde(serialize_with = "crate::history_size::serialize_value")]
     value: CellValue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct TableState {
     table: Option<DataTable>,
     headers: Vec<HeaderCell>,
@@ -43,12 +54,49 @@ pub struct TableCommit {
     formulas: Vec<TableFormulaChange>,
     creation_references: Option<Vec<(crate::cell_id::CellId, String)>>,
     cells: Vec<(HeaderCell, HeaderCell)>,
+    absent_cells: Vec<(usize, usize, crate::cell::CellFormat)>,
     append_region: Option<TableRange>,
     header_insertion: Option<Box<create::HeaderInsertion>>,
     rules: Vec<calculated::RuleChange>,
+    totals_edit: bool,
+    name_edit: bool,
+    calculated_edit: bool,
+    saved_view_edit: bool,
+    totals_schema_edit: bool,
+    guarded: Option<Box<super::GuardedStructureCommit>>,
+    totals_references: Vec<TotalsReferenceChange>,
+    footer_move: Option<footer::FooterMove>,
 }
 
 impl TableCommit {
+    pub fn estimated_history_bytes(&self) -> usize {
+        self.guarded.as_ref().map_or(0, |g| g.estimated_history_bytes())
+            .saturating_add(crate::history_size::serialized_bytes(&(&self.before, &self.after, &self.cells,
+                &self.formulas, &self.rules, &self.footer_move, &self.header_insertion, &self.absent_cells,
+                &self.creation_references, &self.totals_references)))
+    }
+
+    pub fn is_conversion(&self) -> bool {
+        self.before.table.is_some() && self.after.table.is_none()
+    }
+
+    pub fn is_saved_view_change(&self) -> bool {
+        self.saved_view_edit
+    }
+
+    pub fn is_calculated_change(&self) -> bool {
+        self.calculated_edit
+    }
+
+    /// A validated Table/column rename, including derived formula changes.
+    pub fn is_name_change(&self) -> bool {
+        self.name_edit
+    }
+
+    pub fn is_totals_change(&self) -> bool {
+        self.totals_edit
+    }
+
     pub fn inserted_header_row(&self) -> Option<usize> {
         self.header_insertion.as_ref().map(|h| h.at)
     }
@@ -69,10 +117,43 @@ impl TableCommit {
     }
 }
 
-/// Only Table metadata for a whole-row edit; ordinary row history owns the
-/// deleted cells and presentation. Bounds are explicit because undoing a last
-/// body-row deletion inserts at the new bottom edge (normally outside a Table).
-#[derive(Debug, Clone)]
+/// Table metadata for ordinary whole-row history, or a guarded sparse commit
+/// when totals require protected-cell restoration. Explicit bounds restore a
+/// deleted last body row even when inverse insertion is outside the Table.
+/// Sparse rule/merge snapshots preserve exact inverse edits at the grid edge.
+/// No cells or dependency graph are retained.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(super) struct StructuralMetadata(Vec<(SheetId, crate::validation::ValidationStore, crate::cond_format::CondFormatStore, Vec<crate::sheet::MergedRegion>)>);
+impl StructuralMetadata {
+    fn capture(wb: &Workbook, edited: SheetId) -> Option<Self> {
+        let sheets: Vec<_> = wb.sheets().iter().filter(|s| {
+            let has_rules = !s.validations.is_empty()
+                || s.validations.exclusions_iter().next().is_some()
+                || s.cond_formats.iter().next().is_some()
+                || !s.merged_regions.is_empty();
+            if !has_rules {
+                return false;
+            }
+            // Ranges move only on the edited sheet. Another sheet is included
+            // when a validation source can be rewritten by that edit.
+            s.id == edited || s.validations.iter().any(|(_, rule)| rule.reference_origin.is_some())
+        }).map(|s| (s.id, s.validations.clone(), s.cond_formats.clone(), s.merged_regions.clone())).collect();
+        (!sheets.is_empty()).then_some(Self(sheets))
+    }
+    fn restore(&self, wb: &mut Workbook) {
+        for (id, validation, conditional, merges) in &self.0 {
+            if let Some(sheet) = wb.sheet_by_id_mut(*id) {
+                sheet.validations = validation.clone();
+                sheet.cond_formats = conditional.clone();
+                sheet.merged_regions = merges.clone();
+                sheet.rebuild_merge_index();
+                sheet.mark_table_changed();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableRowHistory {
     sheet: SheetId,
     at: usize,
@@ -81,6 +162,8 @@ pub struct TableRowHistory {
     before: Vec<DataTable>,
     after: Vec<DataTable>,
     rules: Vec<calculated::RuleChange>,
+    guarded: Option<Box<super::GuardedStructureCommit>>,
+    metadata_before: Option<StructuralMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +217,15 @@ impl Workbook {
             delete,
         )?;
         let sheet = &self.sheets[sheet_index];
+        if self.tables().any(|(_, t)| t.totals.is_some()) {
+            let (_, guarded) = self.prepare_guarded_structure(sheet_index, vec![super::StructureStep {
+                axis: crate::structural::Axis::Row, at, count, delete,
+            }])?;
+            return Ok(Some(TableRowHistory {
+                sheet: sheet.id, at, count, delete, before: Vec::new(), after: Vec::new(),
+                rules: Vec::new(), guarded: Some(Box::new(guarded)), metadata_before: None,
+            }));
+        }
         let rules = self.structural_rule_changes(
             sheet_index,
             crate::structural::Axis::Row,
@@ -141,7 +233,8 @@ impl Workbook {
             count,
             delete,
         );
-        if sheet.tables().is_empty() && rules.is_empty() {
+        let metadata_before = StructuralMetadata::capture(self, sheet.id);
+        if sheet.tables().is_empty() && rules.is_empty() && metadata_before.is_none() {
             return Ok(None);
         }
         let before = sheet.tables().to_vec();
@@ -173,6 +266,8 @@ impl Workbook {
             }
         }
         Ok(Some(TableRowHistory {
+            metadata_before,
+            guarded: None,
             rules,
             sheet: sheet.id,
             at,
@@ -188,6 +283,7 @@ impl Workbook {
         history: &TableRowHistory,
         undo: bool,
     ) -> Result<(), String> {
+        if let Some(guarded) = &history.guarded { return guarded.candidate(self, undo).map(|_| ()); }
         let index = self
             .sheet_index_by_id(history.sheet)
             .ok_or("Table sheet no longer exists.")?;
@@ -219,6 +315,11 @@ impl Workbook {
         history: &TableRowHistory,
         undo: bool,
     ) -> Result<Vec<(usize, usize, usize, String, String)>, String> {
+        if let Some(guarded) = &history.guarded {
+            let candidate = guarded.candidate(self, undo)?;
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(Vec::new());
+        }
         self.validate_table_row_history(history, undo)?;
         let index = self.sheet_index_by_id(history.sheet).unwrap();
         let rewrites = self.structural_edit_with_rules(
@@ -229,6 +330,7 @@ impl Workbook {
             history.delete != undo,
             !undo,
         )?;
+        if undo { if let Some(metadata) = &history.metadata_before { metadata.restore(self); } }
         self.apply_rule_changes(&history.rules, undo);
         let target = if undo {
             &history.before
@@ -248,7 +350,7 @@ impl Workbook {
                 .columns
                 .clone();
         }
-        if corrected || !history.rules.is_empty() {
+        if !super::recalc_deferred() && (corrected || !history.rules.is_empty()) {
             self.rebuild_dep_graph();
             self.recompute_full_ordered();
         }
@@ -299,7 +401,7 @@ impl Workbook {
         Ok(())
     }
 
-    fn validate_table_region(
+    fn validate_table_region_geometry(
         &self,
         sheet_id: SheetId,
         range: TableRange,
@@ -312,7 +414,7 @@ impl Workbook {
         if let Some(t) = sheet
             .tables()
             .iter()
-            .find(|t| Some(t.id) != except && t.range.intersects(range))
+            .find(|t| Some(t.id) != except && t.full_range().intersects(range))
         {
             return Err(format!("Table range overlaps '{}'.", t.name));
         }
@@ -334,6 +436,14 @@ impl Workbook {
         ) {
             return Err(format!("Table range overlaps {}'s pivot output.", p.name));
         }
+        Ok(())
+    }
+
+    fn validate_table_region(
+        &self, sheet_id: SheetId, range: TableRange, except: Option<TableId>,
+    ) -> Result<(), String> {
+        self.validate_table_region_geometry(sheet_id, range, except)?;
+        let sheet = self.sheet_by_id(sheet_id).unwrap();
         // Sparse iteration: even a header-only table on a large empty range
         // never allocates one entry per body cell.
         for ((row, col), cell) in sheet.cells_iter() {
@@ -395,6 +505,8 @@ impl Workbook {
             columns,
             style: TableStyle::default(),
             source: None,
+            totals: None,
+            saved_views: Vec::new(),
         };
         let commit = self.table_commit(sheet_id, id, None, Some(table))?;
         self.apply_table_commit(&commit, false)?;
@@ -434,8 +546,63 @@ impl Workbook {
     }
 
     /// Explicitly include/release existing cells. Only bottom/right edges may
-    /// move. Body cells and cells released by shrinking are never rewritten.
+    /// move. Cell positions stay fixed except for surviving footer cells;
+    /// dependent formula sources follow schema changes.
     pub fn resize_table(&mut self, id: TableId, range: TableRange) -> Result<TableCommit, String> {
+        let (_, old) = self.table(id).ok_or("Table no longer exists.")?;
+        if !(old.totals.is_some() && old.range.end_col != range.end_col
+            || old.totals_row().is_some() && old.range.end_row != range.end_row) {
+            // Publish only after the candidate settles. Undoing on the live
+            // workbook runs a second full calculation and can leave the resize
+            // in place when that undo fails.
+            let mut candidate = self.clone();
+            // The clone inherits earlier settlement failures. A resize is a new
+            // calculation; a stale "not settled" must not refuse it.
+            candidate.incremental_errors.clear();
+            let commit = candidate.resize_table_inner(id, range)?;
+            if let Some(error) = candidate.incremental_errors.iter().find(|error| error.error.contains("not settled")) {
+                return Err(format!("Could not recalculate the resized Table: {error:?}"));
+            }
+            self.restore_snapshot_monotonic(&candidate);
+            return Ok(commit);
+        }
+        self.ensure_writable()?;
+        let before = old.clone();
+        let width_changed = before.range.end_col != range.end_col;
+        let mut reference_guarded = false;
+        let mut candidate = self.clone();
+        candidate.incremental_errors.clear();
+        // Grow height before admitting new columns, so existing records in the
+        // added columns never become a temporary footer. Shrink width first so
+        // released footer cells stay in place when surviving columns move.
+        if range.end_col > before.range.end_col && range.end_row != before.range.end_row {
+            candidate.resize_table_stage(id, &mut reference_guarded, TableRange { end_col: before.range.end_col, ..range })?;
+        }
+        let current = candidate.table(id).unwrap().1.range;
+        let mut commit = candidate.resize_table_stage(id, &mut reference_guarded, TableRange { end_row: current.end_row, ..range })?;
+        if candidate.table(id).unwrap().1.range != range {
+            commit = candidate.resize_table_stage(id, &mut reference_guarded, range)?;
+        }
+        if let Some(error) = candidate.take_incremental_errors().first() {
+            return Err(format!("Could not recalculate the resized Table: {error:?}"));
+        }
+        if reference_guarded { candidate.validate_footer_relocation(self, id)?; }
+        let guarded = if width_changed || reference_guarded { Some(Box::new(self.capture_guarded_batch(&candidate)?)) } else { None };
+        commit.before.table = Some(before);
+        commit.after.table = Some(candidate.table(id).unwrap().1.clone());
+        commit.guarded = guarded;
+        self.restore_snapshot_monotonic(&candidate);
+        Ok(commit)
+    }
+
+    // Only called on a private candidate. Rewrite existing references before
+    // filling/applying authored append cells, so new input keeps its coordinates.
+    fn resize_table_stage(&mut self, id: TableId, guarded: &mut bool, range: TableRange) -> Result<TableCommit, String> {
+        *guarded |= self.relocate_footer_references(id, range.end_row, None)?.0;
+        self.resize_table_inner(id, range)
+    }
+
+    fn resize_table_inner(&mut self, id: TableId, range: TableRange) -> Result<TableCommit, String> {
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
         if (range.start_row, range.start_col) != (old.range.start_row, old.range.start_col) {
             return Err("Resize keeps the table's header and first column fixed.".into());
@@ -474,6 +641,14 @@ impl Workbook {
                 });
             }
         }
+        if let Some(totals) = &mut new.totals {
+            totals.columns.resize_with(range.width(), Default::default);
+            if let Some(row) = old.totals_row().filter(|_| range.end_col > old.range.end_col) {
+                self.validate_empty_table_append(sheet_id, TableRange {
+                    start_row: row, end_row: row, start_col: old.range.end_col + 1, end_col: range.end_col,
+                }).map_err(|_| "The added footer cells contain data, comments or protected content. Clear those cells before widening the Table.".to_string())?;
+            }
+        }
         let commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
@@ -492,6 +667,9 @@ impl Workbook {
         range.validate(sheet.rows, sheet.cols)?;
         let mut target = None;
         for table in sheet.tables() {
+            if table.totals_row() == Some(range.start_row) && range.start_col <= table.range.end_col && range.end_col >= table.range.start_col {
+                return Err("The totals row is protected. Use Add row or paste from an existing body record to add records above it.".into());
+            }
             let r = table.range;
             if range.start_row > r.start_row
                 && range.start_row <= r.end_row.saturating_add(1)
@@ -537,6 +715,34 @@ impl Workbook {
         writes: &[(usize, usize, String)],
         infer_rule: bool,
     ) -> Result<TableCommit, String> {
+        self.ensure_writable()?;
+        let (_, old) = self.table(id).ok_or("Table no longer exists.")?;
+        if old.totals_row().is_none() {
+            return self.append_table_rows_inner(id, count, writes, infer_rule, None);
+        }
+        let before = old.clone();
+        let end = old.range.end_row.checked_add(count).ok_or("Append exceeds the sheet boundary.")?;
+        let mut candidate = self.clone();
+        let (reference_guarded, rewritten) = candidate.relocate_footer_references(id, end, None)?;
+        let guarded = reference_guarded || writes.iter().any(|(_, _, source)| crate::formula::parser::parse(source)
+                .is_ok_and(|expr| crate::formula::analyze::has_dynamic_deps(&expr)));
+        let mut commit = candidate.append_table_rows_inner(id, count, writes, infer_rule, Some(&rewritten))?;
+        if let Some(error) = candidate.take_incremental_errors().first() {
+            return Err(format!("Could not recalculate the appended Table: {error:?}"));
+        }
+        if guarded {
+            candidate.validate_footer_relocation(self, id)?;
+            commit.guarded = Some(Box::new(self.capture_footer_append(&candidate, id)?));
+        }
+        commit.before.table = Some(before);
+        commit.after.table = Some(candidate.table(id).unwrap().1.clone());
+        self.restore_snapshot_monotonic(&candidate);
+        Ok(commit)
+    }
+
+    fn append_table_rows_inner(
+        &mut self, id: TableId, count: usize, writes: &[(usize, usize, String)], infer_rule: bool, incremental: Option<&[crate::cell_id::CellId]>,
+    ) -> Result<TableCommit, String> {
         if count == 0 {
             return Err("Append at least one row.".into());
         }
@@ -547,15 +753,15 @@ impl Workbook {
             .end_row
             .checked_add(count)
             .ok_or("Append exceeds the sheet boundary.")?;
-        self.validate_table_region(sheet_id, new.range, Some(id))?;
+        self.validate_table_region(sheet_id, new.full_range(), Some(id))?;
         let region = TableRange {
             start_row: old.range.end_row + 1,
             ..new.range
         };
-        self.validate_empty_table_append(sheet_id, region)?;
+        self.validate_empty_table_append_except_footer(sheet_id, region, old.totals_row())?;
         let mut inferred = None;
         let sheet = self.sheet_by_id(sheet_id).unwrap();
-        if infer_rule && writes.len() == 1 {
+        if infer_rule && old.totals.is_none() && writes.len() == 1 {
             let (row, col, source) = &writes[0];
             if new.range.contains(*row, *col)
                 && *row > new.range.start_row
@@ -625,9 +831,16 @@ impl Workbook {
             }
         }
         let mut commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
-        commit.cells = cells;
+        let footer_cells: BTreeMap<_, _> = commit.cells.iter().enumerate()
+            .map(|(index, (cell, _))| ((cell.row, cell.col), index)).collect();
+        for (before, after) in cells {
+            if let Some(index) = footer_cells.get(&(before.row, before.col)) {
+                commit.cells[*index].1 = after;
+            } else { commit.cells.push((before, after)); }
+        }
         commit.append_region = Some(region);
-        self.apply_table_commit(&commit, false)?;
+        self.capture_table_cell_absence(&mut commit);
+        self.apply_table_commit_with_dirty(&commit, false, incremental)?;
         Ok(commit)
     }
 
@@ -636,11 +849,13 @@ impl Workbook {
         sheet_id: SheetId,
         region: TableRange,
     ) -> Result<(), String> {
-        let sheet = self
-            .sheet_by_id(sheet_id)
-            .ok_or("Sheet no longer exists.")?;
+        self.validate_empty_table_append_except_footer(sheet_id, region, None)
+    }
+
+    fn validate_empty_table_append_except_footer(&self, sheet_id: SheetId, region: TableRange, footer: Option<usize>) -> Result<(), String> {
+        let sheet = self.sheet_by_id(sheet_id).ok_or("Sheet no longer exists.")?;
         for ((row, col), cell) in sheet.cells_iter() {
-            if region.contains(row, col)
+            if Some(row) != footer && region.contains(row, col)
                 && (!matches!(cell.value(), ValueRef::Empty) || cell.comment().is_some())
             {
                 return Err(format!("Cannot append: {} already contains data. Resize the Table to include existing records.", crate::cell_id::CellId::new(sheet_id, row, col)));
@@ -680,9 +895,27 @@ impl Workbook {
     /// Convert to a range: remove metadata and rewrite dependent structured
     /// formulas to absolute A1 references, preserving explicit formatting.
     pub fn remove_table(&mut self, id: TableId) -> Result<TableCommit, String> {
+        self.ensure_writable()?;
         let (sheet_id, old) = self.table(id).ok_or("Table no longer exists.")?;
-        let commit = self.table_commit(sheet_id, id, Some(old.clone()), None)?;
-        self.apply_table_commit(&commit, false)?;
+        let mut candidate = self.clone();
+        // Older files may retain visibility only in the totals definition.
+        // Preserve its effective worksheet flags before removing that owner,
+        // without normalizing unrelated Tables' retained metadata.
+        candidate.sheet_by_id_mut(sheet_id).unwrap().manual_hidden_rows =
+            self.sheet_by_id(sheet_id).unwrap().manual_hidden_rows();
+        candidate.prepare_conversion_metadata(sheet_id, old)?;
+        let mut commit = candidate.table_commit(sheet_id, id, Some(old.clone()), None)?;
+        candidate.apply_table_commit(&commit, false)?;
+        let report = candidate.recompute_full_ordered();
+        if (report.had_cycles && candidate.has_new_cycles(self)) || report.errors.iter().any(|e| e.error.contains("not settled")) {
+            return Err("Converting this Table would leave a cycle or unsettled calculation. Nothing was changed.".into());
+        }
+        commit.guarded = Some(Box::new(self.capture_table_conversion(&candidate)?));
+        // Guarded history owns these rewrites now; retaining a second list of
+        // sources/templates can dominate memory for large calculated Tables.
+        commit.formulas = Vec::new();
+        commit.rules = Vec::new();
+        self.restore_snapshot_monotonic(&candidate);
         Ok(commit)
     }
 
@@ -693,6 +926,30 @@ impl Workbook {
         before: Option<DataTable>,
         mut after: Option<DataTable>,
     ) -> Result<TableCommit, String> {
+        let saved_view_edit = before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)| {
+            let mut normalized = b.clone();
+            normalized.saved_views = a.saved_views.clone();
+            a != b && normalized == *a
+        });
+        let name_edit = before.as_ref().zip(after.as_ref())
+            .is_some_and(|(a, b)| a != b && names_only(a, b));
+        let calculated_edit = before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)| {
+            if a.columns.len() != b.columns.len() || a == b { return false; }
+            let mut normalized = b.clone();
+            for (old, new) in a.columns.iter().zip(&mut normalized.columns) {
+                new.formula = old.formula.clone();
+                new.formula_origin = old.formula_origin;
+            }
+            normalized == *a
+        });
+        let width_edit = before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)|
+            a.range.start_row == b.range.start_row && a.range.start_col == b.range.start_col
+            && a.range.end_col != b.range.end_col && a.name == b.name);
+        let totals_schema_edit = name_edit || width_edit;
+        if !totals_schema_edit && !calculated_edit && before.as_ref().zip(after.as_ref()).is_some_and(|(a,b)| a.totals.is_some()
+            && (a.range.start_row != b.range.start_row || a.range.start_col != b.range.start_col || a.name != b.name || a.columns != b.columns)) {
+            return Err("This operation cannot move a totals-row Table's header or first column.".into());
+        }
         let sheet = self
             .sheet_by_id(sheet_id)
             .ok_or("Table sheet no longer exists.")?;
@@ -745,7 +1002,10 @@ impl Workbook {
         } else {
             None
         };
-        let formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref())?;
+        let mut totals_references = if totals_schema_edit {
+            self.totals_reference_changes(sheet_id, before.as_ref().unwrap(), after.as_ref().unwrap())?
+        } else { Vec::new() };
+        let mut formulas = self.table_formula_changes(sheet_id, before.as_ref(), after.as_ref(), totals_schema_edit)?;
         let rules = self.schema_rule_changes(sheet_id, before.as_ref(), after.as_ref())?;
         // The operation's own rule changes are part of its primary schema state.
         if let Some(table) = &mut after {
@@ -757,9 +1017,30 @@ impl Workbook {
             }
         }
         let rules = rules.into_iter().filter(|r| r.table != id).collect();
-        Ok(TableCommit {
+        if let Some(change) = totals_references.iter().find(|c| c.table == id) {
+            after.as_mut().unwrap().totals = Some(change.after.clone());
+        }
+        totals_references.retain(|c| c.table != id);
+        let footer_move = match before.as_ref().zip(after.as_ref()) {
+            Some((old, new)) => self.prepare_footer_move(sheet_id, old, new)?,
+            None => None,
+        };
+        let cells = footer_move.as_ref().map_or_else(Vec::new, |m| m.values());
+        if let Some(movement) = &footer_move {
+            formulas.retain(|change| change.cell.sheet != sheet_id || !movement.owns(change.cell.row, change.cell.col));
+        }
+        let mut commit = TableCommit {
+            absent_cells: Vec::new(),
+            guarded: None,
+            totals_schema_edit,
+            calculated_edit,
+            saved_view_edit,
+            name_edit,
+            totals_references,
+            footer_move,
+            totals_edit: false,
             rules,
-            cells: Vec::new(),
+            cells,
             append_region: None,
             header_insertion: None,
             creation_references,
@@ -776,12 +1057,25 @@ impl Workbook {
                 headers: changed,
                 checks: after_checks,
             },
-        })
+        };
+        self.capture_table_cell_absence(&mut commit);
+        Ok(commit)
+    }
+
+    fn capture_table_cell_absence(&self, commit: &mut TableCommit) {
+        let sheet = self.sheet_by_id(commit.sheet_id).unwrap();
+        let positions: std::collections::BTreeSet<_> = commit.before.headers.iter()
+            .chain(commit.cells.iter().map(|(before, _)| before))
+            .filter(|cell| sheet.get_cell_opt(cell.row, cell.col).is_none())
+            .map(|cell| (cell.row, cell.col)).collect();
+        commit.absent_cells = positions.into_iter().map(|(row, col)| (row, col, sheet.get_format(row, col))).collect();
     }
 
     /// `undo = true` restores the before state; false reapplies the after
     /// state. A stale commit fails atomically instead of overwriting edits.
     pub fn apply_table_commit(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
+        self.ensure_writable()?;
+        if let Some(guarded) = &commit.guarded { return guarded.replay(self, undo); }
         if commit.header_insertion.is_some() {
             return self.apply_headerless_table_commit(commit, undo);
         }
@@ -789,6 +1083,10 @@ impl Workbook {
     }
 
     fn apply_table_commit_inner(&mut self, commit: &TableCommit, undo: bool) -> Result<(), String> {
+        self.apply_table_commit_with_dirty(commit, undo, None)
+    }
+
+    fn apply_table_commit_with_dirty(&mut self, commit: &TableCommit, undo: bool, incremental: Option<&[crate::cell_id::CellId]>) -> Result<(), String> {
         let (expected, target) = if undo {
             (&commit.after, &commit.before)
         } else {
@@ -834,8 +1132,11 @@ impl Workbook {
                     }
                 }
             } else {
-                self.validate_empty_table_append(commit.sheet_id, region)?;
+                self.validate_empty_table_append_except_footer(commit.sheet_id, region, commit.footer_move.as_ref().map(|m| m.before_row))?;
             }
+        }
+        if let Some(movement) = &commit.footer_move {
+            self.validate_footer_move_replay(commit, movement, undo)?;
         }
         for (before, after) in &commit.cells {
             let cell = if undo { after } else { before };
@@ -861,12 +1162,22 @@ impl Workbook {
         if let Some(table) = &target.table {
             table.validate(sheet.rows, sheet.cols)?;
             self.validate_table_name_available(&table.name, Some(commit.id))?;
-            self.validate_table_region(commit.sheet_id, table.range, Some(commit.id))?;
+            self.validate_table_region(commit.sheet_id, table.full_range(), Some(commit.id))?;
             if self
                 .tables()
                 .any(|(s, t)| t.id == table.id && s != commit.sheet_id)
             {
                 return Err("Table identity is already used on another sheet.".into());
+            }
+        }
+        // Footer writes are outside the body range, including when hiding a
+        // footer. Replay must reject a newly merged/spilled/pivot-owned cell.
+        if commit.is_totals_change() {
+            if let (Some((first, _)), Some((last, _))) = (commit.cells.first(), commit.cells.last()) {
+                self.validate_table_region(commit.sheet_id, TableRange {
+                    start_row: first.row, end_row: last.row,
+                    start_col: first.col, end_col: last.col,
+                }, Some(commit.id))?;
             }
         }
         // Headers share one row. Validate their bounding span once, avoiding
@@ -899,6 +1210,15 @@ impl Workbook {
                 );
             }
         }
+        if commit.totals_schema_edit {
+            for change in &commit.formulas {
+                let sheet = self.sheet_by_id(change.cell.sheet).unwrap();
+                if let Some(table) = sheet.table_at(change.cell.row, change.cell.col)
+                    .filter(|t| t.totals_row() == Some(change.cell.row)) {
+                    self.validate_table_region(sheet.id, table.full_range(), Some(table.id))?;
+                }
+            }
+        }
         // Refuse replay if newer formulas would also require a rewrite. Existing
         // destructive rewrites (#REF!/A1 conversion) are restored from the commit.
         if let Some(sources) = &commit.creation_references {
@@ -909,22 +1229,32 @@ impl Workbook {
                 return Err("Table references changed since creation.".into());
             }
         } else {
+            let rewritten_cells: HashSet<_> = commit.formulas.iter().map(|change| change.cell)
+                .chain(commit.cells.iter().map(|(cell, _)| crate::cell_id::CellId::new(commit.sheet_id, cell.row, cell.col)))
+                .collect();
             for change in self.table_formula_changes(
                 commit.sheet_id,
                 expected.table.as_ref(),
                 target.table.as_ref(),
+                commit.totals_schema_edit,
             )? {
-                if !commit
-                    .formulas
-                    .iter()
-                    .any(|saved| saved.cell == change.cell)
-                    && !commit.cells.iter().any(|(cell, _)| {
-                        change.cell.sheet == commit.sheet_id
-                            && change.cell.row == cell.row
-                            && change.cell.col == cell.col
-                    })
-                {
+                if !rewritten_cells.contains(&change.cell) {
                     return Err("New dependent formulas require a fresh table operation.".into());
+                }
+            }
+        }
+        for change in &commit.totals_references {
+            let expected = if undo { &change.after } else { &change.before };
+            if self.table(change.table).filter(|(s, _)| *s == change.sheet)
+                .and_then(|(_, t)| t.totals.as_ref()) != Some(expected) {
+                return Err("Totals settings changed since this schema change was prepared.".into());
+            }
+        }
+        if commit.totals_schema_edit {
+            for change in self.totals_reference_changes(commit.sheet_id,
+                expected.table.as_ref().unwrap(), target.table.as_ref().unwrap())? {
+                if change.table != commit.id && !commit.totals_references.iter().any(|c| c.table == change.table) {
+                    return Err("New totals references require a fresh Table schema change.".into());
                 }
             }
         }
@@ -943,6 +1273,16 @@ impl Workbook {
         }) {
             return Err("New calculated-column references require a fresh Table operation.".into());
         }
+        // A pivot can source a formula on another sheet that depends on this
+        // footer. Recalculation alone doesn't advance that sheet's generation.
+        let totals_dependents: Vec<_> = if incremental.is_none() && (commit.is_conversion() || commit.is_totals_change() || commit.footer_move.is_some() || commit.totals_schema_edit || commit.calculated_edit) {
+            self.sheets().iter().filter(|s| s.id != commit.sheet_id).flat_map(|sheet| {
+                sheet.cells_iter().filter_map(move |((row, col), cell)| {
+                    matches!(cell.value(), ValueRef::Formula { .. })
+                        .then(|| (sheet.id, row, col, sheet.get_computed_value(row, col)))
+                })
+            }).collect()
+        } else { Vec::new() };
         let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
         sheet.data_tables.retain(|t| t.id != commit.id);
         for cell in &target.headers {
@@ -969,11 +1309,16 @@ impl Workbook {
         self.refresh_table_name_reservations();
         for change in &commit.formulas {
             let source = if undo { &change.before } else { &change.after };
-            self.sheet_by_id_mut(change.cell.sheet).unwrap().set_value(
-                change.cell.row,
-                change.cell.col,
-                source,
-            );
+            let sheet = self.sheet_by_id_mut(change.cell.sheet).unwrap();
+            if sheet.table_at(change.cell.row, change.cell.col)
+                .is_some_and(|t| (t.id == commit.id || commit.totals_schema_edit) && t.totals_row() == Some(change.cell.row)) {
+                // Conversion replay and renames own these validated footer
+                // formula writes, including dependent totals in other Tables.
+                sheet.write_table_header(change.cell.row, change.cell.col, CellValue::from_input(source));
+                sheet.mark_table_changed();
+            } else {
+                sheet.set_value(change.cell.row, change.cell.col, source);
+            }
         }
         for (before, after) in &commit.cells {
             let cell = if undo { before } else { after };
@@ -981,11 +1326,110 @@ impl Workbook {
                 .unwrap()
                 .write_table_header(cell.row, cell.col, cell.value.clone());
         }
+        if let Some(movement) = &commit.footer_move {
+            let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
+            for patch in &movement.cells {
+                let present = if undo { patch.before_present } else { patch.after_present };
+                if !present {
+                    sheet.restore_history_cell(patch.row, patch.col, None);
+                } else {
+                    let mut cell = if undo { patch.before.clone() } else { patch.after.clone() };
+                    // Appended values/calculated fills own the value at the old
+                    // footer; the movement owns its formatting and comments.
+                    cell.value = sheet.get_cell(patch.row, patch.col).value;
+                    sheet.restore_history_cell(patch.row, patch.col, Some(cell));
+                }
+            }
+        }
+        if undo {
+            let sheet = self.sheet_by_id_mut(commit.sheet_id).unwrap();
+            for (row, col, format) in &commit.absent_cells {
+                let cell = sheet.get_cell(*row, *col);
+                // Preserve any independently authored presentation. Otherwise,
+                // undo must restore absence so guarded structural history can
+                // follow this entry without seeing phantom empty cells.
+                if matches!(cell.value, CellValue::Empty) && cell.format.as_ref() == format
+                    && cell.comment().is_none() && cell.style_id().is_none() && cell.frozen_formula().is_none() {
+                    sheet.restore_history_cell(*row, *col, None);
+                }
+            }
+        }
+        for change in &commit.totals_references {
+            let sheet = self.sheet_by_id_mut(change.sheet).unwrap();
+            let table = sheet.data_tables.iter_mut().find(|t| t.id == change.table).unwrap();
+            table.totals = Some(if undo { change.before.clone() } else { change.after.clone() });
+            sheet.mark_table_changed();
+        }
         self.apply_rule_changes(&commit.rules, undo);
         // Membership changes affect symbolic shape dependencies even when no
         // cell was written (including empty -> nonempty bodies).
-        self.rebuild_dep_graph();
-        self.recompute_full_ordered();
+        if super::recalc_deferred() {
+            // Eviction stores the commit. Opening rewind recalculates once.
+        } else if let Some(extra) = incremental {
+            let mut dirty: rustc_hash::FxHashSet<_> = extra.iter().copied().chain(self.table_readers.get(&commit.id).into_iter().flat_map(|r| r.iter().copied())).collect();
+            dirty.extend(commit.cells.iter().map(|(c, _)| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
+            dirty.extend(commit.formulas.iter().map(|c| c.cell));
+            dirty.extend(target.headers.iter().map(|c| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
+            // New body cells can bring an existing SUBTOTAL range into a
+            // filtered Table even when those cells were previously empty.
+            // A SUBTOTAL whose range already covered only the old body is not
+            // in this closure. Its filter-column precedent keeps the old end
+            // row. A full rebuild would extend that precedent to the new end.
+            // The value stays correct: visibility is decided per row, and the
+            // formula does not read the new rows. Scanning every formula to
+            // rebind those edges would walk the whole workbook on append.
+            if let Some(region) = commit.append_region {
+                for row in region.start_row..=region.end_row {
+                    for col in region.start_col..=region.end_col {
+                        dirty.extend(self.dep_graph.dependents(crate::cell_id::CellId::new(commit.sheet_id, row, col)));
+                    }
+                }
+            }
+            let mut pending: Vec<_> = dirty.iter().copied().collect();
+            while let Some(cell) = pending.pop() {
+                for reader in self.dep_graph.dependents(cell) {
+                    if dirty.insert(reader) { pending.push(reader); }
+                }
+            }
+            // Rebinding about a third of a large workbook costs more than
+            // calculating all of it. A handful of formulas stays on the rebind:
+            // that is the path the small-workbook regressions lock, and it is
+            // not the slow one.
+            let formulas = self.dep_graph.formula_cell_count();
+            let closure = dirty.iter().filter(|cell| self.dep_graph.has_own_deps(**cell)).count();
+            if formulas > 0 && closure >= 32 && closure.saturating_mul(3) > formulas {
+                self.rebuild_dep_graph();
+                let report = self.recompute_full_ordered();
+                self.incremental_errors.extend(report.errors.into_iter()
+                    .filter(|e| e.error.contains("not settled")));
+            } else {
+                // Rebind the complete touched closure, including visibility edges,
+                // before evaluating it. Runtime dynamic edges settle below.
+                let original_graph = self.dep_graph.clone();
+                for cell in &dirty { self.update_cell_deps(cell.sheet, cell.row, cell.col); }
+                let seeds: Vec<_> = dirty.iter().copied().collect();
+                match self.recalc_dirty_set(&seeds) {
+                    super::Recalculated::Cells(cells) => {
+                        dirty.extend(cells);
+                        std::sync::Arc::make_mut(&mut self.dep_graph).inherit_untouched_cycles(&original_graph, &dirty);
+                        let sheets: HashSet<_> = dirty.iter().map(|c| c.sheet).collect();
+                        for id in sheets { self.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
+                    }
+                    super::Recalculated::All => {
+                        for sheet in &mut self.sheets { sheet.mark_table_changed(); }
+                    }
+                }
+            }
+        } else {
+            self.rebuild_dep_graph();
+            let report = self.recompute_full_ordered();
+            self.incremental_errors.extend(report.errors.into_iter()
+                .filter(|e| e.error.contains("not settled")));
+        }
+        let changed: HashSet<_> = totals_dependents.into_iter().filter_map(|(id, row, col, value)| {
+            (self.sheet_by_id(id)?.get_computed_value(row, col) != value).then_some(id)
+        }).collect();
+        for id in changed { self.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
         self.bump_revision_for_structure();
         Ok(())
     }
@@ -996,8 +1440,12 @@ impl Workbook {
 
     pub fn saved_tables(&self) -> SavedTableCatalog {
         SavedTableCatalog {
-            // Older readers must refuse a recipe link rather than drop it
-            version: if self.tables().any(|(_, t)| t.source.is_some()) {
+            // Older readers must recover read-only rather than drop unsupported metadata.
+            version: if self.tables().any(|(_, t)| !t.saved_views.is_empty()) {
+                6
+            } else if self.tables().any(|(_, t)| t.totals.is_some()) {
+                5
+            } else if self.tables().any(|(_, t)| t.source.is_some()) {
                 4
             } else if self.sheets.iter().any(|s| {
                 s.table_view_spec().is_some_and(|v| v.requires_persistence())
@@ -1027,10 +1475,59 @@ impl Workbook {
         }
     }
 
+    /// Install interchange definitions after cells are loaded and before binding
+    /// formulas. Each result corresponds to one input; invalid definitions leave
+    /// cells and previously accepted Tables intact. IDs are always allocated here.
+    /// Unlike repeated catalog restores, existing definitions are not revalidated.
+    pub fn restore_imported_tables(
+        &mut self, imported: Vec<(usize, DataTable)>,
+    ) -> Vec<Result<TableId, String>> {
+        if imported.is_empty() { return Vec::new(); }
+        if let Err(error) = self.ensure_writable() {
+            return imported.iter().map(|_| Err(error.clone())).collect();
+        }
+        let mut results = Vec::with_capacity(imported.len());
+        let mut spills = std::collections::HashMap::<usize, Vec<(usize, usize)>>::new();
+        for (index, mut table) in imported {
+            let outcome = (|| {
+                let sheet = self.sheet(index).ok_or("Table references a missing sheet.")?;
+                table.id = TableId(self.next_table_id);
+                let next = self.next_table_id.checked_add(1).ok_or("Table identities exhausted.")?;
+                table.validate(sheet.rows, sheet.cols)?;
+                self.validate_table_name_available(&table.name, None)?;
+                self.validate_table_region_geometry(sheet.id, table.full_range(), None)?;
+                // Cell state does not change during metadata loading. Scan each
+                // sheet once, rather than every populated cell for every Table.
+                let positions = spills.entry(index).or_insert_with(|| sheet.cells_iter()
+                    .filter(|(_, cell)| cell.spill_info().is_some() || cell.spill_parent().is_some())
+                    .map(|(position, _)| position).collect());
+                if positions.iter().any(|&(row, col)| table.full_range().contains(row, col)) {
+                    return Err("Saved table overlaps an array spill.".into());
+                }
+                for (offset, col) in table.columns.iter().enumerate() {
+                    if !matches!(sheet.get_cell_opt(table.range.start_row, table.range.start_col + offset).map(|c| c.value()), Some(ValueRef::Text(t)) if t == col.name) {
+                        return Err(format!("Saved table '{}' does not match its header cells.", table.name));
+                    }
+                }
+                let id = table.id;
+                let sheet = &mut self.sheets[index];
+                sheet.table_column_allocators.insert(id.0, table.next_column_id);
+                sheet.data_tables.push(table);
+                self.next_table_id = next;
+                Ok(id)
+            })();
+            results.push(outcome);
+        }
+        for sheet in &mut self.sheets { sheet.table_id_high_water = self.next_table_id - 1; }
+        self.refresh_table_name_reservations();
+        self.update_pivot_staleness();
+        results
+    }
+
     /// Strict, atomic restore after sheets/cells/merges/pivots are loaded and
     /// before recalculation. Reject corrupt metadata, never discard silently.
     pub fn restore_tables(&mut self, saved: SavedTableCatalog) -> Result<(), String> {
-        if ![1, 2, 3, 4].contains(&saved.version) || saved.next_table_id == 0 {
+        if ![1, 2, 3, 4, 5, 6].contains(&saved.version) || saved.next_table_id == 0 {
             return Err("Unsupported or invalid Tables metadata version/allocator.".into());
         }
         let mut names = HashSet::new();
@@ -1063,6 +1560,12 @@ impl Workbook {
                 if saved.version == 1 && table.columns.iter().any(|c| c.formula.is_some()) {
                     return Err("Calculated columns require Tables metadata version 2.".into());
                 }
+                if saved.version < 6 && !table.saved_views.is_empty() {
+                    return Err("Named Table views require Tables metadata version 6.".into());
+                }
+                if saved.version < 5 && table.totals.is_some() {
+                    return Err("Totals rows require Tables metadata version 5.".into());
+                }
                 if saved.version < 4 && table.source.is_some() {
                     return Err("Recipe-backed Tables require Tables metadata version 4.".into());
                 }
@@ -1075,14 +1578,14 @@ impl Workbook {
                 }
                 if entry.tables[..i]
                     .iter()
-                    .any(|t| t.range.intersects(table.range))
+                    .any(|t| t.full_range().intersects(table.full_range()))
                 {
                     return Err("Saved tables overlap.".into());
                 }
                 // Existing tables are replaced only after validating the whole
                 // envelope; collisions against their old bounds are irrelevant.
                 if sheet.merged_regions.iter().any(|m| {
-                    table.range.intersects(TableRange {
+                    table.full_range().intersects(TableRange {
                         start_row: m.start.0,
                         start_col: m.start.1,
                         end_row: m.end.0,
@@ -1092,7 +1595,7 @@ impl Workbook {
                     .pivot_in_rect(
                         table.range.start_row,
                         table.range.start_col,
-                        table.range.end_row,
+                        table.full_range().end_row,
                         table.range.end_col,
                     )
                     .is_some()
@@ -1109,7 +1612,7 @@ impl Workbook {
                     }
                 }
                 for ((r, c), cell) in sheet.cells_iter() {
-                    if table.range.contains(r, c)
+                    if table.full_range().contains(r, c)
                         && (cell.spill_info().is_some() || cell.spill_parent().is_some())
                     {
                         return Err("Saved table overlaps an array spill.".into());

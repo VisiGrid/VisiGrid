@@ -13,6 +13,7 @@ use visigrid_engine::{
         structured::TableSection,
     },
     sheet::UnboundSheetRef,
+    named_range::NamedRangeTarget,
     table::TableRange,
     table_view::TableView,
     workbook::Workbook,
@@ -306,10 +307,12 @@ impl Plan<'_> {
                 self.expr(left, sheet, row, col, false)?;
                 self.expr(right, sheet, row, col, false)?;
             }
-            Expr::NamedRange(_) => {
-                return Err(
-                    "Named-range formulas are not supported for materialized sorting".into(),
-                )
+            Expr::NamedRange(name) => {
+                if self.wb.named_ranges().get(name).is_none() {
+                    return Err(format!("Unresolved named reference {name}"));
+                }
+                // Targets are mapped once below. Keep ordered shape even for
+                // aggregate uses: another consumer may use INDEX on this name.
             }
             Expr::ReferenceError(_) | Expr::RefError | Expr::EmptyRange { .. } => {
                 return Err("A formula has an unresolved reference".into())
@@ -372,14 +375,19 @@ pub(super) fn prepare_inner<'a>(
         {
             continue;
         }
+        if wb.tables().any(|(_, t)| t.totals.is_some()) {
+            return Err("Tables with totals metadata currently require stored-order export".into());
+        }
+        if sheet.manual_hidden_rows().iter().any(|row| *row > table.range.start_row && *row <= table.range.end_row) {
+            return Err(format!("Table {} has manual row visibility that requires stored-order export", table.name));
+        }
         if let Some(layout) = layouts.and_then(|l| l.get(sid)) {
             if layout
                 .row_heights
                 .keys()
                 .chain(layout.hidden_rows.iter())
                 .any(|r| *r > table.range.start_row && *r <= table.range.end_row)
-                || (layout.frozen_rows > table.range.start_row + 1
-                    && layout.frozen_rows <= table.range.end_row)
+
                 || layout.autofilter_range.is_some()
             {
                 return Err(format!(
@@ -387,14 +395,6 @@ pub(super) fn prepare_inner<'a>(
                     table.name
                 ));
             }
-        }
-        if sheet.frozen_panes.0 > table.range.start_row + 1
-            && sheet.frozen_panes.0 <= table.range.end_row
-        {
-            return Err(format!(
-                "Table {} has a freeze boundary through its body",
-                table.name
-            ));
         }
         if sheet
             .row_formats
@@ -413,6 +413,23 @@ pub(super) fn prepare_inner<'a>(
     }
     if plan.sheets.is_empty() {
         return Ok(Cow::Borrowed(wb));
+    }
+    let mut names = Vec::new();
+    for original in wb.named_ranges().list() {
+        let mut name = original.clone();
+        match &mut name.target {
+            NamedRangeTarget::RefError => {},
+            NamedRangeTarget::Cell { sheet, row, col } => *row = plan.row(*sheet, *row, *col),
+            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
+                let mapped = plan.range(*sheet, TableRange {
+                    start_row: *start_row, start_col: *start_col,
+                    end_row: *end_row, end_col: *end_col,
+                }, false).map_err(|e| format!("Defined name '{}': {e}", name.name))?;
+                *start_row = mapped.start_row;
+                *end_row = mapped.end_row;
+            }
+        }
+        names.push(name);
     }
     let mut changes = BTreeMap::new();
     let mut images = Vec::new();
@@ -491,6 +508,7 @@ pub(super) fn prepare_inner<'a>(
     }
     let mut out = wb.clone();
     out.set_auto_recalc(false);
+    for name in names { out.named_ranges_mut().set(name)?; }
     for ((sid, row, col), image) in changes {
         out.restore_cell_tracked(sid, row, col, image)?;
     }

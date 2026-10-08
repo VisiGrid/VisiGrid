@@ -383,6 +383,7 @@ impl Spreadsheet {
                         this.hub_last_error = None;
                         this.is_modified = false;
                         this.history.clear();
+                        this.capture_base_workbook(cx);
                         this.document_meta.display_name = copy_path
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -613,6 +614,7 @@ impl Spreadsheet {
                         this.hub_last_error = None;
                         this.is_modified = false;
                         this.history.clear();
+                        this.capture_base_workbook(cx);
                         this.status_message = Some("Updated from remote".to_string());
                     }
                     Err(e) => {

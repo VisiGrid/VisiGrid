@@ -29,7 +29,61 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+thread_local! {
+    static COW_METER: RefCell<Vec<Arc<AtomicUsize>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Counts bytes `Arc::make_mut` copies while this meter is entered. A normal
+/// clone starts a fresh meter, so rewind does not read it: a workbook
+/// replacement would drop the total. The budget compares baseline and live
+/// arcs instead, and this counter stays so a copy is still measurable on the
+/// workbook that made it.
+#[derive(Debug)]
+struct CowMeter(Arc<AtomicUsize>);
+
+impl Default for CowMeter {
+    fn default() -> Self { Self(Arc::new(AtomicUsize::new(0))) }
+}
+
+impl Clone for CowMeter {
+    fn clone(&self) -> Self { Self(Arc::new(AtomicUsize::new(0))) }
+}
+
+struct CowGuard;
+
+impl CowMeter {
+    fn share(&self) -> Self { Self(Arc::clone(&self.0)) }
+    fn reset(&self) { self.0.store(0, Ordering::Relaxed); }
+    fn enter(&self) -> CowGuard {
+        COW_METER.with(|stack| stack.borrow_mut().push(Arc::clone(&self.0)));
+        CowGuard
+    }
+}
+
+impl Drop for CowGuard {
+    fn drop(&mut self) {
+        COW_METER.with(|stack| { stack.borrow_mut().pop(); });
+    }
+}
+
+fn charge_cow(bytes: usize) {
+    let meter = COW_METER.with(|stack| stack.borrow().last().cloned());
+    if let Some(meter) = meter {
+        let _ = meter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(bytes))
+        });
+    }
+}
+
+fn arc_make_mut<'a, T: Clone>(arc: &'a mut Arc<T>, bytes: impl FnOnce(&T) -> usize) -> &'a mut T {
+    if Arc::strong_count(arc) > 1 {
+        charge_cow(bytes(arc));
+    }
+    Arc::make_mut(arc)
+}
 
 use crate::cell::{Cell, CellExtras, CellFormat, CellRef, CellValue, ValueRef};
 use crate::formula::eval::Value;
@@ -80,22 +134,35 @@ impl<T: Clone> Paged<T> {
         self.pages.get(i >> PAGE_BITS)?.get(i & (PAGE - 1))
     }
 
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+    fn get_mut(&mut self, i: usize, bytes: impl FnOnce(&[T]) -> usize) -> Option<&mut T> {
         let page = self.pages.get_mut(i >> PAGE_BITS)?;
-        Arc::make_mut(page).get_mut(i & (PAGE - 1))
+        arc_make_mut(page, |page: &Vec<T>| bytes(page)).get_mut(i & (PAGE - 1))
     }
 
-    fn push(&mut self, value: T) {
+    fn push(&mut self, value: T, bytes: impl FnOnce(&[T]) -> usize) {
         if self.len.is_multiple_of(PAGE) {
             self.pages.push(Arc::new(Vec::new()));
         }
-        Arc::make_mut(self.pages.last_mut().expect("page just ensured")).push(value);
+        let page = self.pages.last_mut().expect("page just ensured");
+        arc_make_mut(page, |page: &Vec<T>| bytes(page)).push(value);
         self.len += 1;
     }
 
     fn iter(&self) -> impl Iterator<Item = &T> {
         self.pages.iter().flat_map(|p| p.iter())
     }
+}
+
+/// Bytes of `baseline` pages whose allocation `live` does not still hold.
+fn unshared_paged<T>(baseline: &Paged<T>, live: &Paged<T>, bytes: impl Fn(&[T]) -> usize) -> usize {
+    let live_pages: std::collections::HashSet<usize> = live.pages.iter().map(|page| Arc::as_ptr(page) as usize).collect();
+    baseline.pages.iter().fold(0, |total, page| {
+        if live_pages.contains(&(Arc::as_ptr(page) as usize)) {
+            total
+        } else {
+            total.saturating_add(bytes(&page[..]))
+        }
+    })
 }
 
 #[inline]
@@ -387,8 +454,25 @@ impl Column {
                 i
             }
         };
-        Arc::make_mut(&mut self.chunks[i].1)
+        arc_make_mut(&mut self.chunks[i].1, chunk_bytes)
     }
+}
+
+fn chunk_bytes(chunk: &Chunk) -> usize {
+    let cells = match &chunk.cells {
+        Cells::Sparse(v) => v.capacity().saturating_mul(std::mem::size_of::<(u16, Slot)>()),
+        Cells::Numbers { values, .. } => values.len().saturating_mul(std::mem::size_of::<f64>())
+            + std::mem::size_of::<Bits>(),
+        Cells::Texts { ids, .. } => ids.len().saturating_mul(std::mem::size_of::<StrId>())
+            + std::mem::size_of::<Bits>(),
+        Cells::Mixed { slots, .. } => slots.len().saturating_mul(std::mem::size_of::<Slot>())
+            + std::mem::size_of::<Bits>(),
+    };
+    let formats = match &chunk.formats {
+        Formats::Uniform(_) => 0,
+        Formats::Varied(ids) => ids.len().saturating_mul(std::mem::size_of::<FormatId>()),
+    };
+    std::mem::size_of::<Chunk>().saturating_add(cells).saturating_add(formats)
 }
 
 /// Interned text with reference counts, so repeated values cost one copy
@@ -415,23 +499,26 @@ impl StringPool {
     fn intern(&mut self, s: &str) -> StrId {
         let hash = hash_str(s);
         if let Some(&id) = self.index.find(hash, |&id| Self::text(&self.entries, id) == s) {
-            if let Some(Some((_, refs))) = self.entries.get_mut(id as usize) {
+            if let Some(Some((_, refs))) = self.entries.get_mut(id as usize, string_page_bytes) {
                 *refs += 1;
             }
             return id;
         }
+        // A copied page is charged above. The new string is extra either way,
+        // including when this pool is not shared and the page grows in place.
+        charge_cow(s.len());
         let id = match self.free.pop() {
             Some(id) => {
-                *self.entries.get_mut(id as usize).expect("freed string id") = Some((Box::from(s), 1));
+                *self.entries.get_mut(id as usize, string_page_bytes).expect("freed string id") = Some((Box::from(s), 1));
                 id
             }
             None => {
-                self.entries.push(Some((Box::from(s), 1)));
+                self.entries.push(Some((Box::from(s), 1)), string_page_bytes);
                 (self.entries.len() - 1) as StrId
             }
         };
         let entries = &self.entries;
-        Arc::make_mut(&mut self.index).insert_unique(hash, id, |&i| hash_str(Self::text(entries, i)));
+        arc_make_mut(&mut self.index, index_bytes).insert_unique(hash, id, |&i| hash_str(Self::text(entries, i)));
         id
     }
 
@@ -441,19 +528,46 @@ impl StringPool {
 
     fn release(&mut self, id: StrId) {
         let hash = {
-            let Some(Some((text, refs))) = self.entries.get_mut(id as usize) else { return };
+            let Some(Some((text, refs))) = self.entries.get_mut(id as usize, string_page_bytes) else { return };
             *refs -= 1;
             if *refs > 0 {
                 return;
             }
             hash_str(text)
         };
-        if let Ok(entry) = Arc::make_mut(&mut self.index).find_entry(hash, |&i| i == id) {
+        if let Ok(entry) = arc_make_mut(&mut self.index, index_bytes).find_entry(hash, |&i| i == id) {
             entry.remove();
         }
-        *self.entries.get_mut(id as usize).expect("live string id") = None;
+        *self.entries.get_mut(id as usize, string_page_bytes).expect("live string id") = None;
         self.free.push(id);
     }
+}
+
+fn string_page_bytes(page: &[Option<(Box<str>, u32)>]) -> usize {
+    page.iter().map(|slot| {
+        std::mem::size_of::<Option<(Box<str>, u32)>>()
+            + slot.as_ref().map(|(text, _)| text.len()).unwrap_or(0)
+    }).sum()
+}
+
+fn index_bytes(index: &hashbrown::HashTable<StrId>) -> usize {
+    index.capacity().saturating_mul(std::mem::size_of::<StrId>().saturating_add(8))
+}
+
+fn formula_page_bytes(page: &[Option<Formula>]) -> usize {
+    page.iter().map(|slot| {
+        std::mem::size_of::<Option<Formula>>()
+            + slot.as_ref().map(|f| f.source.len()).unwrap_or(0)
+    }).sum()
+}
+
+fn value_page_bytes(page: &[Option<Value>]) -> usize {
+    page.iter().map(|slot| {
+        std::mem::size_of::<Option<Value>>() + match slot {
+            Some(Value::Text(text) | Value::Error(text)) => text.len(),
+            _ => 0,
+        }
+    }).sum()
 }
 
 #[derive(Debug, Clone)]
@@ -464,6 +578,7 @@ struct Formula {
 
 #[derive(Debug, Clone, Default)]
 struct FormulaTable {
+    unparsed: usize,
     entries: Paged<Option<Formula>>,
     free: Vec<FormulaId>,
     /// Each formula's last computed result, by the same id (#18 phase 2).
@@ -475,23 +590,25 @@ struct FormulaTable {
 
 impl FormulaTable {
     fn insert(&mut self, f: Formula) -> FormulaId {
+        charge_cow(f.source.len());
+        self.unparsed += usize::from(f.ast.is_none());
         let id = match self.free.pop() {
             Some(id) => {
-                *self.entries.get_mut(id as usize).expect("freed formula id") = Some(f);
+                *self.entries.get_mut(id as usize, formula_page_bytes).expect("freed formula id") = Some(f);
                 id
             }
             None => {
-                self.entries.push(Some(f));
+                self.entries.push(Some(f), formula_page_bytes);
                 (self.entries.len() - 1) as FormulaId
             }
         };
         // A reused id must not inherit the previous formula's result.
         let values = self.values.get_mut();
         while values.len() <= id as usize {
-            values.push(None);
+            values.push(None, value_page_bytes);
         }
         if values.get(id as usize).is_some_and(Option::is_some) {
-            *values.get_mut(id as usize).expect("value slot") = None;
+            *values.get_mut(id as usize, value_page_bytes).expect("value slot") = None;
         }
         id
     }
@@ -501,12 +618,13 @@ impl FormulaTable {
     }
 
     fn remove(&mut self, id: FormulaId) -> Formula {
-        let f = self.entries.get_mut(id as usize).and_then(Option::take).expect("live formula id");
+        let f = self.entries.get_mut(id as usize, formula_page_bytes).and_then(Option::take).expect("live formula id");
         let values = self.values.get_mut();
         if values.get(id as usize).is_some_and(Option::is_some) {
-            *values.get_mut(id as usize).expect("value slot") = None;
+            *values.get_mut(id as usize, value_page_bytes).expect("value slot") = None;
         }
         self.free.push(id);
+        self.unparsed -= usize::from(f.ast.is_none());
         f
     }
 
@@ -521,7 +639,7 @@ impl FormulaTable {
         let mut values = self.values.borrow_mut();
         match values.get(id as usize) {
             Some(current) if *current != value => {
-                *values.get_mut(id as usize).expect("value slot") = value;
+                *values.get_mut(id as usize, value_page_bytes).expect("value slot") = value;
             }
             _ => {}
         }
@@ -532,14 +650,14 @@ impl FormulaTable {
         if values.get(id as usize)?.is_none() {
             return None;
         }
-        values.get_mut(id as usize).and_then(Option::take)
+        values.get_mut(id as usize, value_page_bytes).and_then(Option::take)
     }
 
     fn clear_values(&self) {
         let mut values = self.values.borrow_mut();
         for id in 0..values.len() {
             if values.get(id).is_some_and(Option::is_some) {
-                *values.get_mut(id).expect("value slot") = None;
+                *values.get_mut(id, value_page_bytes).expect("value slot") = None;
             }
         }
     }
@@ -587,6 +705,16 @@ impl FormatTable {
     }
 }
 
+fn format_table_bytes(table: &FormatTable) -> usize {
+    table.formats.capacity().saturating_mul(std::mem::size_of::<Arc<CellFormat>>())
+        .saturating_add(table.index.capacity().saturating_mul(32))
+        .saturating_add(table.by_address.capacity().saturating_mul(16))
+}
+
+fn extras_bytes(extras: &HashMap<(u32, u32), CellExtras>) -> usize {
+    extras.capacity().saturating_mul(std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<CellExtras>())
+}
+
 /// A stored cell as range aggregation sees it.
 pub(crate) enum Scalar<'a> {
     Number(f64),
@@ -605,7 +733,7 @@ fn append(chunks: &mut Vec<(u32, Arc<Chunk>)>, row: usize, slot: Slot, format: F
     if chunks.last().map(|c| c.0) != Some(idx) {
         chunks.push((idx, Arc::new(Chunk::new(format))));
     }
-    let chunk = Arc::make_mut(&mut chunks.last_mut().expect("chunk just ensured").1);
+    let chunk = arc_make_mut(&mut chunks.last_mut().expect("chunk just ensured").1, chunk_bytes);
     chunk.count += 1;
     chunk.cells.set(off, slot, chunk.count as usize);
     chunk.formats.set(off, format, chunk.count == 1);
@@ -628,12 +756,63 @@ pub(crate) struct ColumnStore {
     formats: Arc<FormatTable>,
     extras: Arc<HashMap<(u32, u32), CellExtras>>,
     len: usize,
+    cow: CowMeter,
 }
 
 impl ColumnStore {
+    pub fn has_unparsed_formulas(&self) -> bool { self.formulas.unparsed != 0 }
+    pub fn frozen_positions(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.extras.iter().filter(|(_, e)| e.frozen_formula.is_some()).map(|(&(r, c), _)| (r as usize, c as usize))
+    }
+
     /// Number of stored cells (with a value, a format, or metadata).
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub(crate) fn share_cow_from(&mut self, other: &ColumnStore) {
+        self.cow = other.cow.share();
+    }
+
+    /// Bytes of chunks and pages this store holds that `live` does not. The
+    /// arc addresses are the comparison, so the total survives a clone that
+    /// replaces either workbook and drops when the allocation is freed.
+    pub(crate) fn unshared_bytes(&self, live: &ColumnStore) -> usize {
+        if std::ptr::eq(self, live) {
+            return 0;
+        }
+        let live_chunks: std::collections::HashSet<usize> = live.columns.iter()
+            .flat_map(|column| column.chunks.iter().map(|(_, chunk)| Arc::as_ptr(chunk) as usize))
+            .collect();
+        let mut total = 0usize;
+        for column in &self.columns {
+            for (_, chunk) in &column.chunks {
+                if !live_chunks.contains(&(Arc::as_ptr(chunk) as usize)) {
+                    total = total.saturating_add(chunk_bytes(chunk));
+                }
+            }
+        }
+        total = total.saturating_add(unshared_paged(&self.strings.entries, &live.strings.entries, string_page_bytes));
+        if !Arc::ptr_eq(&self.strings.index, &live.strings.index) {
+            total = total.saturating_add(index_bytes(&self.strings.index));
+        }
+        total = total.saturating_add(unshared_paged(&self.formulas.entries, &live.formulas.entries, formula_page_bytes));
+        let baseline_values = self.formulas.values.borrow();
+        let live_values = live.formulas.values.borrow();
+        total = total.saturating_add(unshared_paged(&baseline_values, &live_values, value_page_bytes));
+        drop(baseline_values);
+        drop(live_values);
+        if !Arc::ptr_eq(&self.formats, &live.formats) {
+            total = total.saturating_add(format_table_bytes(&self.formats));
+        }
+        if !Arc::ptr_eq(&self.extras, &live.extras) {
+            total = total.saturating_add(extras_bytes(&self.extras));
+        }
+        total
+    }
+
+    pub(crate) fn reset_cow(&self) {
+        self.cow.reset();
     }
 
     /// Nothing to reserve: chunks are allocated as rows arrive.
@@ -759,6 +938,7 @@ impl ColumnStore {
 
     /// Change a cell that exists; `None` when there is no cell there.
     pub fn update<R>(&mut self, row: usize, col: usize, f: impl FnOnce(&mut Cell) -> R) -> Option<R> {
+        let _cow = self.cow.enter();
         let carried = self.take_computed(row, col);
         let mut cell = self.remove(row, col)?;
         let out = f(&mut cell);
@@ -775,6 +955,7 @@ impl ColumnStore {
         init: impl FnOnce() -> Cell,
         f: impl FnOnce(&mut Cell) -> R,
     ) -> R {
+        let _cow = self.cow.enter();
         let carried = self.take_computed(row, col);
         let mut cell = self.remove(row, col).unwrap_or_else(init);
         let out = f(&mut cell);
@@ -803,12 +984,14 @@ impl ColumnStore {
     /// Record a formula's computed result. Ignored where there is no formula:
     /// every reader consults results only for formula cells.
     pub fn set_computed(&self, row: usize, col: usize, value: Value) {
+        let _cow = self.cow.enter();
         if let Some(id) = self.formula_id(row, col) {
             self.formulas.set_value(id, Some(value));
         }
     }
 
     pub fn clear_computed(&self, row: usize, col: usize) {
+        let _cow = self.cow.enter();
         if let Some(id) = self.formula_id(row, col) {
             self.formulas.set_value(id, None);
         }
@@ -816,6 +999,7 @@ impl ColumnStore {
 
     /// Forget every computed result (before a full recalculation).
     pub fn clear_all_computed(&self) {
+        let _cow = self.cow.enter();
         self.formulas.clear_values();
     }
 
@@ -837,6 +1021,7 @@ impl ColumnStore {
     /// formula. A different formula starts uncomputed, whether or not the
     /// caller remembered to clear first.
     fn restore_computed(&self, row: usize, col: usize, carried: Option<(Value, String)>) {
+        let _cow = self.cow.enter();
         let Some((value, source)) = carried else { return };
         if let Some(id) = self.formula_id(row, col) {
             if self.formulas.get(id).source == source {
@@ -859,6 +1044,7 @@ impl ColumnStore {
     /// `init` if there is none. A format edit used to materialize the cell
     /// and write it back, copying and re-interning its text for nothing.
     pub fn set_format(&mut self, row: usize, col: usize, init: impl FnOnce() -> Cell, format: Arc<CellFormat>) {
+        let _cow = self.cow.enter();
         let (idx, off) = split(row);
         let present = self
             .columns
@@ -874,13 +1060,14 @@ impl ColumnStore {
         let id = self.intern_format(format);
         let column = &mut self.columns[col];
         let i = column.chunks.binary_search_by_key(&idx, |c| c.0).expect("present chunk");
-        let chunk = Arc::make_mut(&mut column.chunks[i].1);
+        let chunk = arc_make_mut(&mut column.chunks[i].1, chunk_bytes);
         chunk.formats.set(off, id, chunk.count == 1);
     }
 
     /// Store an owned cell at an empty position, moving its text and formula
     /// into the pools.
     fn insert(&mut self, row: usize, col: usize, cell: Cell) {
+        let _cow = self.cow.enter();
         let (value, format, extras) = cell.into_parts();
         let slot = match value {
             CellValue::Empty => Slot::Empty,
@@ -898,7 +1085,7 @@ impl ColumnStore {
     fn intern_format(&mut self, format: Arc<CellFormat>) -> FormatId {
         match self.formats.find(&format) {
             Some(id) => id,
-            None => Arc::make_mut(&mut self.formats).add(format),
+            None => arc_make_mut(&mut self.formats, format_table_bytes).add(format),
         }
     }
 
@@ -916,7 +1103,7 @@ impl ColumnStore {
         chunk.formats.set(off, raw.format, chunk.count == 1);
         if let Some(extras) = raw.extras {
             chunk.extras += 1;
-            Arc::make_mut(&mut self.extras).insert((row as u32, col as u32), extras);
+            arc_make_mut(&mut self.extras, extras_bytes).insert((row as u32, col as u32), extras);
         }
         self.len += 1;
     }
@@ -927,12 +1114,12 @@ impl ColumnStore {
         let (idx, off) = split(row);
         let column = self.columns.get_mut(col)?;
         let i = column.chunks.binary_search_by_key(&idx, |c| c.0).ok()?;
-        let chunk = Arc::make_mut(&mut column.chunks[i].1);
+        let chunk = arc_make_mut(&mut column.chunks[i].1, chunk_bytes);
         let format = chunk.formats.get(off);
         let slot = chunk.cells.remove(off, chunk.count as usize - 1)?;
         chunk.count -= 1;
         let extras = if chunk.extras > 0 {
-            let e = Arc::make_mut(&mut self.extras).remove(&(row as u32, col as u32));
+            let e = arc_make_mut(&mut self.extras, extras_bytes).remove(&(row as u32, col as u32));
             if e.is_some() {
                 chunk.extras -= 1;
             }
@@ -948,6 +1135,7 @@ impl ColumnStore {
     }
 
     pub fn remove(&mut self, row: usize, col: usize) -> Option<Cell> {
+        let _cow = self.cow.enter();
         let raw = self.take(row, col)?;
         let value = match raw.slot {
             Slot::Empty => CellValue::Empty,
@@ -969,11 +1157,13 @@ impl ColumnStore {
     /// Move cells at or below `at` down by `count` rows, dropping any that
     /// would land at or past `limit`.
     pub fn insert_rows(&mut self, at: usize, count: usize, limit: usize) {
+        let _cow = self.cow.enter();
         self.remap_rows(at, |r| if r >= at { (r + count < limit).then_some(r + count) } else { Some(r) });
     }
 
     /// Delete `count` rows from `start`; cells below move up.
     pub fn delete_rows(&mut self, start: usize, count: usize) {
+        let _cow = self.cow.enter();
         let end = start + count;
         self.remap_rows(start, |r| {
             if r < start {
@@ -990,6 +1180,7 @@ impl ColumnStore {
     /// would land at or past `limit`. Columns move as whole containers; no
     /// cell is touched unless its column is dropped.
     pub fn insert_cols(&mut self, at: usize, count: usize, limit: usize) {
+        let _cow = self.cow.enter();
         if at >= self.columns.len() {
             return;
         }
@@ -1008,6 +1199,7 @@ impl ColumnStore {
     /// Delete `count` columns from `start`; columns to the right move left
     /// as whole containers.
     pub fn delete_cols(&mut self, start: usize, count: usize) {
+        let _cow = self.cow.enter();
         if start >= self.columns.len() {
             return;
         }
@@ -1037,7 +1229,7 @@ impl ColumnStore {
             for (idx, chunk) in old.iter().filter(|(idx, c)| c.extras > 0 && !kept(*idx)) {
                 for (off, _) in chunk.cells.slots() {
                     let row = join(*idx, off);
-                    if let Some(e) = Arc::make_mut(&mut self.extras).remove(&(row as u32, col as u32)) {
+                    if let Some(e) = arc_make_mut(&mut self.extras, extras_bytes).remove(&(row as u32, col as u32)) {
                         extras.insert(row, e);
                     }
                 }
@@ -1055,8 +1247,8 @@ impl ColumnStore {
                         Some(new_row) => {
                             append(&mut built, new_row, slot, chunk.formats.get(off));
                             if let Some(e) = extra {
-                                Arc::make_mut(&mut built.last_mut().expect("just appended").1).extras += 1;
-                                Arc::make_mut(&mut self.extras).insert((new_row as u32, col as u32), e);
+                                arc_make_mut(&mut built.last_mut().expect("just appended").1, chunk_bytes).extras += 1;
+                                arc_make_mut(&mut self.extras, extras_bytes).insert((new_row as u32, col as u32), e);
                             }
                         }
                         None => {
@@ -1077,7 +1269,7 @@ impl ColumnStore {
                 self.release_slot(slot);
                 self.len -= 1;
                 if chunk.extras > 0 {
-                    Arc::make_mut(&mut self.extras).remove(&(join(idx, off) as u32, col as u32));
+                    arc_make_mut(&mut self.extras, extras_bytes).remove(&(join(idx, off) as u32, col as u32));
                 }
             }
         }

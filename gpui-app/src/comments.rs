@@ -11,7 +11,12 @@ use gpui::*;
 use visigrid_engine::cell::CellComment;
 use visigrid_engine::sheet::SheetId;
 
+#[path = "comment_plan.rs"]
+pub(crate) mod plan;
+
 pub struct CommentEditor {
+    pub revision: u64,
+    pub error: Option<String>,
     pub sheet_id: SheetId,
     pub row: usize,
     pub col: usize,
@@ -56,6 +61,7 @@ impl Spreadsheet {
     }
 
     pub fn open_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_table_view(cx);
         let (r, c) = self.view_state.selected;
         self.open_cell_comment(self.row_view.view_to_data(r), c, window, cx);
     }
@@ -66,15 +72,25 @@ impl Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.mode.is_navigation() || self.block_active_sheet_metadata_edit(cx) {
+        if !self.mode.is_navigation() || (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
-        self.comment_reader = None;
+        self.sync_table_view(cx);
         let sheet = self.sheet(cx);
         let (row, col) = sheet
             .get_merge(row, col)
             .map(|m| m.start)
             .unwrap_or((row, col));
+        if let Err(error) = plan::validate_target(sheet, row, col, true, false) {
+            self.status_message = Some(error);
+            cx.notify();
+            return;
+        }
+        if self.row_view.data_to_view(row).is_none() || self.is_row_hidden(row) || self.is_col_hidden(col) {
+            self.status_message = Some("Reveal this cell before editing its comment.".into());
+            cx.notify();
+            return;
+        }
         let comment = sheet.comment(row, col).cloned();
         let text = comment.as_ref().map(|c| c.text.clone()).unwrap_or_default();
         let author = comment
@@ -82,11 +98,14 @@ impl Spreadsheet {
             .map(|c| c.author.clone())
             .unwrap_or_default();
         let sheet_id = sheet.id;
+        self.comment_reader = None;
         self.end_drag_selection(cx);
         if let Some(view_row) = self.row_view.data_to_view(row) {
             self.select_cell(view_row, col, false, cx);
         }
         self.comment_editor = Some(CommentEditor {
+            revision: self.wb(cx).revision(),
+            error: None,
             sheet_id,
             row,
             col,
@@ -127,7 +146,7 @@ impl Spreadsheet {
             .iter()
             .position(|s| s.id == editor.sheet_id)
         else {
-            self.close_comment(cx);
+            self.comment_error("The comment sheet no longer exists. Copy your draft before closing it.".into(), cx);
             return;
         };
         let (row, col) = (editor.row, editor.col);
@@ -135,13 +154,15 @@ impl Spreadsheet {
             text: editor.text.text.clone(),
             author: editor.author.text.trim().to_owned(),
         });
-        self.change_comment(index, row, col, after, cx);
-        self.close_comment(cx);
+        if self.change_comment(index, row, col, after, cx) {
+            self.close_comment(cx);
+        }
     }
     pub fn delete_comment(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
+        self.sync_table_view(cx);
         let (index, row, col) = if let Some(editor) = &self.comment_editor {
             let Some(index) = self
                 .wb(cx)
@@ -162,10 +183,14 @@ impl Spreadsheet {
                 .unwrap_or((r, c));
             (self.sheet_index(cx), r, c)
         };
-        self.change_comment(index, row, col, None, cx);
-        if self.comment_editor.is_some() {
+        if self.change_comment(index, row, col, None, cx) && self.comment_editor.is_some() {
             self.close_comment(cx);
         }
+    }
+    fn comment_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.comment_editor { editor.error = Some(error.clone()); }
+        self.status_message = Some(error);
+        cx.notify();
     }
     fn change_comment(
         &mut self,
@@ -174,15 +199,29 @@ impl Spreadsheet {
         col: usize,
         after: Option<CellComment>,
         cx: &mut Context<Self>,
-    ) {
-        if self.block_sheet_metadata_edit(sheet_index, cx) { return; }
+    ) -> bool {
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return false; }
+        let result = plan::validate_edit(self.wb(cx), sheet_index, row, col, after.is_some(),
+            self.comment_editor.as_ref().map(|e| e.revision));
+        if let Err(error) = result {
+            self.comment_error(error, cx);
+            return false;
+        }
+        if sheet_index == self.sheet_index(cx)
+            && (self.row_view.data_to_view(row).is_none() || self.is_row_hidden(row) || self.is_col_hidden(col))
+        {
+            self.comment_error("Reveal this cell before editing its comment.".into(), cx);
+            return false;
+        }
+        let remove_cell_on_undo = self.wb(cx).sheet(sheet_index)
+            .is_some_and(|s| s.get_cell_opt(row, col).is_none());
         let before = self
             .wb(cx)
             .sheet(sheet_index)
             .and_then(|s| s.comment(row, col))
             .cloned();
         if before == after {
-            return;
+            return true;
         }
         let description = if after.is_none() {
             "Delete comment"
@@ -198,10 +237,11 @@ impl Spreadsheet {
             }
             wb.bump_revision_for_structure();
         });
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::Comments {
                 sheet_index,
                 patches: vec![CommentPatch {
+                    remove_cell_on_undo,
                     row,
                     col,
                     before,
@@ -216,6 +256,7 @@ impl Spreadsheet {
         self.request_title_refresh(cx);
         self.status_message = Some(description);
         cx.notify();
+        true
     }
     pub fn comment_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
@@ -483,6 +524,9 @@ pub fn render(
                     .flex_col()
                     .gap(px(18.))
                     .child(header)
+                    .when_some(editor.error.as_ref(), |d, message| {
+                        d.child(div().text_size(px(12.)).text_color(error).child(message.clone()))
+                    })
                     .child(
                         div()
                             .flex()
@@ -891,9 +935,8 @@ impl Spreadsheet {
     }
 
     pub fn navigate_comment(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) {
-            return;
-        }
+        if self.is_previewing() || self.review_mode.is_some() { return; }
+        self.sync_table_view(cx);
         if !self.mode.is_navigation() && self.mode != Mode::Command {
             return;
         }
@@ -942,7 +985,7 @@ impl Spreadsheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.block_sheet_metadata_edit(sheet, cx)
+        if self.is_previewing() || self.review_mode.is_some()
             || (!self.mode.is_navigation() && self.mode != Mode::Command)
         {
             return;
@@ -962,15 +1005,14 @@ impl Spreadsheet {
                 return;
             }
         }
+        self.sync_table_view(cx);
         self.mode = Mode::Navigation;
         self.end_drag_selection(cx);
         let view_row = self.data_to_view(row, cx);
         let hidden = view_row.is_none() || self.is_row_hidden(row) || self.is_col_hidden(col);
-        if let Some(view_row) = view_row {
+        if let Some(view_row) = view_row.filter(|_| !hidden) {
             self.select_cell(view_row, col, false, cx);
-            if !hidden {
-                self.ensure_visible(cx);
-            }
+            self.ensure_visible(cx);
         }
         self.comment_reader = Some(CommentReader {
             sheet_id: self.sheet(cx).id,
@@ -1129,12 +1171,13 @@ pub fn render_reader(
                         .id("comment-reader-edit")
                         .text_size(px(12.))
                         .text_color(accent)
-                        .cursor_pointer()
-                        .hover(|d| d.underline())
-                        .child("Edit comment")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_cell_comment(row, col, window, cx)
-                        })),
+                        .when(reader.hidden, |d| d.text_color(muted))
+                        .child(if reader.hidden { "Reveal cell to edit" } else { "Edit comment" })
+                        .when(!reader.hidden, |d| d.cursor_pointer()
+                            .hover(|d| d.underline())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_cell_comment(row, col, window, cx)
+                            }))),
                 )
                 .child(
                     div()

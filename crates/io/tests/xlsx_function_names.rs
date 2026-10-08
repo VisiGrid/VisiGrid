@@ -43,6 +43,72 @@ fn newer_functions_and_let_lambda_names_are_written_as_excel_stores_them() {
 
 
 #[test]
+fn calculated_column_and_totals_formulas_prefix_future_functions() {
+    use visigrid_engine::table::{TableRange, TableTotal};
+    let mut wb = Workbook::new();
+    for (col, header) in ["Key", "Value", "Found"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, 0, col, header);
+    }
+    wb.set_cell_value_tracked(0, 1, 0, "a");
+    wb.set_cell_value_tracked(0, 1, 1, "10");
+    wb.set_cell_value_tracked(0, 2, 0, "b");
+    wb.set_cell_value_tracked(0, 2, 1, "20");
+    let id = wb
+        .create_table(
+            wb.active_sheet_id(),
+            TableRange { start_row: 0, start_col: 0, end_row: 2, end_col: 2 },
+            "Items",
+        )
+        .unwrap()
+        .table_id();
+    wb.set_calculated_column(id, 2, 1, "=XLOOKUP([@Key],A2:A3,B2:B3)+LET(n,1,n)", true)
+        .unwrap();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_table_total(
+        id,
+        2,
+        TableTotal {
+            function: Some("custom".into()),
+            formula: Some("=ROWS(FILTER(A2:A3,A2:A3=A2))+ROWS(SORT(A2:A3))".into()),
+            label: None,
+        },
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("table.xlsx");
+    xlsx::export_with_order(&wb, &file, None, xlsx::ExportOrder::Stored).unwrap();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&file).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/tables/table1.xml").unwrap(), &mut xml).unwrap();
+    assert!(
+        xml.contains("<calculatedColumnFormula>_xlfn.XLOOKUP([[#This Row],[Key]],A2:A3,B2:B3)+_xlfn.LET(_xlpm.n,1,_xlpm.n)</calculatedColumnFormula>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<totalsRowFormula>ROWS(_xlfn._xlws.FILTER(A2:A3,A2:A3=A2))+ROWS(_xlfn._xlws.SORT(A2:A3))</totalsRowFormula>"),
+        "{xml}"
+    );
+
+    // The stored column rule and footer come back without Excel's prefixes,
+    // and a second export does not double or uppercase them.
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    let table = loaded.tables().next().unwrap().1;
+    let rule = table.columns[2].formula.as_deref().unwrap_or_default();
+    assert!(!rule.to_ascii_lowercase().contains("_xl"), "{rule}");
+    assert!(rule.starts_with("=XLOOKUP("), "{rule}");
+    let footer = table.totals.as_ref().and_then(|t| t.columns[2].formula.as_deref()).unwrap_or_default();
+    assert!(!footer.to_ascii_lowercase().contains("_xl"), "{footer}");
+    let again = dir.path().join("again.xlsx");
+    xlsx::export_with_order(&loaded, &again, None, xlsx::ExportOrder::Stored).unwrap();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&again).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/tables/table1.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains("<calculatedColumnFormula>_xlfn.XLOOKUP("), "{xml}");
+    assert!(!xml.contains("_XLFN") && !xml.contains("_xlfn._xlfn."), "{xml}");
+}
+
+#[test]
 fn prefixed_formulas_import_and_calculate() {
     let mut wb = Workbook::new();
     wb.set_cell_value_tracked(0, 0, 0, "=LET(x,5,y,7,x*y)");

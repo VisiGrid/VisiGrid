@@ -1399,6 +1399,8 @@ pub struct SpillInfo {
 pub struct SpillError {
     /// The cell blocking the spill
     pub blocked_by: (usize, usize),
+    /// Attempted result dimensions, retained for Excel's rich error metadata.
+    pub dimensions: Option<SpillInfo>,
 }
 
 /// A traditional cell comment (Excel calls these notes), not a threaded discussion.
@@ -1691,7 +1693,12 @@ impl Cell {
     ///
     /// Trims to match `from_input`, so ordinary text imports unchanged.
     pub fn set_text(&mut self, text: &str) {
-        self.value = CellValue::Text(text.trim().to_string());
+        self.set_text_exact(text.trim());
+    }
+
+    /// Preserve an already-typed external string, including significant whitespace.
+    pub fn set_text_exact(&mut self, text: &str) {
+        self.value = CellValue::Text(text.to_string());
         self.clear_spill_state();
         self.set_frozen_formula(None);
     }
@@ -1800,7 +1807,7 @@ mod tests {
         cell.set_spill_parent(Some((4, 2)));
         cell.set_spill_info(Some(SpillInfo { rows: 3, cols: 1 }));
         cell.set_frozen_formula(Some("=A1+1".to_string()));
-        cell.set_spill_error(Some(SpillError { blocked_by: (5, 2) }));
+        cell.set_spill_error(Some(SpillError { blocked_by: (5, 2), ..Default::default() }));
         let view = cell.as_ref();
         assert_eq!(view.style_id(), Some(7));
         assert_eq!(view.spill_parent(), Some((4, 2)));

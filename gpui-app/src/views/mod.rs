@@ -61,6 +61,7 @@ mod f1_help;
 mod cf_rules_panel;
 mod pivot_panel;
 mod table_controls;
+mod table_saved_views;
 mod table_recovery;
 mod problems_panel;
 mod cond_format_dialog;
@@ -75,6 +76,17 @@ use crate::mode::Mode;
 use crate::theme::TokenKey;
 
 pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+    if let Some(notice) = app.history.take_notice() {
+        // A caller may already have reported a more specific undo limit.
+        // Keep that wording, and add the rewind sentence when both happened.
+        if let Some(message) = app.status_message.as_deref().filter(|message| message.contains("too large to undo")) {
+            if notice.contains("Rewind is unavailable") && !message.contains("Rewind is unavailable") {
+                app.status_message = Some(format!("{message}. Rewind is unavailable; ordinary undo still works for recent changes."));
+            }
+        } else {
+            app.status_message = Some(notice);
+        }
+    }
     app.sync_toolbar_preferences(window, cx);
     if app.ui.desktop_keytips.active() && !app.desktop_keytips_available(window, cx) {
         app.dismiss_desktop_keytips(cx);
@@ -830,7 +842,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             div.child(goto_dialog::render_goto_dialog(app, cx))
         })
         .when(show_find, |div| {
-            div.child(find_dialog::render_find_dialog(app))
+            div.child(find_dialog::render_find_dialog(app, cx))
         })
         .when(show_command, |div| {
             div.child(command_palette::render_command_palette(app, cx))

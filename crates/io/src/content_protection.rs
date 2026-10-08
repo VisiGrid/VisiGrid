@@ -275,9 +275,14 @@ pub(crate) fn band_cell_number_loss(content: &str) -> Result<bool, String> {
     Ok(numeric_cell_loss(&cell))
 }
 
-pub(crate) fn fingerprint(sheet: &Sheet) -> Result<[u8; 32], String> {
+pub(crate) fn fingerprint(wb: &Workbook, sheet: &Sheet) -> Result<[u8; 32], String> {
     // Value's object representation sorts keys, including engine HashMaps.
-    let value = crate::json::protection_projection(sheet)?;
+    let mut value = crate::json::protection_projection(sheet)?;
+    // Names belong to the workbook, outside the per-sheet projection. Retain
+    // them in the protection fingerprint so edits cannot be silently ignored.
+    let mut names = wb.list_named_ranges();
+    names.sort_by(|a, b| a.name.cmp(&b.name));
+    value["named_ranges"] = serde_json::to_value(names).map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
     Ok(Sha256::digest(bytes).into())
 }
@@ -310,7 +315,7 @@ pub(crate) fn original_source(wb: &Workbook) -> Result<Option<&str>, String> {
         let Some(p) = &sheet.canonical_content_protection else {
             return Err("Protected workbook metadata is missing.".into());
         };
-        if p.source != protection.source || fingerprint(sheet)? != p.fingerprint {
+        if p.source != protection.source || fingerprint(wb, sheet)? != p.fingerprint {
             return Err("Cannot save changes to unsupported workbook content. Export the original or upgrade VisiGrid.".into());
         }
     }

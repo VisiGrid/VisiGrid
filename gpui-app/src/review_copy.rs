@@ -186,7 +186,7 @@ impl Spreadsheet {
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.install_structure_layout(history.sheet.id, &history.layout);
         self.finish_review_copy_view(history.sheet.id, cx);
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::ReviewCopy {
                 history: Box::new(history),
             },
@@ -449,7 +449,7 @@ mod tests {
         let (after, h) = copy(&before, &prepared);
         let index = h.index;
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::ReviewCopy {
                 history: Box::new(h),
             },
@@ -592,7 +592,7 @@ mod tests {
         let (after, copy) = prepare_copy(&before, &prepared, &shifted, (0, 0), "Result").unwrap();
         let index = copy.index;
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableStructureChanged {
                 sheet_index: 0,
                 history: Box::new(TableStructureHistory {
@@ -605,7 +605,7 @@ mod tests {
             },
             None,
         );
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::ReviewCopy {
                 history: Box::new(copy),
             },
@@ -623,5 +623,64 @@ mod tests {
             preview.view_state.per_sheet[index].structure_layout,
             Some(shifted)
         );
+    }
+    #[test]
+    fn totals_copy_with_reviewed_edits_retains_criteria_and_replays_independently() {
+        use visigrid_engine::table::TableTotal;
+        for visible in [true, false] {
+            let mut before = fixture(true);
+            let id = before.active_sheet().tables()[0].id;
+            before.set_calculated_column(id, 3, 3, "=Sales[@Amount]*2", true).unwrap();
+            before.set_cell_value_tracked(0, 4, 3, "999");
+            before.set_table_totals_visible(id, true, Default::default()).unwrap();
+            before.set_table_total(id, 3, TableTotal {
+                function: Some("custom".into()), formula: Some("=SUBTOTAL(109,Sales[Result])".into()), label: None,
+            }).unwrap();
+            if !visible { before.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+            let prepared = plan(&before, "sheet:set('C6',25)");
+            let (after, h) = copy(&before, &prepared);
+            let index = h.index;
+            let table = &h.sheet.tables()[0];
+            assert_eq!(table.totals.as_ref().unwrap().columns[2].formula.as_deref(), Some("=SUBTOTAL(109,Sales_Copy[Result])"));
+            assert_eq!(h.sheet.get_raw(4, 3), "999");
+            assert_eq!(h.sheet.table_view_spec().unwrap().filters, before.active_sheet().table_view_spec().unwrap().filters);
+            if visible {
+                assert_eq!(after.sheet(index).unwrap().get_display(7, 3), "190");
+                assert_eq!(after.active_sheet().get_display(7, 3), "180");
+            }
+            let undone = h.replay(&after, true).unwrap();
+            assert_eq!(signature(&undone), signature(&before));
+            let redone = h.replay(&undone, false).unwrap();
+            assert_eq!(signature(&redone), signature(&after));
+            let mut history = History::new();
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::ReviewCopy { history: Box::new(h) }, None);
+            let preview = history.build_workbook_before(1, Some(&before), 100, 10_000).unwrap();
+            assert_eq!(signature(&preview.workbook), signature(&after));
+            let copied = after.sheet(index).unwrap().tables()[0].id;
+            let mut grown = after.clone();
+            grown.append_table_rows(copied, 1, &[(7, 1, "West".into()), (7, 2, "7".into())]).unwrap();
+            assert_eq!(grown.sheet(index).unwrap().get_display(7, 3), "14");
+            if visible { assert_eq!(grown.sheet(index).unwrap().get_display(8, 3), "204"); }
+            assert_eq!(grown.active_sheet().tables(), before.active_sheet().tables());
+        }
+    }
+
+    #[test]
+    fn reviewed_row_deletion_copies_moved_totals_and_supports_undo() {
+        let mut before = fixture(true);
+        let id = before.active_sheet().tables()[0].id;
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let prepared = plan(&before, "sheet:delete_rows(5,1)");
+        let (after, history) = copy(&before, &prepared);
+        assert_eq!(history.sheet.tables()[0].totals_row(), Some(6));
+        assert_eq!(after.active_sheet().tables()[0].totals_row(), Some(7));
+        assert!(history.replay(&after, true).is_ok());
+    }
+
+}
+
+impl ReviewCopyHistory {
+    pub(crate) fn estimated_history_bytes(&self) -> usize {
+        visigrid_engine::history_size::sheet_bytes(&self.sheet) + visigrid_engine::history_size::serialized_bytes(&self.layout) + self.before.capacity() + self.after.capacity() + std::mem::size_of_val(self)
     }
 }

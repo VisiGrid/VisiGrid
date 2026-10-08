@@ -123,7 +123,7 @@ impl Spreadsheet {
         self.view_state.selection_end = None;
         self.view_state.additional_selections.clear();
         self.clipboard_visual_range = None;
-        self.history.record_action_with_provenance(action, None);
+        self.record_action_with_provenance(cx, action, None);
         self.cached_title = None;
         self.bump_cells_rev();
         self.bump_cf_rules_rev();
@@ -220,7 +220,7 @@ mod tests {
         commit.replay(&mut live, false).unwrap();
         assert_eq!(live.active_sheet().get_raw(4, 2), "25");
         let mut history = History::new();
-        history.record_named_range_action(UndoAction::TableStructureChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
                 source_frozen: None,
@@ -259,7 +259,7 @@ mod tests {
         commit.replay(&mut live, false).unwrap();
         assert_eq!(live.active_sheet().frozen_panes, (2, 1));
         let mut history = History::new();
-        history.record_named_range_action(UndoAction::TableStructureChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
                 source_frozen: Some((3, 1)),
@@ -293,7 +293,7 @@ mod tests {
         let applied = prepared.verify_candidate(&wb, &context).unwrap().applied;
         let commit = wb.capture_guarded_batch(&applied).unwrap();
         let mut history = History::new();
-        history.record_named_range_action(UndoAction::TableBatchChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
             sheet_index: 0,
             commit: Box::new(commit),
             description: "Reviewed cells".into(),

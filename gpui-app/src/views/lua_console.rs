@@ -1028,13 +1028,13 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
                 ],
                 description: "Lua script".into(),
             };
-            app.history.record_action_with_provenance(group, None);
+            app.record_action_with_provenance(cx, group, None);
             app.is_modified = true;
         } else if !guarded && has_values {
-            app.history.record_batch(sheet_index, changes);
+            app.record_batch(cx, sheet_index, changes);
             app.is_modified = true;
         } else if !guarded && has_formats {
-            app.history.record_format(
+            app.record_format(cx,
                 sheet_index,
                 format_patches,
                 crate::history::FormatActionKind::CellStyle,
@@ -1321,7 +1321,7 @@ fn apply_captured_lua_ops_inner(
                     .unwrap_or_default();
                 guard.clear_cell_tracked(sheet_index, row, col);
                 if before != Default::default() {
-                    format_patches.push(CellFormatPatch {
+                    format_patches.push(CellFormatPatch { remove_cell_on_undo: false,
                         row,
                         col,
                         before,
@@ -1354,7 +1354,7 @@ fn apply_captured_lua_ops_inner(
                         if before != after {
                             let id = guard.sheet(sheet_index).unwrap().id;
                             guard.note_format_changed(visigrid_engine::cell_id::CellId::new(id,row,col));
-                            format_patches.push(CellFormatPatch { row, col, before, after });
+                            format_patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                         }
                     }
                 }
@@ -1605,13 +1605,13 @@ fn handle_debug_completed(
                     ],
                     description: "Lua debug".into(),
                 };
-                app.history.record_action_with_provenance(group, None);
+                app.record_action_with_provenance(cx, group, None);
                 app.is_modified = true;
             } else if !guarded && has_values {
-                app.history.record_batch(target_index, changes);
+                app.record_batch(cx, target_index, changes);
                 app.is_modified = true;
             } else if !guarded && has_formats {
-                app.history.record_format(
+                app.record_format(cx,
                     target_index,
                     format_patches,
                     crate::history::FormatActionKind::CellStyle,

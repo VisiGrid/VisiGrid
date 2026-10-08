@@ -1,6 +1,10 @@
 // Formula parsing and evaluation
 
 pub mod parser;
+pub mod names;
+pub mod sheets;
+pub(crate) mod source_refs;
+pub mod extract;
 pub mod structured;
 pub mod eval;
 pub mod functions;
@@ -25,3 +29,10 @@ pub(crate) mod eval_statistical;
 pub(crate) mod eval_trig;
 pub(crate) mod eval_array;
 pub(crate) mod lift;
+
+pub(crate) mod eval_subtotal;
+
+pub(crate) mod eval_budget;
+pub mod excel_namespaces;
+
+pub(crate) mod reference;

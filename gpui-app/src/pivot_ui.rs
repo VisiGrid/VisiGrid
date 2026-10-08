@@ -779,7 +779,7 @@ impl Spreadsheet {
             self.status_message = Some(error.to_string()); cx.notify(); return;
         }
         self.sync_table_view(cx);
-        self.record_pivot_commit(commit, None, format!("Delete {name}"));
+        self.record_pivot_commit(commit, None, format!("Delete {name}"), cx);
         self.pivot_panel = None;
         self.pivot_errors.remove(&id);
         self.status_message = Some(format!("Deleted {name}."));
@@ -985,7 +985,7 @@ impl Spreadsheet {
                     self.set_col_width_on(sheet_id, col, width);
                     actions.push(crate::history::UndoAction::ColumnWidthSet { sheet_id, col, old: None, new: Some(width) });
                 }
-                self.history.record_action_with_provenance(crate::history::UndoAction::Group {
+                self.record_action_with_provenance(cx, crate::history::UndoAction::Group {
                     actions, description: job.description.clone(),
                 }, None);
                 if let Some(p) = self.pivot_panel.as_mut() {
@@ -1018,7 +1018,7 @@ impl Spreadsheet {
                     self.pivot_job_failed(&job, error.to_string(), cx);
                     return false;
                 }
-                self.record_pivot_commit(commit, None, job.description.clone());
+                self.record_pivot_commit(commit, None, job.description.clone(), cx);
                 let growth = self.wb(cx).pivot_source_growth(&job.table);
                 let note = growth.map(|last| {
                     format!(
@@ -1055,8 +1055,9 @@ impl Spreadsheet {
         commit: PivotCommit,
         created_sheet: Option<(usize, Box<Sheet>)>,
         description: String,
+        cx: &App,
     ) {
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::PivotCommit { commit: Box::new(commit), created_sheet, description },
             None,
         );

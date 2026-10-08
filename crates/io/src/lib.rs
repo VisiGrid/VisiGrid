@@ -30,6 +30,16 @@ pub mod xlsx;
 #[cfg(feature = "native")]
 mod xlsx_comments;
 #[cfg(feature = "native")]
+mod xlsx_cond_formats;
+#[cfg(feature = "native")]
+mod xlsx_names;
+#[cfg(feature = "native")]
+mod xlsx_formula_cache;
+#[cfg(feature = "native")]
+mod xlsx_arrays;
+#[cfg(feature = "native")]
+mod xlsx_rich_errors;
+#[cfg(feature = "native")]
 mod xlsx_functions;
 #[cfg(feature = "native")]
 mod xlsx_tables;

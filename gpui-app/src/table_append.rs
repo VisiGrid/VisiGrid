@@ -22,6 +22,12 @@ pub(crate) struct TableAppendHistory {
     paste: Option<TableCellsCommit>,
 }
 
+impl TableAppendHistory {
+    pub(crate) fn estimated_history_bytes(&self) -> usize {
+        self.table.estimated_history_bytes().saturating_add(visigrid_engine::history_size::serialized_bytes(&(&self.edit, &self.view, &self.paste)))
+    }
+}
+
 fn validate_views(wb: &Workbook) -> Result<(), String> {
     for sheet in wb.sheets() {
         sheet.build_saved_table_view(crate::app::NUM_ROWS.min(sheet.rows))?;
@@ -132,29 +138,30 @@ impl TableAppendHistory {
     }
 }
 
-fn last_visible_body_row(rows: &RowView, range: TableRange) -> Option<usize> {
+fn last_visible_body_row(rows: &RowView, range: TableRange, manual: &std::collections::BTreeSet<usize>) -> Option<usize> {
     let visible = rows.visible_rows();
     let end = visible.partition_point(|r| *r <= range.end_row);
-    end.checked_sub(1)
-        .map(|i| visible[i])
-        .filter(|r| *r > range.start_row)
+    visible[..end].iter().rev().copied()
+        .take_while(|r| *r > range.start_row)
+        .find(|r| !manual.contains(&rows.view_to_data(*r)))
 }
 
 pub(crate) fn is_last_visible_cell(
     rows: &RowView,
     range: TableRange,
     cell: (usize, usize),
+    manual: &std::collections::BTreeSet<usize>,
 ) -> bool {
-    cell.1 == range.end_col && last_visible_body_row(rows, range) == Some(cell.0)
+    cell.1 == range.end_col && last_visible_body_row(rows, range, manual) == Some(cell.0)
 }
 
 /// Stay inside the Table when the new record is filtered out, including when
 /// all records are hidden. Never select a hidden slot or neighboring notes.
-fn append_focus(rows: &RowView, range: TableRange) -> (usize, bool) {
-    match rows.data_to_view(range.end_row) {
+pub(crate) fn append_focus(rows: &RowView, range: TableRange, manual: &std::collections::BTreeSet<usize>) -> (usize, bool) {
+    match rows.data_to_view(range.end_row).filter(|_| !manual.contains(&range.end_row)) {
         Some(row) => (row, false),
         None => (
-            last_visible_body_row(rows, range).unwrap_or(range.start_row),
+            last_visible_body_row(rows, range, manual).unwrap_or(range.start_row),
             true,
         ),
     }
@@ -239,11 +246,11 @@ impl Spreadsheet {
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.table_filter_dropdown = None;
                 self.sync_table_view(cx);
-                let (row, hidden) = append_focus(&self.row_view, range);
+                let (row, hidden) = append_focus(&self.row_view, range, &self.sheet(cx).manual_hidden_rows());
                 self.view_state.select_cell(row, write.col);
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     UndoAction::TableAppend {
                         sheet_index: index,
                         history: Box::new(history),
@@ -255,7 +262,7 @@ impl Spreadsheet {
                 self.is_modified = true;
                 self.clipboard_visual_range = None;
                 self.status_message = Some(if hidden {
-                    "Added 1 Table row, hidden by the current filter. Clear filters to see it."
+                    "Added 1 Table row, hidden by the current view. Unhide rows or clear filters to see it."
                         .into()
                 } else {
                     "Added 1 Table row.".into()
@@ -308,12 +315,12 @@ impl Spreadsheet {
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.table_filter_dropdown = None;
                 self.sync_table_view(cx);
-                let (row, hidden) = append_focus(&self.row_view, range);
+                let (row, hidden) = append_focus(&self.row_view, range, &self.sheet(cx).manual_hidden_rows());
                 self.view_state.select_cell(row, range.start_col);
                 self.view_state.additional_selections.clear();
                 self.tab_chain_origin_col = Some(range.start_col);
                 self.ensure_visible(cx);
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     UndoAction::TableAppend {
                         sheet_index: index,
                         history: Box::new(history),
@@ -327,7 +334,7 @@ impl Spreadsheet {
                 self.maybe_show_cycle_banner(cx);
                 self.surface_incremental_recalc_problems(cx);
                 self.status_message = Some(if hidden {
-                    "Added 1 Table row, hidden by the current filter. Clear filters to enter its values.".into()
+                    "Added 1 Table row, hidden by the current view. Unhide rows or clear filters to enter its values.".into()
                 } else {
                     "Added 1 Table row.".into()
                 });
@@ -391,6 +398,155 @@ mod tests {
     }
 
     #[test]
+    fn manually_hidden_footers_append_with_visible_focus_and_history_rewind() {
+        for criteria in [false, true] {
+            let (mut before, id) = book(criteria);
+            if !criteria { before.set_table_view_spec(before.active_sheet_id(), None).unwrap(); }
+            before.set_table_totals_visible(id, true, Default::default()).unwrap();
+            let (before, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [7, 8].into()).unwrap();
+            let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+            assert_eq!(after.table(id).unwrap().1.totals_row(), Some(8));
+            assert_eq!(after.active_sheet().manual_hidden_rows(), [7, 8].into());
+            assert_eq!(after.active_sheet().get_raw(7, 3), "=[@Amount]*2");
+            assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+            let projection = after.active_sheet().build_saved_table_view(30).unwrap();
+            let plain = RowView::new(30);
+            let rows = projection.as_ref().map_or(&plain, |p| p.rows());
+            let range = after.table(id).unwrap().1.range;
+            let (focus, hidden) = append_focus(rows, range, &after.active_sheet().manual_hidden_rows());
+            assert!(hidden);
+            assert!(rows.is_view_row_visible(focus));
+            assert!(!after.active_sheet().manual_hidden_rows().contains(&rows.view_to_data(focus)));
+            assert!(is_last_visible_cell(rows, range, (focus, range.end_col), &after.active_sheet().manual_hidden_rows()));
+            let undone = entry.replay(&after, true).unwrap();
+            assert_eq!(undone.active_sheet().get_raw(6, 3), before.active_sheet().get_raw(6, 3));
+            assert_eq!(entry.replay(&undone, false).unwrap().active_sheet().manual_hidden_rows(), [7, 8].into());
+            let mut history = History::new();
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with hidden footer".into() }, None);
+            for (end, footer) in [(0, 7), (1, 8)] {
+                let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+                assert_eq!(preview.workbook.table(id).unwrap().1.totals_row(), Some(footer));
+                assert_eq!(preview.workbook.active_sheet().manual_hidden_rows(), [7, 8].into());
+                assert_eq!(preview.workbook.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+            }
+        }
+    }
+
+    #[test]
+    fn plain_table_tab_and_append_focus_skip_canonical_manual_hides() {
+        let rows = RowView::new(20);
+        let range = TableRange { start_row: 2, end_row: 6, start_col: 1, end_col: 3 };
+        let hidden = [5, 6].into();
+        assert!(is_last_visible_cell(&rows, range, (4, 3), &hidden));
+        assert!(!is_last_visible_cell(&rows, range, (6, 3), &hidden));
+        assert_eq!(append_focus(&rows, range, &hidden), (4, true));
+        assert_eq!(append_focus(&rows, range, &[3, 4, 5, 6].into()), (2, true));
+    }
+
+    #[test]
+    fn footer_fixed_references_follow_tab_append_undo_and_rewind() {
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=D8");
+        let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=D9");
+        assert_eq!(after.active_sheet().get_raw(6, 3), "15");
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        let undone = entry.replay(&after, true).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(0, 0), "=D8");
+        assert_eq!(undone.active_sheet().get_raw(6, 3), before.active_sheet().get_raw(6, 3));
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(redone.active_sheet().get_raw(0, 0), "=D9");
+        let mut history = History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with linked totals".into() }, None);
+        for (end, reference) in [(0, "=D8"), (1, "=D9")] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            assert_eq!(preview.workbook.active_sheet().get_raw(0, 0), reference);
+            assert_eq!(preview.workbook.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        }
+    }
+
+    #[test]
+    fn dynamic_footer_links_follow_filtered_tab_append_and_history() {
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.define_name_for_cell("Footer", 0, 7, 3).unwrap();
+        before.set_cell_value_tracked(0, 0, 0, "=OFFSET($D$8,0,0)");
+        before.set_cell_value_tracked(0, 1, 0, "=INDIRECT(\"Footer\")");
+        before.set_cell_value_tracked(0, 9, 0, "=INDIRECT(\"D8\")");
+        let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+        assert_eq!(after.active_sheet().get_raw(0, 0), "=OFFSET($D$9, 0, 0)");
+        assert_eq!(after.active_sheet().get_raw(9, 0), "=INDIRECT(\"D8\")");
+        assert_eq!(after.active_sheet().get_display(9, 0), after.active_sheet().get_display(7, 3));
+        for row in [0, 1] {
+            assert_eq!(after.active_sheet().get_display(row, 0), after.active_sheet().get_display(8, 3));
+        }
+        let undone = entry.replay(&after, true).unwrap();
+        let redone = entry.replay(&undone, false).unwrap();
+        assert_eq!(undone.active_sheet().get_raw(0, 0), before.active_sheet().get_raw(0, 0));
+        assert_eq!(redone.active_sheet().get_raw(0, 0), after.active_sheet().get_raw(0, 0));
+        let mut history = History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with dynamic totals references".into() }, None);
+        for (end, expected) in [(0, &before), (1, &after)] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            let sheet = preview.workbook.active_sheet();
+            for row in [0, 1, 9] {
+                assert_eq!(sheet.get_raw(row, 0), expected.active_sheet().get_raw(row, 0));
+                assert_eq!(sheet.get_display(row, 0), expected.active_sheet().get_display(row, 0));
+            }
+            assert_eq!(sheet.get_raw(4, 3), "999");
+            assert_eq!(sheet.table_view_spec(), before.active_sheet().table_view_spec());
+        }
+    }
+
+    #[test]
+    fn footer_rules_move_through_filtered_append_and_rewind() {
+        use visigrid_engine::{cond_format::CondStyle, validation::{CellRange, ValidationRule}};
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.active_sheet_mut().validations.set(CellRange::single(7, 3), ValidationRule::custom("=$D$8>0"));
+        before.active_sheet_mut().cond_formats.add(vec![CellRange::single(7, 3)], "=$D$8>0", CondStyle::Inline(Default::default()));
+        let (after, entry) = prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
+        assert!(!after.active_sheet().validations.has_validation(7, 3));
+        assert!(after.active_sheet().validations.has_validation(8, 3));
+        assert_eq!(after.active_sheet().cond_formats.iter().next().unwrap().predicate_at(8, 3).as_deref(), Some("=$D$9>0"));
+        let undone = entry.replay(&after, true).unwrap();
+        let redone = entry.replay(&undone, false).unwrap();
+        assert!(redone.active_sheet().validations.has_validation(8, 3));
+        let mut history = History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with footer rules".into() }, None);
+        for (end, row) in [(0, 7), (1, 8)] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            let sheet = preview.workbook.active_sheet();
+            assert!(sheet.validations.has_validation(row, 3));
+            assert!(sheet.cond_formats.any_rule_covers(row, 3));
+            assert_eq!(sheet.get_raw(4, 3), "999");
+            assert_eq!(sheet.table_view_spec(), before.active_sheet().table_view_spec());
+        }
+    }
+
+    #[test]
+    fn filtered_append_moves_footer_and_rewinds_without_touching_hidden_overrides() {
+        let (mut before, id) = book(true);
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let (after, entry) = prepare_append(&before, id, None).unwrap();
+        assert_eq!(after.table(id).unwrap().1.totals_row(), Some(8));
+        assert_eq!(after.active_sheet().get_raw(7, 3), "=[@Amount]*2");
+        assert_eq!(after.active_sheet().get_raw(8, 3), before.active_sheet().get_raw(7, 3));
+        assert_eq!(after.active_sheet().get_raw(4, 3), "999");
+        assert_eq!(after.active_sheet().table_view_spec(), before.active_sheet().table_view_spec());
+        let restored = entry.replay(&after, true).unwrap();
+        assert_eq!(restored.table(id).unwrap().1.totals_row(), Some(7));
+        let redone = entry.replay(&restored, false).unwrap();
+        assert_eq!(redone.active_sheet().get_raw(8, 3), after.active_sheet().get_raw(8, 3));
+        let mut history = History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with totals".into() }, None);
+        let preview = history.build_workbook_before(1, Some(&before), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.table(id).unwrap().1.totals_row(), Some(8));
+        assert_eq!(preview.workbook.active_sheet().get_raw(4, 3), "999");
+    }
+
+    #[test]
     fn filtered_append_fills_formula_preserves_criteria_and_replays_in_one_step() {
         let (before, id) = book(true);
         let spec = before.active_sheet().table_view_spec().cloned();
@@ -406,7 +562,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(view.rows().data_to_view(7).is_none());
-        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range);
+        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows());
         assert!(hidden);
         assert_eq!(view.rows().view_to_data(focus), 6);
         let undo = commit.replay(&after, true).unwrap();
@@ -429,10 +585,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let range = before.table(id).unwrap().1.range;
-        assert!(is_last_visible_cell(view.rows(), range, (6, 3)));
+        assert!(is_last_visible_cell(view.rows(), range, (6, 3), &before.active_sheet().manual_hidden_rows()));
         assert_eq!(view.rows().view_to_data(6), 4); // Last displayed != last stored.
-        assert!(!is_last_visible_cell(view.rows(), range, (5, 3)));
-        assert!(!is_last_visible_cell(view.rows(), range, (6, 2)));
+        assert!(!is_last_visible_cell(view.rows(), range, (5, 3), &before.active_sheet().manual_hidden_rows()));
+        assert!(!is_last_visible_cell(view.rows(), range, (6, 2), &before.active_sheet().manual_hidden_rows()));
         let mut edit = TableCellWrite::value(4, 3, "25%".into());
         let mut format = before.active_sheet().get_format(4, 3);
         format.number_format = NumberFormat::Percent { decimals: 0 };
@@ -453,7 +609,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (7, false)
         );
         let undo = commit.replay(&after, true).unwrap();
@@ -483,7 +639,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (3, false)
         );
         assert_eq!(view.rows().view_to_data(3), 7);
@@ -502,13 +658,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (2, true)
         );
         assert!(!is_last_visible_cell(
             view.rows(),
             after.table(id).unwrap().1.range,
-            (2, 3)
+            (2, 3),
+            &after.active_sheet().manual_hidden_rows()
         ));
         // Remove records entirely, keeping the saved criterion.
         for row in 3..=6 {
@@ -527,7 +684,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            append_focus(view.rows(), after.table(id).unwrap().1.range),
+            append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()),
             (2, true)
         );
     }
@@ -672,7 +829,7 @@ mod tests {
         let (_, commit) =
             prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableAppend {
                 sheet_index: 0,
                 history: Box::new(commit),
@@ -715,9 +872,9 @@ mod tests {
             crate::table_filter_ui::desktop_layout_error(new, Some(&heights), None, 0).is_some()
         );
         assert!(
-            crate::table_filter_ui::desktop_layout_error(new, None, Some(&hidden), 0).is_some()
+            crate::table_filter_ui::desktop_layout_error(new, None, Some(&hidden), 0).is_none()
         );
-        assert!(crate::table_filter_ui::desktop_layout_error(new, None, None, 7).is_some());
+        assert!(crate::table_filter_ui::desktop_layout_error(new, None, None, 7).is_none());
     }
     #[test]
     fn recovery_and_grid_boundary_refuse_before_changing_anything() {
@@ -803,7 +960,7 @@ mod tests {
             .build_saved_table_view(30)
             .unwrap()
             .unwrap();
-        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range);
+        let (focus, hidden) = append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows());
         assert!(!hidden);
         assert_eq!(view.rows().view_to_data(focus), 7);
         let undo = history.replay(&after, true).unwrap();
@@ -838,7 +995,7 @@ mod tests {
             .build_saved_table_view(30)
             .unwrap()
             .unwrap();
-        assert!(append_focus(view.rows(), after.table(id).unwrap().1.range).1);
+        assert!(append_focus(view.rows(), after.table(id).unwrap().1.range, &after.active_sheet().manual_hidden_rows()).1);
         let undo = history.replay(&after, true).unwrap();
         assert_eq!(
             undo.active_sheet().get_format(7, 2),
@@ -954,7 +1111,7 @@ mod tests {
         let (before, id) = book(true);
         let (after, commit) = typed(&before, TableCellWrite::value(7, 1, "West".into())).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableAppend {
                 sheet_index: 0,
                 history: Box::new(commit),

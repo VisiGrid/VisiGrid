@@ -51,7 +51,7 @@ pub fn render_filter_button(
 /// 3. Scrollable column headers (scroll_col to scroll_col + scrollable_visible_cols)
 pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let scroll_col = app.view_state.scroll_col;
-    let visible_cols = app.visible_cols();
+    let panes = app.pane_cols(&app.view_state);
     let frozen_cols = app.view_state.frozen_cols;
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
@@ -60,7 +60,7 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
     let metrics = &app.metrics;
 
     // Calculate scrollable region columns
-    let scrollable_visible_cols = visible_cols.saturating_sub(frozen_cols);
+    let scrollable_visible_cols = panes.body.len();
 
     div()
         .flex()
@@ -86,7 +86,8 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         // Frozen column headers (always visible, cols 0 to frozen_cols-1)
         .when(frozen_cols > 0, |d| {
             d.children(
-                (0..frozen_cols).filter_map(|col| {
+                panes.frozen.iter().filter_map(|slot| {
+                    let col = slot.index;
                     if app.is_col_hidden(col) { return None; }
                     let col_width = metrics.col_width(app.col_width(col));
                     let is_selected = app.is_col_header_selected(col);
@@ -163,10 +164,10 @@ fn render_column_header(
 
     // The grid owns a selection edge touching the header. Cover the neutral
     // header separator with its background instead of drawing a second blue line.
-    let first_row_index = if app.view_state.frozen_rows > 0 { 0 } else { app.view_state.scroll_row };
+    let row_panes = app.pane_rows(&app.view_state);
     let grid_owns_edge = app.split_pane.is_none() && !review_focus_selected
-        && app.nth_visible_row_with_hidden(first_row_index, cx).is_some_and(|(row, _)| {
-            super::grid::selection_borders_for_pane(&app.view_state, row, col).0
+        && row_panes.frozen.first().or_else(|| row_panes.body.first()).is_some_and(|slot| {
+            super::grid::selection_borders_for_pane(&app.view_state, slot.index, col).0
         });
 
     // Reserve right padding when filter button is shown to prevent text/icon overlap
@@ -298,7 +299,7 @@ fn render_column_header(
 /// Render a row header (1, 2, 3, ...) with resize handle and selection support
 pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     // Get scaled row height for rendering
-    let row_height_scaled = app.metrics.row_height(app.row_height(row));
+    let row_height_scaled = app.displayed_row_height(row);
     let header_bg = app.token(TokenKey::HeaderBg);
     let header_border = app.token(TokenKey::HeaderBorder);
     let header_text = app.token(TokenKey::HeaderTextMuted);

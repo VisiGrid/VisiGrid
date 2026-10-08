@@ -49,7 +49,7 @@ pub struct WorkbookViewState {
     pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,
 
     // === Viewport ===
-    /// First visible row (0-indexed)
+    /// First scrollable view-row slot (0-indexed), not a rank among visible rows.
     pub scroll_row: usize,
     /// First visible column (0-indexed)
     pub scroll_col: usize,

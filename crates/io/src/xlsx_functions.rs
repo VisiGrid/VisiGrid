@@ -42,11 +42,16 @@ pub(crate) fn from_excel(source: &str) -> String {
     if !source.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"_xl")) {
         return source.to_owned();
     }
+    let tokens = tokenize(source);
     let mut out = String::with_capacity(source.len());
-    for token in tokenize(source) {
+    for (i, token) in tokens.iter().enumerate() {
         let mut text = token.text;
         if token.kind == Kind::Ident {
-            while let Some(rest) = ["_xlfn.", "_xlws.", "_xlpm."].iter().find_map(|prefix| {
+            // Function namespaces only wrap calls; a parameter prefix marks
+            // every use of a LET or LAMBDA name.
+            let call = tokens.get(i + 1).is_some_and(|t| t.kind == Kind::Open);
+            let prefixes: &[&str] = if call { &["_xlfn.", "_xlws.", "_xlpm."] } else { &["_xlpm."] };
+            while let Some(rest) = prefixes.iter().find_map(|prefix| {
                 text.get(..prefix.len()).filter(|head| head.eq_ignore_ascii_case(prefix)).map(|_| &text[prefix.len()..])
             }) {
                 text = rest;
@@ -55,6 +60,75 @@ pub(crate) fn from_excel(source: &str) -> String {
         out.push_str(text);
     }
     out
+}
+
+/// Prefix the future functions rust_xlsxwriter 0.79.4 would prefix, including
+/// on the table-XML path that never reaches that writer. A name that already
+/// starts with `_xlfn.` is left alone. `FILTER`, `SORT` and `PY` take
+/// `_xlfn._xlws.`; every other future function takes `_xlfn.`.
+pub(crate) fn prefix_future_functions(source: &str) -> String {
+    let tokens = tokenize(source);
+    let mut out = String::with_capacity(source.len() + 16);
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind == Kind::Ident
+            && tokens.get(i + 1).is_some_and(|next| next.kind == Kind::Open)
+            && !token.text.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("_xlfn."))
+        {
+            if let Some(prefix) = future_prefix(&token.text.to_ascii_uppercase()) {
+                out.push_str(prefix);
+            }
+        }
+        out.push_str(token.text);
+    }
+    out
+}
+
+fn future_prefix(name: &str) -> Option<&'static str> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static FUTURE: OnceLock<HashMap<&'static str, u8>> = OnceLock::new();
+    // Same classification as rust_xlsxwriter 0.79.4: 2 is `_xlfn._xlws.`.
+    let kind = *FUTURE.get_or_init(|| {
+        HashMap::from([
+            ("ACOTH", 0), ("ACOT", 0), ("AGGREGATE", 0), ("ARABIC", 0), ("ARRAYTOTEXT", 0),
+            ("BASE", 0), ("BETA.DIST", 0), ("BETA.INV", 0), ("BINOM.DIST.RANGE", 0),
+            ("BINOM.DIST", 0), ("BINOM.INV", 0), ("BITAND", 0), ("BITLSHIFT", 0), ("BITOR", 0),
+            ("BITRSHIFT", 0), ("BITXOR", 0), ("CEILING.MATH", 0), ("CEILING.PRECISE", 0),
+            ("CHISQ.DIST.RT", 0), ("CHISQ.DIST", 0), ("CHISQ.INV.RT", 0), ("CHISQ.INV", 0),
+            ("CHISQ.TEST", 0), ("COMBINA", 0), ("CONCAT", 0), ("CONFIDENCE.NORM", 0),
+            ("CONFIDENCE.T", 0), ("COTH", 0), ("COT", 0), ("COVARIANCE.P", 0), ("COVARIANCE.S", 0),
+            ("CSCH", 0), ("CSC", 0), ("DAYS", 0), ("DECIMAL", 0), ("ERF.PRECISE", 0),
+            ("ERFC.PRECISE", 0), ("EXPON.DIST", 0), ("F.DIST.RT", 0), ("F.DIST", 0),
+            ("F.INV.RT", 0), ("F.INV", 0), ("F.TEST", 0), ("FIELDVALUE", 0), ("FILTERXML", 0),
+            ("FLOOR.MATH", 0), ("FLOOR.PRECISE", 0), ("FORECAST.ETS.CONFINT", 0),
+            ("FORECAST.ETS.SEASONALITY", 0), ("FORECAST.ETS.STAT", 0), ("FORECAST.ETS", 0),
+            ("FORECAST.LINEAR", 0), ("FORMULATEXT", 0), ("GAMMA.DIST", 0), ("GAMMA.INV", 0),
+            ("GAMMALN.PRECISE", 0), ("GAMMA", 0), ("GAUSS", 0), ("HYPGEOM.DIST", 0), ("IFNA", 0),
+            ("IFS", 0), ("IMAGE", 0), ("IMCOSH", 0), ("IMCOT", 0), ("IMCSCH", 0), ("IMCSC", 0),
+            ("IMSECH", 0), ("IMSEC", 0), ("IMSINH", 0), ("IMTAN", 0), ("ISFORMULA", 0),
+            ("ISOMITTED", 0), ("ISOWEEKNUM", 0), ("LET", 0), ("LOGNORM.DIST", 0),
+            ("LOGNORM.INV", 0), ("MAXIFS", 0), ("MINIFS", 0), ("MODE.MULT", 0), ("MODE.SNGL", 0),
+            ("MUNIT", 0), ("NEGBINOM.DIST", 0), ("NORM.DIST", 0), ("NORM.INV", 0),
+            ("NORM.S.DIST", 0), ("NORM.S.INV", 0), ("NUMBERVALUE", 0), ("PDURATION", 0),
+            ("PERCENTILE.EXC", 0), ("PERCENTILE.INC", 0), ("PERCENTRANK.EXC", 0),
+            ("PERCENTRANK.INC", 0), ("PERMUTATIONA", 0), ("PHI", 0), ("POISSON.DIST", 0),
+            ("PQSOURCE", 0), ("PYTHON_STR", 0), ("PYTHON_TYPE", 0), ("PYTHON_TYPENAME", 0),
+            ("QUARTILE.EXC", 0), ("QUARTILE.INC", 0), ("QUERYSTRING", 0), ("RANK.AVG", 0),
+            ("RANK.EQ", 0), ("RRI", 0), ("SECH", 0), ("SEC", 0), ("SHEETS", 0), ("SHEET", 0),
+            ("SKEW.P", 0), ("STDEV.P", 0), ("STDEV.S", 0), ("T.DIST.2T", 0), ("T.DIST.RT", 0),
+            ("T.DIST", 0), ("T.INV.2T", 0), ("T.INV", 0), ("T.TEST", 0), ("TEXTAFTER", 0),
+            ("TEXTBEFORE", 0), ("TEXTJOIN", 0), ("UNICHAR", 0), ("UNICODE", 0), ("VALUETOTEXT", 0),
+            ("VAR.P", 0), ("VAR.S", 0), ("WEBSERVICE", 0), ("WEIBULL.DIST", 0), ("XMATCH", 0),
+            ("XOR", 0), ("Z.TEST", 0), ("ANCHORARRAY", 1), ("BYCOL", 1), ("BYROW", 1),
+            ("CHOOSECOLS", 1), ("CHOOSEROWS", 1), ("DROP", 1), ("EXPAND", 1), ("HSTACK", 1),
+            ("LAMBDA", 1), ("MAKEARRAY", 1), ("MAP", 1), ("RANDARRAY", 1), ("REDUCE", 1),
+            ("SCAN", 1), ("SEQUENCE", 1), ("SINGLE", 1), ("SORTBY", 1), ("SWITCH", 1),
+            ("TAKE", 1), ("TEXTSPLIT", 1), ("TOCOL", 1), ("TOROW", 1), ("UNIQUE", 1),
+            ("VSTACK", 1), ("WRAPCOLS", 1), ("WRAPROWS", 1), ("XLOOKUP", 1),
+            ("FILTER", 2), ("SORT", 2), ("PY", 2),
+        ])
+    }).get(name)?;
+    Some(if kind == 2 { "_xlfn._xlws." } else { "_xlfn." })
 }
 
 fn tokenize(source: &str) -> Vec<Token<'_>> {
@@ -194,7 +268,13 @@ fn expr_token(tokens: &[Token], i: usize, bound: &mut Vec<String>, out: &mut Str
         out.push_str("_xlpm.");
         out.push_str(token.text);
     } else {
-        out.push_str(&token.text.to_ascii_uppercase());
+        // Keep an existing _xlfn./_xlws. prefix as Excel spells it.
+        let mut name = token.text;
+        while let Some(prefix) = ["_xlfn.", "_xlws."].iter().find(|p| name.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p))) {
+            out.push_str(prefix);
+            name = &name[prefix.len()..];
+        }
+        out.push_str(&name.to_ascii_uppercase());
     }
     out.push('(');
     let args = arguments(tokens, i + 2);
@@ -288,6 +368,8 @@ mod tests {
         assert_eq!(x("=xlookup(\"c\",H1:H3,I1:I3)"), "=XLOOKUP(\"c\",H1:H3,I1:I3)");
         assert_eq!(x("=sum(a1:a3)+Stdev.S(B1:B2)"), "=SUM(a1:a3)+STDEV.S(B1:B2)");
         assert_eq!(x("=\"xlookup(\"&lower(A1)"), "=\"xlookup(\"&LOWER(A1)");
+        assert_eq!(x("=_xlfn.xlookup(1,A1,B1)"), "=_xlfn.XLOOKUP(1,A1,B1)");
+        assert_eq!(x("=_XLFN._xlws.filter(A1,A1>0)"), "=_xlfn._xlws.FILTER(A1,A1>0)");
     }
 
     #[test]
@@ -332,12 +414,35 @@ mod tests {
             from_excel("=_xlfn.XLOOKUP(\"_xlfn.x\",'_xlfn.S'!A1:A2,Sales[_xlpm.c])"),
             "=XLOOKUP(\"_xlfn.x\",'_xlfn.S'!A1:A2,Sales[_xlpm.c])"
         );
+        // Not calls: a sheet, a Table field and a defined name keep the prefix.
+        assert_eq!(
+            from_excel("='_xlfn.SEQUENCE'!A1+Sales[_xlfn.SEQUENCE]+_xlfn.Name"),
+            "='_xlfn.SEQUENCE'!A1+Sales[_xlfn.SEQUENCE]+_xlfn.Name"
+        );
+        assert_eq!(from_excel("=(_xlfn.SEQUENCE(2)+1)*2"), "=(SEQUENCE(2)+1)*2");
+        assert_eq!(
+            from_excel("=_xlfn.SEQUENCE(2)+LEN(\"é\"\"_xlfn.SEQUENCE(2)\")+Sales[a']_xlfn.SEQUENCE(2)]"),
+            "=SEQUENCE(2)+LEN(\"é\"\"_xlfn.SEQUENCE(2)\")+Sales[a']_xlfn.SEQUENCE(2)]"
+        );
         for f in ["=SUM(A1:A3)", "=LET(x,5,x)", "=A1&\"_xl\""] {
             assert_eq!(from_excel(f), f);
         }
         for f in ["=xlookup(1,{1},{2})", "=LET(x,x+1,LAMBDA(a,a)(x))", "=LET(N,1,IFERROR(#N/A,N))"] {
             assert_eq!(from_excel(&x(f)).to_ascii_uppercase(), f.to_ascii_uppercase(), "{f}");
         }
+    }
+
+    #[test]
+    fn future_functions_are_prefixed_once_and_ordinary_names_are_not() {
+        use super::prefix_future_functions as p;
+        assert_eq!(p("=XLOOKUP(1,A1,B1)"), "=_xlfn.XLOOKUP(1,A1,B1)");
+        assert_eq!(p("=FILTER(A1:A2,A1:A2>0)"), "=_xlfn._xlws.FILTER(A1:A2,A1:A2>0)");
+        assert_eq!(p("=SORT(A1:A2)"), "=_xlfn._xlws.SORT(A1:A2)");
+        assert_eq!(p("=LET(_xlpm.x,5,_xlpm.x)"), "=_xlfn.LET(_xlpm.x,5,_xlpm.x)");
+        assert_eq!(p("=SUM(A1)+[[#This Row],[Qty]]*C4"), "=SUM(A1)+[[#This Row],[Qty]]*C4");
+        assert_eq!(p("=_xlfn.XLOOKUP(1,A1,B1)"), "=_xlfn.XLOOKUP(1,A1,B1)");
+        assert_eq!(p("=_xlfn._xlws.FILTER(A1,A1>0)"), "=_xlfn._xlws.FILTER(A1,A1>0)");
+        assert_eq!(p("=_xlfn.Name"), "=_xlfn.Name");
     }
 
     #[test]

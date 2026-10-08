@@ -85,4 +85,9 @@ fn a_cell_downstream_of_a_cycle_reports_it_upstream() {
     let id = wb.sheet_id_at_idx(0).unwrap();
     assert!(wb.has_cycle_in_upstream(id, 0, 2), "C1 depends on a cycle");
     assert!(!wb.sheets()[0].is_cycle_error(0, 2), "but is not a member");
+    wb.recompute_full_ordered();
+    assert!(wb.sheets()[0].is_cycle_error(0, 0));
+    assert!(wb.sheets()[0].is_cycle_error(0, 1));
+    assert!(!wb.sheets()[0].is_cycle_error(0, 2));
+    assert!(wb.has_cycle_in_upstream(id, 0, 2));
 }

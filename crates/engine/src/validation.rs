@@ -16,6 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+mod edit;
+pub(crate) mod evaluation;
+mod references;
+pub(crate) mod list_source;
+pub use edit::{ValidationEdit, ValidationPatch};
+
 /// Maximum number of items in a resolved list. Prevents UI freeze on huge ranges.
 pub const MAX_LIST_ITEMS: usize = 10_000;
 
@@ -36,6 +42,10 @@ pub struct ValidationRule {
     pub input_message: Option<InputMessage>,
     /// Optional error alert shown when validation fails.
     pub error_alert: Option<ErrorAlert>,
+    /// Imported relative references are expressed at this stored worksheet cell.
+    /// Absence retains the fixed-reference semantics of existing native rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_origin: Option<(usize, usize)>,
 }
 
 impl ValidationRule {
@@ -49,6 +59,7 @@ impl ValidationRule {
             show_dropdown,
             input_message: None,
             error_alert: None,
+            reference_origin: None,
         }
     }
 
@@ -257,7 +268,7 @@ impl From<i64> for ConstraintValue {
 pub enum ListSource {
     /// Inline list of allowed values.
     Inline(Vec<String>),
-    /// Range reference (e.g., "=A1:A10" or "=Sheet2!B1:B20").
+    /// Range or formula source (e.g., "=A1:A10" or "=OFFSET(A1,0,0,5)").
     Range(String),
     /// Named range (e.g., "StatusOptions").
     NamedRange(String),
@@ -325,7 +336,7 @@ pub enum ValidationFailureReason {
     ConstraintNotNumeric,
     /// Constraint reference could not be resolved.
     InvalidReference,
-    /// Formula constraint not supported.
+    /// Formula evaluation failed (including unsupported functions).
     FormulaNotSupported,
     /// List is empty (no valid options).
     ListEmpty,
@@ -382,7 +393,11 @@ pub fn parse_numeric_input(value: &str, allow_decimal: bool) -> Result<f64, Nume
     }
 
     // Parse the number
-    normalized.parse::<f64>().map_err(|_| NumericParseError::InvalidFormat)
+    let number = crate::cell::parse_finite(normalized).ok_or(NumericParseError::InvalidFormat)?;
+    if !allow_decimal && number.fract() != 0.0 {
+        return Err(NumericParseError::FractionalNotAllowed);
+    }
+    Ok(number)
 }
 
 /// Evaluate a numeric constraint.
@@ -560,6 +575,8 @@ pub struct ResolvedList {
     /// Fingerprint of the source data. Changes when source cells change.
     /// Used to detect stale dropdowns.
     pub source_fingerprint: u64,
+    /// A broken source is distinct from a valid range containing no choices.
+    pub source_error: Option<String>,
 }
 
 impl ResolvedList {
@@ -577,12 +594,13 @@ impl ResolvedList {
             items.truncate(MAX_LIST_ITEMS);
         }
 
-        let source_fingerprint = Self::compute_fingerprint(&items);
+        let source_fingerprint = Self::compute_fingerprint(&items, is_truncated);
 
         Self {
             items,
             is_truncated,
             source_fingerprint,
+            source_error: None,
         }
     }
 
@@ -592,13 +610,21 @@ impl ResolvedList {
             items: Vec::new(),
             is_truncated: false,
             source_fingerprint: 0,
+            source_error: None,
         }
     }
 
-    /// Compute a fingerprint for the list items.
-    fn compute_fingerprint(items: &[String]) -> u64 {
+    pub fn failed(error: impl Into<String>) -> Self {
+        let error = error.into();
         let mut hasher = DefaultHasher::new();
-        items.hash(&mut hasher);
+        ("source error", &error).hash(&mut hasher);
+        Self { items: Vec::new(), is_truncated: false, source_fingerprint: hasher.finish(), source_error: Some(error) }
+    }
+
+    /// Compute a fingerprint for the list items.
+    fn compute_fingerprint(items: &[String], truncated: bool) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (items, truncated).hash(&mut hasher);
         hasher.finish()
     }
 
@@ -707,7 +733,7 @@ impl Ord for CellRange {
 /// Cells can be excluded from validation entirely. Exclusions take precedence
 /// over all rules - if a cell is in an exclusion range, no validation applies.
 /// This enables "apply rule to column except these rows" workflows.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ValidationStore {
     /// Map from cell range to validation rule.
     rules: BTreeMap<CellRange, ValidationRule>,
@@ -771,11 +797,15 @@ impl ValidationStore {
     /// Shift rules for a structural edit on this sheet. Ranges follow the
     /// same grid-line semantics as merges and formula ranges; a range wholly
     /// inside a deleted span is dropped.
-    pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) {
+    pub fn shift_for_structural(&mut self, at: usize, count: usize, delete: bool, is_row: bool) -> Result<(), String> {
+        let limit = if is_row { crate::sheet::NUM_ROWS } else { crate::sheet::NUM_COLS };
+        let shift = |s, e| {
+            crate::structural::shift_edge_span(s, e, at, count, delete, limit)
+        };
         let mut shifted: BTreeMap<CellRange, ValidationRule> = BTreeMap::new();
-        for (range, rule) in std::mem::take(&mut self.rules) {
+        for (range, mut rule) in self.rules.clone() {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
-            let span = crate::structural::shift_span(s, e, at, count, delete);
+            let span = shift(s, e);
             if let Some((ns, ne)) = span {
                 let mut r = range;
                 if is_row {
@@ -785,7 +815,21 @@ impl ValidationStore {
                     r.start_col = ns;
                     r.end_col = ne;
                 }
-                shifted.insert(r, rule);
+                if rule.reference_origin.is_some() {
+                    // Rebase at the first surviving old cell. The workbook
+                    // subsequently adjusts its reference sources on all sheets.
+                    let first = if delete && s >= at { s.max(at.saturating_add(count)) } else { s };
+                    let (row, col) = if is_row { (first, range.start_col) } else { (range.start_row, first) };
+                    rule = rule.at(row, col).into_owned();
+                    rule.reference_origin = Some((r.start_row, r.start_col));
+                }
+                if let Some(existing) = shifted.get(&r) {
+                    if existing != &rule {
+                        return Err("This edit would collapse two validation rules onto the same range. Adjust their ranges first; nothing was changed.".into());
+                    }
+                } else {
+                    shifted.insert(r, rule);
+                }
             }
         }
         self.rules = shifted;
@@ -793,13 +837,14 @@ impl ValidationStore {
         let mut ex = BTreeSet::new();
         for range in std::mem::take(&mut self.exclusions) {
             let (s, e) = if is_row { (range.start_row, range.end_row) } else { (range.start_col, range.end_col) };
-            if let Some((ns, ne)) = crate::structural::shift_span(s, e, at, count, delete) {
+            if let Some((ns, ne)) = shift(s, e) {
                 let mut r = range;
                 if is_row { r.start_row = ns; r.end_row = ne; } else { r.start_col = ns; r.end_col = ne; }
                 ex.insert(r);
             }
         }
         self.exclusions = ex;
+        Ok(())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&CellRange, &ValidationRule)> {

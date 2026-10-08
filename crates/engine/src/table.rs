@@ -137,6 +137,28 @@ pub struct DataTable {
     /// replaces the records; a Table without one is edited by hand only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TableSource>,
+    /// Excel totals metadata; range continues to describe header and data only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<TableTotals>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_views: Vec<crate::table_view::NamedTableView>,
+}
+
+/// Retained totals-row settings. A visible totals row is immediately below the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableTotals {
+    pub visible: bool,
+    pub shown: Option<bool>,
+    #[serde(default)]
+    pub hidden_rows: std::collections::BTreeSet<usize>,
+    pub columns: Vec<TableTotal>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableTotal {
+    pub function: Option<String>,
+    pub label: Option<String>,
+    pub formula: Option<String>,
 }
 
 /// Where a recipe-backed Table comes from, and its last good refresh.
@@ -162,6 +184,20 @@ pub struct RefreshStamp {
 }
 
 impl DataTable {
+    pub fn totals_row(&self) -> Option<usize> {
+        self.totals
+            .as_ref()
+            .filter(|t| t.visible)
+            .map(|_| self.range.end_row + 1)
+    }
+
+    pub fn full_range(&self) -> TableRange {
+        TableRange {
+            end_row: self.totals_row().unwrap_or(self.range.end_row),
+            ..self.range
+        }
+    }
+
     pub fn column_by_name(&self, name: &str) -> Option<&TableColumn> {
         let key = name.to_lowercase();
         self.columns.iter().find(|c| c.name.to_lowercase() == key)
@@ -182,6 +218,39 @@ impl DataTable {
 
     pub fn validate(&self, rows: usize, cols: usize) -> Result<(), String> {
         self.range.validate(rows, cols)?;
+        self.full_range().validate(rows, cols)?;
+        if let Some(totals) = &self.totals {
+            if totals.hidden_rows.iter().any(|r| *r >= rows.min(NUM_ROWS)) {
+                return Err("Invalid hidden-row metadata for totals.".into());
+            }
+            if totals.columns.len() != self.columns.len() {
+                return Err("Invalid totals-column count.".into());
+            }
+            for total in &totals.columns {
+                if total.function.as_deref().is_some_and(|f| {
+                    !matches!(
+                        f,
+                        "none"
+                            | "sum"
+                            | "min"
+                            | "max"
+                            | "average"
+                            | "count"
+                            | "countNums"
+                            | "stdDev"
+                            | "var"
+                            | "custom"
+                    )
+                }) {
+                    return Err("Unsupported totals function.".into());
+                }
+                if total.formula.as_ref().is_some_and(|f| {
+                    !f.starts_with('=') || crate::formula::parser::parse(f).is_err()
+                }) {
+                    return Err("Invalid totals formula.".into());
+                }
+            }
+        }
         validate_table_name(&self.name)?;
         if self
             .style
@@ -216,12 +285,31 @@ impl DataTable {
                 );
             }
         }
+        if self.saved_views.len() > crate::table_view::MAX_NAMED_TABLE_VIEWS {
+            return Err("A Table can have at most 64 named views.".into());
+        }
+        let mut view_names = HashSet::new();
+        for saved in &self.saved_views {
+            crate::table_view::validate_view_name(&saved.name)?;
+            if !view_names.insert(saved.name.to_lowercase()) || saved.view.table != self.id {
+                return Err("Saved views must have unique names and belong to their Table.".into());
+            }
+            // Do not call validate_schema here: it validates this DataTable.
+            saved.view.resolve(self).map_err(|e| format!(
+                "Saved view '{}': {e} Update or delete this saved view first.", saved.name
+            ))?;
+        }
         Ok(())
     }
 }
 
 pub fn validate_table_name(name: &str) -> Result<(), String> {
     crate::named_range::is_valid_name(name)?;
+    // Keep the existing Table naming policy while defined ranges can use
+    // Excel names such as Rate, Date and Value.
+    if crate::named_range::is_reserved_table_word(&name.to_ascii_uppercase()) {
+        return Err("Table name conflicts with a reserved function or error word.".into());
+    }
     if !name
         .chars()
         .enumerate()
@@ -325,6 +413,8 @@ mod tests {
             "C",
             "TRUE",
             "SUM",
+            "NA",
+            "DIV0",
             "9Sales",
             "Sales Data",
             "Sales.Data",

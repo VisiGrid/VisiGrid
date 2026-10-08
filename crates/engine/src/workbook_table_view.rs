@@ -11,7 +11,7 @@ use crate::{
 
 /// History owns only before/after criteria. No cells, cached permutations or
 /// visibility masks. Replay checks the current intent and target bindings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct TableViewCommit {
     sheet: SheetId,
     before: Option<TableViewSpec>,
@@ -149,9 +149,32 @@ impl Workbook {
         }
         if !commit.is_noop() {
             self.sheet_by_id_mut(commit.sheet).unwrap().table_view_spec = target.clone();
-            // Presentation changes dirty the document, without recomputation
-            // or the sheet edit-generation bump that marks pivots stale.
+            // Criteria changes dirty the document without changing body records.
+            // SUBTOTAL formulas additionally need their visibility dependencies rebuilt.
             self.increment_revision();
+            // Totals depend on criteria, not only on cell values. Eviction
+            // stores the criteria; rewind recalculates the baseline once.
+            if !super::recalc_deferred() && self.sheets().iter().any(|s| s.cells_iter().any(|(_, c)| {
+                matches!(c.value(), crate::cell::ValueRef::Formula { ast: Some(ast), .. }
+                    if crate::formula::eval_subtotal::contains_subtotal(ast))
+            })) {
+                let before: Vec<_> = self.sheets().iter().flat_map(|sheet| {
+                    sheet.cells_iter().filter_map(move |((row, col), cell)| {
+                        matches!(cell.value(), crate::cell::ValueRef::Formula { .. })
+                            .then(|| (sheet.id, row, col, sheet.get_computed_value(row, col)))
+                    })
+                }).collect();
+                self.rebuild_dep_graph();
+                self.recompute_full_ordered();
+                let changed: std::collections::HashSet<_> = before.into_iter()
+                    .filter_map(|(id, row, col, value)| {
+                        (self.sheet_by_id(id)?.get_computed_value(row, col) != value).then_some(id)
+                    }).collect();
+                for id in changed {
+                    // A range-backed pivot can include a subtotal or dependent.
+                    self.sheet_by_id_mut(id).unwrap().mark_table_changed();
+                }
+            }
         }
         Ok(())
     }

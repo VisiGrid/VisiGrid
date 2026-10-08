@@ -1,6 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.52.0
+
+### Tables
+
+- **Totals row.** Show a footer under a Table from the Table bar and pick, for each column, Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or your own formula. Totals follow the Table's filter, and stay with the Table when you add records, resize it, insert or delete rows and columns around it, rename it or its columns, copy its sheet or convert it to a range. A formula that points at the footer, such as `=Sales[[#Totals],[Amount]]`, follows it too. Excel Table totals rows open and save with their labels, functions and custom formulas. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Saved views.** **Views…** saves a Table's sort and filter under a name, so you can switch between setups. Excel has no equivalent, so .xlsx export leaves them out and says so. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Keep working while a Table is sorted or filtered.** Formatting, Format Painter, conditional formatting, data validation, comments, freeze panes, hiding and unhiding records, Find & Replace, named ranges (including Extract Named Range), and adding, deleting or renaming sheets no longer ask you to clear the Table's sort or filter first. They change only the records you can see, and each is one undo step. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Find follows the rows as shown.** Find moves in displayed order and skips filtered-out and hidden rows; Replace keeps leading zeros and spacing in what it doesn't replace. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Hidden rows stay hidden.** Rows you hide by hand survive saving as .sheet, JSON and .xlsx, and `SUBTOTAL` leaves them out the same way everywhere. Ctrl+Arrow and reference picking skip them. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Large Tables.** Adding a row to a large Table recalculates only the formulas that read it. Converting a very large Table to a range now says how long it will take and what undo will cost first, and works past the old 100,000-cell limit. Undo history is capped at about 1 GB; when History rewind can't keep its starting point within that, it says so instead of using more memory. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+
+Files with a totals row or saved views use a newer Table format. VisiGrid 0.51 and earlier open them read-only rather than drop those settings.
+
+### Data validation
+
+- **Validation rules are saved.** .sheet files now keep data-validation rules and exclusions, and .xlsx keeps date, time, text-length and custom rules, input and error messages, alert styles and dropdown settings both ways. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Dropdowns from formulas.** A dropdown's list can come from `OFFSET`, `INDIRECT`, a name, a Table column or another sheet. A source that's broken is reported instead of allowing anything. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Checks use the value, not the display.** Formatted percentages, dates and rounded numbers are validated as the numbers they are. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+
+### Excel files
+
+- **Conditional formatting exports to .xlsx**, with its order, ranges and styles, and imports more faithfully. Rules Excel can't represent are listed when you export. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Named ranges and their descriptions** open and save. A name whose sheet was deleted is saved as `#REF!`, as Excel does. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Spills round-trip.** An exported array formula keeps its whole spill range and results, and reopening it gives a live spill again. `#SPILL!` and `#CALC!` from Excel files open as those errors. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Saved results for other readers.** Formulas carry their calculated values, typed as numbers, text, TRUE/FALSE or errors, so pandas and file previews read the same results. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **LET, LAMBDA and newer functions open in Excel.** Excel offered to repair an .xlsx containing LET or LAMBDA, and a newer function typed in lowercase, such as `=xlookup(...)`, showed `#NAME?`. Export now writes them as Excel stores them, and import reads Excel's form back. ([#89](https://github.com/VisiGrid/VisiGrid/issues/89), [#132](https://github.com/VisiGrid/VisiGrid/pull/132))
+
+### Formulas
+
+- **Named ranges evaluate on the sheet they're defined on**, wherever the formula that uses them is. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **`INDIRECT` and `OFFSET` follow their targets.** When the cell an `INDIRECT` or `OFFSET` points at changes, or the formula starts pointing somewhere else, everything downstream recalculates. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Clearing what blocks a spill brings the spill back.** ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
 
 ### Import recipes
 
@@ -8,10 +39,15 @@
 - **Change a column's type from the recipe preview.** The type under each preview column (`Text ›`) is now a button, like the CSV import dialog's: click it for the next type, right-click for the previous one. It edits the selected **Set types** step, or adds one. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134))
 - **The recipe preview scrolls sideways.** Columns past the right edge of the preview could not be reached; scroll with a trackpad, a tilting wheel or Shift+wheel. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134))
 
+### Full-workbook JSON
+
+- **Named ranges, comments, validation exclusions and frozen panes** now survive a full-workbook JSON save. Files with named ranges use JSON version 5, which older readers refuse rather than open without the names. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+
 ### Fixed
 
 - **A near-zero total takes a custom format's zero section.** With an accounting format such as `#,##0.00;(#,##0.00);"-"`, a total that rounds to zero now shows `-`, as an exact 0 does, instead of `0.00` (since 0.51.0). ([#129](https://github.com/VisiGrid/VisiGrid/pull/129))
-- **LET, LAMBDA and newer functions open in Excel.** Excel offered to repair an .xlsx containing LET or LAMBDA, and a newer function typed in lowercase, such as `=xlookup(...)`, showed `#NAME?`. Export now writes Excel's stored forms. Importing an .xlsx with those forms no longer turns its newer-function formulas into errors. ([#89](https://github.com/VisiGrid/VisiGrid/issues/89))
+- **Hide and Unhide after sorting** hid or showed the wrong records. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Sorting and filtering on small imported sheets**, including CSV files, showed the wrong rows. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
 
 ## 0.51.0
 

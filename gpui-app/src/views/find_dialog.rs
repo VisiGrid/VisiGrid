@@ -4,7 +4,7 @@ use crate::app::Spreadsheet;
 use crate::theme::TokenKey;
 
 /// Render the Find/Replace dialog overlay
-pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
+pub fn render_find_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let result_info = if app.find_results.is_empty() {
         if app.find_input.is_empty() {
             String::new()
@@ -42,11 +42,13 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
     };
 
     div()
+        .id("find-dialog")
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .key_context("FindDialog")
         .absolute()
         .top_2()
         .right_2()
-        .w(px(340.0))
+        .w(px(400.0))
         .bg(panel_bg)
         .border_1()
         .border_color(accent)
@@ -63,6 +65,7 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
                 .text_sm()
                 .child(title)
         )
+        .child(div().text_xs().text_color(text_muted).child("Search visible cells; hidden rows and columns are excluded."))
         // Find input row
         .child(
             div()
@@ -78,6 +81,11 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
                 )
                 .child(
                     div()
+                        .id("find-query-field")
+                        .cursor_text()
+                        .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                            cx.stop_propagation(); s.find_focus_replace = false; cx.notify();
+                        }))
                         .flex_1()
                         .h(px(28.0))
                         .bg(app_bg)
@@ -97,7 +105,7 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .w(px(60.0))
+                        .w(px(80.0))
                         .text_color(text_muted)
                         .text_sm()
                         .text_right()
@@ -120,6 +128,11 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
                     )
                     .child(
                         div()
+                            .id("find-replacement-field")
+                            .cursor_text()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                                cx.stop_propagation(); s.find_focus_replace = true; cx.notify();
+                            }))
                             .flex_1()
                             .h(px(28.0))
                             .bg(app_bg)
@@ -162,6 +175,10 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
                             .text_color(text_primary)
                             .cursor_pointer()
                             .hover(|s| s.bg(panel_border))
+                            .id("find-replace-one")
+                            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                                cx.stop_propagation(); s.replace_next(cx);
+                            }))
                             .child("Replace")
                     )
                     .child(
@@ -176,10 +193,20 @@ pub fn render_find_dialog(app: &Spreadsheet) -> impl IntoElement {
                             .text_color(text_primary)
                             .cursor_pointer()
                             .hover(|s| s.bg(panel_border))
+                            .id("find-replace-all")
+                            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                                cx.stop_propagation(); s.replace_all(cx);
+                            }))
                             .child("Replace All")
                     )
             )
         })
+        .child(div().text_color(text_muted).text_xs()
+            .child("Visible rows only. Hidden records stay unchanged."))
+        .when(app.find_replace_mode && app.find_results.iter().any(|hit| hit.kind.is_none()), |el|
+            el.child(div().text_color(text_muted).text_xs().child("Number cells are search-only.")))
+        .when_some(app.status_message.clone(), |el, message| el.child(
+            div().text_color(text_muted).text_xs().child(message)))
         // Instructions
         .child(
             div()

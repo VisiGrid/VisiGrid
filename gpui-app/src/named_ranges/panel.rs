@@ -2,7 +2,7 @@
 
 use gpui::{*};
 use crate::app::Spreadsheet;
-use crate::history::UndoAction;
+use visigrid_engine::workbook::NamedRangeEdit;
 
 impl Spreadsheet {
     // =========================================================================
@@ -11,7 +11,7 @@ impl Spreadsheet {
 
     /// Delete a named range by name (shows impact preview first)
     pub fn delete_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         // Check if named range exists
         if self.wb(cx).get_named_range(name).is_none() {
             self.status_message = Some(format!("Named range '{}' not found", name));
@@ -24,125 +24,27 @@ impl Spreadsheet {
     }
 
     /// Internal method to delete a named range (called from impact preview)
-    pub(crate) fn delete_named_range_internal(&mut self, name: &str, usage_count: usize, cx: &mut Context<Self>) {
-        // Get the named range first (need to clone for undo)
-        let named_range = self.wb(cx).get_named_range(name).cloned();
-
-        if let Some(nr) = named_range {
-            // Record undo action BEFORE deleting
-            self.history.record_named_range_action(UndoAction::NamedRangeDeleted {
-                named_range: nr.clone(),
-            });
-
-            // Now delete
-            self.wb_mut(cx, |wb| wb.delete_named_range(name));
-            self.is_modified = true;
-            self.bump_cells_rev();
-
-            // Log the deletion
-            let impact = if usage_count > 0 {
-                Some(format!("{} formula{} will show #NAME? error", usage_count, if usage_count == 1 { "" } else { "s" }))
-            } else {
-                None
-            };
-            self.log_refactor(
-                "Deleted named range",
-                name,
-                impact.as_deref(),
-            );
-
-            cx.notify();
-        }
+    pub(crate) fn delete_named_range_internal(&mut self, name: &str, _usage_count: usize, cx: &mut Context<Self>) -> bool {
+        let before = match self.named_range_draft(cx) {
+            Ok(before) if before.name.eq_ignore_ascii_case(name) => before,
+            _ => { let error = "The named range changed. Reopen the preview and try again.".to_string(); self.name_draft_error = Some(error.clone()); self.status_message = Some(error); cx.notify(); return false; }
+        };
+        if !self.apply_named_range_edit(NamedRangeEdit::Delete(before), format!("Delete named range: {name}"), cx) { return false; }
+        self.log_refactor("Deleted named range", name, Some("Workbook references recalculated"));
+        true
     }
 
-    /// Count how many formula cells reference a named range
-    fn count_named_range_references(&self, name: &str, cx: &App) -> usize {
-        let name_upper = name.to_uppercase();
-        let mut count = 0;
-
-        for ((_, _), cell) in self.sheet(cx).cells_iter() {
-            let raw = cell.value().raw_display();
-            if raw.starts_with('=') {
-                // Simple check: does the formula contain this name as a word?
-                // More sophisticated: parse the formula and check identifiers
-                // For now, do case-insensitive word boundary check
-                let formula_upper = raw.to_uppercase();
-                // Check if name appears as a standalone identifier
-                // This is a simple heuristic - a proper check would parse the formula
-                for word in formula_upper.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.') {
-                    if word == name_upper {
-                        count += 1;
-                        break; // Count each cell only once
-                    }
-                }
-            }
-        }
-        count
-    }
-
-    /// Get usage count for a named range (with caching)
+    /// Count parsed references across the workbook, including Table rules.
     pub fn get_named_range_usage_count(&mut self, name: &str, cx: &App) -> usize {
-        // Check if cache is stale
         if self.named_range_usage_cache.cached_rev != self.cells_rev {
             self.rebuild_named_range_usage_cache(cx);
         }
-
-        // Return cached count (or 0 if not found)
-        self.named_range_usage_cache.counts
-            .get(&name.to_lowercase())
-            .copied()
-            .unwrap_or(0)
+        self.named_range_usage_cache.counts.get(&name.to_lowercase()).copied().unwrap_or(0)
     }
 
-    /// Rebuild the usage count cache for all named ranges
     fn rebuild_named_range_usage_cache(&mut self, cx: &App) {
-        self.named_range_usage_cache.counts.clear();
-
-        // Get all named range names (lowercase for lookup)
-        let names: Vec<String> = self.wb(cx).list_named_ranges()
-            .iter()
-            .map(|nr| nr.name.to_lowercase())
-            .collect();
-
-        // Also store uppercase versions for matching
-        let names_upper: Vec<String> = names.iter()
-            .map(|n| n.to_uppercase())
-            .collect();
-
-        // Initialize all counts to 0
-        for name in &names {
-            self.named_range_usage_cache.counts.insert(name.clone(), 0);
-        }
-
-        // Collect all formulas first (to avoid borrow issues)
-        let formulas: Vec<String> = self.sheet(cx).cells_iter()
-            .filter_map(|((_, _), cell)| {
-                let raw = cell.value().raw_display();
-                if raw.starts_with('=') {
-                    Some(raw.to_uppercase())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Now process formulas and update counts
-        for formula_upper in formulas {
-            // Check each named range
-            for (i, name_upper) in names_upper.iter().enumerate() {
-                // Check if name appears as a standalone identifier
-                for word in formula_upper.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.') {
-                    if word == name_upper {
-                        if let Some(count) = self.named_range_usage_cache.counts.get_mut(&names[i]) {
-                            *count += 1;
-                        }
-                        break; // Count each cell only once per name
-                    }
-                }
-            }
-        }
-
-        // Mark cache as fresh
+        self.named_range_usage_cache.counts = self.wb(cx).list_named_ranges().into_iter()
+            .map(|name| (name.name.to_lowercase(), self.wb(cx).named_range_usages(&name.name).len())).collect();
         self.named_range_usage_cache.cached_rev = self.cells_rev;
     }
 
@@ -150,43 +52,42 @@ impl Spreadsheet {
     pub fn jump_to_named_range(&mut self, name: &str, cx: &mut Context<Self>) {
         use visigrid_engine::named_range::NamedRangeTarget;
 
-        let target_info = self.wb(cx).get_named_range(name).map(|nr| {
-            match &nr.target {
-                NamedRangeTarget::Cell { sheet, row, col } => {
-                    (*sheet, *row, *col, *row, *col, nr.reference_string())
-                }
-                NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-                    (*sheet, *start_row, *start_col, *end_row, *end_col, nr.reference_string())
-                }
-            }
-        });
-
-        if let Some((sheet_idx, start_row, start_col, end_row, end_col, ref_str)) = target_info {
-            // Switch to target sheet if different
-            let current_sheet = self.sheet_index(cx);
-            if sheet_idx != current_sheet {
-                if !self.activate_sheet(sheet_idx, cx) {
-                    return;
-                }
-            }
-
-            // Select the whole range
-            self.view_state.selected = (start_row, start_col);
-            if start_row == end_row && start_col == end_col {
-                self.view_state.selection_end = None;
-            } else {
-                self.view_state.selection_end = Some((end_row, end_col));
-            }
-
-            // Center the view on the selection
-            self.ensure_cell_visible(start_row, start_col);
-
-            self.status_message = Some(format!("'{}' = {}", name, ref_str));
+        let Some(nr) = self.wb(cx).get_named_range(name).cloned() else {
+            self.status_message = Some(format!("Named range '{name}' not found"));
             cx.notify();
-        } else {
-            self.status_message = Some(format!("Named range '{}' not found", name));
-            cx.notify();
+            return;
+        };
+        let ref_str = nr.reference_string();
+        let (sheet_idx, start_row, start_col, end_row, end_col) = match nr.target {
+            NamedRangeTarget::RefError => {
+                self.status_message = Some(format!("'{name}' refers to a deleted sheet (#REF!)."));
+                cx.notify();
+                return;
+            }
+            NamedRangeTarget::Cell { sheet, row, col } => (sheet, row, col, row, col),
+            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } =>
+                (sheet, start_row, start_col, end_row, end_col),
+        };
+        // Switch to target sheet if different
+        let current_sheet = self.sheet_index(cx);
+        if sheet_idx != current_sheet {
+            if !self.activate_sheet(sheet_idx, cx) {
+                return;
+            }
         }
+
+        self.sync_table_view(cx);
+        let ranges = super::plan::project_named_range(&self.row_view, (start_row, start_col), (end_row, end_col));
+        let Some(&(start, end)) = ranges.first() else {
+            self.status_message = Some(format!("'{name}' = {ref_str} is hidden by the current view."));
+            cx.notify(); return;
+        };
+        self.view_state.selected = start;
+        self.view_state.selection_end = (start != end).then_some(end);
+        self.view_state.additional_selections = ranges.into_iter().skip(1).map(|(a,b)| (a, (a != b).then_some(b))).collect();
+        self.ensure_cell_visible(start.0, start.1);
+        self.status_message = Some(format!("'{name}' = {ref_str} (visible cells selected)"));
+        cx.notify();
     }
 
     /// Filter named ranges by query (for Names panel search)
@@ -225,10 +126,12 @@ impl Spreadsheet {
 
         let range_info = self.wb(cx).get_named_range(name).map(|nr| {
             let sheet_index = match &nr.target {
+                NamedRangeTarget::RefError => 0,
                 NamedRangeTarget::Cell { sheet, .. } => *sheet,
                 NamedRangeTarget::Range { sheet, .. } => *sheet,
             };
             let cells: Vec<(usize, usize)> = match &nr.target {
+                NamedRangeTarget::RefError => vec![],
                 NamedRangeTarget::Cell { row, col, .. } => vec![(*row, *col)],
                 NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => {
                     let mut cells = Vec::new();
@@ -263,7 +166,7 @@ impl Spreadsheet {
                     break;
                 }
 
-                let raw = self.sheet(cx).get_raw(*row, *col);
+                let raw = self.wb(cx).sheet(sheet_index).map(|s| s.get_raw(*row, *col)).unwrap_or_default();
                 if raw.starts_with('=') {
                     // Get precedents from dependency graph
                     let precedents = self.wb(cx).get_precedents(sheet_id, *row, *col);

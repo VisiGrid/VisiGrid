@@ -122,7 +122,10 @@ fn evaluate_let_inner<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> EvalResu
             },
             // A defined name is pinned to the cells it names now, so a LET or
             // LAMBDA parameter of the same name further in cannot capture it.
-            Expr::NamedRange(ref n) if !lookup.is_table_name(n) => match lookup.resolve_named_range(n) {
+            Expr::NamedRange(ref n) if !lookup.is_table_name(n) => {
+                if let Some(reference) = lookup.resolve_named_reference(n) {
+                    Binding::Expr(Rc::new(reference))
+                } else { match lookup.resolve_named_range(n) {
                 Some(NamedRangeResolution::Cell { row, col }) => Binding::Expr(Rc::new(Expr::CellRef {
                     sheet: SheetRef::Current, col, row, col_abs: true, row_abs: true,
                 })),
@@ -131,6 +134,7 @@ fn evaluate_let_inner<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> EvalResu
                     start_col_abs: true, start_row_abs: true, end_col_abs: true, end_row_abs: true,
                 })),
                 None => Binding::Expr(Rc::new(literal(evaluate(&value, lookup)))),
+                } }
             },
             ref v if is_reference(v) => Binding::Expr(Rc::new(value)),
             v => Binding::Expr(Rc::new(literal(evaluate(&v, lookup)))),
@@ -226,6 +230,7 @@ fn array_literal<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> EvalResult {
     if rows.checked_mul(cols).and_then(|n| n.checked_add(2)) != Some(args.len()) {
         return EvalResult::Error("#VALUE!".to_string());
     }
+    if let Err(error) = super::eval_budget::array(rows, cols) { return EvalResult::Error(error); }
     let mut out = Array2D::new(rows, cols);
     for (i, element) in args[2..].iter().enumerate() {
         out.set(i / cols, i % cols, evaluate(element, lookup).to_value());

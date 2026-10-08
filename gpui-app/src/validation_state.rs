@@ -433,9 +433,29 @@ pub struct ValidationDialogState {
 
     /// Whether we loaded existing validation (for Clear button visibility)
     pub has_existing_validation: bool,
+    pub(crate) draft: Option<crate::validation_ui::plan::Draft>,
+    pub original_rule: Option<visigrid_engine::validation::ValidationRule>,
+    /// Stored source before rebasing its editable fields to the selected cell.
+    authored_rule: Option<visigrid_engine::validation::ValidationRule>,
+    /// Choosing Any Value explicitly clears an imported unsupported rule;
+    /// merely opening and applying its common options must preserve the type.
+    pub type_changed: bool,
+    pub anchor_excluded: bool,
 }
 
 impl ValidationDialogState {
+    pub(crate) fn open_draft(&mut self, draft: crate::validation_ui::plan::Draft, rule: Option<&visigrid_engine::validation::ValidationRule>, has_existing_rules: bool) {
+        self.reset();
+        if let Some(rule) = rule {
+            self.load_from_rule(&rule.at(draft.anchor.0, draft.anchor.1));
+            self.authored_rule = Some(rule.clone());
+        }
+        self.anchor_excluded = draft.anchor_excluded();
+        self.has_existing_validation = has_existing_rules;
+        self.target_range = draft.ranges.first().copied();
+        self.draft = Some(draft);
+    }
+
     /// Reset to defaults for a new dialog session
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -449,6 +469,7 @@ impl ValidationDialogState {
 
         self.reset();
         self.has_existing_validation = true;
+        self.original_rule = Some(rule.clone());
         self.ignore_blank = rule.ignore_blank;
         self.show_dropdown = rule.show_dropdown;
 
@@ -478,10 +499,101 @@ impl ValidationDialogState {
             }
             _ => {
                 // Date, Time, TextLength, Custom - not yet supported in dialog
-                // Show as AnyValue (read-only)
+                // Render as an existing imported type until explicitly replaced.
                 self.validation_type = ValidationTypeOption::AnyValue;
             }
         }
+    }
+
+    pub fn preserves_imported_type(&self) -> bool {
+        use visigrid_engine::validation::ValidationType;
+        !self.type_changed && self.original_rule.as_ref().is_some_and(|r|
+            !matches!(r.rule_type, ValidationType::List(_) | ValidationType::WholeNumber(_) | ValidationType::Decimal(_)))
+    }
+
+    /// Preserve unexposed metadata and ambiguous inline-list text when the
+    /// corresponding field has not changed (one item, embedded commas, spaces).
+    pub fn build_rule(&self) -> Result<Option<visigrid_engine::validation::ValidationRule>, String> {
+        use visigrid_engine::validation::{ComparisonOperator, ConstraintValue, ListSource, NumericConstraint, ValidationRule, ValidationType};
+        let parse = |text: &str| {
+            if let Ok(n) = text.parse::<f64>() { ConstraintValue::Number(n) }
+            else if text.starts_with('=') { ConstraintValue::Formula(text.into()) }
+            else { ConstraintValue::CellRef(text.into()) }
+        };
+        let kind = if self.preserves_imported_type() {
+            self.original_rule.as_ref().unwrap().rule_type.clone()
+        } else {
+            match self.validation_type {
+                ValidationTypeOption::AnyValue => return Ok(None),
+                ValidationTypeOption::List => {
+                    let source = self.list_source.trim();
+                    let original_source = self.original_rule.as_ref().and_then(|r| match &r.rule_type {
+                        ValidationType::List(s) => {
+                            let text = match s { ListSource::Inline(v) => v.join(","), ListSource::Range(s) | ListSource::NamedRange(s) => s.clone() };
+                            (text == self.list_source).then(|| s.clone())
+                        }
+                        _ => None,
+                    });
+                    if source.is_empty() && original_source.is_none() { return Err("List source is required".into()); }
+                    let unchanged_source = original_source.is_some();
+                    let source = original_source.unwrap_or_else(|| {
+                        if source.starts_with('=') || source.contains('!') || source.contains(':') || source.contains('[') {
+                            ListSource::Range(source.into())
+                        } else if source.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && !source.contains(',') {
+                            ListSource::NamedRange(source.into())
+                        } else { ListSource::Inline(source.split(',').map(|s| s.trim().to_owned()).collect()) }
+                    });
+                    if !unchanged_source && matches!(&source, ListSource::Inline(items) if items.iter().all(|s| s.is_empty())) {
+                        return Err("At least one list item is required".into());
+                    }
+                    ValidationType::List(source)
+                }
+                ValidationTypeOption::WholeNumber | ValidationTypeOption::Decimal => {
+                    let original = self.original_rule.as_ref().and_then(|r| match &r.rule_type {
+                        ValidationType::WholeNumber(c) | ValidationType::Decimal(c) => Some(c),
+                        _ => None,
+                    });
+                    let preserve_value = |text: &str, original: Option<&ConstraintValue>| {
+                        if let Some(value) = original {
+                            let displayed = match value {
+                                ConstraintValue::Number(n) => n.to_string(),
+                                ConstraintValue::CellRef(s) | ConstraintValue::Formula(s) => s.clone(),
+                            };
+                            if text == displayed { return value.clone(); }
+                        }
+                        parse(text.trim())
+                    };
+                    let operator = match self.numeric_operator {
+                        NumericOperatorOption::Between => ComparisonOperator::Between,
+                        NumericOperatorOption::NotBetween => ComparisonOperator::NotBetween,
+                        NumericOperatorOption::EqualTo => ComparisonOperator::EqualTo,
+                        NumericOperatorOption::NotEqualTo => ComparisonOperator::NotEqualTo,
+                        NumericOperatorOption::GreaterThan => ComparisonOperator::GreaterThan,
+                        NumericOperatorOption::LessThan => ComparisonOperator::LessThan,
+                        NumericOperatorOption::GreaterThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
+                        NumericOperatorOption::LessThanOrEqual => ComparisonOperator::LessThanOrEqual,
+                    };
+                    if self.value1.trim().is_empty() { return Err("Value is required".into()); }
+                    let value2 = if self.numeric_operator.needs_two_values() {
+                        if self.value2.trim().is_empty() { return Err("Maximum value is required".into()); }
+                        Some(preserve_value(&self.value2,original.and_then(|c| c.value2.as_ref())))
+                    } else { None };
+                    let c = NumericConstraint { operator, value1: preserve_value(&self.value1,original.map(|c| &c.value1)), value2 };
+                    if self.validation_type == ValidationTypeOption::WholeNumber { ValidationType::WholeNumber(c) } else { ValidationType::Decimal(c) }
+                }
+            }
+        };
+        let unchanged_source = self.original_rule.as_ref().is_some_and(|rule| rule.rule_type == kind);
+        let mut rule = if unchanged_source {
+            self.authored_rule.clone().or_else(|| self.original_rule.clone()).unwrap()
+        } else {
+            let mut rule = self.original_rule.clone().unwrap_or_else(|| ValidationRule::new(kind.clone()));
+            rule.rule_type = kind;
+            rule
+        };
+        rule.ignore_blank = self.ignore_blank;
+        rule.show_dropdown = self.show_dropdown;
+        Ok(Some(rule))
     }
 
     fn load_numeric_constraint(&mut self, constraint: &visigrid_engine::validation::NumericConstraint) {

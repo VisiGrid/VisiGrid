@@ -2462,70 +2462,137 @@ pub fn parse_dxfs(xml: &str, theme: &ThemePalette) -> Vec<ParsedDxf> {
     let mut dxfs = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-
     let mut in_dxfs = false;
-    let mut depth_dxf = false;
+    let mut in_dxf = false;
     let mut in_font = false;
     let mut in_fill = false;
+    let mut in_border = false;
+    let mut side = None;
     let mut current = ParsedDxf::default();
-
+    fn edge(dxf: &mut ParsedDxf, side: u8) -> &mut Option<CellBorder> {
+        match side {
+            0 => &mut dxf.extra.border_left,
+            1 => &mut dxf.extra.border_right,
+            2 => &mut dxf.extra.border_top,
+            _ => &mut dxf.extra.border_bottom,
+        }
+    }
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                match e.local_name().as_ref() {
-                    b"dxfs" => in_dxfs = true,
-                    b"dxf" if in_dxfs => {
-                        depth_dxf = true;
-                        current = ParsedDxf::default();
-                    }
-                    b"font" if depth_dxf => in_font = true,
-                    b"fill" if depth_dxf => in_fill = true,
-                    b"b" if in_font => current.bold = Some(bool_attr_or(e, true)),
-                    b"i" if in_font => current.italic = Some(bool_attr_or(e, true)),
-                    b"u" if in_font => current.underline = Some(true),
-                    b"strike" if in_font => current.strikethrough = Some(bool_attr_or(e, true)),
-                    b"sz" if in_font => {
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                current.size = std::str::from_utf8(&attr.value)
-                                    .ok()
-                                    .and_then(|s| s.parse().ok());
-                            }
-                        }
-                    }
-                    b"color" if in_font => {
-                        let attrs = collect_attrs(e);
-                        current.font_color = parse_font_color(&attrs, theme);
-                    }
-                    // bgColor is the solid colour in a dxf; fgColor appears too
-                    // in files written by some tools, so accept either.
-                    b"bgColor" | b"fgColor" if in_fill => {
-                        let attrs = collect_attrs(e);
-                        if let Some(c) = parse_color_attrs(&attrs, theme) {
-                            current.fill_color = Some(c);
-                        }
-                    }
-                    _ => {}
+        let event = match reader.read_event() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        let empty = matches!(event, Event::Empty(_));
+        if let Event::Start(e) | Event::Empty(e) = &event {
+            let attrs = collect_attrs(e);
+            let attr = |key: &[u8]| {
+                attrs
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .and_then(|(_, v)| std::str::from_utf8(v).ok())
+                    .and_then(|v| quick_xml::escape::unescape(v).ok())
+                    .map(|v| v.into_owned())
+            };
+            match e.local_name().as_ref() {
+                b"dxfs" => in_dxfs = true,
+                b"dxf" if in_dxfs => {
+                    in_dxf = true;
+                    current = ParsedDxf::default();
                 }
+                b"font" if in_dxf => in_font = true,
+                b"fill" if in_dxf => in_fill = true,
+                b"border" if in_dxf => in_border = true,
+                b"b" if in_font => current.bold = Some(bool_attr_or(e, true)),
+                b"i" if in_font => current.italic = Some(bool_attr_or(e, true)),
+                b"u" if in_font => {
+                    current.underline = Some(!matches!(
+                        attr(b"val").as_deref(),
+                        Some("none" | "0" | "false")
+                    ))
+                }
+                b"strike" if in_font => current.strikethrough = Some(bool_attr_or(e, true)),
+                b"sz" if in_font => {
+                    current.size = attr(b"val")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                }
+                b"name" if in_font => current.extra.font_family = attr(b"val").map(Some),
+                b"color" if in_font => current.font_color = parse_font_color(&attrs, theme),
+                b"fgColor" | b"bgColor" if in_fill => {
+                    if let Some(c) = parse_color_attrs(&attrs, theme) {
+                        current.fill_color = Some(c);
+                    }
+                }
+                b"left" | b"right" | b"top" | b"bottom" if in_border => {
+                    let n = match e.local_name().as_ref() {
+                        b"left" => 0,
+                        b"right" => 1,
+                        b"top" => 2,
+                        _ => 3,
+                    };
+                    side = Some(n);
+                    *edge(&mut current, n) = Some(CellBorder {
+                        style: parse_border_style(attr(b"style").as_deref().unwrap_or("none")),
+                        color: None,
+                    });
+                }
+                b"color" if in_border => {
+                    if let Some(n) = side {
+                        if let Some(edge) = edge(&mut current, n) {
+                            edge.color = parse_color_attrs(&attrs, theme);
+                        }
+                    }
+                }
+                b"numFmt" if in_dxf => {
+                    current.extra.number_format = attr(b"formatCode")
+                        .map(|code| {
+                            if code.eq_ignore_ascii_case("General") {
+                                NumberFormat::General
+                            } else {
+                                NumberFormat::Custom(code)
+                            }
+                        })
+                        .or_else(|| {
+                            attr(b"numFmtId")
+                                .and_then(|n| n.parse::<u16>().ok())
+                                .map(builtin_number_format)
+                        });
+                }
+                b"patternFill" if in_fill => {
+                    if attr(b"patternType").is_some_and(|p| p != "solid" && p != "none") {
+                        current.has_unmapped = true;
+                    }
+                }
+                _ if in_dxf => current.has_unmapped = true,
+                _ => {}
             }
-            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
+        }
+        let end = match &event {
+            Event::End(e) => Some(e.local_name().as_ref().to_vec()),
+            Event::Empty(e) if empty => Some(e.local_name().as_ref().to_vec()),
+            _ => None,
+        };
+        if let Some(end) = end {
+            match end.as_slice() {
                 b"dxfs" => in_dxfs = false,
-                b"dxf" if depth_dxf => {
-                    depth_dxf = false;
+                b"dxf" if in_dxf => {
+                    in_dxf = false;
                     dxfs.push(std::mem::take(&mut current));
                 }
                 b"font" => in_font = false,
                 b"fill" => in_fill = false,
+                b"border" => {
+                    in_border = false;
+                    side = None;
+                }
+                b"left" | b"right" | b"top" | b"bottom" => side = None,
                 _ => {}
-            },
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
+            }
         }
-        buf.clear();
+        if matches!(event, Event::Eof) {
+            break;
+        }
     }
-
     dxfs
 }
 
@@ -2539,6 +2606,8 @@ pub struct ParsedDxf {
     pub size: Option<f32>,
     pub font_color: Option<[u8; 4]>,
     pub fill_color: Option<[u8; 4]>,
+    pub extra: visigrid_engine::cell::CellFormatOverride,
+    pub has_unmapped: bool,
 }
 
 impl ParsedDxf {

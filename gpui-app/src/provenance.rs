@@ -96,7 +96,7 @@ impl UndoAction {
     /// Returns None for audit-only actions (Rewind) that are represented as comments.
     pub fn to_lua(&self) -> Option<String> {
         match self {
-            UndoAction::Comments { .. } | UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => None,
+            UndoAction::ValidationChanged { .. } | UndoAction::Comments { .. } | UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => None,
             UndoAction::Values { sheet_index, changes } => {
                 Some(values_to_lua(*sheet_index, changes))
             }
@@ -330,7 +330,7 @@ impl UndoAction {
     /// hashes in `register_grid_api`, ensuring fingerprint alignment.
     pub fn to_replay_hashes(&self) -> Vec<String> {
         match self {
-            UndoAction::Comments { .. } | UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => Vec::new(),
+            UndoAction::ValidationChanged { .. } | UndoAction::Comments { .. } | UndoAction::CondFormatAdded { .. } | UndoAction::CondFormatsCleared { .. } => Vec::new(),
             UndoAction::Values { sheet_index, changes } => {
                 let sheet = sheet_index + 1; // 1-indexed in Lua API
                 if changes.len() == 1 {
@@ -428,6 +428,7 @@ impl UndoAction {
             UndoAction::NamedRangeCreated { named_range } => {
                 use visigrid_engine::named_range::NamedRangeTarget;
                 let (sheet, range_str) = match &named_range.target {
+                    NamedRangeTarget::RefError => return vec![format!("broken_name:{}", named_range.name)],
                     NamedRangeTarget::Cell { sheet, row, col } => {
                         (*sheet + 1, cell_ref(*row, *col))
                     }
@@ -698,6 +699,7 @@ fn named_range_created_to_lua(nr: &visigrid_engine::named_range::NamedRange) -> 
     use visigrid_engine::named_range::NamedRangeTarget;
 
     match &nr.target {
+        NamedRangeTarget::RefError => format!("-- Name {} refers to #REF!; replay requires its sheet history", lua_escape(&nr.name)),
         NamedRangeTarget::Cell { sheet, row, col } => {
             format!(
                 "grid.define_name{{ name={}, sheet={}, range=\"{}\" }}",
@@ -904,7 +906,7 @@ pub fn export_script(
 /// Check if an action affects a specific sheet.
 fn action_affects_sheet(action: &UndoAction, sheet_index: usize) -> bool {
     match action {
-        UndoAction::Comments { sheet_index: s, .. } => *s == sheet_index,
+        UndoAction::ValidationChanged { sheet_index: s, .. } | UndoAction::Comments { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::CondFormatAdded { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::CondFormatsCleared { sheet_index: s, .. } => *s == sheet_index,
         UndoAction::Values { sheet_index: s, .. } => *s == sheet_index,
@@ -1009,6 +1011,7 @@ mod tests {
     fn test_rows_inserted_to_lua() {
         let action = UndoAction::RowsInserted {
             table_rows: None,
+            row_layout: None,
             print_setup_before: Default::default(),
             sheet_index: 0,
             at_row: 4,

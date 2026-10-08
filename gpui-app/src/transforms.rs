@@ -270,7 +270,7 @@ impl Spreadsheet {
                 scope,
                 lua: format!("-- Transform: {} ({})", op.label(), transformed_count),
             };
-            self.history.record_batch_with_provenance(
+            self.record_batch_with_provenance(cx,
                 self.sheet_index(cx),
                 changes,
                 Some(provenance),
@@ -390,7 +390,7 @@ impl Spreadsheet {
                 scope,
                 lua: format!("-- Transform: {} ({})", preview.op.label(), count),
             };
-            self.history.record_batch_with_provenance(
+            self.record_batch_with_provenance(cx,
                 preview.sheet_index,
                 changes,
                 Some(provenance),

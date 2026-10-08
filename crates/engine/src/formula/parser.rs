@@ -110,6 +110,11 @@ pub fn parse(formula: &str) -> Result<ParsedExpr, String> {
         return Err("Formula must start with =".to_string());
     }
 
+    let normalized;
+    let formula = if formula.as_bytes().windows(6).any(|s| s.eq_ignore_ascii_case(b"_xlfn.") || s.eq_ignore_ascii_case(b"_xlws.")) {
+        normalized = super::excel_namespaces::normalize_formula(formula);
+        normalized.as_str()
+    } else { formula };
     let input = &formula[1..]; // Skip the '='
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
@@ -133,6 +138,7 @@ enum Token {
     SheetPrefix(String),
     /// The `#REF!` literal (a reference whose target was deleted)
     RefError,
+    ErrorLiteral(String),
     Ident(String),
     StructuredRef(super::structured::StructuredReference),
     Plus,
@@ -385,24 +391,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 tokens.push(Token::Number(num, num_str.bytes().all(|c| c.is_ascii_digit())));
             }
-            // Error literals: only #REF! is representable in the AST — it is
-            // what a structural edit writes over a dead reference.
+            // Keep authored/generated errors as values in expressions, so
+            // IFERROR and error inspection retain their normal semantics.
             '#' => {
-                let mut lit = String::new();
-                while let Some(&ch) = chars.peek() {
-                    lit.push(ch);
-                    chars.next();
-                    if ch == '!' {
-                        break;
-                    }
-                    if lit.len() > 12 {
-                        break;
-                    }
-                }
-                if lit.eq_ignore_ascii_case("#REF!") {
+                let ahead: String = chars.clone().take(8).collect();
+                let lit = ["#REF!", "#VALUE!", "#NAME?", "#DIV/0!", "#N/A", "#NUM!", "#NULL!", "#SPILL!", "#CALC!"]
+                    .into_iter().find(|error| ahead.get(..error.len()).is_some_and(|s| s.eq_ignore_ascii_case(error)))
+                    .ok_or_else(|| format!("Unsupported error literal: {ahead}"))?;
+                for _ in 0..lit.len() { chars.next(); }
+                if lit == "#REF!" {
                     tokens.push(Token::RefError);
                 } else {
-                    return Err(format!("Unsupported error literal: {}", lit));
+                    tokens.push(Token::ErrorLiteral(lit.into()));
                 }
             }
             _ => return Err(format!("Unexpected character: {}", c)),
@@ -628,8 +628,18 @@ fn parse_percent(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
 /// tokens preserves parentheses, strings, and sheet names, and recognizes the
 /// same whole-range endpoints as the parser. Also used for XLSX shared formulas.
 pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> String {
+    transform_formula_refs(formula, delta_row, delta_col, false)
+}
+
+/// Freeze A1 references while preserving strings, names and structured fields.
+/// Used when exporting native validation rules with fixed-reference semantics.
+pub fn absolutize_formula_refs(formula: &str) -> String {
+    transform_formula_refs(formula, 0, 0, true)
+}
+
+fn transform_formula_refs(formula: &str, delta_row: i32, delta_col: i32, absolute: bool) -> String {
     fn token_end(bytes: &[u8], mut i: usize) -> usize {
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || b"_$.".contains(&bytes[i])) {
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] >= 0x80 || b"_$.\\".contains(&bytes[i])) {
             i += 1;
         }
         i
@@ -714,7 +724,7 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
                     };
                     match (shift(first, first_abs, delta), shift(last, last_abs, delta)) {
                         (Some(first), Some(last)) if first < limit && last < limit => result
-                            .push_str(&format_whole_range(axis, first, last, first_abs, last_abs)),
+                            .push_str(&format_whole_range(axis, first, last, absolute || first_abs, absolute || last_abs)),
                         _ => result.push_str("#REF!"),
                     }
                     i = last_end;
@@ -734,7 +744,7 @@ pub fn adjust_formula_refs(formula: &str, delta_row: i32, delta_col: i32) -> Str
                 shift(row, row_abs, delta_row),
             ) {
                 (Some(col), Some(row)) if col < crate::sheet::NUM_COLS && row < crate::sheet::NUM_ROWS => {
-                    result.push_str(&format_cell_addr(col, row, col_abs, row_abs))
+                    result.push_str(&format_cell_addr(col, row, absolute || col_abs, absolute || row_abs))
                 }
                 _ => result.push_str("#REF!"),
             }
@@ -803,6 +813,7 @@ fn parse_primary(tokens: &[Token], pos: usize) -> Result<(ParsedExpr, usize), St
         Token::StructuredRef(r) => Ok((Expr::StructuredRef(r.clone()), pos + 1)),
         Token::Number(n, _) => Ok((Expr::Number(*n), pos + 1)),
         Token::RefError => Ok((Expr::RefError, pos + 1)),
+        Token::ErrorLiteral(error) => Ok((Expr::ReferenceError(error.clone()), pos + 1)),
         Token::StringLit(s) => Ok((Expr::Text(s.clone()), pos + 1)),
         Token::SheetPrefix(sheet_name) => {
             // Sheet prefix must be followed by a cell reference

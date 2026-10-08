@@ -182,14 +182,11 @@ impl Spreadsheet {
             return;
         }
         let blocked = if action.is_cell_format() {
-            self.block_active_sheet_metadata_edit(cx)
+            (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx)
         } else {
             self.block_if_previewing(cx)
         };
         if blocked { return; }
-        if let RepeatAction::NumberFormat(format) = &action {
-            if self.block_number_format_conversion(format, cx) { return; }
-        }
 
         // Re-applying must not overwrite the slot with itself — otherwise a
         // command whose parameters depend on the selection (structure ops)
@@ -224,7 +221,9 @@ impl Spreadsheet {
         }
 
         self.suppress_repeat_capture = false;
-        self.status_message = Some(format!("Repeated: {}", action.label()));
+        if !action.is_cell_format() {
+            self.status_message = Some(format!("Repeated: {}", action.label()));
+        }
         cx.notify();
     }
 }

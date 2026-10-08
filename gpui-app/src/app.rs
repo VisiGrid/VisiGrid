@@ -564,6 +564,7 @@ pub struct Spreadsheet {
     pub menu_highlight: Option<usize>,
 
     // Sheet tab state
+    pub(crate) sheet_rename_draft: Option<crate::sheet_ops::SheetRenameDraft>,
     pub renaming_sheet: Option<usize>,     // Index of sheet being renamed
     pub sheet_rename_input: String,        // Current rename input value
     pub sheet_rename_cursor: usize,        // Cursor position (byte index)
@@ -781,29 +782,30 @@ pub struct Spreadsheet {
     pub rename_original_name: String,      // The named range being renamed
     pub rename_new_name: String,           // User's typed new name
     pub rename_select_all: bool,           // True = typing replaces entire name
-    pub rename_affected_cells: Vec<(usize, usize)>,  // Cells with formulas referencing this name
+    pub rename_affected_cells: Vec<(String, String)>, // Workbook reference locations and sources
     pub rename_validation_error: Option<String>,     // Current validation error (if any)
 
     // Add conditional format state
     pub cf_input: String,                          // Typed rule: "=PRED -> STYLE"
     pub cf_input_error: Option<String>,            // Parse error shown in dialog
     pub cf_target: Vec<visigrid_engine::validation::CellRange>,  // Selection when opened
-    pub cf_preview_id: Option<u64>,                // Live-preview rule currently in the store
+    pub(crate) cf_draft: Option<crate::cond_format_ui::plan::Draft>, // Private, uncommitted preview
     pub cf_preview_matches: Option<(usize, usize)>, // (matching, scanned) for the preview
     pub cf_panel_visible: bool,                    // Rules management drawer
     pub(crate) table_dialog: Option<crate::table_ui::TableDialog>,
     pub pivot_panel: Option<crate::pivot_ui::PivotPanel>, // Pivot field-list drawer
     pub pivot_errors: std::collections::HashMap<u64, String>, // Last failed refresh per pivot
     pub(crate) cf_rules_rev: u64,                  // Bumped on any CF rule mutation (cache key)
-    /// Per-cell conditional format override cache, keyed by (cells_rev, cf_rules_rev).
+    /// Per-cell conditional format override cache, keyed by cell/rule/workbook revisions and preview state.
     /// Heavy predicates (COUNTIF over large ranges) are evaluated once per
     /// edit/rule-change instead of once per frame per cell.
     pub(crate) cf_cache: std::cell::RefCell<std::collections::HashMap<(usize, usize), Option<visigrid_engine::cell::CellFormatOverride>>>,
-    pub(crate) cf_cache_key: std::cell::Cell<(u64, u64)>,
-    pub cf_edit_backup: Option<(usize, visigrid_engine::cond_format::CondFormatRule)>, // Rule pulled for editing (index, rule) — restored on cancel
+    pub(crate) cf_cache_key: std::cell::Cell<(u64, u64, u64, bool)>,
 
     // Create named range state (Ctrl+Shift+N)
     pub create_name_name: String,           // User-typed name
+    pub(crate) name_draft: Option<crate::named_ranges::plan::NameDraft>,
+    pub(crate) name_draft_error: Option<String>,
     pub create_name_description: String,    // Optional description
     pub create_name_target: String,         // Auto-filled from selection (e.g., "A1:B10")
     pub create_name_validation_error: Option<String>,
@@ -844,6 +846,7 @@ pub struct Spreadsheet {
     pub refactor_log: Vec<crate::views::refactor_log::RefactorLogEntry>,
 
     // Extract Named Range state
+    pub(crate) extract_draft: Option<crate::named_ranges::extract_plan::ExtractionDraft>,
     pub extract_range_literal: String,           // The detected range literal (e.g., "A1:A100")
     pub extract_name: String,                    // User-entered name
     pub extract_description: String,             // User-entered description (optional)
@@ -1128,7 +1131,8 @@ impl Spreadsheet {
     /// nothing at any size and afterwards only the chunks edits touch.
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
         self.table_dialog = None;
-        let snapshot = self.wb(cx).clone();
+        let snapshot = self.wb(cx).clone_sharing_cell_cow();
+        self.history.set_rewind_base(&snapshot);
         self.base_workbook = Some(snapshot);
     }
 
@@ -1136,7 +1140,7 @@ impl Spreadsheet {
         let font_catalog = crate::fonts::FontCatalog::new(cx);
         let workbook_data = Workbook::new();
         let initial_sheet_id = workbook_data.active_sheet().id;
-        let base_workbook = Some(workbook_data.clone()); // Capture initial state for replay
+        let base_workbook = Some(workbook_data.clone_sharing_cell_cow());
         let workbook = cx.new(|_| workbook_data);
 
         let focus_handle = cx.focus_handle();
@@ -1243,7 +1247,7 @@ impl Spreadsheet {
 
         let mut app = Self {
             workbook,
-            history: History::new(),
+            history: { let mut history = History::new(); history.set_rewind_base(base_workbook.as_ref().unwrap()); history },
             base_workbook,
             rewind_preview: RewindPreviewState::Off,
             cell_metadata: crate::role_styles::CellMetadataMap::new(),
@@ -1351,6 +1355,7 @@ impl Spreadsheet {
             resize_start_original: None,
             open_menu: None,
             menu_highlight: None,
+            sheet_rename_draft: None,
             renaming_sheet: None,
             sheet_rename_input: String::new(),
             sheet_rename_cursor: 0,
@@ -1461,17 +1466,18 @@ impl Spreadsheet {
             cf_input: String::new(),
             cf_input_error: None,
             cf_target: Vec::new(),
-            cf_preview_id: None,
+            cf_draft: None,
             cf_preview_matches: None,
             cf_panel_visible: false,
             table_dialog: None,
             pivot_panel: None,
             pivot_errors: std::collections::HashMap::new(),
-            cf_edit_backup: None,
             cf_rules_rev: 1,
             cf_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-            cf_cache_key: std::cell::Cell::new((0, 0)),
+            cf_cache_key: std::cell::Cell::new((0, 0, 0, false)),
             create_name_name: String::new(),
+            name_draft: None,
+            name_draft_error: None,
             create_name_description: String::new(),
             create_name_target: String::new(),
             create_name_validation_error: None,
@@ -1496,6 +1502,7 @@ impl Spreadsheet {
 
             refactor_log: Vec::new(),
 
+            extract_draft: None,
             extract_range_literal: String::new(),
             extract_name: String::new(),
             extract_description: String::new(),
@@ -1812,18 +1819,27 @@ impl Spreadsheet {
     pub fn open_validation_dropdown(&mut self, cx: &mut Context<Self>) {
         use crate::validation_dropdown::ValidationDropdownState;
 
+        self.sync_table_view(cx);
         let (row, col) = self.view_state.selected;
+        let target = crate::validation_ui::plan::DropdownTarget::capture(self.wb(cx), &self.row_view, (row,col));
+        if !target.is_current(self.wb(cx), &self.row_view, (row,col)) || self.is_row_hidden(target.cell.0) || self.is_col_hidden(col) { return; }
         let sheet_index = self.sheet_index(cx);
 
         // Priority 1: Check for list validation
-        let resolved = self.wb(cx).get_list_items(sheet_index, row, col);
+        let resolved = self.wb(cx).get_list_items(sheet_index, target.cell.0, col);
         match resolved {
+            Some(list) if list.source_error.is_some() => {
+                self.status_message = Some(format!("Validation list source error: {}", list.source_error.unwrap()));
+                cx.notify();
+                return;
+            }
             Some(list) if !list.items.is_empty() => {
                 // Open validation dropdown
                 self.validation_dropdown = ValidationDropdownState::open(
                     (row, col),
                     std::sync::Arc::new(list),
                 );
+                self.validation_dropdown.as_open_mut().unwrap().target = Some(target);
                 cx.notify();
                 return;
             }
@@ -1854,8 +1870,8 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Check if the validation dropdown source has changed (fingerprint mismatch).
-    /// Call this during render or update cycle to detect stale data.
+    /// Keep the captured choices while the workbook and source generations are
+    /// unchanged. Do not re-evaluate formula sources on every render.
     pub fn check_dropdown_staleness(&mut self, cx: &mut Context<Self>) {
         use crate::validation_dropdown::DropdownCloseReason;
 
@@ -1864,18 +1880,11 @@ impl Spreadsheet {
             None => return,
         };
 
-        let (row, col) = open_state.cell;
-        let stored_fingerprint = open_state.source_fingerprint;
-        let sheet_index = self.sheet_index(cx);
-
-        // Get current fingerprint from source
-        if let Some(current_list) = self.wb(cx).get_list_items(sheet_index, row, col) {
-            if current_list.source_fingerprint != stored_fingerprint {
-                self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
-            }
-        } else {
-            // Source no longer exists - close dropdown
-            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx);
+        let Some(target) = &open_state.target else {
+            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
+        };
+        if !target.is_current(self.wb(cx), &self.row_view, self.view_state.selected) || self.is_col_hidden(target.cell.1) {
+            self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
         }
     }
 
@@ -1951,24 +1960,29 @@ impl Spreadsheet {
     /// - Dependency graph is updated
     /// - Dirty state is tracked via history
     pub fn commit_validation_value(&mut self, value: &str, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         use crate::validation_dropdown::DropdownCloseReason;
-
-        // Close dropdown first
+        self.sync_table_view(cx);
+        self.check_dropdown_staleness(cx);
+        let Some(state) = self.validation_dropdown.as_open() else { return; };
+        let Some(target) = state.target.clone() else { return; };
+        if !state.resolved_list.items.iter().any(|item| item == value) {
+            self.status_message = Some("Choose a value from the current validation list.".into());
+            cx.notify(); return;
+        }
+        let (row, col) = target.cell;
         self.close_validation_dropdown(DropdownCloseReason::Committed, cx);
-
-        // Commit value using the same path as normal cell editing
-        let (row, col) = self.view_state.selected;
-        let old_value = self.sheet(cx).get_raw(row, col);
-
-        // Record for undo (same as confirm_edit)
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, value.to_string());
-
-        // Set value and update dependency graph (same as confirm_edit)
-        self.set_cell_value(row, col, value, cx);
-
-        // Bump revision for render cache invalidation
-        self.cells_rev = self.cells_rev.wrapping_add(1);
+        if self.wb(cx).has_table_criteria() {
+            self.apply_table_cell_writes(vec![crate::table_edit::TableCellWrite::value(row, col, value.into())], "Choose validation value", cx);
+        } else {
+            let old_value = self.sheet(cx).get_raw(row, col);
+            if old_value != value {
+                self.record_change(cx, self.sheet_index(cx), row, col, old_value, value.to_string());
+                self.set_cell_value(row, col, value, cx);
+                self.bump_cells_rev();
+            }
+        }
+        self.revalidate_validation_ranges(&[visigrid_engine::validation::CellRange::single(row,col)], cx);
         cx.notify();
     }
 
@@ -2004,42 +2018,9 @@ impl Spreadsheet {
 
     /// Circle Invalid Data: validate all cells with validation rules and mark invalid ones.
     pub fn circle_invalid_data(&mut self, cx: &mut Context<Self>) {
-        use visigrid_engine::validation::ValidationResult;
-        use visigrid_engine::workbook::Workbook;
-
-        // Clear existing markers
         self.invalid_cells.clear();
-        self.validation_failures.clear();
-        self.validation_failure_index = 0;
-
-        // Collect validation ranges first (to avoid borrow conflict)
-        let ranges: Vec<_> = self.sheet(cx).validations.iter()
-            .map(|(range, _)| range.clone())
-            .collect();
-
-        // Validate each cell with a rule
-        let sheet_idx = self.sheet_index(cx);
-        for target in ranges {
-            for row in target.start_row..=target.end_row {
-                for col in target.start_col..=target.end_col {
-                    let display_value = self.sheet(cx).get_display(row, col);
-                    // Skip empty cells
-                    if display_value.is_empty() {
-                        continue;
-                    }
-                    let result = self.wb(cx).validate_cell_input(sheet_idx, row, col, &display_value);
-                    if let ValidationResult::Invalid { reason, .. } = result {
-                        // Classify the failure reason
-                        let failure_reason = Workbook::classify_failure_reason(&reason);
-                        self.invalid_cells.insert((row, col), failure_reason);
-                        self.validation_failures.push((row, col));
-                    }
-                }
-            }
-        }
-
-        // Sort failures in row-major order for predictable navigation
-        self.validation_failures.sort_by_key(|&(r, c)| (r, c));
+        let ranges: Vec<_> = self.sheet(cx).validations.iter().map(|(range, _)| *range).collect();
+        self.revalidate_validation_ranges(&ranges, cx);
 
         let count = self.invalid_cells.len();
         if count == 0 {
@@ -2073,44 +2054,18 @@ impl Spreadsheet {
 
     /// Jump to the next invalid cell (F8).
     pub fn next_invalid_cell(&mut self, cx: &mut Context<Self>) {
-        if self.validation_failures.is_empty() {
-            self.status_message = Some("No validation failures to navigate".to_string());
-            cx.notify();
-            return;
-        }
-
-        // Move to next failure (with wrap-around)
-        self.validation_failure_index = (self.validation_failure_index + 1) % self.validation_failures.len();
-        let (row, col) = self.validation_failures[self.validation_failure_index];
-
-        // Select the cell and scroll into view
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
-        self.ensure_visible(cx);
-
-        // Get failure reason for status message
-        let reason_str = self.invalid_cells.get(&(row, col))
-            .map(|r| Self::failure_reason_short(*r))
-            .unwrap_or_default();
-
-        self.status_message = Some(format!(
-            "Invalid {} of {}: {} — F8 next, Shift+F8 prev",
-            self.validation_failure_index + 1,
-            self.validation_failures.len(),
-            reason_str
-        ));
-        cx.notify();
+        self.navigate_validation_failure(false, cx);
     }
 
     /// Short human-readable description of validation failure reason.
-    fn failure_reason_short(reason: visigrid_engine::validation::ValidationFailureReason) -> String {
+    pub(crate) fn failure_reason_short(reason: visigrid_engine::validation::ValidationFailureReason) -> String {
         use visigrid_engine::validation::ValidationFailureReason;
         match reason {
             ValidationFailureReason::InvalidValue => "Value doesn't match rule".to_string(),
             ValidationFailureReason::ConstraintBlank => "Constraint cell is blank".to_string(),
             ValidationFailureReason::ConstraintNotNumeric => "Constraint is not numeric".to_string(),
             ValidationFailureReason::InvalidReference => "Invalid reference".to_string(),
-            ValidationFailureReason::FormulaNotSupported => "Formula constraint not supported".to_string(),
+            ValidationFailureReason::FormulaNotSupported => "Validation formula could not be evaluated".to_string(),
             ValidationFailureReason::ListEmpty => "List is empty".to_string(),
             ValidationFailureReason::NotInList => "Not in list".to_string(),
         }
@@ -2118,37 +2073,7 @@ impl Spreadsheet {
 
     /// Jump to the previous invalid cell (Shift+F8).
     pub fn prev_invalid_cell(&mut self, cx: &mut Context<Self>) {
-        if self.validation_failures.is_empty() {
-            self.status_message = Some("No validation failures to navigate".to_string());
-            cx.notify();
-            return;
-        }
-
-        // Move to previous failure (with wrap-around)
-        if self.validation_failure_index == 0 {
-            self.validation_failure_index = self.validation_failures.len() - 1;
-        } else {
-            self.validation_failure_index -= 1;
-        }
-        let (row, col) = self.validation_failures[self.validation_failure_index];
-
-        // Select the cell and scroll into view
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
-        self.ensure_visible(cx);
-
-        // Get failure reason for status message
-        let reason_str = self.invalid_cells.get(&(row, col))
-            .map(|r| Self::failure_reason_short(*r))
-            .unwrap_or_default();
-
-        self.status_message = Some(format!(
-            "Invalid {} of {}: {} — F8 next, Shift+F8 prev",
-            self.validation_failure_index + 1,
-            self.validation_failures.len(),
-            reason_str
-        ));
-        cx.notify();
+        self.navigate_validation_failure(true, cx);
     }
 
     // ========================================================================
@@ -2302,11 +2227,15 @@ impl Spreadsheet {
     pub(crate) fn effective_format_cached(&self, row: usize, col: usize, cx: &App) -> visigrid_engine::cell::CellFormat {
         let sheet = self.sheet(cx);
         let base = sheet.get_format(row, col);
-        if !sheet.cond_formats.any_rule_covers(row, col) {
+        let preview = self.cf_draft.as_ref()
+            .filter(|d| self.mode == Mode::AddCondFormat && !self.is_previewing() && self.review_mode.is_none() && d.is_current(self.wb(cx)))
+            .and_then(|d| d.preview.as_ref());
+        let store = preview.unwrap_or(&sheet.cond_formats);
+        if !store.any_rule_covers(row, col) {
             return base;
         }
 
-        let key = (self.cells_rev, self.cf_rules_rev);
+        let key = (self.cells_rev, self.cf_rules_rev, self.wb(cx).revision(), preview.is_some());
         if self.cf_cache_key.get() != key {
             self.cf_cache.borrow_mut().clear();
             self.cf_cache_key.set(key);
@@ -2316,7 +2245,7 @@ impl Spreadsheet {
         let override_opt = match cached {
             Some(ov) => ov,
             None => {
-                let ov = sheet.cond_formats.override_for_cell(row, col, sheet);
+                let ov = store.override_for_cell(row, col, sheet);
                 self.cf_cache.borrow_mut().insert((row, col), ov.clone());
                 ov
             }
@@ -2398,8 +2327,8 @@ impl Spreadsheet {
             SearchAction::OpenFile(path) => {
                 self.load_file(&path, cx);
             }
-            SearchAction::JumpToNamedRange { .. } => {
-                // Future: implement named range navigation
+            SearchAction::JumpToNamedRange { name } => {
+                self.jump_to_named_range(&name, cx);
             }
             SearchAction::OpenSetting { key } => {
                 // Copy key to clipboard so user doesn't have to hunt
@@ -3369,7 +3298,7 @@ impl Spreadsheet {
         if old != new {
             // Use SheetId (stable across sheet reorder/delete) instead of index
             let sheet_id = self.cached_sheet_id;
-            self.history.record_action_with_provenance(
+            self.record_action_with_provenance(cx,
                 crate::history::UndoAction::ColumnWidthSet {
                     sheet_id,
                     col,
@@ -3396,7 +3325,7 @@ impl Spreadsheet {
         if old != new {
             // Use SheetId (stable across sheet reorder/delete) instead of index
             let sheet_id = self.cached_sheet_id;
-            self.history.record_action_with_provenance(
+            self.record_action_with_provenance(cx,
                 crate::history::UndoAction::RowHeightSet {
                     sheet_id,
                     row,
@@ -3426,34 +3355,30 @@ impl Spreadsheet {
         self.row_heights.get(&self.cached_sheet_id).map_or(false, |h| !h.is_empty())
     }
 
+    /// Canonical manual hides for rendering and navigation, including previews.
+    pub(crate) fn display_hidden_rows(&self) -> Option<&std::collections::BTreeSet<usize>> {
+        self.preview_structure_layout().map(|layout| &layout.hidden_rows)
+            .or_else(|| self.hidden_rows.get(&self.cached_sheet_id))
+    }
+
     /// Check if a row is hidden on the current sheet
     pub fn is_row_hidden(&self, row: usize) -> bool {
-        if let Some(layout) = self.preview_structure_layout() {
-            return layout.hidden_rows.contains(&row);
-        }
-        self.hidden_rows
-            .get(&self.cached_sheet_id)
-            .map_or(false, |set| set.contains(&row))
+        self.display_hidden_rows().is_some_and(|hidden| hidden.contains(&row))
     }
 
     /// Check if a column is hidden on the current sheet
     pub fn is_col_hidden(&self, col: usize) -> bool {
-        if let Some(layout) = self.preview_structure_layout() {
-            return layout.hidden_cols.contains(&col);
-        }
-        self.hidden_cols
-            .get(&self.cached_sheet_id)
-            .map_or(false, |set| set.contains(&col))
+        self.display_hidden_cols().is_some_and(|hidden| hidden.contains(&col))
+    }
+
+    pub(crate) fn display_hidden_cols(&self) -> Option<&std::collections::BTreeSet<usize>> {
+        self.preview_structure_layout().map(|layout| &layout.hidden_cols)
+            .or_else(|| self.hidden_cols.get(&self.cached_sheet_id))
     }
 
     /// Check if current sheet has any hidden rows
     pub fn has_hidden_rows(&self) -> bool {
-        if let Some(layout) = self.preview_structure_layout() {
-            return !layout.hidden_rows.is_empty();
-        }
-        self.hidden_rows
-            .get(&self.cached_sheet_id)
-            .map_or(false, |s| !s.is_empty())
+        self.display_hidden_rows().is_some_and(|hidden| !hidden.is_empty())
     }
 
     /// Check if current sheet has any hidden columns
@@ -3487,48 +3412,11 @@ impl Spreadsheet {
         None
     }
 
-    /// Get the nth visible row composing RowView filtering with user-hidden rows.
-    /// Returns (view_row, data_row) or None if out of bounds.
-    /// The displayed rows at display positions `start..start + count`, as
-    /// (view_row, data_row), in one pass: the renderer needs each row's
-    /// neighbours too, and `nth_visible_row_with_hidden` walks from the top
-    /// when rows are hidden. Shorter than `count` at the end of the sheet.
-    pub fn displayed_rows(&self, start: usize, count: usize, cx: &gpui::App) -> Vec<(usize, usize)> {
-        if !self.has_hidden_rows() {
-            return (start..start + count).map_while(|i| self.nth_visible_row(i, cx)).collect();
-        }
-        let mut out = Vec::with_capacity(count);
-        let mut shown = 0;
-        let mut idx = 0;
-        while out.len() < count {
-            let Some((view_row, data_row)) = self.nth_visible_row(idx, cx) else { break };
-            if !self.is_row_hidden(data_row) {
-                if shown >= start {
-                    out.push((view_row, data_row));
-                }
-                shown += 1;
-            }
-            idx += 1;
-        }
-        out
-    }
-
-    pub fn nth_visible_row_with_hidden(&self, visible_index: usize, cx: &gpui::App) -> Option<(usize, usize)> {
-        if !self.has_hidden_rows() {
-            return self.nth_visible_row(visible_index, cx);
-        }
-        let mut count = 0;
-        let mut idx = 0;
-        loop {
-            let (view_row, data_row) = self.nth_visible_row(idx, cx)?;
-            if !self.is_row_hidden(data_row) {
-                if count == visible_index {
-                    return Some((view_row, data_row));
-                }
-                count += 1;
-            }
-            idx += 1;
-        }
+    /// Resolve a viewport from its first view slot, never scanning from row 0.
+    /// Filtering and manual hiding use the same iterator as pane layout.
+    pub fn displayed_rows(&self, start: usize, count: usize, _cx: &gpui::App) -> Vec<(usize, usize)> {
+        crate::formatting::plan::visible_rows(&self.row_view, self.display_hidden_rows(),
+            start, self.row_view.row_count().saturating_sub(1)).take(count).collect()
     }
 
     /// Update cached sheet ID from the workbook.
@@ -3592,21 +3480,13 @@ impl Spreadsheet {
     /// Get the X position of a column's left edge (relative to start of grid, after row header)
     /// Returns scaled (zoomed) position for rendering.
     pub fn col_x_offset(&self, target_col: usize) -> f32 {
-        let mut x = 0.0;
-        for col in self.view_state.scroll_col..target_col {
-            x += self.metrics.col_width(self.col_width(col));
-        }
-        GridMetrics::snap_floor(x, self.metrics.scale)
+        GridMetrics::snap_floor(crate::pane_layout::offset(target_col, self.view_state.frozen_cols,
+            self.view_state.scroll_col, |c| self.displayed_col_width(c)), self.metrics.scale)
     }
 
-    /// Get the Y position of a row's top edge (relative to start of grid, after column header)
-    /// Returns scaled (zoomed) position for rendering.
     pub fn row_y_offset(&self, target_row: usize) -> f32 {
-        let mut y = 0.0;
-        for row in self.view_state.scroll_row..target_row {
-            y += self.metrics.row_height(self.row_height(row));
-        }
-        GridMetrics::snap_floor(y, self.metrics.scale)
+        GridMetrics::snap_floor(crate::pane_layout::offset(target_row, self.view_state.frozen_rows,
+            self.view_state.scroll_row, |r| self.displayed_row_height(r)), self.metrics.scale)
     }
 
     /// Get the bounding rect of a cell in grid-relative coordinates.
@@ -3616,8 +3496,8 @@ impl Spreadsheet {
         CellRect {
             x: self.col_x_offset(col),
             y: self.row_y_offset(row),
-            width: self.metrics.col_width(self.col_width(col)),
-            height: self.metrics.row_height(self.row_height(row)),
+            width: self.displayed_col_width(col),
+            height: self.displayed_row_height(row),
         }
     }
 
@@ -3637,51 +3517,11 @@ impl Spreadsheet {
     /// Uses measured grid_layout.grid_body_origin for accuracy.
     /// Uses scaled (zoomed) column widths for hit-testing.
     pub fn col_from_window_x(&self, window_x: f32) -> Option<usize> {
-        let x = window_x - self.grid_layout.grid_body_origin.0;
-        if x < 0.0 { return None; }
-
-        let viewport_width = self.grid_layout.viewport_size.0;
-        let mut current_x = 0.0;
-        for col in self.view_state.scroll_col..NUM_COLS {
-            if current_x > viewport_width { break; }
-            // Use scaled width for hit-testing in screen coordinates
-            let width = self.metrics.col_width(self.col_width(col));
-            if x < current_x + width {
-                return Some(col);
-            }
-            current_x += width;
-        }
-        Some(NUM_COLS - 1)  // Clamp to last column if beyond viewport
+        self.pane_cols(&self.view_state).hit(window_x - self.grid_layout.grid_body_origin.0)
     }
 
-    /// Convert window Y position to row index.
-    /// O(1) for uniform heights, O(visible rows) for variable heights.
-    /// Uses scaled (zoomed) row heights for hit-testing.
     pub fn row_from_window_y(&self, window_y: f32) -> Option<usize> {
-        let y = window_y - self.grid_layout.grid_body_origin.1;
-        if y < 0.0 { return None; }
-
-        // O(1) fast path: uniform row heights (use scaled cell height)
-        if !self.has_custom_row_heights() {
-            let row = self.view_state.scroll_row + (y / self.metrics.cell_h).floor() as usize;
-            return Some(row.min(NUM_ROWS - 1));
-        }
-
-        // O(visible rows) slow path: variable heights, stop at viewport bottom
-        let viewport_height = self.grid_layout.viewport_size.1;
-        let mut current_y = 0.0;
-        let mut last_row = self.view_state.scroll_row;
-        for row in self.view_state.scroll_row..NUM_ROWS {
-            if current_y > viewport_height { break; }
-            last_row = row;
-            // Use scaled height for hit-testing in screen coordinates
-            let height = self.metrics.row_height(self.row_height(row));
-            if y < current_y + height {
-                return Some(row);
-            }
-            current_y += height;
-        }
-        Some(last_row)
+        self.pane_rows(&self.view_state).hit(window_y - self.grid_layout.grid_body_origin.1)
     }
 
     /// Auto-fit column width to content
@@ -3788,9 +3628,9 @@ impl Spreadsheet {
         if !actions.is_empty() {
             let count = actions.len();
             if count == 1 {
-                self.history.record_action_with_provenance(actions.remove(0), None);
+                self.record_action_with_provenance(cx, actions.remove(0), None);
             } else {
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     crate::history::UndoAction::Group {
                         actions,
                         description: "Auto-fit column widths".to_string(),
@@ -4243,7 +4083,7 @@ impl Spreadsheet {
         let (row, col) = self.view_state.active_cell();
         let old_value = self.sheet(cx).get_raw(row, col);
         self.set_cell_value(row, col, &date_str, cx);
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, date_str);
+        self.record_change(cx, self.sheet_index(cx), row, col, old_value, date_str);
         self.is_modified = true;
         self.status_message = Some("Date inserted".to_string());
         cx.notify();
@@ -4257,7 +4097,7 @@ impl Spreadsheet {
         let (row, col) = self.view_state.active_cell();
         let old_value = self.sheet(cx).get_raw(row, col);
         self.set_cell_value(row, col, &time_str, cx);
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, time_str);
+        self.record_change(cx, self.sheet_index(cx), row, col, old_value, time_str);
         self.is_modified = true;
         self.status_message = Some("Time inserted".to_string());
         cx.notify();
@@ -4480,6 +4320,9 @@ impl Spreadsheet {
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_table_view(cx);
+        // Freeze boundaries belong to the sheet, including both split panes and rewind.
+        let frozen = self.display_workbook(cx).active_sheet().frozen_panes;
+        self.sync_freeze_panes(frozen);
         // Drain pending session server requests (TCP → GUI bridge)
         self.drain_session_requests(cx);
 

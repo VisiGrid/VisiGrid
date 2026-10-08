@@ -9,7 +9,7 @@ use crate::{
     workbook::Workbook,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct RuleChange {
     pub sheet: SheetId,
     pub table: TableId,
@@ -37,7 +37,7 @@ impl Workbook {
         let Some(table) = sheet.table_at(row, col) else {
             return Ok(None);
         };
-        if row == table.range.start_row
+        if row <= table.range.start_row || row > table.range.end_row
             || table.columns[col - table.range.start_col].formula.is_some()
         {
             return Ok(None);
@@ -103,7 +103,9 @@ impl Workbook {
             ));
         }
         let mut commit = self.table_commit(sheet_id, id, Some(old.clone()), Some(new))?;
+        commit.calculated_edit = true;
         commit.cells = cells;
+        self.capture_table_cell_absence(&mut commit);
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
     }
@@ -124,6 +126,7 @@ impl Workbook {
         self.validate_calculated_formula(sheet_id, row, col, &formula)?;
         let mut commit =
             self.table_commit(sheet_id, id, Some(table.clone()), Some(table.clone()))?;
+        commit.calculated_edit = true;
         commit.cells.push((
             HeaderCell {
                 row,
@@ -136,6 +139,7 @@ impl Workbook {
                 value: CellValue::from_input(&formula),
             },
         ));
+        self.capture_table_cell_absence(&mut commit);
         self.apply_table_commit(&commit, false)?;
         Ok(commit)
     }

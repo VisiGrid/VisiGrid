@@ -298,3 +298,104 @@ fn boundary_insertions_shift_but_do_not_expand_and_clipped_deletions_undo_exactl
     assert_eq!(wb.table(id).unwrap().1.range.start_col, 3);
     assert_eq!(wb.table(id).unwrap().1.columns[0].id, columns[0].id);
 }
+
+
+#[test]
+fn totals_columns_move_settings_cells_and_references_with_atomic_history() {
+    use visigrid_engine::table::TableTotal;
+    for visible in [true, false] {
+        let (mut wb, id) = book("=[@Qty]*[@Price]");
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 1, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM([Qty])+A2".into()), label: None,
+        }).unwrap();
+        if visible { wb.sheet_mut(0).unwrap().set_comment(4, 1, Some(visigrid_engine::cell::CellComment { text: "Custom footer".into(), author: "QA".into() })); }
+        wb.sheet_mut(0).unwrap().toggle_bold(4, 1);
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        let original = wb.table(id).unwrap().1.clone();
+        let generation = wb.sheet(1).unwrap().edit_generation();
+        let history = wb.prepare_table_column_history(0, 1, 2, false).unwrap().unwrap();
+        wb.apply_table_column_history(&history, false).unwrap();
+        let table = wb.table(id).unwrap().1;
+        assert_eq!(table.columns[3].id, original.columns[1].id);
+        assert_eq!(table.totals.as_ref().unwrap().columns.len(), 5);
+        assert_eq!(table.totals.as_ref().unwrap().columns[1], Default::default());
+        assert_eq!(table.totals.as_ref().unwrap().columns[3].formula.as_deref(), Some("=SUM([Qty])+A2"));
+        assert!(wb.sheet(1).unwrap().edit_generation() > generation);
+        if visible {
+            assert_eq!(wb.sheet(0).unwrap().get_display(4, 3), "8");
+            assert_eq!(wb.sheet(0).unwrap().get_raw(4, 4), "=SUBTOTAL(109, [Amount])");
+            assert!(wb.sheet(0).unwrap().get_format(4, 3).bold);
+            assert_eq!(wb.sheet(0).unwrap().get_cell(4, 3).comment().map(|c| c.text.as_str()), Some("Custom footer"));
+        }
+        wb.apply_table_column_history(&history, true).unwrap();
+        assert_eq!(wb.table(id).unwrap().1.columns, original.columns);
+        assert_eq!(wb.table(id).unwrap().1.totals, original.totals);
+        wb.apply_table_column_history(&history, false).unwrap();
+        if !visible { wb.set_table_totals_visible(id, true, Default::default()).unwrap(); }
+        assert_eq!(wb.sheet(0).unwrap().get_display(4, 3), "8");
+    }
+}
+
+#[test]
+fn deleted_field_references_in_visible_and_dormant_totals_restore_on_undo() {
+    use visigrid_engine::table::TableTotal;
+    for visible in [true, false] {
+        let (mut wb, id) = book("=[@Qty]*[@Price]");
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        wb.set_table_total(id, 2, TableTotal {
+            function: Some("custom".into()), formula: Some("=SUM([Qty])+SUM([Price])+B2".into()), label: None,
+        }).unwrap();
+        if !visible { wb.set_table_totals_visible(id, false, Default::default()).unwrap(); }
+        let original = wb.table(id).unwrap().1.clone();
+        let history = wb.prepare_table_column_history(0, 1, 1, true).unwrap().unwrap();
+        wb.apply_table_column_history(&history, false).unwrap();
+        let table = wb.table(id).unwrap().1;
+        assert_eq!(table.columns.len(), 2);
+        assert_eq!(table.totals.as_ref().unwrap().columns.len(), 2);
+        let source = table.totals.as_ref().unwrap().columns[1].formula.as_ref().unwrap();
+        assert!(source.contains("SUM(#REF!)"), "{source}");
+        assert!(source.ends_with("+#REF!"), "{source}");
+        if visible { assert_eq!(wb.sheet(0).unwrap().get_raw(4, 1), *source); }
+        wb.apply_table_column_history(&history, true).unwrap();
+        assert_eq!(wb.table(id).unwrap().1.totals, original.totals);
+        if visible { assert_eq!(wb.sheet(0).unwrap().get_display(4, 2), "46"); }
+        wb.apply_table_column_history(&history, false).unwrap();
+        let revision = wb.revision();
+        wb.set_cell_value_tracked(1, 9, 0, "Later edit");
+        assert!(wb.apply_table_column_history(&history, true).is_err());
+        assert_eq!(wb.revision(), revision + 1);
+        assert_eq!(wb.sheet(1).unwrap().get_raw(9, 0), "Later edit");
+    }
+}
+
+#[test]
+fn column_moves_rewrite_other_sheet_totals_and_keep_dormant_local_context() {
+    use visigrid_engine::table::TableTotal;
+    let (mut wb, id) = book("=[@Qty]*[@Price]");
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    wb.set_cell_value_tracked(1, 3, 3, "Remote");
+    wb.set_cell_value_tracked(1, 4, 3, "7");
+    let other_sheet = wb.sheet(1).unwrap().id;
+    let other = wb.create_table(other_sheet, TableRange { start_row: 3, end_row: 4, start_col: 3, end_col: 3 }, "Other").unwrap().table_id();
+    wb.set_table_totals_visible(other, true, Default::default()).unwrap();
+    wb.set_table_total(other, 3, TableTotal {
+        function: Some("custom".into()), formula: Some("=SUM(Sales[Qty])+Data!A2+SUM([Remote])".into()), label: None,
+    }).unwrap();
+    wb.set_table_totals_visible(other, false, Default::default()).unwrap();
+    let history = wb.prepare_table_column_history(0, 0, 2, false).unwrap().unwrap();
+    wb.apply_table_column_history(&history, false).unwrap();
+    assert_eq!(wb.table(other).unwrap().1.totals.as_ref().unwrap().columns[0].formula.as_deref(),
+        Some("=SUM(Sales[Qty])+Data!C2+SUM([Remote])"));
+    wb.apply_table_column_history(&history, true).unwrap();
+    wb.set_table_totals_visible(other, true, Default::default()).unwrap();
+    assert_eq!(wb.sheet(1).unwrap().get_display(5, 3), "15");
+    let (mut deleted, _) = wb.prepare_guarded_structure(0, vec![visigrid_engine::workbook::StructureStep {
+        axis: Axis::Col, at: 0, count: 1, delete: true,
+    }]).unwrap();
+    assert!(deleted.sheet(1).unwrap().get_raw(5, 3).contains("SUM(#REF!)"));
+    assert!(deleted.table(other).unwrap().1.totals.as_ref().unwrap().columns[0].formula.as_ref().unwrap().contains("SUM(#REF!)"));
+    let revision = deleted.revision();
+    assert!(deleted.structural_edit(0, Axis::Col, 0, 2, true).is_err());
+    assert_eq!(deleted.revision(), revision);
+}

@@ -13,8 +13,20 @@ impl Spreadsheet {
     /// Show the create named range dialog
     pub fn show_create_named_range(&mut self, cx: &mut Context<Self>) {
         self.lua_console.visible = false;
-        // Build target string from current selection
-        let target = self.selection_to_reference_string();
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.sync_table_view(cx);
+        if !self.view_state.additional_selections.is_empty() {
+            self.status_message = Some("Select one rectangular range to name.".into());
+            cx.notify(); return;
+        }
+        let range = match super::plan::selection_range(self.wb(cx), &self.row_view,
+            self.view_state.selected, self.view_state.selection_end.unwrap_or(self.view_state.selected)) {
+            Ok(range) => range,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        let target = format!("'{}'!{}", self.sheet(cx).name.replace('\'', "''"), range.reference_string());
+        self.name_draft_error = None;
+        self.name_draft = Some(super::plan::NameDraft { revision: self.wb(cx).revision(), range });
 
         self.create_name_name = String::new();
         self.create_name_description = String::new();
@@ -27,6 +39,8 @@ impl Spreadsheet {
 
     /// Hide the create named range dialog
     pub fn hide_create_named_range(&mut self, cx: &mut Context<Self>) {
+        self.name_draft_error = None;
+        self.name_draft = None;
         self.create_name_name.clear();
         self.create_name_description.clear();
         self.create_name_target.clear();
@@ -90,95 +104,23 @@ impl Spreadsheet {
 
     /// Confirm creation of the named range
     pub fn confirm_create_named_range(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        // Validate first
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.validate_create_name(cx);
-        if self.create_name_validation_error.is_some() {
-            return;
-        }
-
-        let name = self.create_name_name.clone();
-        let description = if self.create_name_description.is_empty() {
-            None
-        } else {
-            Some(self.create_name_description.clone())
+        if self.create_name_validation_error.is_some() { return; }
+        let mut range = match self.named_range_draft(cx) {
+            Ok(range) => range,
+            Err(error) => { self.create_name_validation_error = Some(error); cx.notify(); return; }
         };
-
-        // Parse the selection and create the named range
-        let (anchor_row, anchor_col) = self.view_state.selected;
-        let (end_row, end_col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-        let (start_row, start_col, end_row, end_col) = (
-            anchor_row.min(end_row),
-            anchor_col.min(end_col),
-            anchor_row.max(end_row),
-            anchor_col.max(end_col),
-        );
-        let sheet = self.wb(cx).active_sheet_index();
-
-        let result = if start_row == end_row && start_col == end_col {
-            // Single cell
-            self.wb_mut(cx, |wb| wb.define_name_for_cell(&name, sheet, start_row, start_col))
+        range.name = self.create_name_name.trim().to_string();
+        range.description = (!self.create_name_description.is_empty()).then(|| self.create_name_description.clone());
+        let name = range.name.clone();
+        if self.apply_named_range_edit(visigrid_engine::workbook::NamedRangeEdit::Create(range), format!("Create named range: {name}"), cx) {
+            self.log_refactor("Created named range", &format!("{} → {}", name, self.create_name_target), None);
+            self.status_message = Some(format!("Created named range '{}' → {}", name, self.create_name_target));
+            self.hide_create_named_range(cx);
         } else {
-            // Range
-            self.wb_mut(cx, |wb| wb.define_name_for_range(
-                &name, sheet, start_row, start_col, end_row, end_col
-            ))
-        };
-
-        match result {
-            Ok(()) => {
-                // Add description if provided
-                if let Some(desc) = description {
-                    self.workbook.update(cx, |wb, _| {
-                        if let Some(nr) = wb.named_ranges_mut().get(&name).cloned() {
-                            let mut updated = nr;
-                            updated.description = Some(desc);
-                            let _ = wb.named_ranges_mut().set(updated);
-                        }
-                    });
-                }
-
-                self.is_modified = true;
-
-                // Log the creation
-                let target = self.create_name_target.clone();
-                self.log_refactor(
-                    "Created named range",
-                    &format!("{} → {}", name, target),
-                    None,
-                );
-
-                self.status_message = Some(format!(
-                    "Created named range '{}' → {}",
-                    name,
-                    self.create_name_target
-                ));
-                self.hide_create_named_range(cx);
-            }
-            Err(e) => {
-                self.create_name_validation_error = Some(e);
-                cx.notify();
-            }
+            self.create_name_validation_error = self.status_message.clone();
         }
     }
 
-    /// Convert current selection to a reference string (e.g., "A1" or "A1:B10")
-    pub(crate) fn selection_to_reference_string(&self) -> String {
-        let (anchor_row, anchor_col) = self.view_state.selected;
-        let (end_row, end_col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-        let (start_row, start_col, end_row, end_col) = (
-            anchor_row.min(end_row),
-            anchor_col.min(end_col),
-            anchor_row.max(end_row),
-            anchor_col.max(end_col),
-        );
-
-        let start_ref = format!("{}{}", Self::col_to_letter(start_col), start_row + 1);
-
-        if start_row == end_row && start_col == end_col {
-            start_ref
-        } else {
-            format!("{}:{}{}", start_ref, Self::col_to_letter(end_col), end_row + 1)
-        }
-    }
 }

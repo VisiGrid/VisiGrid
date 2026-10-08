@@ -1482,7 +1482,7 @@ sheet:cols()
             self.row_view = after_row_view.clone();
             self.row_heights.insert(sheet_id, after_row_heights.clone());
 
-            self.history.record_action_with_provenance(
+            self.record_action_with_provenance(cx,
                 crate::history::UndoAction::PlanCommit {
                     commit: Box::new(commit),
                     sheet_id,

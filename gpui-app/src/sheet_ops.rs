@@ -13,119 +13,100 @@ use gpui::*;
 use visigrid_engine::sheet::Sheet;
 use visigrid_engine::workbook::Workbook;
 use crate::app::{Spreadsheet, display_filename, ext_lower, is_native_ext, DocumentMeta, DocumentSource};
+use crate::history::{CellChange, CellFormatPatch, FormatActionKind, MutationSource, UndoAction};
 use crate::mode::Mode;
 use crate::session::SessionManager;
 use crate::window_registry::{WindowInfo, WindowRegistry};
+
+#[derive(Clone, Debug)]
+pub(crate) struct SheetRenameDraft {
+    revision: u64,
+    sheet: visigrid_engine::sheet::SheetId,
+    name: String,
+    generations: Vec<(visigrid_engine::sheet::SheetId, String, u64)>,
+}
+impl SheetRenameDraft {
+    fn capture(wb: &Workbook, index: usize) -> Result<Self, String> {
+        wb.ensure_writable()?;
+        let sheet = wb.sheet(index).ok_or("The sheet no longer exists.")?;
+        Ok(Self { revision: wb.revision(), sheet: sheet.id, name: sheet.name.clone(),
+            generations: wb.sheets().iter().map(|s| (s.id, s.name.clone(), s.edit_generation())).collect() })
+    }
+    fn prepare(&self, wb: &Workbook, name: &str) -> Result<(Workbook, visigrid_engine::workbook::GuardedStructureCommit), String> {
+        if wb.revision() != self.revision
+            || wb.sheets().iter().map(|s| (s.id, s.name.clone(), s.edit_generation())).collect::<Vec<_>>() != self.generations {
+            return Err("The workbook changed while renaming. Cancel and start the rename again.".into());
+        }
+        wb.prepare_sheet_rename(self.sheet, &self.name, name)
+    }
+}
 
 impl Spreadsheet {
     // =========================================================================
     // Freeze Panes
     // =========================================================================
 
-    /// Freeze the top row (row 0)
     pub fn freeze_top_row(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = 1;
-        self.view_state.frozen_cols = 0;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: 1, new_frozen_cols: 0,
-            }, None);
-        self.status_message = Some("Frozen top row".to_string());
-        cx.notify();
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.change_freeze_panes((1, 0), "Frozen top row", cx);
     }
 
-    /// Freeze the first column (column A)
     pub fn freeze_first_column(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = 0;
-        self.view_state.frozen_cols = 1;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: 0, new_frozen_cols: 1,
-            }, None);
-        self.status_message = Some("Frozen first column".to_string());
-        cx.notify();
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.change_freeze_panes((0, 1), "Frozen first column", cx);
     }
 
-    /// Freeze panes at the current selection
-    /// Freezes all rows above and all columns to the left of the active cell
+    /// Freeze boundaries are view-slot positions, not canonical record identities.
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        let (row, col) = self.view_state.selected;
-        if row == 0 && col == 0 {
-            // Nothing to freeze - show message
-            self.status_message = Some("Select a cell to freeze rows above and columns to the left".to_string());
-            cx.notify();
-            return;
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        let (row, col) = self.active_view_state().selected;
+        if (row, col) == (0, 0) {
+            self.status_message = Some("Select a cell to freeze rows above and columns to the left".into());
+            cx.notify(); return;
         }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = row;
-        self.view_state.frozen_cols = col;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: row, new_frozen_cols: col,
-            }, None);
-        let msg = match (row, col) {
-            (0, c) => format!("Frozen {} column{}", c, if c == 1 { "" } else { "s" }),
-            (r, 0) => format!("Frozen {} row{}", r, if r == 1 { "" } else { "s" }),
-            (r, c) => format!("Frozen {} row{} and {} column{}", r, if r == 1 { "" } else { "s" }, c, if c == 1 { "" } else { "s" }),
+        let message = match (row, col) {
+            (0, c) => format!("Frozen columns before {}", Self::col_letter(c)),
+            (r, 0) => format!("Frozen rows above {}", r + 1),
+            (r, c) => format!("Frozen rows above {} and columns before {}", r + 1, Self::col_letter(c)),
         };
-        self.status_message = Some(msg);
-        cx.notify();
+        self.change_freeze_panes((row, col), &message, cx);
     }
 
-    /// Remove all freeze panes
     pub fn unfreeze_panes(&mut self, cx: &mut Context<Self>) {
-        if self.block_active_sheet_metadata_edit(cx) { return; }
-        if self.view_state.frozen_rows == 0 && self.view_state.frozen_cols == 0 {
-            self.status_message = Some("No frozen panes to unfreeze".to_string());
-            cx.notify();
-            return;
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.change_freeze_panes((0, 0), "Unfrozen all panes", cx);
+    }
+
+    fn change_freeze_panes(&mut self, frozen: (usize, usize), message: &str, cx: &mut Context<Self>) {
+        let sheet_id = self.sheet(cx).id;
+        let before = self.sheet(cx).frozen_panes;
+        if before == frozen {
+            self.status_message = Some("Freeze panes are already set this way".into());
+            cx.notify(); return;
         }
-        let old_rows = self.view_state.frozen_rows;
-        let old_cols = self.view_state.frozen_cols;
-        self.view_state.frozen_rows = 0;
-        self.view_state.frozen_cols = 0;
-        self.clamp_scroll_to_freeze(cx);
-        self.history.record_action_with_provenance(
-            crate::history::UndoAction::FreezePanesChanged {
-                sheet_id: self.sheet(cx).id,
-                old_frozen_rows: old_rows, old_frozen_cols: old_cols,
-                new_frozen_rows: 0, new_frozen_cols: 0,
-            }, None);
-        self.status_message = Some("Unfrozen all panes".to_string());
+        let result = self.workbook.update(cx, |wb, _| crate::table_command_scope::restore_freeze_panes(wb, sheet_id, frozen));
+        if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
+        self.sync_freeze_panes(frozen);
+        self.record_action_with_provenance(cx, crate::history::UndoAction::FreezePanesChanged {
+            sheet_id, old_frozen_rows: before.0, old_frozen_cols: before.1,
+            new_frozen_rows: frozen.0, new_frozen_cols: frozen.1,
+        }, None);
+        self.is_modified = true;
+        self.request_title_refresh(cx);
+        self.status_message = Some(message.into());
         cx.notify();
     }
 
-    /// Clamp scroll position to ensure it doesn't overlap with frozen regions
-    pub(crate) fn clamp_scroll_to_freeze(&mut self, cx: &mut Context<Self>) {
-        let frozen = (self.view_state.frozen_rows, self.view_state.frozen_cols);
-        if self.wb(cx).active_sheet().frozen_panes != frozen {
-            self.wb_mut(cx, |wb| wb.active_sheet_mut().frozen_panes = frozen);
-            self.is_modified = true;
-        }
-        // When freeze panes are active, scrollable region starts after frozen rows/cols
-        // Ensure scroll position doesn't show frozen rows/cols in the scrollable area
-        if self.view_state.frozen_rows > 0 && self.view_state.scroll_row < self.view_state.frozen_rows {
-            self.view_state.scroll_row = self.view_state.frozen_rows;
-        }
-        if self.view_state.frozen_cols > 0 && self.view_state.scroll_col < self.view_state.frozen_cols {
-            self.view_state.scroll_col = self.view_state.frozen_cols;
+    pub(crate) fn sync_freeze_panes(&mut self, frozen: (usize, usize)) {
+        self.view_state.frozen_rows = frozen.0;
+        self.view_state.frozen_cols = frozen.1;
+        self.view_state.scroll_row = self.view_state.scroll_row.max(frozen.0);
+        self.view_state.scroll_col = self.view_state.scroll_col.max(frozen.1);
+        if let Some(pane) = &mut self.split_pane {
+            pane.view_state.frozen_rows = frozen.0;
+            pane.view_state.frozen_cols = frozen.1;
+            pane.view_state.scroll_row = pane.view_state.scroll_row.max(frozen.0);
+            pane.view_state.scroll_col = pane.view_state.scroll_col.max(frozen.1);
         }
     }
 
@@ -316,6 +297,61 @@ impl Spreadsheet {
     #[inline]
     pub fn wb_mut<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Workbook) -> R) -> R {
         self.workbook.update(cx, |wb, _| f(wb))
+    }
+
+    pub fn record_change(&mut self, cx: &App, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
+        let live = self.workbook.clone();
+        self.history.record_change(live.read(cx), sheet_index, row, col, old_value, new_value);
+    }
+
+    pub fn record_change_with_source(&mut self, cx: &App, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.record_change_with_source(live.read(cx), sheet_index, row, col, old_value, new_value, source);
+    }
+
+    pub fn record_batch(&mut self, cx: &App, sheet_index: usize, changes: Vec<CellChange>) {
+        let live = self.workbook.clone();
+        self.history.record_batch(live.read(cx), sheet_index, changes);
+    }
+
+    pub fn record_batch_from(&mut self, cx: &App, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.record_batch_from(live.read(cx), sheet_index, changes, source);
+    }
+
+    pub fn record_batch_with_provenance(&mut self, cx: &App, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<visigrid_engine::provenance::Provenance>) {
+        let live = self.workbook.clone();
+        self.history.record_batch_with_provenance(live.read(cx), sheet_index, changes, provenance);
+    }
+
+    pub fn record_format(&mut self, cx: &App, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
+        let live = self.workbook.clone();
+        self.history.record_format(live.read(cx), sheet_index, patches, kind, description);
+    }
+
+    pub fn record_format_from(&mut self, cx: &App, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.record_format_from(live.read(cx), sheet_index, patches, kind, description, source);
+    }
+
+    pub fn record_format_with_provenance(&mut self, cx: &App, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String, provenance: Option<visigrid_engine::provenance::Provenance>) {
+        let live = self.workbook.clone();
+        self.history.record_format_with_provenance(live.read(cx), sheet_index, patches, kind, description, provenance);
+    }
+
+    pub fn record_named_range_action(&mut self, cx: &App, action: UndoAction) {
+        let live = self.workbook.clone();
+        self.history.record_named_range_action(live.read(cx), action);
+    }
+
+    pub fn record_action_with_provenance(&mut self, cx: &App, action: UndoAction, provenance: Option<visigrid_engine::provenance::Provenance>) {
+        let live = self.workbook.clone();
+        self.history.record_action_with_provenance(live.read(cx), action, provenance);
+    }
+
+    pub fn retag_last_source(&mut self, cx: &App, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.retag_last_source(live.read(cx), source);
     }
 
     /// Shorthand for sheet mutation by index: `self.sheet_mut(idx, cx, |s| s.method())`
@@ -684,12 +720,17 @@ impl Spreadsheet {
 
     /// Add a new sheet and switch to it
     pub fn add_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        let new_index = self.wb_mut(cx, |wb| wb.add_sheet());
-        self.activate_sheet(new_index, cx);
-        self.clear_selection_state();
-        self.is_modified = true;
-        cx.notify();
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        self.cancel_sheet_rename(cx);
+        let result = self.wb(cx).prepare_sheet_add(None).and_then(|(mut candidate, commit)| {
+            let index = candidate.sheet_count() - 1;
+            let name = candidate.sheets()[index].name.clone();
+            candidate.set_active_sheet(index);
+            self.publish_table_batch(candidate, commit, format!("Add sheet '{name}'"), crate::history::MutationSource::Human, cx)
+        });
+        if let Err(error) = result { self.status_message = Some(error); cx.notify(); }
     }
 
     /// Clear selection state when switching sheets
@@ -710,76 +751,49 @@ impl Spreadsheet {
 
     /// Start renaming a sheet (double-click on tab or context menu)
     pub fn start_sheet_rename(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        if let Some(name) = self.wb(cx).sheet_names().get(index).map(|s| s.to_string()) {
-            self.renaming_sheet = Some(index);
-            self.sheet_rename_input = name;
-            self.sheet_rename_cursor = self.sheet_rename_input.len();
-            self.sheet_rename_select_all = true;  // Select all on start
-            self.sheet_context_menu = None;
-            self.start_caret_blink(cx);
-            cx.notify();
-        }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        let draft = match SheetRenameDraft::capture(self.wb(cx), index) {
+            Ok(draft) => draft,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
+        };
+        self.renaming_sheet = Some(index);
+        self.sheet_rename_input = draft.name.clone();
+        self.sheet_rename_draft = Some(draft);
+        self.sheet_rename_cursor = self.sheet_rename_input.len();
+        self.sheet_rename_select_all = true;
+        self.sheet_context_menu = None;
+        self.start_caret_blink(cx);
+        cx.notify();
     }
 
-    /// Confirm the sheet rename with validation.
-    /// Rejects: empty names, duplicates, too long. Trims whitespace.
+    /// Rename the sheet and every authored qualifier in one guarded batch.
     pub fn confirm_sheet_rename(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        if let Some(index) = self.renaming_sheet {
-            let new_name = self.sheet_rename_input.trim();
-
-            // Helper to reset rename state
-            let reset_state = |this: &mut Self| {
-                this.renaming_sheet = None;
-                this.sheet_rename_input.clear();
-                this.sheet_rename_cursor = 0;
-                this.sheet_rename_select_all = false;
-                this.stop_caret_blink();
-            };
-
-            // Validation: reject empty names
-            if new_name.is_empty() {
-                self.status_message = Some("Sheet name cannot be empty".to_string());
-                reset_state(self);
-                cx.notify();
-                return;
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        if self.renaming_sheet.is_none() { return; }
+        let name = self.sheet_rename_input.trim().to_string();
+        let result = self.sheet_rename_draft.as_ref()
+            .ok_or_else(|| "Cancel and start the sheet rename again.".to_string())
+            .and_then(|draft| draft.prepare(self.wb(cx), &name))
+            .and_then(|(candidate, commit)| {
+                if commit.is_empty() { return Ok(()); }
+                self.publish_table_batch(candidate, commit, format!("Rename sheet to '{name}'"), crate::history::MutationSource::Human, cx)
+            });
+        match result {
+            Ok(()) => {
+                self.cancel_sheet_rename(cx);
+                self.status_message = Some(format!("Renamed sheet to '{name}'"));
+                self.request_title_refresh(cx);
             }
-
-            // Validation: reject too long names (Excel uses 31 chars max)
-            if new_name.chars().count() > 31 {
-                self.status_message = Some("Sheet name cannot exceed 31 characters".to_string());
-                reset_state(self);
-                cx.notify();
-                return;
-            }
-
-            // Validation: reject duplicates (case-insensitive)
-            let is_duplicate = self.wb(cx).sheet_names()
-                .iter()
-                .enumerate()
-                .any(|(i, name)| i != index && name.eq_ignore_ascii_case(new_name));
-
-            if is_duplicate {
-                self.status_message = Some(format!("Sheet '{}' already exists", new_name));
-                reset_state(self);
-                cx.notify();
-                return;
-            }
-
-            // Apply the rename
-            let new_name_owned = new_name.to_string();
-            self.wb_mut(cx, |wb| wb.rename_sheet(index, &new_name_owned));
-            self.is_modified = true;
-
-            reset_state(self);
-            self.request_title_refresh(cx);
+            Err(error) => { self.status_message = Some(error); cx.notify(); }
         }
     }
 
     /// Cancel the sheet rename
     pub fn cancel_sheet_rename(&mut self, cx: &mut Context<Self>) {
         self.renaming_sheet = None;
+        self.sheet_rename_draft = None;
         self.sheet_rename_input.clear();
         self.sheet_rename_cursor = 0;
         self.sheet_rename_select_all = false;
@@ -911,8 +925,8 @@ impl Spreadsheet {
 
     /// Show context menu for a sheet tab
     pub fn show_sheet_context_menu(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.cancel_sheet_rename(cx);
         self.sheet_context_menu = Some(index);
-        self.renaming_sheet = None;
         cx.notify();
     }
 
@@ -950,16 +964,18 @@ impl Spreadsheet {
 
     /// Delete a sheet
     pub fn delete_sheet(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        if self.wb_mut(cx, |wb| wb.delete_sheet(index)) {
-            self.is_modified = true;
-            self.sheet_context_menu = None;
-            self.request_title_refresh(cx);
-        } else {
-            self.status_message = Some(if self.wb(cx).sheet_count() <= 1 { "Cannot delete the last sheet" } else { "Cannot delete this sheet while its Tables are referenced. Convert those Tables to ranges first." }.to_string());
-            self.sheet_context_menu = None;
-            cx.notify();
-        }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        self.cancel_sheet_rename(cx);
+        let result = self.wb(cx).sheet(index)
+            .ok_or_else(|| "The sheet no longer exists.".to_string())
+            .and_then(|sheet| self.wb(cx).prepare_sheet_delete(sheet.id).map(|prepared| (prepared, sheet.name.clone())))
+            .and_then(|((candidate, commit), name)| self.publish_table_batch(
+                candidate, commit, format!("Delete sheet '{name}'"), crate::history::MutationSource::Human, cx));
+        self.sheet_context_menu = None;
+        if let Err(error) = result { self.status_message = Some(error); }
+        cx.notify();
     }
 }
 
@@ -1124,3 +1140,11 @@ pub fn install_close_guard(
         })
     });
 }
+
+#[cfg(test)]
+#[path = "sheet_rename_tests.rs"]
+mod table_sheet_rename_tests;
+
+#[cfg(test)]
+#[path = "sheet_lifecycle_tests.rs"]
+mod sheet_lifecycle_tests;

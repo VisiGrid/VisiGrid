@@ -301,7 +301,7 @@ impl Spreadsheet {
             Some(false) => { self.cancel_edit(cx); return; }
             Some(true) => {}
             None => {
-                self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+                self.record_change(cx, self.sheet_index(cx), row, col, old_value, new_value.clone());
                 self.set_cell_value(row, col, &new_value, cx);
             }
         }  // Use helper that updates dep graph
@@ -323,8 +323,7 @@ impl Spreadsheet {
         // Auto-clear invalid marker if cell is now valid (Phase 6C)
         if self.invalid_cells.contains_key(&(row, col)) {
             use visigrid_engine::validation::ValidationResult;
-            let display_value = self.sheet(cx).get_display(row, col);
-            let result = self.wb(cx).validate_cell_input(self.sheet_index(cx), row, col, &display_value);
+            let result = self.wb(cx).validate_cell(self.sheet_index(cx), row, col);
             if matches!(result, ValidationResult::Valid) {
                 self.clear_cell_invalid(row, col);
             }
@@ -1024,7 +1023,7 @@ impl Spreadsheet {
         // Record batch for undo
         let had_changes = !changes.is_empty();
         if had_changes {
-            self.history.record_batch(sheet_index, changes);
+            self.record_batch(cx, sheet_index, changes);
         }
 
         // Exit edit mode
@@ -1443,7 +1442,7 @@ impl Spreadsheet {
             Some(false) => { self.cancel_edit(cx); return false; }
             Some(true) => {}
             None => {
-                self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value.clone());
+                self.record_change(cx, self.sheet_index(cx), row, col, old_value, new_value.clone());
                 self.set_cell_value(row, col, &new_value, cx);
             }
         }
@@ -1639,7 +1638,7 @@ impl Spreadsheet {
                 cells: target_cells.clone(),
                 value: base_value.clone(),
             }.to_provenance(&sheet_name);
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
@@ -1741,7 +1740,7 @@ impl Spreadsheet {
         };
         let old_value = self.sheet(cx).get_raw(row, col);
         self.set_cell_value(row, col, &new_value, cx);
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, new_value);
+        self.record_change(cx, self.sheet_index(cx), row, col, old_value, new_value);
         self.is_modified = true;
         self.status_message = Some("Copied formula from above".to_string());
         cx.notify();
@@ -1763,7 +1762,7 @@ impl Spreadsheet {
         }
         let old_value = self.sheet(cx).get_raw(row, col);
         self.set_cell_value(row, col, &display, cx);
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, display);
+        self.record_change(cx, self.sheet_index(cx), row, col, old_value, display);
         self.is_modified = true;
         self.status_message = Some("Copied value from above".to_string());
         cx.notify();

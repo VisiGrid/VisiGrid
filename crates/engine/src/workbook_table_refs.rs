@@ -7,13 +7,34 @@ use crate::cell_id::CellId;
 use crate::formula::parser::{format_expr, BoundExpr, Expr};
 use crate::formula::structured::{self, StructuredReference};
 use crate::sheet::SheetId;
-use crate::table::DataTable;
+use crate::table::{DataTable, TableId, TableTotals};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct TableFormulaChange {
     pub cell: CellId,
     pub before: String,
     pub after: String,
+}
+
+/// Compare the input schemas before derived formula rewrites are applied.
+pub(crate) fn names_only(before: &DataTable, after: &DataTable) -> bool {
+    if before.columns.len() != after.columns.len() {
+        return false;
+    }
+    let mut normalized = after.clone();
+    normalized.name = before.name.clone();
+    for (old, new) in before.columns.iter().zip(&mut normalized.columns) {
+        new.name = old.name.clone();
+    }
+    normalized == *before
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct TotalsReferenceChange {
+    pub sheet: SheetId,
+    pub table: TableId,
+    pub before: TableTotals,
+    pub after: TableTotals,
 }
 
 impl Workbook {
@@ -28,7 +49,7 @@ impl Workbook {
     ) -> bool {
         match &reference.table {
             Some(name) => name.eq_ignore_ascii_case(&table.name),
-            None => sheet == owner_sheet && table.range.contains(row, col),
+            None => sheet == owner_sheet && table.full_range().contains(row, col),
         }
     }
 
@@ -42,7 +63,7 @@ impl Workbook {
             for ((row, col), cell) in sheet.cells_iter() {
                 if sheet.id == owner_sheet
                     && row == table.range.start_row
-                    && table.range.contains(row, col)
+                    && table.full_range().contains(row, col)
                 {
                     continue;
                 }
@@ -73,12 +94,32 @@ impl Workbook {
         owner_sheet: SheetId,
         before: Option<&DataTable>,
         after: Option<&DataTable>,
+        allow_totals: bool,
     ) -> Result<Vec<TableFormulaChange>, String> {
         let Some(before) = before else {
             return Ok(Vec::new());
         };
+        // Growing the body preserves every existing structured token and its
+        // local owner. Dependencies are rebound separately after membership changes.
+        if after.is_some_and(|after| before.name == after.name && before.columns == after.columns
+            && before.range.start_row == after.range.start_row && before.range.start_col == after.range.start_col
+            && before.range.end_col == after.range.end_col && after.range.end_row >= before.range.end_row) {
+            return Ok(Vec::new());
+        }
         let mut changes = Vec::new();
         for sheet in self.sheets() {
+            for table in sheet.tables().iter().filter(|t| t.id != before.id) {
+                if let Some(totals) = table.totals.as_ref().filter(|_| !allow_totals) {
+                    for (offset, total) in totals.columns.iter().enumerate() {
+                        if let Some(source) = &total.formula {
+                            if self.rewrite_named_table_formula_source(owner_sheet, before, after, sheet.id,
+                                table.range.end_row + 1, table.range.start_col + offset, source)? != *source {
+                                return Err("This schema change would rewrite totals metadata. Totals reference rewriting is not supported yet.".into());
+                            }
+                        }
+                    }
+                }
+            }
             for ((row, col), cell) in sheet.cells_iter() {
                 let ValueRef::Formula {
                     source,
@@ -98,6 +139,9 @@ impl Workbook {
                     source,
                 )?;
                 if rewritten != source {
+                    if !allow_totals && sheet.table_at(row, col).is_some_and(|t| t.totals_row() == Some(row) && t.id != before.id) {
+                        return Err("This schema change would rewrite a totals formula. Totals reference rewriting is not supported yet.".into());
+                    }
                     changes.push(TableFormulaChange {
                         cell: CellId::new(sheet.id, row, col),
                         before: source.to_string(),
@@ -108,6 +152,78 @@ impl Workbook {
         }
         changes.sort_by_key(|c| (c.cell.sheet.0, c.cell.row, c.cell.col));
         Ok(changes)
+    }
+
+    pub(crate) fn totals_reference_changes(
+        &self,
+        owner: SheetId,
+        before: &DataTable,
+        after: &DataTable,
+    ) -> Result<Vec<TotalsReferenceChange>, String> {
+        let mut changes = Vec::new();
+        for (sheet, table) in self.tables() {
+            let Some(totals) = &table.totals else { continue; };
+            let mut rewritten = if table.id == before.id {
+                after.totals.clone().unwrap()
+            } else { totals.clone() };
+            // Dormant footers still bind local references to their owning Table.
+            let mut context = before.clone();
+            let mut target = after.clone();
+            if table.id == before.id {
+                context.totals.as_mut().unwrap().visible = true;
+                target.totals.as_mut().unwrap().visible = true;
+            }
+            for (offset, total) in rewritten.columns.iter_mut().enumerate() {
+                if let Some(source) = &mut total.formula {
+                    let old_offset = if table.id == before.id {
+                        table.columns.iter().position(|c| c.id == after.columns[offset].id)
+                            .ok_or("A new totals column cannot already have a custom formula.")?
+                    } else { offset };
+                    *source = if table.id == before.id {
+                        self.rewrite_table_formula_source(
+                            owner, &context, Some(&target), sheet,
+                            table.range.end_row + 1, table.range.start_col + old_offset, source,
+                        )?
+                    } else {
+                        self.rewrite_named_table_formula_source(
+                            owner, &context, Some(&target), sheet,
+                            table.range.end_row + 1, table.range.start_col + old_offset, source,
+                        )?
+                    };
+                }
+            }
+            if rewritten != *totals {
+                changes.push(TotalsReferenceChange {
+                    sheet, table: table.id, before: totals.clone(), after: rewritten,
+                });
+            }
+        }
+        Ok(changes)
+    }
+
+    /// A foreign Table's retained totals formula has its own local context,
+    /// even when its dormant footer position lies inside the edited Table.
+    /// Only explicit references to the edited Table can bind here.
+    pub(crate) fn rewrite_named_table_formula_source(
+        &self,
+        owner_sheet: SheetId,
+        before: &DataTable,
+        after: Option<&DataTable>,
+        sheet: SheetId,
+        row: usize,
+        col: usize,
+        source: &str,
+    ) -> Result<String, String> {
+        let mut rewritten = source.to_owned();
+        for (start, end, reference) in structured::source_references(source).into_iter().rev() {
+            if reference.table.as_ref().is_some_and(|name| name.eq_ignore_ascii_case(&before.name)) {
+                let replacement = self.rewrite_table_formula_source(
+                    owner_sheet, before, after, sheet, row, col, &source[start..end],
+                )?;
+                rewritten.replace_range(start..end, &replacement);
+            }
+        }
+        Ok(rewritten)
     }
 
     pub(crate) fn rewrite_table_formula_source(
@@ -157,7 +273,7 @@ impl Workbook {
                 }
                 // A released row must not silently adopt another table's
                 // local context when that rectangle is reused later.
-                if reference.table.is_none() && !after.range.contains(row, col) {
+                if reference.table.is_none() && !after.full_range().contains(row, col) {
                     rewritten.table = Some(after.name.clone());
                 }
                 if rewritten == reference {
@@ -208,18 +324,14 @@ impl Workbook {
             .filter(|s| s.id != sheet_id)
             .any(|sheet| {
                 sheet.tables().iter().any(|t| {
-                    t.columns.iter().any(|c| {
-                        c.formula.as_ref().is_some_and(|source| {
-                            structured::source_references(source)
-                                .iter()
-                                .any(|(_, _, r)| {
-                                    r.table.as_ref().is_some_and(|name| {
-                                        owner
-                                            .tables()
-                                            .iter()
-                                            .any(|owned| owned.name.eq_ignore_ascii_case(name))
-                                    })
-                                })
+                    let rules = t.columns.iter().filter_map(|c| c.formula.as_deref());
+                    let totals = t.totals.iter().flat_map(|totals|
+                        totals.columns.iter().filter_map(|c| c.formula.as_deref()));
+                    rules.chain(totals).any(|source| {
+                        structured::source_references(source).iter().any(|(_, _, r)| {
+                            r.table.as_ref().is_some_and(|name| {
+                                owner.tables().iter().any(|owned| owned.name.eq_ignore_ascii_case(name))
+                            })
                         })
                     })
                 }) || sheet.cells_iter().any(|((row, col), cell)| {

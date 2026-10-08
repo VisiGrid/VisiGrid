@@ -377,7 +377,7 @@ fn test_multi_edit_applies_once_and_single_undo() {
 
     // Record as single batch (this is what multi-edit does)
     // sheet_index = 0 for this test
-    history.record_batch(0, changes);
+    history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes);
 
     // Verify all 6 cells have the formula
     for (row, col) in selection.iter() {
@@ -434,22 +434,22 @@ fn test_format_coalescing_same_cells_merges() {
     let mut history = History::new();
 
     // First decimal change on cell (0,0)
-    let patches1 = vec![CellFormatPatch {
+    let patches1 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 0,
         before: CellFormat::default(),
         after: CellFormat { bold: true, ..Default::default() },
     }];
-    history.record_format(0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Second decimal change on same cell within 500ms window
-    let patches2 = vec![CellFormatPatch {
+    let patches2 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 0,
         before: CellFormat { bold: true, ..Default::default() },
         after: CellFormat { bold: true, italic: true, ..Default::default() },
     }];
-    history.record_format(0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Should have coalesced into single entry
     let entry = history.undo().expect("Should have undo entry");
@@ -475,22 +475,22 @@ fn test_format_coalescing_different_cells_separate() {
     let mut history = History::new();
 
     // First decimal change on cell (0,0)
-    let patches1 = vec![CellFormatPatch {
+    let patches1 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 0,
         before: CellFormat::default(),
         after: CellFormat { bold: true, ..Default::default() },
     }];
-    history.record_format(0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Second decimal change on DIFFERENT cell (0,1) within 500ms window
-    let patches2 = vec![CellFormatPatch {
+    let patches2 = vec![CellFormatPatch { remove_cell_on_undo: false,
         row: 0,
         col: 1,  // Different column!
         before: CellFormat::default(),
         after: CellFormat { bold: true, ..Default::default() },
     }];
-    history.record_format(0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Should have TWO separate entries because cells are different
     let entry1 = history.undo().expect("Should have first undo entry");
@@ -543,11 +543,11 @@ fn test_format_undo_restores_mixed_state() {
 
     // Record format change with individual before/after for each cell
     let patches = vec![
-        CellFormatPatch { row: 0, col: 0, before: before_a1.clone(), after: sheet.get_format(0, 0) },
-        CellFormatPatch { row: 1, col: 0, before: before_a2.clone(), after: sheet.get_format(1, 0) },
-        CellFormatPatch { row: 2, col: 0, before: before_a3.clone(), after: sheet.get_format(2, 0) },
+        CellFormatPatch { remove_cell_on_undo: false, row: 0, col: 0, before: before_a1.clone(), after: sheet.get_format(0, 0) },
+        CellFormatPatch { remove_cell_on_undo: false, row: 1, col: 0, before: before_a2.clone(), after: sheet.get_format(1, 0) },
+        CellFormatPatch { remove_cell_on_undo: false, row: 2, col: 0, before: before_a3.clone(), after: sheet.get_format(2, 0) },
     ];
-    history.record_format(0, patches, FormatActionKind::Bold, "Bold on".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::Bold, "Bold on".into());
 
     // Now undo
     let entry = history.undo().expect("Should have undo entry");
@@ -900,7 +900,7 @@ fn apply_ops_with_history(
     }
 
     // Record as single batch (like Lua script commit)
-    history.record_batch(0, changes.clone());
+    history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes.clone());
 
     changes
 }
@@ -1416,7 +1416,7 @@ fn test_fill_handle_undo_single_entry() {
     }
 
     // Record as single batch
-    history.record_batch(0, changes);
+    history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes);
 
     // Verify fill occurred
     assert_eq!(sheet.get_raw(1, 0), "100", "A2 filled");
@@ -2879,6 +2879,7 @@ fn no_untracked_cell_mutations() {
     // PR reviewers: any addition here deserves scrutiny.
     let whitelist_files: &[(&str, &str)] = &[
         ("tests.rs",              "Test code operates on raw Sheet (no live Entity<Workbook>)"),
+        ("extract_tests.rs",      "Test-only cloned workbook edit verifies stale extraction rejects sheet writes without a workbook revision bump"),
         ("sheet_ops.rs",          "Defines the tracked wrappers (set_cell_value, clear_cell_value)"),
         ("history.rs",            "Preview replay on cloned (non-live) workbook — no recalc needed"),
         ("workbook_view.rs",      "SharedWorkbookView uses RefCell<Workbook> — separate architecture"),
@@ -2890,7 +2891,7 @@ fn no_untracked_cell_mutations() {
 
     // ── Count gate ─────────────────────────────────────────────────────────
     // If these counts change, a conscious decision was made. Make it visible.
-    assert_eq!(whitelist_files.len(), 5,
+    assert_eq!(whitelist_files.len(), 6,
         "Whitelist file count changed! If you added an entry, document why.\n\
          Current whitelist:\n{}",
         whitelist_files.iter().map(|(f, r)| format!("  {} — {}", f, r)).collect::<Vec<_>>().join("\n")
@@ -2993,15 +2994,12 @@ fn review_mode_workbook_mutators_are_guarded() {
     let metadata_scope = include_str!("table_command_scope.rs");
     assert_contains_near(metadata_scope, "block_active_sheet_metadata_edit", "block_sheet_metadata_edit(");
     for function in ["freeze_top_row", "freeze_first_column", "freeze_panes", "unfreeze_panes"] {
-        assert_contains_near(include_str!("sheet_ops.rs"), function, "block_active_sheet_metadata_edit(cx)");
+        assert_contains_near(include_str!("sheet_ops.rs"), function, "block_if_previewing_only(cx)");
     }
-    assert_contains_near(include_str!("comments.rs"), "change_comment", "block_sheet_metadata_edit(sheet_index, cx)");
+    assert_contains_near(include_str!("comments.rs"), "change_comment", "block_if_previewing_only(cx)");
     let conditional_formats = include_str!("cond_format_ui.rs");
     for function in [
         "show_add_cond_format",
-        "hide_add_cond_format",
-        "cf_input_insert_char",
-        "cf_input_backspace",
         "confirm_add_cond_format",
         "clear_cond_formats_in_selection",
         "toggle_cf_rule",
@@ -3009,7 +3007,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "move_cf_rule",
         "edit_cf_rule",
     ] {
-        assert_contains_near(conditional_formats, function, "block_active_sheet_metadata_edit(cx)");
+        assert_contains_near(conditional_formats, function, "block_if_previewing_only(cx)");
     }
 
     let validations = include_str!("dialogs.rs");
@@ -3020,7 +3018,7 @@ fn review_mode_workbook_mutators_are_guarded() {
         "exclude_from_validation",
         "clear_validation_exclusions",
     ] {
-        assert_guarded(validations, function);
+        assert_contains_near(validations, function, "block_if_previewing_only(cx)");
     }
 
     let sheets = include_str!("sheet_ops.rs");
@@ -3032,25 +3030,28 @@ fn review_mode_workbook_mutators_are_guarded() {
     assert_contains_near(sheets, "activate_sheet", "review.source_sheet_id");
     for function in [
         "add_sheet",
-        "start_sheet_rename",
-        "confirm_sheet_rename",
         "delete_sheet",
     ] {
-        assert_guarded(sheets, function);
+        assert_contains_near(sheets, function, "block_if_previewing_only(cx)");
     }
 
+    for function in ["start_sheet_rename", "confirm_sheet_rename"] {
+        assert_contains_near(sheets, function, "block_if_previewing_only(cx)");
+    }
     assert_guarded(include_str!("editing.rs"), "recalculate");
-    assert_guarded(include_str!("app.rs"), "commit_validation_value");
+    assert_contains_near(include_str!("app.rs"), "commit_validation_value", "block_if_previewing_only(cx)");
     let find_replace = include_str!("find_replace.rs");
-    assert_guarded(find_replace, "replace_next");
-    assert_guarded(find_replace, "replace_all");
+    assert_contains_near(find_replace, "replace_next", "block_if_previewing_only(cx)");
+    assert_contains_near(find_replace, "replace_all", "block_if_previewing_only(cx)");
     assert_guarded(include_str!("dialogs.rs"), "ask_ai_insert_formula");
-    assert_guarded(include_str!("named_ranges/create.rs"), "confirm_create_named_range");
-    assert_guarded(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range");
-    assert_guarded(include_str!("named_ranges/panel.rs"), "delete_named_range");
+    assert_contains_near(include_str!("named_ranges/create.rs"), "confirm_create_named_range", "block_if_previewing_only(cx)");
+    assert_contains_near(include_str!("named_ranges/extract.rs"), "confirm_extract_named_range", "block_if_previewing_only(cx)");
+    assert_contains_near(include_str!("named_ranges/panel.rs"), "delete_named_range", "block_if_previewing_only(cx)");
+    assert_contains_near(include_str!("named_ranges/plan.rs"), "apply_named_range_edit", "block_if_previewing_only(cx)");
+    assert_contains_near(include_str!("impact_preview.rs"), "apply_impact_preview", "block_if_previewing_only(cx)");
     let rename = include_str!("named_ranges/rename.rs");
-    assert_guarded(rename, "confirm_rename_symbol");
-    assert_guarded(rename, "apply_edit_description");
+    assert_contains_near(rename, "confirm_rename_symbol", "block_if_previewing_only(cx)");
+    assert_contains_near(rename, "apply_edit_description", "block_if_previewing_only(cx)");
 
     let app = include_str!("app.rs");
     for function in [
@@ -3358,11 +3359,11 @@ fn test_format_painter_undo_reverts_multi_cell() {
         if b != paint_format {
             sheet.set_format(0, col, paint_format.clone());
             let a = sheet.get_format(0, col);
-            patches.push(CellFormatPatch { row: 0, col, before: b, after: a });
+            patches.push(CellFormatPatch { remove_cell_on_undo: false, row: 0, col, before: b, after: a });
         }
     }
     assert_eq!(patches.len(), 3, "All 3 cells should change");
-    history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
 
     // Verify formats changed
     for col in 0..3 {
@@ -3442,11 +3443,11 @@ fn test_format_painter_locked_mode_persists() {
             if before != snapshot {
                 sheet.set_format(0, col, snapshot.clone());
                 let after = sheet.get_format(0, col);
-                patches.push(CellFormatPatch { row: 0, col, before, after });
+                patches.push(CellFormatPatch { remove_cell_on_undo: false, row: 0, col, before, after });
             }
         }
         assert_eq!(patches.len(), 3, "Selection A: all 3 cells should change");
-        history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+        history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
 
         // Locked mode: painter stays active (don't clear)
         assert!(painter.is_some(), "Painter should still be active after apply (locked)");
@@ -3466,11 +3467,11 @@ fn test_format_painter_locked_mode_persists() {
             if before != snapshot {
                 sheet.set_format(1, col, snapshot.clone());
                 let after = sheet.get_format(1, col);
-                patches.push(CellFormatPatch { row: 1, col, before, after });
+                patches.push(CellFormatPatch { remove_cell_on_undo: false, row: 1, col, before, after });
             }
         }
         assert_eq!(patches.len(), 3, "Selection B: all 3 cells should change");
-        history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+        history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
     }
 
     // Verify painter still active
@@ -3554,7 +3555,7 @@ fn test_format_painter_applies_to_range() {
                 if before != paint_format {
                     sheet.set_format(row, col, paint_format.clone());
                     let after = sheet.get_format(row, col);
-                    patches.push(CellFormatPatch { row, col, before, after });
+                    patches.push(CellFormatPatch { remove_cell_on_undo: false, row, col, before, after });
                 }
             }
         }
@@ -3562,7 +3563,7 @@ fn test_format_painter_applies_to_range() {
 
     // All 6 cells should have been painted
     assert_eq!(patches.len(), 6, "All 6 cells in 3×2 range should change");
-    history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
 
     // Verify all 6 cells have the painted format
     for row in 0..3 {
@@ -3930,7 +3931,7 @@ fn test_hide_unhide_rows_undo() {
     for &r in &rows_to_hide {
         hidden_rows.insert(r);
     }
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::RowVisibilityChanged {
             sheet_id,
             rows: rows_to_hide.clone(),
@@ -4310,4 +4311,24 @@ fn grid_size_has_a_single_definition() {
     // And the re-export still points at the engine's definition.
     assert_eq!(crate::app::NUM_ROWS, visigrid_engine::sheet::NUM_ROWS);
     assert_eq!(crate::app::NUM_COLS, visigrid_engine::sheet::NUM_COLS);
+}
+
+#[test]
+fn dropdown_snapshot_detects_untracked_source_writes_on_other_sheets() {
+    let mut wb = crate::table_edit::tests::fixture(true);
+    let other = wb.add_sheet_named("Options").unwrap();
+    let view = wb
+        .active_sheet()
+        .build_saved_table_view(30)
+        .unwrap()
+        .unwrap();
+    let selected = (view.rows().data_to_view(5).unwrap(), 2);
+    let target = crate::validation_ui::plan::DropdownTarget::capture(&wb, view.rows(), selected);
+    assert!(target.is_current(&wb, view.rows(), selected));
+    let revision = wb.revision();
+    // Deliberately bypass tracking in this non-live fixture: the snapshot
+    // must still detect a source value generation change without a revision.
+    wb.sheet_mut(other).unwrap().set_value(0, 0, "new choice");
+    assert_eq!(wb.revision(), revision);
+    assert!(!target.is_current(&wb, view.rows(), selected));
 }

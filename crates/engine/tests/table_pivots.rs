@@ -59,6 +59,29 @@ fn total(wb: &Workbook, id: u64) -> String {
 }
 
 #[test]
+fn totals_growth_keeps_table_sources_dynamic_and_fixed_sources_spatial() {
+    for fixed in [false, true] {
+        let (mut wb, id, mut source, mut def) = fixture();
+        wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+        if fixed {
+            source.table_id = None;
+            source.end_row = 3;
+            for field in &mut def.rows { field.column_id = None; }
+            for value in &mut def.values { value.field.column_id = None; }
+        }
+        let (pivot, _) = wb.create_pivot(source, def).unwrap();
+        let append = wb.append_table_rows(id, 1, &[(3, 0, "West".into()), (3, 1, "7".into())]);
+        let append = append.unwrap();
+        wb.refresh_pivot(pivot).unwrap();
+        assert_eq!(total(&wb, pivot), "37");
+        assert_eq!(wb.find_pivot(pivot).unwrap().1.last_refresh.as_ref().unwrap().source_rows, 3);
+        if fixed { assert_eq!(wb.find_pivot(pivot).unwrap().1.source.end_row, 3); }
+        wb.apply_table_commit(&append, true).unwrap();
+        assert!(wb.is_pivot_stale(wb.find_pivot(pivot).unwrap().1));
+    }
+}
+
+#[test]
 fn refresh_follows_growth_rename_and_metadata_only_resize() {
     let (mut wb, id, source, def) = fixture();
     let (pivot, _) = wb.create_pivot(source, def).unwrap();

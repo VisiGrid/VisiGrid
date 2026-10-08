@@ -1923,7 +1923,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                     let mut item = SearchItem::new(
                         SearchKind::NamedRange,
                         &entry.name,
-                        SearchAction::JumpToCell { row: entry.target_row, col: entry.target_col },
+                        SearchAction::JumpToNamedRange { name: entry.name.clone() },
                     )
                     .with_meta(&entry.reference)
                     .with_score(score)
@@ -1941,7 +1941,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                     let mut item = SearchItem::new(
                         SearchKind::NamedRange,
                         &entry.name,
-                        SearchAction::JumpToCell { row: entry.target_row, col: entry.target_col },
+                        SearchAction::JumpToNamedRange { name: entry.name.clone() },
                     )
                     .with_meta(&entry.reference)
                     .with_score(0.6);
@@ -1959,7 +1959,7 @@ impl SearchProvider for NamedRangeSearchProvider {
                             let mut item = SearchItem::new(
                                 SearchKind::NamedRange,
                                 &entry.name,
-                                SearchAction::JumpToCell { row: entry.target_row, col: entry.target_col },
+                                SearchAction::JumpToNamedRange { name: entry.name.clone() },
                             )
                             .with_meta(&entry.reference)
                             .with_score(0.5);  // Lower score for description match
@@ -2761,11 +2761,10 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         match &results[0].action {
-            SearchAction::JumpToCell { row, col } => {
-                assert_eq!(*row, 9);  // E10 = row 9 (0-indexed)
-                assert_eq!(*col, 4);  // E = col 4 (0-indexed)
+            SearchAction::JumpToNamedRange { name } => {
+                assert_eq!(name, "Data"); // Resolve the current sheet and view at execution.
             }
-            _ => panic!("Expected JumpToCell action"),
+            _ => panic!("Expected JumpToNamedRange action"),
         }
     }
 

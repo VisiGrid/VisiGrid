@@ -8,7 +8,7 @@
 //! - Formula nav mode auto-switching (Caret vs Point)
 
 use gpui::*;
-use crate::app::{Spreadsheet, NUM_COLS, NUM_ROWS};
+use crate::app::{Spreadsheet, NUM_COLS};
 use crate::mode::FormulaNavMode;
 
 /// Determine if the caret is at a position where a cell reference can be inserted.
@@ -119,13 +119,13 @@ impl Spreadsheet {
 
         let (new_row, new_col) = if let Some((row, col)) = self.formula_ref_cell {
             // Move existing reference
-            let new_row = if self.table_view_installed { self.next_visible_row(row, dr) } else { (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize };
+            let new_row = self.next_visible_row(row, dr);
             let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
             (new_row, new_col)
         } else {
             // Start new reference from the selected cell (editing cell)
             let (sel_row, sel_col) = self.view_state.selected;
-            let new_row = if self.table_view_installed { self.next_visible_row(sel_row, dr) } else { (sel_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize };
+            let new_row = self.next_visible_row(sel_row, dr);
             let new_col = (sel_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
             (new_row, new_col)
         };
@@ -165,7 +165,7 @@ impl Spreadsheet {
         let (end_row, end_col) = self.formula_ref_end.unwrap_or((anchor_row, anchor_col));
 
         // Extend from the end position
-        let new_row = if self.table_view_installed { self.next_visible_row(end_row, dr) } else { (end_row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize };
+        let new_row = self.next_visible_row(end_row, dr);
         let new_col = (end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
 
         self.formula_ref_end = Some((new_row, new_col));
@@ -315,13 +315,9 @@ impl Spreadsheet {
         };
 
         // Build the reference string, prefixed with sheet name if cross-sheet
-        let base_ref = if self.table_view_installed {
-            crate::table_edit::table_formula_reference(&self.row_view, (ref_row, ref_col), self.formula_ref_end)
-        } else if let Some((end_row, end_col)) = self.formula_ref_end {
-            Self::make_range_ref((ref_row, ref_col), (end_row, end_col))
-        } else {
-            Self::make_cell_ref(ref_row, ref_col)
-        };
+        let base_ref = crate::table_edit::table_formula_reference(
+            &self.row_view, (ref_row, ref_col), self.formula_ref_end,
+        );
 
         let ref_text = if let Some(sheet_name) = &self.formula_cross_sheet_name {
             format!("{}!{}", sheet_name, base_ref)
@@ -353,33 +349,12 @@ impl Spreadsheet {
 
     /// Ensure a cell is visible (scroll if necessary)
     pub(crate) fn ensure_cell_visible(&mut self, row: usize, col: usize) {
-        let visible_rows = self.visible_rows();
-        let visible_cols = self.visible_cols();
-
-        // Adjust scroll to keep cell visible
-        if row < self.view_state.scroll_row {
-            self.view_state.scroll_row = row;
-        } else if row >= self.view_state.scroll_row + visible_rows {
-            self.view_state.scroll_row = row.saturating_sub(visible_rows - 1);
-        }
-
-        if col < self.view_state.scroll_col {
-            self.view_state.scroll_col = col;
-        } else if col >= self.view_state.scroll_col + visible_cols {
-            self.view_state.scroll_col = col.saturating_sub(visible_cols - 1);
-        }
-
-        // Never let the scrollable pane duplicate frozen rows or columns.
-        // Review navigation can call this immediately after file load, before
-        // the normal deferred navigation clamp has run.
-        self.view_state.scroll_row = self
-            .view_state
-            .scroll_row
-            .max(self.view_state.frozen_rows);
-        self.view_state.scroll_col = self
-            .view_state
-            .scroll_col
-            .max(self.view_state.frozen_cols);
+        self.view_state.scroll_row = crate::pane_layout::ensure_visible(self.row_view.row_count(),
+            self.view_state.frozen_rows, self.view_state.scroll_row, row,
+            self.grid_layout.viewport_size.1, |r| self.displayed_row_height(r));
+        self.view_state.scroll_col = crate::pane_layout::ensure_visible(crate::app::NUM_COLS,
+            self.view_state.frozen_cols, self.view_state.scroll_col, col,
+            self.grid_layout.viewport_size.0, |c| self.displayed_col_width(c));
     }
 
     // ========================================================================

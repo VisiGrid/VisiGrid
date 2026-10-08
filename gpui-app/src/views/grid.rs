@@ -195,7 +195,6 @@ pub fn render_grid(
 
     // Get view state based on which pane we're rendering
     let view_state = get_pane_view_state(app, pane_side);
-    let scroll_row = view_state.scroll_row.max(view_state.frozen_rows);
     let scroll_col = view_state.scroll_col.max(view_state.frozen_cols);
     let frozen_rows = view_state.frozen_rows;
     let frozen_cols = view_state.frozen_cols;
@@ -206,8 +205,10 @@ pub fn render_grid(
         .unwrap_or(true);
     let editing = app.mode.is_editing() && on_formula_home_sheet;
     let edit_value = app.edit_value.clone();
-    let total_visible_rows = app.visible_rows();
-    let total_visible_cols = app.visible_cols();
+    let row_panes = app.pane_rows(view_state);
+    let col_panes = app.pane_cols(view_state);
+    let total_visible_rows = row_panes.body.len();
+    let total_visible_cols = col_panes.body.len();
 
     // Read show_gridlines from global settings
     let show_gridlines = match &user_settings(cx).appearance.show_gridlines {
@@ -216,15 +217,14 @@ pub fn render_grid(
     };
 
     // Calculate scrollable region dimensions
-    let scrollable_visible_rows = total_visible_rows.saturating_sub(frozen_rows);
-    let scrollable_visible_cols = total_visible_cols.saturating_sub(frozen_cols);
+    let scrollable_visible_rows = row_panes.body.len();
+    let scrollable_visible_cols = col_panes.body.len();
 
-    // This frame's scrolling rows, resolved once with one extra row either
-    // side, so each row also knows the rows displayed above and below it
-    // (shared edges) without another walk over hidden rows.
-    let frame_lead = scroll_row.min(1);
-    let frame_count = if frozen_rows == 0 && frozen_cols == 0 { total_visible_rows } else { scrollable_visible_rows };
-    let frame_rows = app.displayed_rows(scroll_row - frame_lead, frame_count + frame_lead + 1, cx);
+    // Resolve this frame once in view-slot coordinates, skipping both filter
+    // and manual hiding. Keep the next row for shared bottom-edge ownership.
+    let frame_rows = app.displayed_rows(view_state.scroll_row.max(frozen_rows), scrollable_visible_rows + 1, cx);
+    let frame_above = frame_rows.first().and_then(|&(slot, _)|
+        crate::pane_layout::row_neighbors(&app.row_view, app.display_hidden_rows(), slot).0);
 
     // Get divider color for freeze pane separators
     let divider_color = app.token(TokenKey::FreezeDivider);
@@ -243,9 +243,9 @@ pub fn render_grid(
                         (0..total_visible_rows).filter_map(|screen_row| {
                             // Get the view_row and data_row for this screen position
                             // This respects both sort order AND filter visibility
-                            let at = frame_lead + screen_row;
+                            let at = screen_row;
                             let (view_row, data_row) = *frame_rows.get(at)?;
-                            let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d);
+                            let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d).or(frame_above);
                             let row_below = frame_rows.get(at + 1).map(|&(_, d)| d);
                             let is_last_visible_row = screen_row == total_visible_rows - 1;
                             Some(render_row(
@@ -312,13 +312,11 @@ pub fn render_grid(
                     .flex_col()
                     .flex_shrink_0()
                     .children(
-                        (0..frozen_rows).map(|view_row| {
-                            // Frozen rows: view_row == data_row (headers don't sort)
+                        row_panes.frozen.iter().map(|slot| {
+                            let view_row = slot.index;
                             let data_row = app.view_to_data(view_row, cx);
-                            let row_above = view_row.checked_sub(1).map(|v| app.view_to_data(v, cx));
-                            let row_below = Some(app.view_to_data(view_row + 1, cx));
-                            // Use scaled row height for rendering
-                            let row_height = metrics.row_height(app.row_height(view_row));
+                            let row_height = slot.size;
+                            let (row_above, row_below) = crate::pane_layout::row_neighbors(&app.row_view, app.display_hidden_rows(), view_row);
                             div()
                                 .flex()
                                 .flex_shrink_0()
@@ -329,7 +327,8 @@ pub fn render_grid(
                                 // No viewport boundary edges — dividers separate from scrollable regions
                                 .when(frozen_cols > 0, |d| {
                                     d.children(
-                                        (0..frozen_cols).filter_map(|col| {
+                                        col_panes.frozen.iter().filter_map(|slot| {
+                                            let col = slot.index;
                                             if app.is_col_hidden(col) { return None; }
                                             let col_width = metrics.col_width(app.col_width(col));
                                             Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, false, false, app, window, cx))
@@ -381,11 +380,11 @@ pub fn render_grid(
                             (0..scrollable_visible_rows).filter_map(|screen_row| {
                                 // Get the view_row and data_row for this screen position
                                 // Account for frozen rows + scroll position in visible index
-                                let at = frame_lead + screen_row;
+                                let at = screen_row;
                                 let (view_row, data_row) = *frame_rows.get(at)?;
-                                let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d);
+                                let row_above = at.checked_sub(1).and_then(|j| frame_rows.get(j)).map(|&(_, d)| d).or(frame_above);
                                 let row_below = frame_rows.get(at + 1).map(|&(_, d)| d);
-                                let row_height = metrics.row_height(app.row_height(view_row));
+                                let row_height = row_panes.body[screen_row].size;
                                 let is_last_row = screen_row == scrollable_visible_rows - 1;
                                 Some(div()
                                     .flex()
@@ -397,7 +396,8 @@ pub fn render_grid(
                                     // Bottom boundary at viewport edge; no right boundary (divider separates)
                                     .when(frozen_cols > 0, |d| {
                                         d.children(
-                                            (0..frozen_cols).filter_map(|col| {
+                                            col_panes.frozen.iter().filter_map(|slot| {
+                                            let col = slot.index;
                                                 if app.is_col_hidden(col) { return None; }
                                                 let col_width = metrics.col_width(app.col_width(col));
                                                 Some(render_cell(view_row, data_row, row_above, row_below, col, col_width, row_height, view_state, pane_side, editing, &edit_value, show_gridlines, is_last_row, false, app, window, cx))
@@ -458,7 +458,7 @@ fn render_row(
     cx: &mut Context<Spreadsheet>,
 ) -> impl IntoElement {
     // Use scaled dimensions for rendering (use view_row for consistent row heights)
-    let row_height = app.metrics.row_height(app.row_height(view_row));
+    let row_height = app.displayed_row_height(view_row);
 
     div()
         .flex()
@@ -639,6 +639,7 @@ fn render_cell(
 
     let table_fill = display_sheet.table_at(display_data_row,col).and_then(|t| {
         if display_data_row == t.range.start_row { Some(app.token(TokenKey::Accent).opacity(0.20)) }
+        else if t.totals_row() == Some(display_data_row) { Some(app.token(TokenKey::Accent).opacity(0.12)) }
         else if t.style.banded_rows && (display_data_row-t.range.start_row)%2 == 0 { Some(app.token(TokenKey::Accent).opacity(0.07)) }
         else { None }
     });
@@ -711,13 +712,18 @@ fn render_cell(
         } else { cell_base_background_with_role(app,is_editing,format.background_color,cell_style.fill,role_style) })
         .border_color(border_color);
 
+    if display_sheet.table_at(display_data_row, col).is_some_and(|t| t.totals_row() == Some(display_data_row)) {
+        cell = cell.child(non_interactive_overlay().border_t_1()
+            .border_color(app.token(TokenKey::Accent).opacity(0.35)));
+    }
+
     // Membership outline for the Table containing the active cell. This is a
     // viewport-only overlay; no borders or fills are stamped into cell storage.
     if !is_frozen_review && !app.is_previewing() {
         if let Some(table) = display_sheet.table_at(display_data_row,col) {
             let (selected_row,selected_col)=view_state.selected;
-            if table.range.contains(app.row_view.view_to_data(selected_row),selected_col) {
-                let range=table.range;
+            if table.full_range().contains(app.row_view.view_to_data(selected_row),selected_col) {
+                let range=table.full_range();
                 cell=cell.child(non_interactive_overlay()
                     .border_color(app.token(TokenKey::Accent).opacity(0.7))
                     .when(display_data_row==range.start_row,|d|d.border_t_1())
@@ -1321,7 +1327,7 @@ fn render_cell(
         // Draw caret as overlay rect when visible
         if app.caret_visible && selection.is_none() {
             let caret_color = app.token(TokenKey::TextPrimary);
-            let line_height = app.metrics.row_height(app.row_height(view_row)) - 4.0;
+            let line_height = app.displayed_row_height(view_row) - 4.0;
 
             // Caret position accounts for scroll offset
             let visual_caret_x = padding + caret_x + scroll_x;
@@ -2329,8 +2335,8 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
             if fref.sheet.is_some() && (app.table_view_installed || app.filter_state.sort.is_some()) {
                 let visible = app.row_view.visible_rows();
                 let first = visible.partition_point(|&r| r < region.row);
-                let rows = visible.iter().skip(first).copied().take(region.rows)
-                    .take_while(|r| region.height.is_none() || *r < region.row + region.rows);
+                let rows = visible.iter().skip(first).copied().take_while(|r| *r < region.row + region.rows)
+                    .filter(|r| app.displayed_row_height(*r) > 0.0);
                 let end = fref.end.unwrap_or(fref.start);
                 for (start,last) in crate::table_formula_editor::projected_runs(&app.row_view, fref.start.0..end.0 + 1, rows) {
                     projected.push((RefKey::new(start,fref.start.1,last,end.1),fref.color_index));
@@ -2339,19 +2345,10 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
         }
         let range_bounds: Vec<(Bounds<Pixels>, Hsla)> = projected.iter()
             .filter_map(|(key, color_idx)| {
-                // Filtered view indices can extend beyond the visible row count.
-                let mut projected_region = region;
-                if app.table_view_installed || app.filter_state.sort.is_some() {
-                    let visible = app.row_view.visible_rows();
-                    let first = visible.partition_point(|&r| r < region.row);
-                    if region.height.is_none() {
-                        if let Some(last) = visible.iter().skip(first).take(region.rows).last() { projected_region.rows = last + 1 - region.row; }
-                    }
-                }
                 let (x, y, width, height) = formula_ref_rect(
-                    key, projected_region,
+                    key, region,
                     |c| if app.is_col_hidden(c) { 0.0 } else { app.metrics.col_width(app.col_width(c)) },
-                    |r| if app.is_row_hidden(r) { 0.0 } else { app.metrics.row_height(app.row_height(r)) },
+                    |r| app.displayed_row_height(r),
                 )?;
                 if width <= 0.0 || height <= 0.0 { return None; }
                 let mut color: Hsla = rgb(REF_COLORS[*color_idx % 8]).into();
@@ -2380,6 +2377,20 @@ fn render_formula_ref_borders(app: &Spreadsheet, pane_side: Option<SplitSide>) -
         layers.push(overlay_region_container(region, header_width).child(borders));
     }
     div().absolute().inset_0().children(layers).into_any_element()
+}
+
+/// Overlay keys use projected slots; visibility and row sizes belong to
+/// canonical rows. Hidden slots have no height in the rendered grid.
+#[cfg(test)]
+fn formula_overlay_row_height(
+    slot: usize, projection: Option<&visigrid_engine::filter::RowView>,
+    hidden: impl Fn(usize) -> bool, height: impl Fn(usize) -> f32,
+) -> f32 {
+    let row = if let Some(view) = projection {
+        if !view.is_view_row_visible(slot) { return 0.0; }
+        view.view_to_data(slot)
+    } else { slot };
+    if hidden(row) { 0.0 } else { height(row) }
 }
 
 /// Preserve offscreen origins: the containing pane clips the original outline
@@ -2421,49 +2432,24 @@ fn render_clipboard_border(app: &Spreadsheet, cx: &mut Context<Spreadsheet>, pan
         return div().into_any_element();
     }
 
-    // Check if any part of the range is visible
     let view_state = get_pane_view_state(app, pane_side);
-    let scroll_row = view_state.scroll_row;
-    let scroll_col = view_state.scroll_col;
-    let visible_rows = app.visible_rows();
-    let visible_cols = app.visible_cols();
-
-    if r2 < scroll_row || c2 < scroll_col {
-        return div().into_any_element();
-    }
-    if r1 >= scroll_row + visible_rows || c1 >= scroll_col + visible_cols {
-        return div().into_any_element();
-    }
-
-    // Compute bounds using cell_rect (same pattern as formula ref borders)
-    let top_left = app.cell_rect(r1, c1);
-    let bottom_right = app.cell_rect(r2, c2);
-    let header_w = app.metrics.header_w;
-
-    let x = top_left.x + header_w;
-    let y = top_left.y;
-    let width = (bottom_right.x + bottom_right.width) - top_left.x;
-    let height = (bottom_right.y + bottom_right.height) - top_left.y;
-
+    let key = RefKey::new(r1, c1, r2, c2);
     let mut ant: Hsla = app.token(TokenKey::SelectionBorder);
     ant.a = 1.0;
     let mut base: Hsla = app.token(TokenKey::CellBg);
     base.a = 1.0;
-
-    canvas(
-        move |_bounds, _window, _cx| (),
-        move |canvas_bounds, (), window, _cx| {
-            let ox: f32 = canvas_bounds.origin.x.into();
-            let oy: f32 = canvas_bounds.origin.y.into();
-            // Redraws come from Spreadsheet::start_marching_ants' timer, not
-            // animation frames, so a pending copy doesn't repaint at 60-120 Hz.
+    let layers: Vec<_> = grid_overlay_regions(app, view_state).into_iter().filter_map(|region| {
+        let (x, y, width, height) = formula_ref_rect(&key, region,
+            |c| app.displayed_col_width(c), |r| app.displayed_row_height(r))?;
+        if width <= 0.0 || height <= 0.0 { return None; }
+        let border = canvas(move |_bounds, _window, _cx| (), move |bounds, (), window, _cx| {
+            let ox: f32 = bounds.origin.x.into();
+            let oy: f32 = bounds.origin.y.into();
             paint_marching_ants(window, ox + x, oy + y, width, height, ant, base);
-        },
-    )
-    .absolute()
-    .inset_0()
-    .size_full()
-    .into_any_element()
+        }).absolute().inset_0().size_full();
+        Some(overlay_region_container(region, app.metrics.header_w).child(border))
+    }).collect();
+    div().absolute().inset_0().children(layers).into_any_element()
 }
 
 /// One clock for every copy border, so the ants move at a steady speed.
@@ -2530,6 +2516,7 @@ struct OverlayRegion {
     height: Option<f32>,
 }
 
+#[cfg(test)]
 fn overlay_regions(
     view: &WorkbookViewState, rows: usize, cols: usize,
     frozen_width: f32, frozen_height: f32,
@@ -2560,11 +2547,23 @@ fn overlay_regions(
 }
 
 fn grid_overlay_regions(app: &Spreadsheet, view: &WorkbookViewState) -> Vec<OverlayRegion> {
-    let width = (0..view.frozen_cols).filter(|&c| !app.is_col_hidden(c))
-        .map(|c| app.metrics.col_width(app.col_width(c))).sum();
-    let height = (0..view.frozen_rows)
-        .map(|r| app.metrics.row_height(app.row_height(r))).sum();
-    overlay_regions(view, app.visible_rows(), app.visible_cols(), width, height)
+    pane_regions(view, &app.pane_rows(view), &app.pane_cols(view))
+}
+
+fn pane_regions(view: &WorkbookViewState, rows: &crate::pane_layout::AxisLayout, cols: &crate::pane_layout::AxisLayout) -> Vec<OverlayRegion> {
+    let mut regions = Vec::new();
+    let row_bands = [(&rows.frozen, 0, 0.0, Some((rows.body_offset - 1.0).max(0.0))),
+        (&rows.body, view.scroll_row.max(view.frozen_rows), rows.body_offset, None)];
+    let col_bands = [(&cols.frozen, 0, 0.0, Some((cols.body_offset - 1.0).max(0.0))),
+        (&cols.body, view.scroll_col.max(view.frozen_cols), cols.body_offset, None)];
+    for (slots, row, y, height) in row_bands {
+        let Some(last_row) = slots.last() else { continue; };
+        for (slots, col, x, width) in col_bands {
+            let Some(last_col) = slots.last() else { continue; };
+            regions.push(OverlayRegion { row, col, rows: last_row.index + 1 - row, cols: last_col.index + 1 - col, x, y, width, height });
+        }
+    }
+    regions
 }
 
 fn overlay_region_container(region: OverlayRegion, header_width: f32) -> Div {
@@ -2610,20 +2609,19 @@ fn collect_visible_merges(
         return Vec::new();
     }
 
-    let metrics = &app.metrics;
 
     // Merges are stored in data rows but drawn among view rows. Under a sort
     // or filter, place each merge where its rows are displayed; one whose rows
     // are hidden, split or reordered can't be drawn as a block, so skip it
     // (sorts and filters refuse to move merged rows, so this is rare).
     let row_view = &app.row_view;
-    let remap = row_view.is_filtered() || row_view.is_sorted();
+    let remap = row_view.is_filtered() || row_view.is_sorted() || app.has_hidden_rows();
 
     let mut out = Vec::new();
     for stored in &sheet.merged_regions {
         let shown;
         let merge = if remap {
-            let Some(region) = merge_in_view(stored, row_view) else { continue };
+            let Some(region) = merge_in_slots(stored, row_view, app.display_hidden_rows()) else { continue };
             shown = region;
             &shown
         } else {
@@ -2639,9 +2637,8 @@ fn collect_visible_merges(
         let (x, y, width, height) = merge.pixel_rect(
             scroll_row,
             scroll_col,
-            |c| metrics.col_width(app.col_width(c)),
-            // Remapped merges are in display order; heights are per view row.
-            |r| metrics.row_height(app.row_height(if remap { row_view.nth_visible(r).unwrap_or(r) } else { r })),
+            |c| app.displayed_col_width(c),
+            |r| app.displayed_row_height(r),
         );
 
         out.push(VisibleMerge {
@@ -2673,6 +2670,23 @@ fn merge_in_view(
     let ev = row_view.visible_index_of_data(stored.end.0)?;
     (ev >= sv && ev - sv == stored.end.0 - stored.start.0)
         .then(|| visigrid_engine::sheet::MergedRegion::new(sv, stored.start.1, ev, stored.end.1))
+}
+
+/// Pane geometry uses view slots with zero extent for hidden rows, rather
+/// than visible ranks. Keep #117's constant-time inverse lookup, then recover
+/// those slots for the shared geometry used by cells and overlays.
+fn merge_in_slots(
+    stored: &visigrid_engine::sheet::MergedRegion,
+    rows: &visigrid_engine::filter::RowView,
+    hidden: Option<&std::collections::BTreeSet<usize>>,
+) -> Option<visigrid_engine::sheet::MergedRegion> {
+    if hidden.is_some_and(|hidden| hidden.range(stored.start.0..=stored.end.0).next().is_some()) {
+        return None;
+    }
+    let mut displayed = merge_in_view(stored, rows)?;
+    displayed.start.0 = rows.nth_visible(displayed.start.0)?;
+    displayed.end.0 = rows.nth_visible(displayed.end.0)?;
+    Some(displayed)
 }
 
 /// Build the gpui element for a single merge overlay.
@@ -2736,11 +2750,9 @@ fn render_merge_div(
     // before it. Otherwise a header's bottom rule stops short of a merged
     // cell below it.
     let row_view = &app.row_view;
-    let above = row_view
-        .visible_index_of_data(m.origin_row)
-        .and_then(|i| i.checked_sub(1))
-        .and_then(|i| row_view.nth_visible(i))
-        .map(|v| row_view.view_to_data(v));
+    let above = row_view.visible_index_of_data(m.origin_row)
+        .and_then(|rank| row_view.nth_visible(rank))
+        .and_then(|slot| crate::pane_layout::row_neighbors(row_view, app.display_hidden_rows(), slot).0);
     if let Some(a) = above {
         for col in m.origin_col..=m.end_col {
             b_top = max_border(b_top, edge_of(sheet, a, col, Edge::Bottom));
@@ -3192,35 +3204,16 @@ fn render_region_text_spill(
     let cell_text = app.token(TokenKey::CellText);
     let selection_text = app.token(TokenKey::SelectionText);
 
-    // Scan visible cells for spill candidates
-    for screen_row in 0..visible_rows {
-        let visible_index = scroll_row + screen_row;
-
-        // Get view_row and data_row for this screen position
-        let row_at = |index| if region.height.is_some() {
-            Some((index, app.view_to_data(index, cx)))
-        } else { app.nth_visible_row_with_hidden(index, cx) };
-        let Some((view_row, data_row)) = row_at(visible_index) else { continue; };
-
-        // Calculate Y position for this row
-        let mut y: f32 = 0.0;
-        for r in 0..screen_row {
-            let idx = scroll_row + r;
-            if let Some((vr, _)) = row_at(idx) {
-                y += metrics.row_height(app.row_height(vr));
-            }
-        }
-        let row_height = metrics.row_height(app.row_height(view_row));
-
-        for screen_col in 0..visible_cols {
-            let col = if region.width.is_some() {
-                let col = screen_col;
-                if app.is_col_hidden(col) { continue; }
-                col
-            } else {
-                let Some(col) = app.nth_visible_col(screen_col, scroll_col) else { continue; };
-                col
-            };
+    // Regions contain view-slot spans. Hidden slots consume no pixels.
+    let mut next_y = 0.0;
+    for view_row in scroll_row..scroll_row.saturating_add(visible_rows) {
+        let row_height = app.displayed_row_height(view_row);
+        if row_height <= 0.0 { continue; }
+        let data_row = app.view_to_data(view_row, cx);
+        let y = next_y;
+        next_y += row_height;
+        for col in scroll_col..scroll_col.saturating_add(visible_cols) {
+            if app.is_col_hidden(col) { continue; }
             let sheet_id = app.sheet(cx).id;
             let (display_sheet, display_data_row) = app
                 .review_endpoint_sheet_row(sheet_id, data_row)
@@ -3604,6 +3597,26 @@ mod frozen_overlay_tests {
     }
 
     #[test]
+    fn formula_outline_skips_filtered_and_manually_hidden_sorted_slots() {
+        use super::{formula_overlay_row_height, formula_ref_rect, RefKey};
+        let before = crate::table_edit::tests::fixture(true);
+        let (hidden, _) = before.prepare_table_row_visibility(before.active_sheet_id(), [3].into()).unwrap();
+        let projection = hidden.active_sheet().build_saved_table_view(30).unwrap().unwrap();
+        let rows = projection.rows();
+        let heights = |slot| formula_overlay_row_height(slot, Some(rows), |row| row == 3, |_| 20.0);
+        assert_eq!(heights(3), 0.0); // filter-hidden East record
+        assert_eq!(heights(5), 0.0); // manually hidden West record, sorted to slot 5
+        assert_eq!(heights(4), 20.0);
+        let mut state = WorkbookViewState::default();
+        state.scroll_row = 3;
+        let region = overlay_regions(&state, 20, 8, 0.0, 0.0)[0];
+        let runs = crate::table_formula_editor::projected_runs(rows, 3..7, rows.visible_rows().iter().copied());
+        assert_eq!(runs, [(4, 6)]);
+        assert_eq!(formula_ref_rect(&RefKey::new(4, 1, 6, 1), region, |_| 100.0, heights), Some((100.0, 0.0, 100.0, 40.0)));
+        assert_eq!(formula_ref_rect(&RefKey::Cell { row: 6, col: 1 }, region, |_| 100.0, heights), Some((100.0, 20.0, 100.0, 20.0)));
+    }
+
+    #[test]
     fn merges_are_placed_where_their_rows_are_displayed() {
         use super::merge_in_view;
         use visigrid_engine::{filter::RowView, sheet::MergedRegion};
@@ -3622,6 +3635,26 @@ mod frozen_overlay_tests {
         sorted.apply_sort(vec![0, 3, 4, 1, 2, 5]);
         assert_eq!(merge_in_view(&MergedRegion::new(3, 0, 4, 2), &sorted), Some(MergedRegion::new(1, 0, 2, 2)));
         assert_eq!(merge_in_view(&MergedRegion::new(2, 0, 3, 2), &sorted), None);
+    }
+
+    #[test]
+    fn filtered_merges_use_slots_and_manual_hiding_in_shared_pane_geometry() {
+        use super::merge_in_slots;
+        use visigrid_engine::{filter::RowView, sheet::MergedRegion};
+        let mut rows = RowView::new(12);
+        rows.apply_filter((0..12).map(|row| row != 3 && row != 5).collect());
+        let total = MergedRegion::new(9, 0, 9, 1);
+        // The visible rank is 7; all pane geometry instead uses slot 9,
+        // with the filtered and manually hidden rows contributing zero height.
+        let displayed = merge_in_slots(&total, &rows, Some(&[2].into())).unwrap();
+        assert_eq!(displayed, total);
+        assert_eq!(displayed.pixel_rect(0, 0, |_| 100.0, |slot| {
+            if rows.is_view_row_visible(slot) && rows.view_to_data(slot) != 2 { 20.0 } else { 0.0 }
+        }), (0.0, 120.0, 200.0, 20.0));
+        assert_eq!(merge_in_slots(&total, &rows, Some(&[9].into())), None);
+        assert_eq!(merge_in_slots(&MergedRegion::new(8, 0, 9, 0), &rows, Some(&[8].into())), None);
+        rows.apply_sort(vec![0, 1, 2, 3, 4, 5, 6, 9, 8, 7, 10, 11]);
+        assert_eq!(merge_in_slots(&total, &rows, None), Some(MergedRegion::new(7, 0, 7, 1)));
     }
 
     #[test]
@@ -3654,6 +3687,31 @@ mod frozen_overlay_tests {
         assert_eq!(moved[0].col, 0);
         assert_eq!(moved[0].x, 0.0);
         assert_eq!(moved[1].x + (9 - moved[1].col) as f32 * 96.0, 481.0);
+    }
+
+    #[test]
+    fn visible_pane_regions_clip_overlays_at_the_same_hidden_row_and_column_boundaries() {
+        use super::{pane_regions, formula_ref_rect, RefKey};
+        let mut view = WorkbookViewState::default();
+        view.frozen_rows = 4;
+        view.frozen_cols = 2;
+        view.scroll_row = 5;
+        view.scroll_col = 3;
+        let row_height = |r| if [1, 3, 5, 7].contains(&r) { 0.0 } else { 20.0 };
+        let col_width = |c| if [1, 3].contains(&c) { 0.0 } else { 50.0 };
+        let rows = crate::pane_layout::layout(30, 4, 5, 81.0, row_height);
+        let cols = crate::pane_layout::layout(8, 2, 3, 151.0, col_width);
+        let regions = pane_regions(&view, &rows, &cols);
+        assert_eq!(regions.len(), 4);
+        let body = regions[3];
+        assert_eq!((body.row, body.col, body.rows, body.cols), (5, 3, 4, 3));
+        assert_eq!((body.x, body.y), (51.0, 41.0));
+        let rect = formula_ref_rect(&RefKey::new(6, 4, 8, 5), body, col_width, row_height).unwrap();
+        assert_eq!(rect, (0.0, 0.0, 100.0, 40.0));
+        let corner = regions[0];
+        assert_eq!((corner.row, corner.col, corner.rows, corner.cols), (0, 0, 3, 1));
+        assert_eq!((corner.width, corner.height), (Some(50.0), Some(40.0)));
+        assert!(formula_ref_rect(&RefKey::new(6, 4, 8, 5), corner, col_width, row_height).is_none());
     }
 
     #[test]

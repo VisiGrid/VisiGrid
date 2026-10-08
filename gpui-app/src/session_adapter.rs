@@ -894,7 +894,7 @@ impl Spreadsheet {
         if outcome.response.error.is_none() && outcome.response.applied > 0 {
             for (sheet_idx, changes) in &outcome.value_changes {
                 if !changes.is_empty() {
-                    self.history.record_batch_from(
+                    self.record_batch_from(cx,
                         *sheet_idx,
                         changes
                             .iter()
@@ -911,11 +911,11 @@ impl Spreadsheet {
             }
             for (sheet_idx, patches) in &outcome.format_patches {
                 if !patches.is_empty() {
-                    self.history.record_format_from(
+                    self.record_format_from(cx,
                         *sheet_idx,
                         patches
                             .iter()
-                            .map(|p| CellFormatPatch {
+                            .map(|p| CellFormatPatch { remove_cell_on_undo: false,
                                 row: p.row,
                                 col: p.col,
                                 before: p.before.clone(),
@@ -948,7 +948,7 @@ impl Spreadsheet {
     /// entry with the agent's identity so the undo guard can tell them apart.
     /// Row/column ops only apply to the ACTIVE sheet: the view state they
     /// maintain is per-active-sheet.
-    fn handle_session_structure(
+    pub(crate) fn handle_session_structure(
         &mut self,
         op: &visigrid_protocol::StructureOp,
         client: Option<String>,
@@ -972,6 +972,8 @@ impl Spreadsheet {
                     | StructureOp::DeleteRows { .. }
                     | StructureOp::InsertCols { .. }
                     | StructureOp::DeleteCols { .. }
+                    | StructureOp::RenameSheet { .. }
+                    | StructureOp::AddSheet { .. }
             )
         {
             out.error = Some((
@@ -982,6 +984,12 @@ impl Spreadsheet {
         }
         if self.review_mode.is_some() {
             out.error = Some(plan_under_review_error());
+            return out;
+        }
+        if matches!(op, StructureOp::RenameSheet { .. } | StructureOp::AddSheet { .. })
+            && ((self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing())
+        {
+            out.error = Some(("invalid_op".into(), "Finish editing or reviewing before changing sheets.".into()));
             return out;
         }
 
@@ -998,6 +1006,11 @@ impl Spreadsheet {
                 out.error = Some((code.to_string(), msg));
                 return out;
             }
+        }
+
+        if self.cloud_live_enabled() {
+            out.error = Some(("invalid_op".into(), "Live structural edits must use the sequencer; they are not enabled in this slice.".into()));
+            return out;
         }
 
         // Row/column ops are active-sheet only in a GUI window.
@@ -1056,26 +1069,40 @@ impl Spreadsheet {
                 format!("Deleted {} column(s) at column {}", count, at + 1)
             }
             StructureOp::AddSheet { name } => {
-                let idx = self.wb_mut(cx, |wb| match name {
-                    Some(n) => wb
-                        .add_sheet_named(n.trim())
-                        .unwrap_or_else(|| wb.add_sheet()),
-                    None => wb.add_sheet(),
+                let result = self.wb(cx).prepare_sheet_add(name.as_deref()).and_then(|(candidate, commit)| {
+                    let description = format!("Added sheet \"{}\"", candidate.sheets().last().unwrap().name);
+                    let source = client.clone().map(|client| MutationSource::Agent { client }).unwrap_or(MutationSource::Human);
+                    self.publish_table_batch(candidate, commit, description.clone(), source, cx)?;
+                    Ok(description)
                 });
-                let sheet_name = self.workbook.read(cx).sheets()[idx].name.clone();
-                self.is_modified = true;
-                cx.notify();
-                format!("Added sheet \"{}\"", sheet_name)
+                match result {
+                    Ok(description) => description,
+                    Err(message) => {
+                        self.suppress_repeat_capture = false;
+                        out.error = Some(("invalid_op".into(), message));
+                        return out;
+                    }
+                }
             }
             StructureOp::RenameSheet { name, .. } => {
                 let old = self.workbook.read(cx).sheets()[target].name.clone();
                 let new_name = name.trim().to_string();
-                self.wb_mut(cx, |wb| {
-                    wb.rename_sheet(target, &new_name);
-                });
-                self.is_modified = true;
-                cx.notify();
-                format!("Renamed sheet \"{}\" to \"{}\"", old, new_name)
+                let id = self.workbook.read(cx).sheets()[target].id;
+                let description = format!("Renamed sheet \"{}\" to \"{}\"", old, new_name);
+                let result = self.wb(cx).prepare_sheet_rename(id, &old, &new_name)
+                    .and_then(|(candidate, commit)| {
+                        if commit.is_empty() { return Ok(()); }
+                        let source = client.clone()
+                            .map(|client| MutationSource::Agent { client })
+                            .unwrap_or(MutationSource::Human);
+                        self.publish_table_batch(candidate, commit, description.clone(), source, cx)
+                    });
+                if let Err(message) = result {
+                    self.suppress_repeat_capture = false;
+                    out.error = Some(("invalid_op".into(), message));
+                    return out;
+                }
+                description
             }
             StructureOp::CreatePivot { .. } => {
                 let resolved =
@@ -1087,8 +1114,8 @@ impl Spreadsheet {
                 match result {
                     Ok(desc) => {
                         if let Some(client) = client.clone() {
-                            self.history
-                                .retag_last_source(MutationSource::Agent { client });
+                            self
+                                .retag_last_source(cx, MutationSource::Agent { client });
                         }
                         desc
                     }
@@ -1118,8 +1145,8 @@ impl Spreadsheet {
                             match self.session_refresh_pivot(id, cx) {
                                 Ok(d) => {
                                     if let Some(client) = client.clone() {
-                                        self.history
-                                            .retag_last_source(MutationSource::Agent { client });
+                                        self
+                                            .retag_last_source(cx, MutationSource::Agent { client });
                                     }
                                     done.push(d);
                                 }
@@ -1160,11 +1187,11 @@ impl Spreadsheet {
         }
 
         // Attribute the undo entry the GUI method just recorded (row/col ops
-        // record one; sheet ops record none, matching the GUI's own behavior).
+        // record one; sheet rename records its agent source at publication).
         if row_col_op {
             if let Some(client) = client {
-                self.history
-                    .retag_last_source(MutationSource::Agent { client });
+                self
+                    .retag_last_source(cx, MutationSource::Agent { client });
             }
         }
 

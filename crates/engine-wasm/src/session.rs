@@ -484,15 +484,9 @@ impl Session {
 
     pub(crate) fn add_sheet_core(&mut self, name: Option<&str>) -> Result<StructuralDelta, String> {
         let before = self.values();
-        let idx = match name {
-            Some(name) => self.wb.add_sheet_named(name).ok_or_else(|| format!("cannot add a sheet named {name:?}"))?,
-            None => self.wb.add_sheet(),
-        };
-        self.wb.bump_revision_for_structure();
-        // A formula that already named the new sheet (=#REF! until now) can
-        // resolve; recalculate so its value is current.
-        self.wb.rebuild_dep_graph();
-        self.wb.recompute_full_ordered();
+        let (candidate, _) = self.wb.prepare_sheet_add(name)?;
+        let idx = candidate.sheet_count() - 1;
+        self.wb.restore_snapshot_monotonic(&candidate);
         let cells = self.changed_since(before, |_, r, c| Some((r, c)));
         Ok(StructuralDelta { revision: self.wb.revision(), shift: None, rewritten: Vec::new(), cells, sheet: Some(idx) })
     }
@@ -502,14 +496,26 @@ impl Session {
             return Err(format!("no sheet at index {sheet}"));
         }
         let before = self.values();
-        if !self.wb.rename_sheet(sheet, name.trim()) {
-            return Err(format!("cannot rename sheet {sheet} to {name:?}"));
+        let target = &self.wb.sheets()[sheet];
+        let (candidate, commit) = self.wb.prepare_sheet_rename(target.id, &target.name, name)?;
+        let mut rewritten = Vec::new();
+        for (index, updated) in candidate.sheets().iter().enumerate() {
+            let previous = &self.wb.sheets()[index];
+            for ((row, col), cell) in updated.cells_iter() {
+                if cell.value().formula_ast().is_some() {
+                    let formula = updated.get_raw(row, col);
+                    if formula != previous.get_raw(row, col) {
+                        rewritten.push(Rewritten { sheet: index, row, col, formula });
+                    }
+                }
+            }
         }
-        self.wb.bump_revision_for_structure();
-        self.wb.rebuild_dep_graph();
-        self.wb.recompute_full_ordered();
+        rewritten.sort_by_key(|r| (r.sheet, r.row, r.col));
+        if !commit.is_empty() {
+            self.wb.restore_snapshot_monotonic(&candidate);
+        }
         let cells = self.changed_since(before, |_, r, c| Some((r, c)));
-        Ok(StructuralDelta { revision: self.wb.revision(), shift: None, rewritten: Vec::new(), cells, sheet: None })
+        Ok(StructuralDelta { revision: self.wb.revision(), shift: None, rewritten, cells, sheet: None })
     }
 
     pub(crate) fn delete_sheet_core(&mut self, sheet: usize) -> Result<StructuralDelta, String> {
@@ -518,14 +524,23 @@ impl Session {
         }
         let gone = self.wb.sheets()[sheet].id.0;
         let before = self.values();
-        if !self.wb.delete_sheet(sheet) {
-            return Err(format!("cannot delete sheet {sheet} (the last sheet, or its Tables are referenced)"));
+        let (candidate, _) = self.wb.prepare_sheet_delete(SheetId(gone))?;
+        let mut rewritten = Vec::new();
+        for (index, updated) in candidate.sheets().iter().enumerate() {
+            let previous = self.wb.sheet_by_id(updated.id).unwrap();
+            for ((row, col), cell) in updated.cells_iter() {
+                if cell.value().formula_ast().is_some() {
+                    let formula = updated.get_raw(row, col);
+                    if formula != previous.get_raw(row, col) {
+                        rewritten.push(Rewritten { sheet: index, row, col, formula });
+                    }
+                }
+            }
         }
-        self.wb.bump_revision_for_structure();
-        self.wb.rebuild_dep_graph();
-        self.wb.recompute_full_ordered();
+        rewritten.sort_by_key(|r| (r.sheet, r.row, r.col));
+        self.wb.restore_snapshot_monotonic(&candidate);
         let cells = self.changed_since(before, |id, r, c| (id != gone).then_some((r, c)));
-        Ok(StructuralDelta { revision: self.wb.revision(), shift: None, rewritten: Vec::new(), cells, sheet: None })
+        Ok(StructuralDelta { revision: self.wb.revision(), shift: None, rewritten, cells, sheet: None })
     }
 
     pub(crate) fn formulas_core(&self, sheet: usize, top: usize, left: usize, bottom: usize, right: usize) -> Result<Vec<FormulaText>, String> {
@@ -929,11 +944,45 @@ mod tests {
         assert_eq!(s.all_results_core().cells[0].display, "42");
 
         let deleted = s.delete_sheet_core(1).unwrap();
+        assert_eq!(deleted.rewritten.len(), 1);
+        assert_eq!(deleted.rewritten[0].formula, "=#REF!+1");
         let first = deleted.cells.iter().find(|c| (c.sheet, c.row, c.col) == (0, 0, 0)).expect("A1 recalculated");
         assert!(first.error.is_some(), "a reference to a deleted sheet is an error: {:?}", reported_structural(&deleted));
         assert!(s.delete_sheet_core(0).is_err(), "the last sheet cannot go");
         assert!(s.rename_sheet_core(0, "Renamed").is_ok());
         assert!(s.rename_sheet_core(0, "   ").is_err(), "a blank name is refused");
+        s.add_sheet_core(Some("Data")).unwrap();
+        s.apply_one(1, 0, 0, Some("99")).unwrap();
+        assert_eq!(s.wb.sheet(0).unwrap().get_display(0, 0), "#REF!");
+    }
+
+    #[test]
+    fn sheet_rename_reports_source_rewrites_even_when_values_do_not_change() {
+        let mut s = Session::from_sheets(&[sheet(&[
+            (0, 0, "7"), (0, 1, "=( Sheet1!A1 + 1 )*2"),
+            (1, 1, "=INDIRECT(\"Sheet1!A1\")"),
+        ])]);
+        s.add_sheet_core(Some("Summary")).unwrap();
+        s.apply_one(1, 0, 0, Some("=Sheet1!A1")).unwrap();
+        let before = s.revision();
+        let d = s.rename_sheet_core(0, "New Data").unwrap();
+        assert!(d.revision > before);
+        assert_eq!(d.rewritten.len(), 2);
+        assert_eq!((d.rewritten[0].sheet, d.rewritten[0].row, d.rewritten[0].col), (0, 0, 1));
+        assert_eq!(d.rewritten[0].formula, "=( 'New Data'!A1 + 1 )*2");
+        assert_eq!(d.rewritten[1].formula, "='New Data'!A1");
+        assert_eq!(s.wb.sheet(0).unwrap().get_display(0, 1), "16");
+        assert_eq!(s.wb.sheet(1).unwrap().get_display(0, 0), "7");
+        assert!(d.cells.iter().any(|c| (c.sheet, c.row, c.col) == (0, 1, 1)
+            && c.error.as_deref() == Some("#REF!")));
+        let noop = s.rename_sheet_core(0, "New Data").unwrap();
+        assert_eq!(noop.revision, d.revision);
+        assert!(noop.rewritten.is_empty() && noop.cells.is_empty());
+        assert!(s.rename_sheet_core(0, "Summary").is_err());
+        assert_eq!(s.revision(), d.revision);
+        s.apply_one(0, 0, 0, Some("8")).unwrap();
+        assert_eq!(s.wb.sheet(0).unwrap().get_display(0, 1), "18");
+        assert_eq!(s.wb.sheet(1).unwrap().get_display(0, 0), "8");
     }
 
     #[test]
@@ -984,4 +1033,3 @@ mod tests {
         println!("engine structural_edit alone={engine_only:?} one values() snapshot={:?}", t.elapsed());
     }
 }
-

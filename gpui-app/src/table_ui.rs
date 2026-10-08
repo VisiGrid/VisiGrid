@@ -13,10 +13,22 @@ pub(crate) const TABLE_CONTROLS_HEIGHT: f32 = 32.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TableDialogKind {
     Create,
+    Views(TableId),
+    SaveView(TableId),
+    RenameView(TableId, usize),
+    UpdateView(TableId, usize),
+    DeleteView(TableId, usize),
     Rename(TableId),
     Resize(TableId),
     Convert(TableId),
+    Total(TableId, usize),
     ColumnFormula(TableId, usize, bool),
+}
+
+impl TableDialogKind {
+    pub(crate) fn is_named_view(self) -> bool {
+        matches!(self, Self::Views(_) | Self::SaveView(_) | Self::RenameView(..) | Self::UpdateView(..) | Self::DeleteView(..))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +51,14 @@ pub(crate) fn range_label(r: TableRange) -> String {
         Spreadsheet::col_letter(r.end_col),
         r.end_row + 1
     )
+}
+
+/// Conservative estimate from the million-row conversion probe (135 s).
+pub(crate) fn conversion_warning(table: &DataTable) -> Option<String> {
+    let rows = table.range.data_rows();
+    let seconds = (rows as f64 * 135.0 / 1_000_000.0).ceil() as usize;
+    (rows >= 200_000 || seconds >= 10).then(|| format!(
+        "Large Table: {rows} body rows. Estimated wait: about {seconds} seconds, possibly longer for complex formulas. The window won't respond while converting. Undo and redo may take about as long. History is limited to about 1 GB; a change too large to keep cannot be undone. Continue?"))
 }
 
 /// Only a finite, unqualified A1 rectangle; never quietly accept a name,
@@ -103,41 +123,29 @@ impl Spreadsheet {
         source: &str,
         cx: &mut Context<Self>,
     ) -> Option<bool> {
+        // Live cell entry continues through the sequencer; never publish a
+        // locally inferred rule or fill neighboring records here.
+        if self.cloud_live_enabled() { return None; }
         let row = self.row_view.view_to_data(view_row);
         let sheet = self.sheet(cx).id;
-        let result = self.workbook.update(cx, |wb, _| {
-            wb.try_calculated_column(sheet, row, col, source)
-        });
+        let result = crate::table_calculated::prepare_inferred(self.wb(cx), sheet, row, col, source);
         match result {
             Ok(None) => None,
-            Ok(Some(commit)) => {
-                self.record_table_commit(commit, "Fill calculated column".into(), cx);
-                Some(true)
-            }
-            Err(error) => {
-                self.status_message = Some(error);
-                cx.notify();
-                Some(false)
-            }
+            Ok(Some((candidate, commit))) => Some(match self.publish_calculated(candidate, commit, "Fill calculated column", cx) {
+                Ok(()) => true,
+                Err(error) => { self.status_message = Some(error); cx.notify(); false }
+            }),
+            Err(error) => { self.status_message = Some(error); cx.notify(); Some(false) }
         }
     }
 
     pub(crate) fn restore_column_formula(&mut self, id: TableId, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) || self.mode.is_editing() {
-            return;
-        }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() { return; }
         let (row, col) = self.view_state.selected;
         let row = self.row_view.view_to_data(row);
-        match self
-            .workbook
-            .update(cx, |wb, _| wb.restore_calculated_cell(id, row, col))
-        {
-            Ok(commit) => self.record_table_commit(commit, "Restore column formula".into(), cx),
-            Err(error) => {
-                self.status_message = Some(error);
-                cx.notify();
-            }
-        }
+        let result = crate::table_calculated::prepare_restore(self.wb(cx), id, row, col)
+            .and_then(|(candidate, commit)| self.publish_calculated(candidate, commit, "Restore column formula", cx));
+        if let Err(error) = result { self.status_message = Some(error); cx.notify(); }
     }
 
     fn table_growth_blocked(&mut self, cx: &mut Context<Self>) -> bool {
@@ -249,7 +257,13 @@ impl Spreadsheet {
                 self.clipboard_visual_range = None;
                 self.maybe_show_cycle_banner(cx);
                 self.surface_incremental_recalc_problems(cx);
-                self.view_state.selected = (range.end_row, range.start_col);
+                let (row, hidden) = crate::table_append::append_focus(
+                    &self.row_view, range, &self.sheet(cx).manual_hidden_rows(),
+                );
+                self.view_state.selected = (row, range.start_col);
+                if hidden {
+                    self.status_message = Some("Added 1 Table row, hidden by the current view. Unhide rows or clear filters to enter its values.".into());
+                }
                 self.view_state.selection_end = None;
                 self.view_state.additional_selections.clear();
                 self.tab_chain_origin_col = Some(range.start_col);
@@ -274,7 +288,7 @@ impl Spreadsheet {
         };
         let (r, c) = self.view_state.selected;
         if table.range.data_rows() == 0
-            || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c))
+            || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c), &self.sheet(cx).manual_hidden_rows())
         {
             return false;
         }
@@ -482,11 +496,17 @@ impl Spreadsheet {
         if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() || self.mode.is_overlay() {
             return;
         }
-        if !matches!(kind, TableDialogKind::Resize(_)) && self.block_table_view_edit(cx) { return; }
+        if !kind.is_named_view() && !matches!(kind, TableDialogKind::Rename(_) | TableDialogKind::Resize(_) | TableDialogKind::Convert(_) | TableDialogKind::Total(..) | TableDialogKind::ColumnFormula(..)) && self.block_table_view_edit(cx) { return; }
         let id = match kind {
-            TableDialogKind::Rename(id)
+            TableDialogKind::Views(id)
+            | TableDialogKind::SaveView(id)
+            | TableDialogKind::RenameView(id, _)
+            | TableDialogKind::UpdateView(id, _)
+            | TableDialogKind::DeleteView(id, _)
+            | TableDialogKind::Rename(id)
             | TableDialogKind::Resize(id)
             | TableDialogKind::Convert(id)
+            | TableDialogKind::Total(id, _)
             | TableDialogKind::ColumnFormula(id, _, _) => id,
             _ => return,
         };
@@ -496,7 +516,17 @@ impl Spreadsheet {
         self.table_dialog = Some(TableDialog {
             kind,
             sheet,
-            name: if let TableDialogKind::ColumnFormula(_, col, _) = kind {
+            name: if kind.is_named_view() {
+                match kind {
+                    TableDialogKind::RenameView(_, i) | TableDialogKind::UpdateView(_, i) | TableDialogKind::DeleteView(_, i) => {
+                        let Some(saved) = table.saved_views.get(i) else { return; };
+                        saved.name.clone()
+                    }
+                    _ => String::new(),
+                }
+            } else if let TableDialogKind::Total(_, col) = kind {
+                self.sheet(cx).get_raw(table.range.end_row + 1, col)
+            } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
                 let row = self.row_view.view_to_data(self.view_state.selected.0);
                 if table.columns[col - table.range.start_col].formula.is_some() {
                     table.columns[col - table.range.start_col]
@@ -509,7 +539,15 @@ impl Spreadsheet {
             } else {
                 table.name.clone()
             },
-            range: if let TableDialogKind::ColumnFormula(_, col, _) = kind {
+            range: if kind.is_named_view() {
+                match kind {
+                    TableDialogKind::RenameView(_, i) | TableDialogKind::UpdateView(_, i) | TableDialogKind::DeleteView(_, i) => table.saved_views[i].name.clone(),
+                    _ => String::new(),
+                }
+            } else if let TableDialogKind::Total(_, col) = kind {
+                let total = table.totals.as_ref().and_then(|t| t.columns.get(col - table.range.start_col));
+                total.map(|t| if t.formula.is_some() { "custom" } else if let Some(f) = t.function.as_deref().filter(|f| *f != "none") { f } else if t.label.is_some() { "label" } else { "none" }).unwrap_or("none").into()
+            } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
                 let column = &table.columns[col - table.range.start_col];
                 if column.formula.is_some() {
                     (table.range.start_row + column.formula_origin).to_string()
@@ -537,8 +575,58 @@ impl Spreadsheet {
         let Some(draft) = self.table_dialog.clone() else {
             return;
         };
+        if draft.kind.is_named_view() {
+            self.submit_named_table_view(cx);
+            return;
+        }
         if let TableDialogKind::Resize(id) = draft.kind {
             match parse_range(&draft.range).and_then(|range| self.submit_table_resize(id, range, cx)) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::Total(id, col) = draft.kind {
+            let result = crate::table_totals::total_setting(&draft.range, &draft.name)
+                .and_then(|total| self.change_table_totals(id, Some((col, total)), cx));
+            match result {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::ColumnFormula(id, col, replace) = draft.kind {
+            let result = draft.range.parse::<usize>()
+                .map_err(|_| "Invalid formula origin.".to_string())
+                .and_then(|row| self.submit_column_formula(id, col, row, &draft.name, replace, cx));
+            match result {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::Rename(id) = draft.kind {
+            match self.submit_table_rename(id, draft.name.trim(), cx) {
+                Ok(()) => self.table_dialog = None,
+                Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
+        if let TableDialogKind::Convert(id) = draft.kind {
+            let result = (|| {
+                self.validate_saved_view_layout(self.wb(cx))?;
+                let mut candidate = self.wb(cx).clone();
+                let commit = candidate.remove_table(id)?;
+                self.validate_saved_view_layout(&candidate)?;
+                self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                self.record_table_commit(commit, format!("Convert Table to range: {}", draft.name.trim()), cx);
+                Ok::<(), String>(())
+            })();
+            match result {
                 Ok(()) => self.table_dialog = None,
                 Err(error) => self.table_dialog.as_mut().unwrap().error = Some(error),
             }
@@ -562,6 +650,8 @@ impl Spreadsheet {
                 parse_range(&draft.range).and_then(|r| wb.resize_table(id, r))
             }
             TableDialogKind::Convert(id) => wb.remove_table(id),
+            TableDialogKind::Total(..) | TableDialogKind::Views(_) | TableDialogKind::SaveView(_)
+            | TableDialogKind::RenameView(..) | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..) => unreachable!(),
             TableDialogKind::ColumnFormula(id, col, replace) => {
                 let row = draft
                     .range
@@ -573,10 +663,13 @@ impl Spreadsheet {
         match result {
             Ok(commit) => {
                 let verb = match draft.kind {
+                    TableDialogKind::Views(_) | TableDialogKind::SaveView(_) | TableDialogKind::RenameView(..)
+                    | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..) => unreachable!(),
                     TableDialogKind::Create => "Create Table",
                     TableDialogKind::Rename(_) => "Rename Table",
                     TableDialogKind::Resize(_) => "Resize Table",
                     TableDialogKind::Convert(_) => "Convert Table to range",
+                    TableDialogKind::Total(..) => "Change Table totals",
                     TableDialogKind::ColumnFormula(_, _, _) => "Set column formula",
                 };
                 self.record_table_commit(commit, format!("{verb}: {}", draft.name.trim()), cx);
@@ -619,7 +712,8 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
     ) {
         self.update_header_insertion_view(&commit, false, cx);
-        self.history.record_action_with_provenance(
+        let conversion = commit.is_conversion();
+        self.record_action_with_provenance(cx,
             UndoAction::TableCommit { header_layout: None,
                 sheet_index: self
                     .wb(cx)
@@ -632,7 +726,10 @@ impl Spreadsheet {
         );
         self.bump_cells_rev();
         self.is_modified = true;
-        self.status_message = Some(description);
+        self.status_message = Some(if self.history.last_record_too_large() {
+            if conversion { "Converted; this change is too large to undo".into() }
+            else { format!("{description}; this change is too large to undo") }
+        } else { description });
         cx.notify();
     }
 
@@ -646,11 +743,41 @@ impl Spreadsheet {
         if crate::table_create::is_creation(commit) {
             return self.replay_table_creation(commit, header_layout, undo, cx);
         }
+        if commit.is_calculated_change() {
+            return self.replay_calculated(commit, undo, cx);
+        }
+        if commit.is_totals_change() {
+            return self.replay_table_totals(commit, undo, cx);
+        }
         if crate::table_resize::is_resize(commit) {
             return self.replay_table_resize(commit, undo, cx);
         }
-        if crate::table_header_paste::is_header_rename(commit) {
+        if commit.is_name_change() {
             return self.replay_table_headers(commit, undo, cx);
+        }
+        if commit.is_conversion() {
+            let result = (|| {
+                self.validate_saved_view_layout(self.wb(cx))?;
+                let mut candidate = self.wb(cx).clone();
+                candidate.apply_table_commit(commit, undo)?;
+                self.validate_saved_view_layout(&candidate)?;
+                Ok::<_, String>(candidate)
+            })();
+            return match result {
+                Ok(candidate) => {
+                    self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                    self.sync_table_view(cx);
+                    self.bump_cells_rev();
+                    self.is_modified = true;
+                    cx.notify();
+                    true
+                }
+                Err(error) => {
+                    self.status_message = Some(format!("Cannot {} Table conversion: {error}", if undo { "undo" } else { "redo" }));
+                    cx.notify();
+                    false
+                }
+            };
         }
         match self
             .workbook
@@ -716,11 +843,20 @@ impl Spreadsheet {
         }
         let mut names: Vec<_> = table.columns.iter().map(|c| c.name.clone()).collect();
         names[col - table.range.start_col] = value.to_string();
-        let result = self
-            .workbook
-            .update(cx, |wb, _| wb.rename_table_columns(table.id, &names));
+        if table.columns[col - table.range.start_col].name == value {
+            return Some(true);
+        }
+        let result = (|| {
+            self.validate_saved_view_layout(self.wb(cx))?;
+            let (candidate, commit) = crate::table_header_paste::prepare_column_rename(self.wb(cx), table.id, &names)?;
+            self.validate_saved_view_layout(&candidate)?;
+            Ok::<_, String>((candidate, commit))
+        })();
         Some(match result {
-            Ok(commit) => {
+            Ok((candidate, commit)) => {
+                self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
+                self.table_filter_dropdown = None;
+                self.sync_table_view(cx);
                 self.record_table_commit(commit, format!("Rename {} column", table.name), cx);
                 true
             }
@@ -808,6 +944,7 @@ impl Spreadsheet {
     /// A modal interceptor runs before grid bindings so typing, Enter, Delete,
     /// paste and Ctrl+T cannot mutate cells behind the dialog.
     pub(crate) fn table_dialog_key(&mut self, key: &Keystroke, cx: &mut Context<Self>) -> bool {
+        if self.named_table_views_key(key, cx) { return true; }
         use crate::ui::text_input::{handle_input_key, handle_input_paste, InputAction};
         let Some(d) = self.table_dialog.as_mut() else {
             return false;
@@ -821,7 +958,27 @@ impl Spreadsheet {
             self.submit_table_dialog(cx);
             return true;
         }
-        if matches!(d.kind, TableDialogKind::Convert(_)) {
+        if matches!(d.kind, TableDialogKind::Total(..)) {
+            if key.key == "tab" {
+                d.field = if d.field == 2 && matches!(d.range.as_str(), "label" | "custom") { 0 } else { 2 };
+                d.select_all = true;
+                cx.notify();
+                return true;
+            }
+            if d.field == 2 || !matches!(d.range.as_str(), "label" | "custom") {
+                let choices = crate::table_totals::CHOICES;
+                let index = choices.iter().position(|(key, _)| *key == d.range).unwrap_or(0);
+                let next = match key.key.as_str() {
+                    "left" | "up" => Some((index + choices.len() - 1) % choices.len()),
+                    "right" | "down" => Some((index + 1) % choices.len()),
+                    _ => None,
+                };
+                if let Some(next) = next { d.range = choices[next].0.into(); d.error = None; }
+                cx.notify();
+                return true;
+            }
+        }
+        if matches!(d.kind, TableDialogKind::Convert(_) | TableDialogKind::UpdateView(..) | TableDialogKind::DeleteView(..)) {
             return true;
         }
         if key.key == "tab" && d.kind == TableDialogKind::Create {
@@ -884,6 +1041,58 @@ impl Spreadsheet {
 mod tests {
     use super::{header_in_view_rect, parse_range, range_label, TableRange};
     #[test]
+    fn conversion_rewind_preserves_manual_hides_and_another_sheets_criteria() {
+        use crate::history::{History, UndoAction};
+        let mut before = crate::table_edit::tests::fixture(true);
+        let spec = before.active_sheet().table_view_spec().cloned();
+        let other = before.add_sheet_named("Convert").unwrap();
+        for (row, value) in ["Amount", "10", "20", "30"].iter().enumerate() {
+            before.set_cell_value_tracked(other, row, 0, value);
+        }
+        let sid = before.sheet(other).unwrap().id;
+        let id = before.create_table(sid, TableRange { start_row: 0, end_row: 3, start_col: 0, end_col: 0 }, "ConvertMe").unwrap().table_id();
+        before.set_table_totals_visible(id, true, Default::default()).unwrap();
+        before.sheet_mut(other).unwrap().cond_formats.add(
+            vec![visigrid_engine::validation::CellRange::new(1, 0, 3, 0)],
+            "=[@Amount]>15",
+            visigrid_engine::cond_format::CondStyle::Named(visigrid_engine::cell::CellStyle::Warning),
+        );
+        before.sheet_mut(other).unwrap().validations.set(
+            visigrid_engine::validation::CellRange::single(7, 0),
+            visigrid_engine::validation::ValidationRule::list_range("ConvertMe[Amount]"),
+        );
+        let (mut before, _) = before.prepare_table_row_visibility(sid, [2, 4].into()).unwrap();
+        let dependent = spec.as_ref().unwrap().table;
+        before.set_table_totals_visible(dependent, true, Default::default()).unwrap();
+        before.set_table_total(dependent, 2, visigrid_engine::table::TableTotal {
+            function: Some("custom".into()),
+            formula: Some("=SUM(ConvertMe[[#Totals],[Amount]])+SUBTOTAL(109,[Amount])".into()),
+            label: None,
+        }).unwrap();
+        let mut after = before.clone();
+        let commit = after.remove_table(id).unwrap();
+        assert!(commit.is_conversion());
+        after.apply_table_commit(&commit, true).unwrap();
+        after.apply_table_commit(&commit, false).unwrap();
+        let mut history = History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
+            sheet_index: other, commit: Box::new(commit), header_layout: None,
+            description: "Convert hidden totals to range".into(),
+        }, None);
+        for end in [0, 1] {
+            let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
+            assert_eq!(preview.workbook.sheet(other).unwrap().tables().is_empty(), end == 1);
+            assert_eq!(preview.workbook.sheet(other).unwrap().manual_hidden_rows(), [2, 4].into());
+            assert_eq!(preview.workbook.sheet(other).unwrap().get_display(4, 0), "40");
+            assert!(!preview.workbook.sheet(other).unwrap().has_cond_format(1, 0));
+            assert!(preview.workbook.sheet(other).unwrap().has_cond_format(2, 0));
+            assert_eq!(preview.workbook.get_list_items(other, 7, 0).unwrap().items, ["10", "20", "30"]);
+            assert_eq!(preview.workbook.active_sheet().table_view_spec(), spec.as_ref());
+            assert_eq!(preview.workbook.active_sheet().get_display(7, 2), "130");
+        }
+    }
+
+    #[test]
     fn table_dialog_ranges_are_finite_local_and_ordered() {
         assert_eq!(range_label(parse_range("$B$2:D20").unwrap()), "B2:D20");
         for s in [
@@ -923,5 +1132,128 @@ mod tests {
         rows.apply_sort(vec![2, 1, 0, 3, 4, 5, 6, 7, 8, 9]);
         assert!(header_in_view_rect(table, &rows, 0, 2, 0, 3));
         assert!(!header_in_view_rect(table, &rows, 2, 2, 2, 3));
+    }
+}
+
+#[cfg(test)]
+mod conversion_size_tests {
+    use super::{conversion_warning, TableDialogKind};
+    use crate::app::Spreadsheet;
+    use visigrid_engine::table::TableRange;
+
+    #[gpui::test]
+    fn live_session_refuses_phase4_metadata_commands_without_mutation(cx: &mut gpui::TestAppContext) {
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("VISIGRID_LIVE_COLLAB", value),
+                    None => std::env::remove_var("VISIGRID_LIVE_COLLAB"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(std::env::var_os("VISIGRID_LIVE_COLLAB"));
+        std::env::set_var("VISIGRID_LIVE_COLLAB", "1");
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            let id = app.workbook.update(cx, |wb, _| {
+                wb.set_cell_value_tracked(0, 0, 0, "Amount");
+                wb.set_cell_value_tracked(0, 1, 0, "10");
+                let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 1, end_col: 0 }, "Sales").unwrap().table_id();
+                let mut view = visigrid_engine::table_view::TableViewSpec::new(id);
+                view.sort = Some(visigrid_engine::table_view::TableSort {
+                    column: wb.table(id).unwrap().1.columns[0].id,
+                    direction: visigrid_engine::filter::SortDirection::Ascending,
+                });
+                wb.set_table_view_spec(wb.active_sheet_id(), Some(view)).unwrap();
+                id
+            });
+            app.sync_table_view(cx);
+            app.view_state.selected = (1, 0);
+            app.cloud_identity = Some(crate::cloud::CloudIdentity {
+                sheet_id: 1, public_id: "test-live".into(), sheet_name: "Test".into(),
+                api_base: "https://example.invalid".into(), last_synced_hash: None,
+                last_synced_at: None, last_synced_revision: None,
+            });
+            assert!(app.cloud_live_enabled());
+            let before = format!("{:?}", app.wb(cx));
+            macro_rules! blocked {
+                ($action:expr) => {{
+                    app.status_message = None;
+                    $action;
+                    assert!(app.status_message.as_deref().unwrap().contains("cell values and formulas only"));
+                    assert_eq!(format!("{:?}", app.wb(cx)), before);
+                    assert!(!app.history.can_undo());
+                }};
+            }
+            app.view_state.selected = (0, 0);
+            blocked!(assert!(app.paste_table_headers(crate::clipboard::TablePasteKind::Contents, cx)));
+            blocked!(assert!(app.paste_table_headers(crate::clipboard::TablePasteKind::Values, cx)));
+            app.view_state.selected = (1, 0);
+            assert_eq!(app.commit_calculated_value(1, 0, "=1+2", cx), None);
+            assert_eq!(format!("{:?}", app.wb(cx)), before);
+            use visigrid_protocol::StructureOp;
+            for op in [StructureOp::InsertRows { sheet:None,at:1,count:1 }, StructureOp::DeleteRows { sheet:None,at:1,count:1 }, StructureOp::InsertCols { sheet:None,at:0,count:1 }, StructureOp::DeleteCols { sheet:None,at:0,count:1 }] {
+                let result = app.handle_session_structure(&op, None, cx);
+                assert!(result.error.unwrap().1.contains("sequencer"));
+                assert_eq!(format!("{:?}", app.wb(cx)), before);
+                assert!(!app.history.can_undo());
+            }
+            blocked!(app.toggle_table_totals(id, cx));
+            blocked!(app.restore_column_formula(id, cx));
+            blocked!(app.hide_rows(cx));
+            blocked!(app.set_bold(true, cx));
+            blocked!(app.add_sheet(cx));
+            app.table_dialog = Some(super::TableDialog {
+                kind: TableDialogKind::SaveView(id), sheet: app.wb(cx).active_sheet_id(),
+                name: "Saved".into(), range: String::new(), has_headers: true,
+                field: 0, select_all: false, error: None,
+            });
+            blocked!(app.submit_named_table_view(cx));
+        }).unwrap();
+    }
+    #[gpui::test]
+    fn conversion_too_large_for_history_reports_no_undo(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            let id = app.workbook.update(cx, |wb, _| {
+                wb.set_cell_value_tracked(0, 0, 0, "Amount");
+                wb.set_cell_value_tracked(0, 1, 0, "10");
+                wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 1, end_col: 0 }, "Sales").unwrap().table_id()
+            });
+            app.history.set_byte_budget_for_test(1);
+            app.open_table_dialog(TableDialogKind::Convert(id), cx);
+            app.submit_table_dialog(cx);
+            assert!(app.wb(cx).table(id).is_none());
+            assert!(app.table_dialog.is_none());
+            assert!(!app.history.can_undo());
+            assert_eq!(app.status_message.as_deref(), Some("Converted; this change is too large to undo"));
+        }).unwrap();
+    }
+
+    #[test]
+    fn large_conversion_confirmation_states_wait_unresponsive_window_and_undo_cost() {
+        let mut wb = visigrid_engine::workbook::Workbook::new();
+        wb.set_cell_value_tracked(0, 0, 0, "Amount");
+        let id = wb.create_table(wb.active_sheet_id(), TableRange { start_row: 0, start_col: 0, end_row: 1_000_000, end_col: 0 }, "LargeRecords").unwrap().table_id();
+        let table = wb.table(id).unwrap().1;
+        let warning = conversion_warning(table).unwrap();
+        for text in ["1000000 body rows", "135 seconds", "won't respond", "Undo and redo", "1 GB"] {
+            assert!(warning.contains(text), "{warning}");
+        }
+        let mut small = table.clone(); small.range.end_row = 100;
+        assert!(conversion_warning(&small).is_none());
     }
 }

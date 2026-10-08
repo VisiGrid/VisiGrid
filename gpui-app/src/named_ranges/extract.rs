@@ -2,7 +2,8 @@
 
 use gpui::{*};
 use crate::app::{Spreadsheet, CreateNameFocus};
-use crate::history::UndoAction;
+use crate::history::MutationSource;
+use super::extract_plan::ExtractionDraft;
 use crate::mode::Mode;
 
 impl Spreadsheet {
@@ -12,39 +13,16 @@ impl Spreadsheet {
 
     /// Show the extract named range modal
     pub fn show_extract_named_range(&mut self, cx: &mut Context<Self>) {
-        // Get the current cell's formula
-        let (row, col) = self.view_state.selected;
-        let cell = self.sheet(cx).get_cell(row, col);
-        let formula_opt = self.get_formula_source(cell.value());
-
-        let formula = match formula_opt {
-            Some(f) => f,
-            None => {
-                self.status_message = Some("Place the cursor inside a formula containing a range.".to_string());
-                cx.notify();
-                return;
-            }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.sync_table_view(cx);
+        let draft = match ExtractionDraft::capture(self.wb(cx), &self.row_view, self.view_state.selected) {
+            Ok(draft) => draft,
+            Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };
-
-        // Detect range literals in the formula
-        let range_literal = match self.detect_range_literal(&formula, cx) {
-            Some(r) => r,
-            None => {
-                self.status_message = Some("No range literal found in formula.".to_string());
-                cx.notify();
-                return;
-            }
-        };
-
-        // Check if this range is already a named range
-        if self.wb(cx).get_named_range(&range_literal).is_some() {
-            self.status_message = Some(format!("'{}' is already a named range.", range_literal));
-            cx.notify();
-            return;
-        }
-
-        // Find all cells containing this range literal
-        let (affected_cells, occurrence_count) = self.find_cells_with_range(&range_literal, cx);
+        let range_literal = draft.literal.clone();
+        let affected_cells = draft.cells();
+        let occurrence_count = draft.occurrences;
+        self.extract_draft = Some(draft);
 
         // Generate a suggested name (Range_1, Range_2, etc.)
         let suggested_name = self.generate_unique_range_name(cx);
@@ -66,7 +44,7 @@ impl Spreadsheet {
         let mut i = 1;
         loop {
             let name = format!("Range_{}", i);
-            if self.wb(cx).get_named_range(&name).is_none() {
+            if self.wb(cx).get_named_range(&name).is_none() && self.wb(cx).table_by_name(&name).is_none() {
                 return name;
             }
             i += 1;
@@ -80,161 +58,9 @@ impl Spreadsheet {
         }
     }
 
-    /// Detect a range literal in a formula (e.g., A1:B10, $A$1:$B$10)
-    fn detect_range_literal(&self, formula: &str, cx: &App) -> Option<String> {
-        // Simple regex-like pattern matching for range literals
-        // Matches: A1:B10, $A$1:$B$10, A1, $A$1, etc.
-        let chars: Vec<char> = formula.chars().collect();
-        let mut i = 0;
-
-        while i < chars.len() {
-            // Look for start of a cell reference
-            if let Some(range) = self.try_parse_range_at(&chars, i) {
-                // Skip named ranges (already defined)
-                if self.wb(cx).get_named_range(&range).is_none() {
-                    // Make sure it's actually a range (contains :) or a single cell
-                    return Some(range);
-                }
-            }
-            i += 1;
-        }
-        None
-    }
-
-    /// Try to parse a range starting at position i
-    fn try_parse_range_at(&self, chars: &[char], start: usize) -> Option<String> {
-        let mut i = start;
-
-        // Skip $ if present
-        if i < chars.len() && chars[i] == '$' {
-            i += 1;
-        }
-
-        // Need at least one letter
-        if i >= chars.len() || !chars[i].is_ascii_alphabetic() {
-            return None;
-        }
-
-        // Collect column letters
-        while i < chars.len() && chars[i].is_ascii_alphabetic() {
-            i += 1;
-        }
-
-        // Skip $ if present before row
-        if i < chars.len() && chars[i] == '$' {
-            i += 1;
-        }
-
-        // Need at least one digit
-        if i >= chars.len() || !chars[i].is_ascii_digit() {
-            return None;
-        }
-
-        // Collect row digits
-        while i < chars.len() && chars[i].is_ascii_digit() {
-            i += 1;
-        }
-
-        // Check for range separator (:)
-        if i < chars.len() && chars[i] == ':' {
-            i += 1;
-
-            // Parse second cell reference
-            // Skip $ if present
-            if i < chars.len() && chars[i] == '$' {
-                i += 1;
-            }
-
-            // Need at least one letter
-            if i >= chars.len() || !chars[i].is_ascii_alphabetic() {
-                return None;
-            }
-
-            // Collect column letters
-            while i < chars.len() && chars[i].is_ascii_alphabetic() {
-                i += 1;
-            }
-
-            // Skip $ if present before row
-            if i < chars.len() && chars[i] == '$' {
-                i += 1;
-            }
-
-            // Need at least one digit
-            if i >= chars.len() || !chars[i].is_ascii_digit() {
-                return None;
-            }
-
-            // Collect row digits
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-        }
-
-        // Make sure next char is not alphanumeric (word boundary)
-        if i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-            return None;
-        }
-
-        // Make sure previous char is not alphanumeric (word boundary)
-        if start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
-            return None;
-        }
-
-        Some(chars[start..i].iter().collect())
-    }
-
-    /// Find all cells containing a specific range literal and count occurrences
-    fn find_cells_with_range(&self, range_literal: &str, cx: &App) -> (Vec<(usize, usize)>, usize) {
-        let range_upper = range_literal.to_uppercase();
-        let mut cells = Vec::new();
-        let mut total_count = 0;
-
-        for ((row, col), cell) in self.sheet(cx).cells_iter() {
-            let raw = cell.value().raw_display();
-            if !raw.starts_with('=') {
-                continue;
-            }
-
-            let formula_upper = raw.to_uppercase();
-            let count = self.count_range_occurrences(&formula_upper, &range_upper);
-            if count > 0 {
-                cells.push((row, col));
-                total_count += count;
-            }
-        }
-
-        (cells, total_count)
-    }
-
-    /// Count how many times a range appears in a formula
-    fn count_range_occurrences(&self, formula: &str, range: &str) -> usize {
-        let mut count = 0;
-        let chars: Vec<char> = formula.chars().collect();
-        let range_chars: Vec<char> = range.chars().collect();
-        let range_len = range_chars.len();
-
-        let mut i = 0;
-        while i + range_len <= chars.len() {
-            // Check for match
-            let slice: String = chars[i..i + range_len].iter().collect();
-            if slice == range {
-                // Verify word boundaries
-                let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_' && chars[i - 1] != '$');
-                let after_ok = i + range_len >= chars.len() || (!chars[i + range_len].is_alphanumeric() && chars[i + range_len] != '_');
-                if before_ok && after_ok {
-                    count += 1;
-                    i += range_len;
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        count
-    }
-
     /// Hide the extract named range modal
     pub fn hide_extract_named_range(&mut self, cx: &mut Context<Self>) {
+        self.extract_draft = None;
         self.extract_range_literal.clear();
         self.extract_name.clear();
         self.extract_description.clear();
@@ -348,183 +174,27 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    /// Confirm extraction - create named range and replace in formulas
+    /// Publish the captured name and formula changes as one atomic history entry.
     pub fn confirm_extract_named_range(&mut self, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        // Validate
-        if self.extract_name.is_empty() {
-            self.extract_validation_error = Some("Name cannot be empty".to_string());
-            cx.notify();
-            return;
-        }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.validate_extract_name(cx);
-        if self.extract_validation_error.is_some() {
-            cx.notify();
-            return;
-        }
-
-        let range_literal = self.extract_range_literal.clone();
+        if self.extract_validation_error.is_some() { cx.notify(); return; }
         let name = self.extract_name.clone();
-        let description = if self.extract_description.is_empty() {
-            None
-        } else {
-            Some(self.extract_description.clone())
-        };
-        let affected_cells = std::mem::take(&mut self.extract_affected_cells);
-        let occurrence_count = self.extract_occurrence_count;
-
-        // 1. Parse the range literal and create the named range
-        // Handle absolute references by removing $ signs
-        let clean_range = range_literal.replace('$', "");
-        let parts: Vec<&str> = clean_range.split(':').collect();
-
-        let sheet = self.sheet_index(cx);
-        let result: Result<(), String> = if parts.len() == 2 {
-            // Range reference like A1:B10
-            if let (Some(start), Some(end)) = (
-                Self::parse_cell_ref(parts[0]),
-                Self::parse_cell_ref(parts[1]),
-            ) {
-                self.wb_mut(cx, |wb| wb.define_name_for_range(&name, sheet, start.0, start.1, end.0, end.1))
-            } else {
-                Err("Invalid cell reference".to_string())
-            }
-        } else {
-            // Single cell reference like A1
-            if let Some((row, col)) = Self::parse_cell_ref(&clean_range) {
-                self.wb_mut(cx, |wb| wb.define_name_for_cell(&name, sheet, row, col))
-            } else {
-                Err("Invalid cell reference".to_string())
-            }
-        };
-
-        if let Err(e) = result {
-            self.extract_validation_error = Some(format!("Failed to create named range: {:?}", e));
-            cx.notify();
-            return;
+        let description = (!self.extract_description.is_empty()).then(|| self.extract_description.clone());
+        let result = self.extract_draft.as_ref()
+            .ok_or_else(|| "Reopen extraction and try again.".to_string())
+            .and_then(|draft| draft.prepare(self.wb(cx), &self.row_view, &name, description))
+            .and_then(|(candidate, commit)| self.publish_table_batch(candidate, commit, format!("Extract '{name}'"), MutationSource::Human, cx));
+        if let Err(error) = result {
+            self.extract_validation_error = Some(error);
+            cx.notify(); return;
         }
-
-        // Add description if provided
-        if let Some(desc) = description {
-            self.wb_mut(cx, |wb| {
-                if let Some(nr) = wb.named_ranges_mut().get(&name).cloned() {
-                    let mut updated = nr;
-                    updated.description = Some(desc);
-                    let _ = wb.named_ranges_mut().set(updated);
-                }
-            });
-        }
-
-        // 2. Replace range literal with name in all affected cells
-        let mut cell_changes = Vec::new();
-        self.wb_mut(cx, |wb| wb.begin_batch());
-        for (row, col) in &affected_cells {
-            let cell = self.sheet(cx).get_cell(*row, *col);
-            let old_value = cell.value.raw_display();
-            if old_value.starts_with('=') {
-                let new_value = self.replace_range_in_formula(&old_value, &range_literal, &name);
-                if new_value != old_value {
-                    // Apply the change
-                    self.set_cell_value(*row, *col, &new_value, cx);
-                    cell_changes.push(crate::history::CellChange {
-                        row: *row,
-                        col: *col,
-                        old_value,
-                        new_value,
-                    });
-                }
-            }
-        }
-        self.end_batch_and_broadcast(cx);
-
-        // 3. Record undo action (group)
-        // Get the full named range we just created for the undo action
-        let created_range = self.wb(cx).get_named_range(&name)
-            .cloned()
-            .expect("Named range was just created");
-        let mut actions = vec![
-            UndoAction::NamedRangeCreated { named_range: created_range },
-        ];
-        if !cell_changes.is_empty() {
-            actions.push(UndoAction::Values {
-                sheet_index: 0,
-                changes: cell_changes,
-            });
-        }
-        self.history.record_named_range_action(UndoAction::Group {
-            actions,
-            description: format!("Extract '{}'", name),
-        });
-
-        // 4. Add to refactor log
-        let impact_msg = format!("Replaced {} occurrences in {} cells", occurrence_count, affected_cells.len());
         self.refactor_log.push(
             crate::views::refactor_log::RefactorLogEntry::new(
-                "Extracted to Named Range",
-                format!("{} = {}", name, range_literal),
-            ).with_impact(impact_msg)
+                "Extracted to Named Range", format!("{} = {}", name, self.extract_range_literal),
+            ).with_impact(format!("Replaced {} occurrences in {} visible formulas", self.extract_occurrence_count, self.extract_affected_cells.len()))
         );
-
-        // 5. Invalidate caches and show status
-        self.bump_cells_rev();
-        self.is_modified = true;
-        self.status_message = Some(format!("Extracted '{}' (Ctrl+Shift+R to rename)", name));
-
-        // 6. Hide modal
+        self.status_message = Some(format!("Extracted '{name}' (Ctrl+Shift+R to rename)"));
         self.hide_extract_named_range(cx);
-    }
-
-    /// Replace all occurrences of a range literal with a name in a formula.
-    /// This is token-aware: it won't replace inside string literals.
-    fn replace_range_in_formula(&self, formula: &str, range_literal: &str, name: &str) -> String {
-        let range_upper = range_literal.to_uppercase();
-        let mut result = String::new();
-        let chars: Vec<char> = formula.chars().collect();
-        let range_len = range_upper.len();
-
-        let mut i = 0;
-        let mut in_string = false;
-
-        while i < chars.len() {
-            // Track string literal state (toggle on each unescaped quote)
-            if chars[i] == '"' {
-                // Check for escaped quote (doubled quote in Excel formulas)
-                if in_string && i + 1 < chars.len() && chars[i + 1] == '"' {
-                    result.push(chars[i]);
-                    result.push(chars[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                in_string = !in_string;
-                result.push(chars[i]);
-                i += 1;
-                continue;
-            }
-
-            // If inside a string, just copy the character
-            if in_string {
-                result.push(chars[i]);
-                i += 1;
-                continue;
-            }
-
-            // Check for range match (only outside strings)
-            if i + range_len <= chars.len() {
-                let slice: String = chars[i..i + range_len].iter().collect::<String>().to_uppercase();
-                if slice == range_upper {
-                    // Verify word boundaries
-                    let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_' && chars[i - 1] != '$');
-                    let after_ok = i + range_len >= chars.len() || (!chars[i + range_len].is_alphanumeric() && chars[i + range_len] != '_');
-                    if before_ok && after_ok {
-                        result.push_str(name);
-                        i += range_len;
-                        continue;
-                    }
-                }
-            }
-            result.push(chars[i]);
-            i += 1;
-        }
-        result
     }
 }

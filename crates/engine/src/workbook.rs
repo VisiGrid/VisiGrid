@@ -14,6 +14,17 @@ mod sheet_copy;
 mod guarded_structure;
 #[path = "workbook_automation.rs"]
 mod automation;
+#[path = "workbook_sheet_rename.rs"]
+mod sheet_rename;
+#[path = "workbook_sheet_lifecycle.rs"]
+mod sheet_lifecycle;
+#[path = "workbook_names.rs"]
+mod names;
+#[path = "workbook_validation.rs"]
+mod validation_eval;
+#[path = "workbook_dynamic_refs.rs"]
+mod dynamic_refs;
+pub use names::NamedRangeEdit;
 pub use guarded_structure::{shift_structure_index, GuardedStructureCommit, StructureStep};
 #[path = "workbook_table_view.rs"]
 mod table_view_ops;
@@ -106,6 +117,9 @@ pub struct Workbook {
     /// keeps a clone of the workbook, and most edits change only values.
     #[serde(skip)]
     dep_graph: Arc<DepGraph>,
+    /// Captured during immutable cell evaluation, applied between recalc passes.
+    #[serde(skip)]
+    pending_dynamic_refs: std::cell::RefCell<FxHashMap<CellId, Vec<crate::dep_graph::RangeRef>>>,
     /// Settlement failures from incremental recalcs, which have no report to
     /// carry them. Taken by whoever surfaces recalc problems (the status
     /// line, a session log); never persisted.
@@ -142,6 +156,8 @@ pub struct Workbook {
     /// ordinary edit pays one emptiness check.
     #[serde(skip)]
     volatile_cells: FxHashSet<CellId>,
+    #[serde(skip)]
+    table_readers: FxHashMap<crate::table::TableId, Arc<FxHashSet<CellId>>>,
 
     /// Clock and seed for volatile functions, for replicas that must agree
     /// (collaboration). `None` reads the machine, as the desktop always has.
@@ -194,6 +210,33 @@ impl Default for Workbook {
     }
 }
 
+thread_local! {
+    static DEFER_RECALC_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// While this guard is alive, batch and Table replay store edits and skip
+/// recalculation. Rewind calculates the stored baseline once, after the guard
+/// is gone. The flag is thread-local so a workbook cloned inside replay still
+/// sees it; it is not part of the workbook.
+pub struct DeferRecalcGuard;
+
+impl DeferRecalcGuard {
+    pub fn enter() -> Self {
+        DEFER_RECALC_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for DeferRecalcGuard {
+    fn drop(&mut self) {
+        DEFER_RECALC_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+pub(crate) fn recalc_deferred() -> bool {
+    DEFER_RECALC_DEPTH.with(|depth| depth.get() > 0)
+}
+
 impl Workbook {
     /// Create a new workbook with one default sheet
     pub fn new() -> Self {
@@ -207,12 +250,14 @@ impl Workbook {
             style_table: Vec::new(),
             pending_bands: None,
             dep_graph: Arc::default(),
+            pending_dynamic_refs: Default::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
             batch_vacated: Vec::new(),
             volatile_cells: FxHashSet::default(),
+            table_readers: FxHashMap::default(),
             recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
@@ -363,8 +408,9 @@ impl Workbook {
         !self.sheets.iter().any(|s| s.id != exclude_id && s.name_key == key)
     }
 
-    /// Delete a sheet by index
-    /// Returns false if it's the last sheet (can't delete)
+    /// Delete a sheet by index. Names aimed at it become `#REF!` and their
+    /// dependents recalculate. Returns false if it is the last sheet, the
+    /// index is out of range, or another sheet's Table still references it.
     pub fn delete_sheet(&mut self, index: usize) -> bool {
         if self.sheets.len() <= 1 || index >= self.sheets.len() {
             return false;
@@ -372,6 +418,8 @@ impl Workbook {
 
         if self.has_external_table_references(self.sheets[index].id) { return false; }
         self.sheets.remove(index);
+        // Name targets still use the indexes from before this removal.
+        self.named_ranges.remove_sheet(index);
         self.refresh_table_name_reservations();
 
         // Adjust active sheet if needed
@@ -381,6 +429,8 @@ impl Workbook {
             self.active_sheet -= 1;
         }
 
+        self.rebuild_dep_graph();
+        self.recompute_full_ordered();
         true
     }
 
@@ -548,12 +598,14 @@ impl Workbook {
             style_table: Vec::new(),
             pending_bands: None,
             dep_graph: Arc::default(),
+            pending_dynamic_refs: Default::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
             batch_vacated: Vec::new(),
             volatile_cells: FxHashSet::default(),
+            table_readers: FxHashMap::default(),
             recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
@@ -581,12 +633,14 @@ impl Workbook {
             style_table: Vec::new(),
             pending_bands: None,
             dep_graph: Arc::default(),
+            pending_dynamic_refs: Default::default(),
             incremental_errors: Vec::new(),
             batch_depth: 0,
             batch_changed: Vec::new(),
             batch_format_changed: Vec::new(),
             batch_vacated: Vec::new(),
             volatile_cells: FxHashSet::default(),
+            table_readers: FxHashMap::default(),
             recalc_clock: None,
             auto_recalc: true,
             iterative_enabled: false,
@@ -673,95 +727,11 @@ impl Workbook {
     /// Returns None if the cell has no validation or non-list validation.
     pub fn get_list_items(&self, sheet_index: usize, row: usize, col: usize) -> Option<crate::validation::ResolvedList> {
         use crate::validation::{ValidationType, ListSource, ResolvedList};
-
-        let sheet = self.sheets.get(sheet_index)?;
-        let rule = sheet.validations.get(row, col)?;
-
+        let rule = self.sheets.get(sheet_index)?.validations.get(row, col)?.at(row, col);
         match &rule.rule_type {
-            ValidationType::List(source) => {
-                match source {
-                    ListSource::Inline(values) => {
-                        Some(ResolvedList::from_items(values.clone()))
-                    }
-                    ListSource::Range(range_str) => {
-                        // Parse range string, may include sheet reference
-                        let range_str = range_str.trim_start_matches('=').trim();
-                        Some(self.resolve_range_to_list(sheet_index, range_str))
-                    }
-                    ListSource::NamedRange(name) => {
-                        // Strip leading = if present (UI accepts both forms)
-                        let name = name.trim_start_matches('=');
-                        Some(self.resolve_named_range_to_list(name))
-                    }
-                }
-            }
+            ValidationType::List(ListSource::Inline(values)) => Some(ResolvedList::from_items(values.clone())),
+            ValidationType::List(ListSource::Range(source) | ListSource::NamedRange(source)) => Some(self.resolve_validation_list(sheet_index, row, col, source)),
             _ => None,
-        }
-    }
-
-    /// Resolve a range string (possibly with sheet reference) to list items.
-    fn resolve_range_to_list(&self, current_sheet: usize, range_str: &str) -> crate::validation::ResolvedList {
-        use crate::validation::ResolvedList;
-
-        // Check for sheet reference: "Sheet1!A1:A10"
-        let (sheet_idx, cell_range) = if let Some(bang_pos) = range_str.find('!') {
-            let sheet_name = &range_str[..bang_pos].trim_matches('\'');
-            let cell_range = &range_str[bang_pos + 1..];
-
-            // Find sheet by name
-            match self.sheets.iter().position(|s| s.name == *sheet_name) {
-                Some(idx) => (idx, cell_range),
-                None => return ResolvedList::empty(), // Sheet not found
-            }
-        } else {
-            (current_sheet, range_str)
-        };
-
-        // Use the sheet's resolve method
-        if let Some(sheet) = self.sheets.get(sheet_idx) {
-            sheet.resolve_range_to_list(cell_range)
-        } else {
-            ResolvedList::empty()
-        }
-    }
-
-    /// Resolve a named range to list items.
-    fn resolve_named_range_to_list(&self, name: &str) -> crate::validation::ResolvedList {
-        use crate::validation::ResolvedList;
-        use crate::named_range::NamedRangeTarget;
-
-        let named_range = match self.named_ranges.get(name) {
-            Some(nr) => nr,
-            None => return ResolvedList::empty(),
-        };
-
-        match &named_range.target {
-            NamedRangeTarget::Cell { sheet, row, col } => {
-                if let Some(s) = self.sheets.get(*sheet) {
-                    let display = s.get_display(*row, *col);
-                    if display.is_empty() {
-                        return ResolvedList::empty();
-                    }
-                    return ResolvedList::from_items(vec![display]);
-                }
-                ResolvedList::empty()
-            }
-            NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } => {
-                if let Some(s) = self.sheets.get(*sheet) {
-                    // Collect values from range
-                    let mut items = Vec::new();
-                    for row in *start_row..=*end_row {
-                        for col in *start_col..=*end_col {
-                            let display = s.get_display(row, col);
-                            if !display.is_empty() {
-                                items.push(display);
-                            }
-                        }
-                    }
-                    return ResolvedList::from_items(items);
-                }
-                ResolvedList::empty()
-            }
         }
     }
 
@@ -771,224 +741,6 @@ impl Workbook {
             sheet.has_list_dropdown(row, col)
         } else {
             false
-        }
-    }
-
-    // =========================================================================
-    // Numeric Constraint Resolution (workbook-level)
-    // =========================================================================
-
-    /// Resolve a constraint value to a number.
-    ///
-    /// This is the workbook-level resolver that can handle cross-sheet CellRefs.
-    /// - Literal numbers: return directly
-    /// - CellRef: parse "A1" or "Sheet2!A1", get computed value, parse as number
-    /// - Formula: not yet implemented (returns FormulaError)
-    pub fn resolve_constraint_value(
-        &self,
-        current_sheet: usize,
-        value: &crate::validation::ConstraintValue,
-    ) -> Result<f64, crate::validation::ConstraintResolveError> {
-        use crate::validation::{ConstraintValue, ConstraintResolveError};
-
-        match value {
-            ConstraintValue::Number(n) => Ok(*n),
-            ConstraintValue::CellRef(ref_str) => {
-                self.resolve_cell_ref_to_number(current_sheet, ref_str)
-            }
-            ConstraintValue::Formula(_formula) => {
-                // Formula constraint evaluation not yet implemented
-                // Return deterministic error so behavior is predictable
-                Err(ConstraintResolveError::FormulaError(
-                    "Formula constraints not yet implemented".to_string()
-                ))
-            }
-        }
-    }
-
-    /// Resolve a cell reference string to a numeric value.
-    ///
-    /// Handles both same-sheet ("A1") and cross-sheet ("Sheet2!A1") references.
-    fn resolve_cell_ref_to_number(
-        &self,
-        current_sheet: usize,
-        ref_str: &str,
-    ) -> Result<f64, crate::validation::ConstraintResolveError> {
-        use crate::validation::ConstraintResolveError;
-
-        // Parse reference: check for sheet prefix
-        let (sheet_idx, cell_ref) = if let Some(bang_pos) = ref_str.find('!') {
-            let sheet_name = ref_str[..bang_pos].trim_matches('\'');
-            let cell_ref = &ref_str[bang_pos + 1..];
-
-            // Find sheet by name
-            let idx = self.sheets.iter()
-                .position(|s| s.name == sheet_name)
-                .ok_or_else(|| ConstraintResolveError::InvalidReference(
-                    format!("Sheet '{}' not found", sheet_name)
-                ))?;
-            (idx, cell_ref)
-        } else {
-            (current_sheet, ref_str)
-        };
-
-        // Get sheet
-        let sheet = self.sheets.get(sheet_idx)
-            .ok_or_else(|| ConstraintResolveError::InvalidReference(
-                format!("Sheet index {} out of range", sheet_idx)
-            ))?;
-
-        // Parse cell reference
-        let (row, col) = sheet.parse_cell_ref(cell_ref)
-            .ok_or_else(|| ConstraintResolveError::InvalidReference(
-                format!("Invalid cell reference: {}", cell_ref)
-            ))?;
-
-        // Get computed value (display value, not raw formula)
-        let display = sheet.get_display(row, col);
-
-        if display.is_empty() {
-            return Err(ConstraintResolveError::BlankConstraint);
-        }
-
-        // Parse as number
-        display.parse::<f64>()
-            .map_err(|_| ConstraintResolveError::NotNumeric)
-    }
-
-    /// Validate a cell input at the workbook level.
-    ///
-    /// This handles cross-sheet CellRef constraints that require workbook context.
-    /// For List validation and other types, delegates to the sheet.
-    pub fn validate_cell_input(
-        &self,
-        sheet_index: usize,
-        row: usize,
-        col: usize,
-        value: &str,
-    ) -> crate::validation::ValidationResult {
-        use crate::validation::{ValidationResult, ValidationType, NumericParseError};
-
-        let sheet = match self.sheets.get(sheet_index) {
-            Some(s) => s,
-            None => return ValidationResult::Valid,
-        };
-
-        let rule = match sheet.validations.get(row, col) {
-            Some(r) => r,
-            None => return ValidationResult::Valid,
-        };
-
-        // Check ignore_blank
-        if rule.ignore_blank && value.trim().is_empty() {
-            return ValidationResult::Valid;
-        }
-
-        // Handle numeric types with workbook-level constraint resolution
-        match &rule.rule_type {
-            ValidationType::WholeNumber(constraint) => {
-                use crate::validation::parse_numeric_input;
-
-                let num = match parse_numeric_input(value, false) {
-                    Ok(n) => n,
-                    Err(NumericParseError::FractionalNotAllowed) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a whole number (no decimals)".to_string(),
-                        };
-                    }
-                    Err(_) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a whole number".to_string(),
-                        };
-                    }
-                };
-
-                self.validate_numeric_constraint(sheet_index, num, constraint, rule, "whole number")
-            }
-
-            ValidationType::Decimal(constraint) => {
-                use crate::validation::parse_numeric_input;
-
-                let num = match parse_numeric_input(value, true) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a number".to_string(),
-                        };
-                    }
-                };
-
-                self.validate_numeric_constraint(sheet_index, num, constraint, rule, "number")
-            }
-
-            // For other types, delegate to sheet (they don't need cross-sheet resolution)
-            _ => sheet.validate_cell_input(row, col, value),
-        }
-    }
-
-    /// Helper to validate a numeric value against a constraint using workbook resolver.
-    fn validate_numeric_constraint(
-        &self,
-        sheet_index: usize,
-        value: f64,
-        constraint: &crate::validation::NumericConstraint,
-        rule: &crate::validation::ValidationRule,
-        type_name: &str,
-    ) -> crate::validation::ValidationResult {
-        use crate::validation::{ValidationResult, eval_numeric_constraint, ComparisonOperator};
-
-        // Resolve constraint values using workbook-level resolver
-        let v1 = match self.resolve_constraint_value(sheet_index, &constraint.value1) {
-            Ok(n) => n,
-            Err(e) => {
-                return ValidationResult::Invalid {
-                    rule: rule.clone(),
-                    reason: format!("Validation constraint error: {}", e),
-                };
-            }
-        };
-
-        let v2 = match &constraint.value2 {
-            Some(cv) => match self.resolve_constraint_value(sheet_index, cv) {
-                Ok(n) => Some(n),
-                Err(e) => {
-                    return ValidationResult::Invalid {
-                        rule: rule.clone(),
-                        reason: format!("Validation constraint error: {}", e),
-                    };
-                }
-            },
-            None => None,
-        };
-
-        // Use the shared evaluation helper
-        let valid = eval_numeric_constraint(value, constraint.operator, v1, v2);
-
-        if valid {
-            ValidationResult::Valid
-        } else {
-            let reason = match constraint.operator {
-                ComparisonOperator::Between => {
-                    format!("{} must be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
-                }
-                ComparisonOperator::NotBetween => {
-                    format!("{} must not be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
-                }
-                ComparisonOperator::EqualTo => format!("{} must equal {}", type_name, v1),
-                ComparisonOperator::NotEqualTo => format!("{} must not equal {}", type_name, v1),
-                ComparisonOperator::GreaterThan => format!("{} must be greater than {}", type_name, v1),
-                ComparisonOperator::LessThan => format!("{} must be less than {}", type_name, v1),
-                ComparisonOperator::GreaterThanOrEqual => format!("{} must be at least {}", type_name, v1),
-                ComparisonOperator::LessThanOrEqual => format!("{} must be at most {}", type_name, v1),
-            };
-
-            ValidationResult::Invalid {
-                rule: rule.clone(),
-                reason,
-            }
         }
     }
 
@@ -1006,20 +758,15 @@ impl Workbook {
     ) -> ValidationFailures {
         use crate::validation::ValidationResult;
 
-        let sheet = match self.sheets.get(sheet_index) {
-            Some(s) => s,
-            None => return ValidationFailures::default(),
-        };
+        if self.sheets.get(sheet_index).is_none() {
+            return ValidationFailures::default();
+        }
 
         let mut failures = ValidationFailures::default();
 
         for row in start_row..=end_row {
             for col in start_col..=end_col {
-                // Get the current display value of the cell
-                let value = sheet.get_display(row, col);
-
-                // Validate using workbook-level validation
-                let result = self.validate_cell_input(sheet_index, row, col, &value);
+                let result = self.validate_cell(sheet_index, row, col);
 
                 if let ValidationResult::Invalid { reason, .. } = result {
                     failures.count += 1;
@@ -1072,6 +819,12 @@ impl Workbook {
         &self.dep_graph
     }
 
+    /// Whether a recalculated candidate adds cycle members. Existing cycles
+    /// are a supported saved state and must not block unrelated transactions.
+    pub fn has_new_cycles(&self, before: &Workbook) -> bool {
+        !self.dep_graph.find_cycle_members().is_subset(&before.dep_graph.find_cycle_members())
+    }
+
     /// A formula's single-cell references and its ranges, whole rows and
     /// columns included. Ranges stay ranges (#29): the graph indexes them
     /// instead of holding an edge per cell, which made a running total
@@ -1091,7 +844,80 @@ impl Workbook {
                 .iter()
                 .map(crate::dep_graph::RangeRef::from_whole),
         );
+        if crate::formula::eval_subtotal::contains_subtotal(bound) {
+            let sheets: FxHashSet<_> = ranges.iter().map(|r| r.sheet).chain(refs.iter().map(|r| r.sheet)).collect();
+            for sheet in self.sheets().iter().filter(|s| sheets.contains(&s.id)) {
+                if let Some(spec) = sheet.table_view_spec() {
+                    if let Some(table) = sheet.tables().iter().find(|t| t.id == spec.table && t.range.data_rows() > 0) {
+                        let touches_body = ranges.iter().any(|r| r.sheet == sheet.id
+                            && r.end_row > table.range.start_row && r.start_row <= table.range.end_row)
+                            || refs.iter().any(|r| r.sheet == sheet.id
+                                && r.row > table.range.start_row && r.row <= table.range.end_row);
+                        if !touches_body { continue; }
+                        for filter in &spec.filters {
+                            if let Some(offset) = table.columns.iter().position(|c| c.id == filter.column) {
+                                let column = table.range.start_col + offset;
+                                ranges.push(crate::dep_graph::RangeRef { sheet: sheet.id,
+                                    start_row: table.range.start_row + 1, start_col: column,
+                                    end_row: table.range.end_row, end_col: column });
+                            }
+                        }
+                    }
+                }
+            }
+        }
         (refs, ranges)
+    }
+
+    fn table_reader_ids(&self, ast: &crate::formula::parser::ParsedExpr, cell: CellId) -> FxHashSet<crate::table::TableId> {
+        use crate::formula::parser::Expr;
+        fn visit(wb: &Workbook, ast: &crate::formula::parser::ParsedExpr, cell: CellId, ids: &mut FxHashSet<crate::table::TableId>) {
+            let table = match ast {
+                Expr::StructuredRef(reference) => match &reference.table {
+                    Some(name) => wb.table_by_name(name).map(|(_, t)| t),
+                    None => wb.sheet_by_id(cell.sheet).and_then(|s| s.table_at(cell.row, cell.col)),
+                },
+                Expr::NamedRange(name) => wb.table_by_name(name).map(|(_, t)| t),
+                Expr::Function { args, .. } => { for a in args { visit(wb, a, cell, ids); } None },
+                Expr::BinaryOp { left, right, .. } => { visit(wb, left, cell, ids); visit(wb, right, cell, ids); None },
+                _ => None,
+            };
+            if let Some(table) = table { ids.insert(table.id); }
+        }
+        let mut ids = FxHashSet::default();
+        visit(self, ast, cell, &mut ids);
+        ids
+    }
+
+    /// Clone that shares the cell-storage copy meter with this workbook.
+    pub fn clone_sharing_cell_cow(&self) -> Self {
+        let mut cloned = self.clone();
+        for (dst, src) in cloned.sheets.iter_mut().zip(self.sheets.iter()) {
+            dst.share_cell_cow_from(src);
+        }
+        cloned
+    }
+
+    /// Bytes of this workbook's chunks, string and formula pages, and
+    /// capture-time maps that `live` does not share. Arc identity is the
+    /// comparison, so replacing the live workbook with a clone keeps the
+    /// charge, and freeing a copy drops it.
+    pub fn unshared_cow_bytes(&self, live: &Workbook) -> usize {
+        if std::ptr::eq(self, live) {
+            return 0;
+        }
+        self.sheets.iter().map(|sheet| match live.sheet_by_id(sheet.id) {
+            Some(other) => sheet.unshared_cow_bytes(other),
+            None => sheet.all_cow_bytes(),
+        }).sum()
+    }
+
+    /// Zero the shared copy meter. A new rewind baseline still shares every
+    /// chunk, so copies made for the previous baseline are not charged again.
+    pub fn reset_shared_cell_cow(&self) {
+        for sheet in &self.sheets {
+            sheet.reset_cell_cow();
+        }
     }
 
     /// Rebuild the dependency graph from scratch.
@@ -1099,8 +925,10 @@ impl Workbook {
     /// Call this after loading a workbook to populate the graph.
     /// Iterates all formula cells and extracts their references.
     pub fn rebuild_dep_graph(&mut self) {
+        self.pending_dynamic_refs.get_mut().clear();
         self.dep_graph = Arc::default();
         self.volatile_cells.clear();
+        self.table_readers.clear();
 
         // Iterate all sheets and cells
         for sheet in &self.sheets {
@@ -1125,6 +953,9 @@ impl Workbook {
                     // Formulas inside these ranges are ordered first through
                     // the range index, whenever they are registered.
                     Arc::make_mut(&mut self.dep_graph).set_ranges(formula_cell, ranges);
+                    for id in self.table_reader_ids(ast, formula_cell) {
+                        Arc::make_mut(self.table_readers.entry(id).or_default()).insert(formula_cell);
+                    }
                     if crate::formula::analyze::is_volatile(ast) {
                         self.volatile_cells.insert(formula_cell);
                     }
@@ -1145,7 +976,13 @@ impl Workbook {
         let ast = self.sheet_by_id(sheet_id)
             .and_then(|sheet| sheet.get_cell(row, col).value.formula_ast().cloned());
 
+        for readers in self.table_readers.values_mut() {
+            if readers.contains(&cell_id) { Arc::make_mut(readers).remove(&cell_id); }
+        }
         if let Some(ast) = ast {
+            for id in self.table_reader_ids(&ast, cell_id) {
+                Arc::make_mut(self.table_readers.entry(id).or_default()).insert(cell_id);
+            }
             // Bind and extract references
             let bound = bind_expr(&ast, |name| self.sheet_id_by_name(name));
             let (refs, ranges) = self.formula_dependencies(&bound, sheet_id, row, col);
@@ -1193,6 +1030,9 @@ impl Workbook {
     pub fn clear_cell_deps(&mut self, sheet_id: SheetId, row: usize, col: usize) {
         let cell_id = CellId::new(sheet_id, row, col);
         self.volatile_cells.remove(&cell_id);
+        for readers in self.table_readers.values_mut() {
+            if readers.contains(&cell_id) { Arc::make_mut(readers).remove(&cell_id); }
+        }
         if self.dep_graph.has_own_deps(cell_id) {
             Arc::make_mut(&mut self.dep_graph).clear_cell(cell_id);
         }
@@ -1464,6 +1304,12 @@ impl Workbook {
         std::mem::take(&mut self.incremental_errors)
     }
 
+    /// Whether an earlier incremental pass left an error whose text contains `text`.
+    /// Does not clear the list. A later structural edit decides for itself.
+    pub fn incremental_errors_contain(&self, text: &str) -> bool {
+        self.incremental_errors.iter().any(|error| error.error.contains(text))
+    }
+
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
         match crate::custom_fns::default_custom_fn_handler() {
             Some(handler) => self.recompute_full_ordered_inner(Some(&handler)),
@@ -1474,12 +1320,10 @@ impl Workbook {
     /// Core recompute implementation, optionally with custom function handler.
     /// Bracketed by the custom-function hooks so a handler can scope a memo
     /// to this one recalculation.
-    fn recompute_full_ordered_inner(
+    fn recompute_full_ordered_pass(
         &mut self,
         custom_fn_handler: Option<&dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
     ) -> crate::recalc::RecalcReport {
-        let _recalc_scope = crate::custom_fns::recalc_scope();
-        let _clock = crate::timing::ClockGuard::install(self.recalc_clock);
         use crate::formula::analyze::has_dynamic_deps;
         use crate::formula::eval::Value;
         use crate::recalc::{CellRecalcInfo, RecalcError, RecalcReport};
@@ -1492,8 +1336,9 @@ impl Workbook {
         // --- Phase 1: Invalidation (clear caches) ---
         let phase_start = Instant::now();
         // Clear computed value caches from previous recalc
-        for sheet in &self.sheets {
+        for sheet in &mut self.sheets {
             sheet.clear_computed_cache();
+            sheet.reset_spill_blockers();
         }
         report.phase_invalidation_us = phase_start.elapsed().as_micros() as u64;
 
@@ -1506,15 +1351,22 @@ impl Workbook {
                 levels = lv;
                 (order, Vec::new())
             }
-            Err(cycle) => {
+            Err(_) => {
                 report.had_cycles = true;
-                let cycle_cells = cycle.cells.clone();
+                // Kahn's remainder also contains downstream readers. Only
+                // strongly connected components are actual cycle members.
+                let cycle_cells: Vec<_> = self.dep_graph.find_cycle_sccs()
+                    .into_iter().flatten().collect();
+                let cycle_set: FxHashSet<_> = cycle_cells.iter().copied().collect();
                 let all_formula_cells: Vec<CellId> = self.dep_graph.formula_cells().collect();
                 let non_cycle: Vec<CellId> = all_formula_cells
                     .into_iter()
-                    .filter(|c| !cycle_cells.contains(c))
+                    .filter(|c| !cycle_set.contains(c))
                     .collect();
-                (non_cycle, cycle_cells)
+                let non_cycle_set = non_cycle.iter().copied().collect();
+                let order = self.dep_graph.topo_order_subset(&non_cycle_set)
+                    .unwrap_or(non_cycle);
+                (order, cycle_cells)
             }
         };
         report.phase_topo_sort_us = phase_start.elapsed().as_micros() as u64;
@@ -1542,39 +1394,20 @@ impl Workbook {
             let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
             let mut eval_order: usize = 0;
 
-            // Separate known-deps and unknown-deps among non-cycle cells
-            let mut known_deps_order = Vec::new();
-            let mut unknown_deps_cells = Vec::new();
-            for cell_id in &non_cycle_cells {
-                if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.get_cell_opt(cell_id.row, cell_id.col) {
-                        if let Some(ast) = cell.value().formula_ast() {
-                            if has_dynamic_deps(ast) {
-                                unknown_deps_cells.push(*cell_id);
-                            } else {
-                                known_deps_order.push(*cell_id);
-                            }
-                        } else {
-                            known_deps_order.push(*cell_id);
-                        }
-                    }
+            // Runtime references now participate in ordering. Keep dynamic
+            // producers before their readers even alongside iterative SCCs.
+            let non_cycle_set: FxHashSet<_> = non_cycle_cells.iter().copied().collect();
+            let known_deps_order = self.dep_graph.topo_order_subset(&non_cycle_set)
+                .unwrap_or(non_cycle_cells);
+            let mut downstream_set = cycle_set.clone();
+            let mut pending: std::collections::VecDeque<_> = cycle_set.iter().copied().collect();
+            while let Some(cell) = pending.pop_front() {
+                for dependent in self.dep_graph.dependents(cell) {
+                    if downstream_set.insert(dependent) { pending.push_back(dependent); }
                 }
             }
-
-            // Partition non-cycle cells into upstream (no cycle deps) and downstream
-            let mut downstream_known = Vec::new();
-            let mut upstream_known = Vec::new();
-            for cell_id in known_deps_order {
-                // Check transitive dependency on cycle cells
-                let depends_on_cycle = self.dep_graph.ordering_precedents(cell_id)
-                    .iter()
-                    .any(|p| cycle_set.contains(p));
-                if depends_on_cycle {
-                    downstream_known.push(cell_id);
-                } else {
-                    upstream_known.push(cell_id);
-                }
-            }
+            let (downstream_known, upstream_known): (Vec<_>, Vec<_>) = known_deps_order.into_iter()
+                .partition(|cell| downstream_set.contains(cell));
 
             // Evaluate upstream non-cycle cells
             for cell_id in &upstream_known {
@@ -1760,58 +1593,21 @@ impl Workbook {
                 report.cells_recomputed += 1;
             }
 
-            // Phase 4: Unknown-deps formulas (after everything else)
-            unknown_deps_cells.sort_by(|a, b| {
-                a.sheet.raw().cmp(&b.sheet.raw())
-                    .then(a.row.cmp(&b.row))
-                    .then(a.col.cmp(&b.col))
-            });
-            for cell_id in &unknown_deps_cells {
-                let cell_depth = report.max_depth + 1;
-                depths.insert(*cell_id, cell_depth);
-                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
-                    if report.errors.len() < 100 {
-                        report.errors.push(RecalcError::new(*cell_id, e));
-                    }
-                }
-                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, true));
-                eval_order += 1;
-                report.cells_recomputed += 1;
-                report.unknown_deps_recomputed += 1;
-            }
-            if !unknown_deps_cells.is_empty() {
-                report.max_depth += 1;
-            }
         } else {
             // No iteration: original path (mark cycles as #CYCLE!, eval non-cycle)
             for cell_id in &cycle_cells {
                 if let Some(sheet) = self.sheet_by_id_mut(cell_id.sheet) {
+                    // A runtime cycle can disappear when its selector changes.
+                    // Keep the authored formula and report the cycle as a cache value.
                     sheet.set_cycle_error(cell_id.row, cell_id.col);
-                }
-            }
-            // Use Tarjan SCC membership as the canonical cycle count (not Kahn's
-            // remainder, which can include downstream false positives).
-            let sccs = self.dep_graph.find_cycle_sccs();
-            report.cycle_cells = sccs.iter().map(|scc| scc.len()).sum();
-
-            let mut known_deps_order = Vec::new();
-            let mut unknown_deps_cells = Vec::new();
-            for cell_id in order {
-                if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
-                    if let Some(cell) = sheet.get_cell_opt(cell_id.row, cell_id.col) {
-                        if let Some(ast) = cell.value().formula_ast() {
-                            if has_dynamic_deps(ast) {
-                                unknown_deps_cells.push(cell_id);
-                            } else {
-                                known_deps_order.push(cell_id);
-                            }
-                        } else {
-                            known_deps_order.push(cell_id);
-                        }
+                    if sheet.get_cell_opt(cell_id.row, cell_id.col).is_some_and(|c| c.spill_info().is_some()) {
+                        sheet.record_pending_spill(cell_id.row, cell_id.col, crate::formula::eval::Array2D::new(0, 0));
                     }
                 }
             }
+            report.cycle_cells = cycle_cells.len();
 
+            let known_deps_order = order;
             let mut depths: FxHashMap<CellId, usize> = FxHashMap::default();
             let mut eval_order: usize = 0;
 
@@ -1836,34 +1632,26 @@ impl Workbook {
                         report.errors.push(RecalcError::new(*cell_id, e));
                     }
                 }
-                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, false));
+                let dynamic = self.sheet_by_id(cell_id.sheet)
+                    .and_then(|s| s.get_cell_opt(cell_id.row, cell_id.col))
+                    .and_then(|c| c.value().formula_ast())
+                    .is_some_and(has_dynamic_deps);
+                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, dynamic));
+                report.unknown_deps_recomputed += usize::from(dynamic);
                 eval_order += 1;
                 report.cells_recomputed += 1;
             }
 
-            unknown_deps_cells.sort_by(|a, b| {
-                a.sheet.raw().cmp(&b.sheet.raw())
-                    .then(a.row.cmp(&b.row))
-                    .then(a.col.cmp(&b.col))
-            });
-            for cell_id in &unknown_deps_cells {
-                let cell_depth = report.max_depth + 1;
-                depths.insert(*cell_id, cell_depth);
-                if let Err(e) = self.evaluate_cell_with_handler(*cell_id, custom_fn_handler) {
-                    if report.errors.len() < 100 {
-                        report.errors.push(RecalcError::new(*cell_id, e));
-                    }
-                }
-                report.cell_info.insert(*cell_id, CellRecalcInfo::new(cell_depth, eval_order, true));
-                eval_order += 1;
-                report.cells_recomputed += 1;
-                report.unknown_deps_recomputed += 1;
-            }
-            if !unknown_deps_cells.is_empty() {
-                report.max_depth += 1;
-            }
+
         }
 
+        report.unknown_deps_recomputed = 0;
+        for (cell, info) in &mut report.cell_info {
+            info.has_unknown_deps = self.sheet_by_id(cell.sheet)
+                .and_then(|s| s.get_cell_opt(cell.row, cell.col))
+                .and_then(|c| c.value().formula_ast()).is_some_and(has_dynamic_deps);
+            report.unknown_deps_recomputed += usize::from(info.has_unknown_deps);
+        }
         report.phase_eval_us = phase_start.elapsed().as_micros() as u64;
 
         let _ = self.settle_pending_spills(custom_fn_handler, &mut report);
@@ -2068,6 +1856,12 @@ impl Workbook {
             let mut readers: FxHashSet<CellId> = dynamic_readers.iter().copied().collect();
             let mut stack: Vec<CellId> = touched.into_iter().chain(dynamic_readers.iter().copied()).collect();
             while let Some(cell) = stack.pop() {
+                if let Some(sheet) = self.sheet_by_id(cell.sheet) {
+                    for (row, col) in sheet.spills_blocked_by(cell.row, cell.col) {
+                        let parent = CellId::new(cell.sheet, row, col);
+                        if readers.insert(parent) { stack.push(parent); }
+                    }
+                }
                 for dependent in self.dep_graph.dependents(cell) {
                     if readers.insert(dependent) {
                         stack.push(dependent);
@@ -2159,6 +1953,9 @@ impl Workbook {
                 ),
             };
             let result = evaluate(&bound, &lookup);
+            if crate::formula::analyze::has_dynamic_deps(ast) {
+                self.pending_dynamic_refs.borrow_mut().insert(cell_id, lookup.dynamic_references.into_inner());
+            }
 
             // An array answer is noted, not placed. Placing it here would mean
             // spilling into a sheet whose other cells may not be evaluated yet,
@@ -2228,11 +2025,17 @@ impl Workbook {
     /// Write literal text with dependency tracking, without interpreting formulas
     /// or numeric-looking identifiers. Used by typed clipboard imports.
     pub fn set_cell_text_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
+        self.set_cell_text_exact_tracked(sheet_index, row, col, text.trim())
+    }
+
+    /// Preserve authored whitespace and text type for clipboard and replacement
+    /// operations, while retaining dependency tracking and Table write guards.
+    pub fn set_cell_text_exact_tracked(&mut self, sheet_index: usize, row: usize, col: usize, text: &str) -> Recalculated {
         let Some(sheet) = self.sheets.get_mut(sheet_index) else { return Recalculated::Cells(Vec::new()); };
         if sheet.table_value_write_error(row, col).is_some() { return Recalculated::Cells(Vec::new()); }
         let sheet_id = sheet.id;
         let spill = self.spill_effects_of_write(sheet_index, row, col);
-        self.sheets[sheet_index].set_text(row, col, text);
+        self.sheets[sheet_index].set_text_exact(row, col, text);
         self.update_cell_deps(sheet_id, row, col);
         self.note_write_with_spills(CellId::new(sheet_id, row, col), spill)
     }
@@ -2395,7 +2198,14 @@ impl Workbook {
             let mut changed = std::mem::take(&mut self.batch_changed);
             let format_changed = std::mem::take(&mut self.batch_format_changed);
             let vacated = std::mem::take(&mut self.batch_vacated);
-            let recalculated = if !changed.is_empty() {
+            // Evicted history stores the write and recalculates once when
+            // rewind opens. An error inherited from an earlier pass is not a
+            // failure of this stored write.
+            let deferred = recalc_deferred();
+            if deferred && !changed.is_empty() {
+                self.incremental_errors.clear();
+            }
+            let recalculated = if !changed.is_empty() && !deferred {
                 with_reported(self.recalc_dirty_set(&changed), &vacated)
             } else {
                 Recalculated::Cells(Vec::new())
@@ -2406,7 +2216,7 @@ impl Workbook {
                 // The batch is the caller's unit of work: hand back what its
                 // recalc could not settle instead of leaving it in the side
                 // channel for someone else to find.
-                let errors = self.take_incremental_errors();
+                let errors = if deferred { Vec::new() } else { self.take_incremental_errors() };
                 return BatchOutcome { written: changed, recalculated, errors };
             }
         }
@@ -2483,6 +2293,14 @@ impl Workbook {
             self.column_rule_changes(sheet_index, at, count, delete, before, after)?
         } else { self.structural_rule_changes(sheet_index, axis, at, count, delete) };
 
+        let totals_changes = if let Some((before, after)) = &column_tables {
+            self.structural_totals_changes(sheet_index, axis, at, count, delete, before, after)?
+        } else {
+            let after = self.sheets[sheet_index].tables_after_row_edit(at, count, delete)?;
+            self.structural_totals_changes(sheet_index, axis, at, count, delete,
+                self.sheets[sheet_index].tables(), &after)?
+        };
+
         // 1. Move cells + merges + conditional formats (sheet-local).
         {
             let sheet = &mut self.sheets[sheet_index];
@@ -2496,7 +2314,7 @@ impl Workbook {
                 (false, true) => sheet.delete_cols(at, count),
             }
             // 2. Validations and line layout move with their cells.
-            sheet.validations.shift_for_structural(at, count, delete, is_row);
+            sheet.validations.shift_for_structural(at, count, delete, is_row)?;
             sheet.layout.shift_for_structural(at, count, delete, is_row);
         }
 
@@ -2510,6 +2328,15 @@ impl Workbook {
         // 4. Formulas on EVERY sheet: unqualified refs move only on the edited
         //    sheet, qualified refs move from anywhere.
         let edit = StructuralEdit { sheet_name, axis, at, count, delete };
+        for sheet in &mut self.sheets {
+            let rules: Vec<_> = sheet.validations.iter().filter(|(_, rule)| rule.reference_origin.is_some()).map(|(r, rule)| (*r, rule.clone())).collect();
+            for (range, mut rule) in rules {
+                if rule.reference_origin.is_some() {
+                    rule.adjust_relative_sources_for_structural(&edit, &sheet.name);
+                    sheet.validations.set(range, rule);
+                }
+            }
+        }
         let mut rewrites = Vec::new();
         // Positions here are POST-edit (cells have already moved). Record
         // PRE-edit positions instead: undo applies these after the inverse
@@ -2548,15 +2375,29 @@ impl Workbook {
             }
         }
         for (idx, row, col, new_raw) in writes {
-            // The cell that was read, even inside a merge: a redirect to the
-            // merge origin would leave this formula stale and overwrite the origin.
-            self.sheets[idx].set_value_at(row, col, &new_raw);
+            if self.sheets[idx].table_at(row, col).is_some_and(|t| t.totals_row() == Some(row)) {
+                self.sheets[idx].write_table_header(row, col, crate::cell::CellValue::from_input(&new_raw));
+            } else {
+                // Rewrite the cell read, including covered merge cells.
+                self.sheets[idx].set_value_at(row, col, &new_raw);
+            }
+        }
+        for change in totals_changes {
+            let sheet = self.sheet_index_by_id(change.sheet).unwrap();
+            self.sheets[sheet].data_tables.iter_mut().find(|t| t.id == change.table).unwrap()
+                .totals = Some(change.after);
         }
 
         self.apply_rule_changes(&rule_changes, false);
         if fill_rules && is_row && !delete { self.fill_inserted_calculated_rows(sheet_index, at, count); }
-        self.rebuild_dep_graph();
-        self.recompute_full_ordered();
+        if !recalc_deferred() {
+            self.rebuild_dep_graph();
+            self.recompute_full_ordered();
+        }
+        if self.tables().any(|(_, t)| t.totals.is_some()) {
+            // Footer changes can alter indirect pivot sources on other sheets.
+            for sheet in &mut self.sheets { sheet.mark_table_changed(); }
+        }
         self.increment_revision();
         Ok(rewrites)
     }
@@ -2569,27 +2410,43 @@ impl Workbook {
         if count == 0 || at.checked_add(count).is_none_or(|end| end > limit) {
             return Err("Structural edit exceeds the sheet boundary.".into());
         }
-        // Refuse inserts that would push content off the grid rather than
-        // dropping it (Excel's behavior).
         if !delete {
-            let sheet = &self.sheets[sheet_index];
-            let limit = if is_row { sheet.rows } else { sheet.cols };
-            let last_used = sheet
-                .cells_iter()
-                .filter(|(_, cell)| !cell.raw_display().is_empty())
-                .map(|((r, c), _)| if is_row { r } else { c })
-                .max();
-            if let Some(last) = last_used {
-                if last >= at && last.checked_add(count).is_none_or(|v| v >= limit) {
-                    return Err(format!(
-                        "inserting {} {}(s) would push data past the end of the sheet",
-                        count,
-                        if is_row { "row" } else { "column" }
-                    ));
+            // Inverse deletion cannot restore metadata clipped at the edge.
+            // Refuse the forward edit, including empty merged/formatted ranges.
+            let beyond = |end: usize| end >= at && end.checked_add(count).is_none_or(|v| v >= limit);
+            let range_beyond = |start: usize, end: usize| beyond(start) || (end != limit - 1 && beyond(end));
+            let mut obstacles = Vec::new();
+            for m in &sheet.merged_regions {
+                if range_beyond(if is_row { m.start.0 } else { m.start.1 }, if is_row { m.end.0 } else { m.end.1 }) {
+                    obstacles.push((m.start, m.end, "merged range"));
                 }
             }
+            for (r, _) in sheet.validations.iter() {
+                if range_beyond(if is_row { r.start_row } else { r.start_col }, if is_row { r.end_row } else { r.end_col }) {
+                    obstacles.push(((r.start_row, r.start_col), (r.end_row, r.end_col), "validation range"));
+                }
+            }
+            for rule in sheet.cond_formats.iter() {
+                for r in &rule.ranges {
+                    if range_beyond(if is_row { r.start_row } else { r.start_col }, if is_row { r.end_row } else { r.end_col }) {
+                        obstacles.push(((r.start_row, r.start_col), (r.end_row, r.end_col), "conditional format"));
+                    }
+                }
+            }
+            for ((r, c), cell) in sheet.cells_iter() {
+                if beyond(if is_row { r } else { c }) && !cell.raw_display().is_empty() {
+                    obstacles.push(((r, c), (r, c), "non-empty cell"));
+                }
+            }
+            if let Some((start, end, kind)) = obstacles.into_iter().min() {
+                let label = |(r, c)| CellId::new(sheet.id, r, c).to_string();
+                return Err(format!("Cannot insert {}: {kind} {}:{} would extend past the last {}. Move or resize it first.",
+                    if is_row { "rows" } else { "columns" }, label(start), label(end), if is_row { "row" } else { "column" }));
+            }
         }
-
+        // The keyed rule store cannot represent two definitions at one exact
+        // range. Refuse clipping collisions before changing any cells/layout.
+        sheet.validations.clone().shift_for_structural(at, count, delete, is_row)?;
         // Pivot outputs move as a whole or not at all: an edit that would cut
         // through one is refused before anything changes.
         if let Some(error) = self.sheets[sheet_index].table_structural_error(is_row, at, count, delete) {
@@ -2718,20 +2575,33 @@ impl Workbook {
     /// evaluate it in dependency order — ordering only that subgraph, so the
     /// cost follows the size of the change rather than the size of the
     /// workbook.
-    fn recalc_dirty_set(&mut self, changed: &[CellId]) -> Recalculated {
-        let _recalc_scope = crate::custom_fns::recalc_scope();
-        let _clock = crate::timing::ClockGuard::install(self.recalc_clock);
+    fn recalc_dirty_pass(&mut self, changed: &[CellId]) -> Recalculated {
         use std::collections::VecDeque;
-
-        // Test instrumentation: count recalc calls
-        #[cfg(test)]
-        self.recalc_count.set(self.recalc_count.get() + 1);
 
         // 1. BFS forward from all changed cells to collect dirty set
         let mut dirty_set = FxHashSet::default();
         let mut queue = VecDeque::new();
 
-        for &cell_id in changed {
+        let mut retired = Vec::new();
+        let changed_sheets: FxHashSet<_> = changed.iter().map(|cell| cell.sheet).collect();
+        for id in changed_sheets {
+            if let Some(sheet) = self.sheets.iter_mut().find(|sheet| sheet.id == id) {
+                retired.extend(sheet.take_retired_spill_cells().into_iter().map(|(row, col)| CellId::new(id, row, col)));
+                for (row, col) in sheet.take_edited_spill_parents() {
+                    if sheet.get_cell_opt(row, col).is_some_and(|cell| cell.value().formula_ast().is_some()) {
+                        let parent = CellId::new(id, row, col);
+                        if dirty_set.insert(parent) { queue.push_back(parent); }
+                    }
+                }
+            }
+        }
+        for &cell_id in changed.iter().chain(&retired) {
+            if let Some(sheet) = self.sheet_by_id(cell_id.sheet) {
+                for (row, col) in sheet.spills_blocked_by(cell_id.row, cell_id.col) {
+                    let parent = CellId::new(cell_id.sheet, row, col);
+                    if dirty_set.insert(parent) { queue.push_back(parent); }
+                }
+            }
             // A changed cell that is itself a formula is re-evaluated here, at
             // the workbook level, with the custom-function handler. The sheet's
             // eager evaluation on entry has no handler, so without this a
@@ -2768,7 +2638,7 @@ impl Workbook {
         }
 
         if dirty_set.is_empty() {
-            return Recalculated::Cells(Vec::new());
+            return Recalculated::Cells(retired);
         }
 
         // 2. Clear cached values for dirty cells
@@ -2818,7 +2688,7 @@ impl Workbook {
                 // arrays changed, since those cells changed as surely.
                 let mut delta = order;
                 let mut seen: FxHashSet<CellId> = delta.iter().copied().collect();
-                for cell in settled {
+                for cell in retired.into_iter().chain(settled) {
                     if seen.insert(cell) {
                         delta.push(cell);
                     }
@@ -2839,7 +2709,9 @@ impl Workbook {
                 // it had nothing to do with the edit. A cycle outside the dirty
                 // set cannot affect these cells — whatever it computed to is
                 // still cached and still correct to read.
-                self.recompute_full_ordered();
+                let report = self.recompute_full_ordered();
+                self.incremental_errors.extend(report.errors.into_iter().filter(|e|
+                    e.error.starts_with("spill not settled") || e.error.starts_with("dynamic references not settled")));
                 Recalculated::All
             }
         }
@@ -2911,6 +2783,7 @@ impl Workbook {
                 let sheet_id = sheet.id;
                 let lookup = WorkbookLookup::with_cell_context(self, sheet_id, row, col);
                 let result = evaluate(&bound, &lookup);
+
 
                 match result {
                     EvalResult::Number(n) => CellValue::format_number(n, &cell.format.number_format),
@@ -3086,6 +2959,7 @@ pub struct WorkbookLookup<'a> {
     workbook: &'a Workbook,
     current_sheet_id: SheetId,
     current_cell: Option<(usize, usize)>,
+    dynamic_references: std::cell::RefCell<Vec<crate::dep_graph::RangeRef>>,
     custom_fn_handler: Option<&'a dyn Fn(&str, &[EvalArg]) -> Option<EvalResult>>,
 }
 
@@ -3096,6 +2970,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: None,
+            dynamic_references: Default::default(),
             custom_fn_handler: None,
         }
     }
@@ -3106,6 +2981,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: Some((row, col)),
+            dynamic_references: Default::default(),
             custom_fn_handler: None,
         }
     }
@@ -3122,6 +2998,7 @@ impl<'a> WorkbookLookup<'a> {
             workbook,
             current_sheet_id,
             current_cell: Some((row, col)),
+            dynamic_references: Default::default(),
             custom_fn_handler: Some(handler),
         }
     }
@@ -3133,6 +3010,25 @@ impl<'a> WorkbookLookup<'a> {
 }
 
 impl<'a> CellLookup for WorkbookLookup<'a> {
+    fn record_dynamic_reference(&self, sheet: &SheetRef, r0: usize, c0: usize, r1: usize, c1: usize) {
+        let sheet = match sheet {
+            SheetRef::Current => self.current_sheet_id,
+            SheetRef::Id(id) => *id,
+            SheetRef::RefError { .. } => return,
+        };
+        self.dynamic_references.borrow_mut().push(crate::dep_graph::RangeRef {
+            sheet, start_row: r0, start_col: c0, end_row: r1, end_col: c1,
+        });
+    }
+
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool {
+        match sheet {
+            SheetRef::Current => self.current_sheet(),
+            SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
+            SheetRef::RefError { .. } => None,
+        }.is_some_and(|s| s.subtotal_excluded(row, col, ignore_hidden))
+    }
+
     fn sheet_id_by_name(&self, name: &str) -> Option<SheetId> {
         self.workbook.sheet_id_by_name(name)
     }
@@ -3209,8 +3105,9 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
 
     fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
         use crate::named_range::NamedRangeTarget;
-        self.workbook.named_ranges.get(name).map(|nr| {
-            match &nr.target {
+        self.workbook.named_ranges.get(name).and_then(|nr| {
+            Some(match &nr.target {
+                NamedRangeTarget::RefError => return None,
                 NamedRangeTarget::Cell { row, col, .. } => {
                     NamedRangeResolution::Cell { row: *row, col: *col }
                 }
@@ -3222,7 +3119,29 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
                         end_col: *end_col,
                     }
                 }
-            }
+            })
+        })
+    }
+
+    fn bind_reference_text(&self, text: &str) -> Result<crate::formula::parser::BoundExpr, String> {
+        use crate::formula::parser::{parse, bind_expr};
+        parse(&format!("={}", text.trim().trim_start_matches('=')))
+            .map(|expr| bind_expr(&expr, |name| self.workbook.sheet_id_by_name(name)))
+    }
+
+    fn resolve_named_reference(&self, name: &str) -> Option<crate::formula::parser::BoundExpr> {
+        use crate::{formula::parser::Expr, named_range::NamedRangeTarget};
+        let target = &self.workbook.named_ranges.get(name)?.target;
+        let index = match target { NamedRangeTarget::RefError => return Some(Expr::RefError), NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } => *sheet };
+        let Some(id) = self.workbook.sheet_id_at_idx(index) else { return Some(Expr::RefError); };
+        let sheet = crate::sheet::SheetRef::Id(id);
+        Some(match *target {
+            NamedRangeTarget::RefError => Expr::RefError,
+            NamedRangeTarget::Cell { row, col, .. } => Expr::CellRef { sheet, row, col, row_abs: true, col_abs: true },
+            NamedRangeTarget::Range { start_row, start_col, end_row, end_col, .. } => Expr::Range {
+                sheet, start_row, start_col, end_row, end_col,
+                start_row_abs: true, start_col_abs: true, end_row_abs: true, end_col_abs: true,
+            },
         })
     }
 
@@ -3463,7 +3382,7 @@ mod tests {
         wb.sheet_mut(0).unwrap().set_value(last, 0, "edge");
         let before = wb.revision();
         let err = wb.structural_edit(0, Axis::Row, 0, 1, false).unwrap_err();
-        assert!(err.contains("past the end"), "got: {}", err);
+        assert!(err.contains("past the last row"), "got: {}", err);
         assert_eq!(wb.sheets()[0].get_display(last, 0), "edge", "data untouched");
         assert_eq!(wb.revision(), before, "refused edits do not bump the revision");
     }
@@ -4544,8 +4463,9 @@ mod tests {
 
         let report = wb.recompute_full_ordered();
 
-        assert_eq!(report.cells_recomputed, 1);
-        assert_eq!(report.unknown_deps_recomputed, 1);
+        // One discovery pass and one pass using the resolved runtime edge.
+        assert_eq!(report.cells_recomputed, 2);
+        assert_eq!(report.unknown_deps_recomputed, 2);
     }
 
     #[test]
@@ -4767,15 +4687,15 @@ mod tests {
 
     #[test]
     fn test_validation_formula_constraint_error() {
-        // Formula constraint should return deterministic FormulaError
+        // A failing formula constraint returns a deterministic error.
         use crate::validation::{ValidationRule, ValidationResult, NumericConstraint, ConstraintValue};
 
         let mut wb = Workbook::new();
 
-        // Set validation with formula constraint (not yet implemented)
+        // Division by zero must not silently pass validation.
         let constraint = NumericConstraint {
             operator: crate::validation::ComparisonOperator::LessThan,
-            value1: ConstraintValue::Formula("=A1+10".to_string()),
+            value1: ConstraintValue::Formula("=1/0".to_string()),
             value2: None,
         };
         let rule = ValidationRule::decimal(constraint);

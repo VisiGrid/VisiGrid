@@ -12,7 +12,7 @@ use visigrid_engine::{
     workbook::{shift_structure_index, GuardedStructureCommit, StructureStep, Workbook},
 };
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct StructureLayout {
     pub heights: HashMap<usize, f32>,
     pub widths: HashMap<usize, f32>,
@@ -63,6 +63,37 @@ impl StructureLayout {
         Ok(next)
     }
 }
+/// Sparse layout only: ordinary row history must not capture every shifted cell.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct RowLayoutHistory {
+    pub sheet: SheetId,
+    pub before: StructureLayout,
+    pub after: StructureLayout,
+}
+impl RowLayoutHistory {
+    pub(crate) fn capture(mut before: StructureLayout, sheet: &Sheet, step: StructureStep) -> Result<Self, String> {
+        before.hidden_rows = sheet.manual_hidden_rows();
+        let after = before.shifted(sheet, &[step])?;
+        Ok(Self { sheet: sheet.id, before, after })
+    }
+
+    pub(crate) fn apply(&self, wb: &mut Workbook, sheet_index: usize, undo: bool) -> Result<&StructureLayout, String> {
+        let layout = if undo { &self.before } else { &self.after };
+        let sheet = wb.sheet_mut(sheet_index).ok_or("Sheet no longer exists")?;
+        if sheet.id != self.sheet { return Err("Row history belongs to another sheet".into()); }
+        let visibility_changed = sheet.manual_hidden_rows() != layout.hidden_rows;
+        if visibility_changed {
+            sheet.set_manual_hidden_rows(layout.hidden_rows.clone())?;
+        }
+        // Plain row undo restores cells directly. Rebuild dependencies before
+        // recalculating SUBTOTAL and readers on other sheets.
+        if undo && visibility_changed {
+            wb.rebuild_dep_graph();
+            wb.recompute_full_ordered();
+        }
+        Ok(layout)
+    }
+}
 #[derive(Clone, Debug)]
 pub(crate) struct TableStructureHistory {
     pub commit: GuardedStructureCommit,
@@ -70,6 +101,11 @@ pub(crate) struct TableStructureHistory {
     pub source_frozen: Option<(usize, usize)>,
     pub(crate) before: StructureLayout,
     pub(crate) after: StructureLayout,
+}
+impl TableStructureHistory {
+    pub(crate) fn estimated_history_bytes(&self) -> usize {
+        self.commit.estimated_history_bytes().saturating_add(visigrid_engine::history_size::serialized_bytes(&(&self.before, &self.after)))
+    }
 }
 /// Resolve selected visible slots once. Deletions are coalesced and performed
 /// bottom-up, so neither hidden records nor newly shifted records are deleted.
@@ -133,6 +169,17 @@ impl Spreadsheet {
         self.col_widths.insert(id, layout.widths.clone());
         self.hidden_rows.insert(id, layout.hidden_rows.clone());
         self.hidden_cols.insert(id, layout.hidden_cols.clone());
+    }
+    pub(crate) fn replay_row_layout(&mut self, history: Option<&RowLayoutHistory>, sheet_index: usize, undo: bool, cx: &mut Context<Self>) {
+        let Some(history) = history else { return; };
+        let result = self.workbook.update(cx, |wb, _| history.apply(wb, sheet_index, undo).map(|_| ()));
+        if let Err(error) = result {
+            self.status_message = Some(error);
+            return;
+        }
+        if let Some(sheet) = self.wb(cx).sheet(sheet_index) {
+            self.install_structure_layout(sheet.id, if undo { &history.before } else { &history.after });
+        }
     }
     pub(crate) fn validate_structure_layout(
         &self,
@@ -275,8 +322,8 @@ impl Spreadsheet {
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.install_structure_layout(id, &history.after);
         self.finish_table_structure(index, first.axis, count, cx);
-        self.history
-            .record_named_range_action(UndoAction::TableStructureChanged {
+        self
+            .record_named_range_action(cx, UndoAction::TableStructureChanged {
                 sheet_index: index,
                 history: Box::new(history),
                 description: description.clone(),
@@ -366,12 +413,20 @@ impl Spreadsheet {
                 self.workbook
                     .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.install_structure_layout(id, &layout);
-                self.finish_table_structure(
-                    index,
-                    history.commit.steps[0].axis,
-                    history.commit.steps.iter().map(|s| s.count).sum(),
-                    cx,
-                );
+                if let Some(first) = history.commit.steps.first() {
+                    self.finish_table_structure(
+                        index, first.axis, history.commit.steps.iter().map(|s| s.count).sum(), cx,
+                    );
+                } else {
+                    // Visibility changes share guarded workbook/layout history,
+                    // but do not insert/delete rows or replace the selection.
+                    if self.sheet_index(cx) != index { self.activate_sheet(index, cx); }
+                    self.sync_table_view(cx);
+                    self.table_filter_dropdown = None;
+                    self.bump_cells_rev();
+                    self.ensure_visible(cx);
+                    cx.notify();
+                }
                 true
             }
             Err(error) => {
@@ -568,6 +623,27 @@ mod tests {
             .is_err());
     }
     #[test]
+    fn ordinary_sheet_hidden_rows_shift_with_layout_and_restore_deleted_hides() {
+        let mut before = Workbook::new();
+        before.active_sheet_mut().set_manual_hidden_rows([2, 8].into()).unwrap();
+        let layout = StructureLayout { heights: [(2, 40.0)].into(), ..Default::default() };
+        for delete in [false, true] {
+            let history = RowLayoutHistory::capture(layout.clone(), before.active_sheet(), step(Axis::Row, 2, 1, delete)).unwrap();
+            let mut candidate = before.clone();
+            candidate.structural_edit(0, Axis::Row, 2, 1, delete).unwrap();
+            assert_eq!(candidate.active_sheet().manual_hidden_rows(), history.after.hidden_rows);
+            assert_eq!(history.after.hidden_rows, if delete { [7].into() } else { [3, 9].into() });
+            if delete { candidate.active_sheet_mut().insert_rows(2, 1); }
+            else { candidate.active_sheet_mut().delete_rows(2, 1); }
+            history.apply(&mut candidate, 0, true).unwrap();
+            assert_eq!(candidate.active_sheet().manual_hidden_rows(), history.before.hidden_rows);
+            assert_eq!(history.before.heights.get(&2), Some(&40.0));
+            candidate.structural_edit(0, Axis::Row, 2, 1, delete).unwrap();
+            history.apply(&mut candidate, 0, false).unwrap();
+            assert_eq!(candidate.active_sheet().manual_hidden_rows(), history.after.hidden_rows);
+        }
+    }
+    #[test]
     fn structural_history_does_not_break_earlier_cell_undo_after_column_ids_advance() {
         let before = fixture(true);
         let writes = [TableCellWrite::value(8, 0, "note".into())];
@@ -668,18 +744,18 @@ mod tests {
         let (_, commit) = b.prepare_guarded_structure(0, steps.clone()).unwrap();
         let after = layout.shifted(b.active_sheet(), &steps).unwrap();
         let mut h = History::new();
-        h.record_named_range_action(UndoAction::ColumnWidthSet {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::ColumnWidthSet {
             sheet_id: b.active_sheet_id(),
             col: 5,
             old: None,
             new: Some(120.0),
         });
-        h.record_named_range_action(UndoAction::ColVisibilityChanged {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::ColVisibilityChanged {
             sheet_id: b.active_sheet_id(),
             cols: vec![6],
             hidden: true,
         });
-        h.record_named_range_action(UndoAction::TableStructureChanged {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
                 source_frozen: None,
@@ -689,7 +765,7 @@ mod tests {
             }),
             description: "Insert column".into(),
         });
-        h.record_named_range_action(UndoAction::ColVisibilityChanged {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::ColVisibilityChanged {
             sheet_id: b.active_sheet_id(),
             cols: vec![7],
             hidden: false,
@@ -720,7 +796,7 @@ mod tests {
         before.heights.insert(9, 40.0);
         let after = before.shifted(b.active_sheet(), &steps).unwrap();
         let mut history = History::new();
-        history.record_named_range_action(UndoAction::TableStructureChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
                 source_frozen: None,
@@ -895,5 +971,109 @@ mod metadata_tests {
         assert!(b
             .prepare_guarded_structure(index, vec![step(Axis::Row, region.0, 1, true)])
             .is_err());
+    }
+    #[test]
+    fn totals_columns_keep_filtered_records_and_history_rewind() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_table_total(id, 2, visigrid_engine::table::TableTotal {
+            function: Some("sum".into()), ..Default::default()
+        }).unwrap();
+        let spec = base.active_sheet().table_view_spec().cloned();
+        let (mut after, commit) = base.prepare_guarded_structure(0,
+            vec![step(Axis::Col, 2, 1, false)]).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 3), "90");
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        assert_eq!(after.active_sheet().get_raw(4, 3), "10");
+        let mut history = crate::history::History::new();
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), crate::history::UndoAction::TableStructureChanged {
+            sheet_index: 0, description: "Insert totals column".into(),
+            history: Box::new(TableStructureHistory { commit: commit.clone(), source_frozen: None,
+                before: StructureLayout::default(), after: StructureLayout::default() }),
+        }, None);
+        let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().get_display(7, 3), "90");
+        commit.replay(&mut after, true).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 2), "90");
+        commit.replay(&mut after, false).unwrap();
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        assert!(after.prepare_guarded_structure(0, vec![step(Axis::Col, 3, 1, true)]).is_err());
+        let (mut removed, deletion) = after.prepare_guarded_structure(0,
+            vec![step(Axis::Col, 4, 1, true)]).unwrap();
+        assert_eq!(removed.active_sheet().tables()[0].totals.as_ref().unwrap().columns.len(), 3);
+        deletion.replay(&mut removed, true).unwrap();
+        assert_eq!(removed.active_sheet().get_display(7, 4), "180");
+    }
+
+    #[test]
+    fn totals_row_edits_preserve_filtered_records_and_rewind() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_calculated_column(id, 3, 3, "=[@Amount]*2", true).unwrap();
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        let spec = base.active_sheet().table_view_spec().cloned();
+        let rows = base.active_sheet().build_saved_table_view(base.active_sheet().rows).unwrap().unwrap();
+        let steps = selected_row_steps(rows.rows(), 3, 6, true).unwrap();
+        let (mut after, commit) = base.prepare_guarded_structure(0, steps).unwrap();
+        assert_eq!(after.active_sheet().tables()[0].totals_row(), Some(4));
+        assert_eq!(after.active_sheet().get_raw(3, 1), "East");
+        assert_eq!(after.active_sheet().get_display(4, 3), "0");
+        assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
+        let mut history = crate::history::History::new();
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
+            sheet_index: 0, description: "Delete visible records".into(),
+            history: Box::new(TableStructureHistory { commit: commit.clone(), source_frozen: None,
+                before: StructureLayout::default(), after: StructureLayout::default() }),
+        });
+        let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();
+        assert_eq!(preview.workbook.active_sheet().get_display(4, 3), "0");
+        commit.replay(&mut after, true).unwrap();
+        assert_eq!(after.active_sheet().get_display(7, 3), "180");
+        commit.replay(&mut after, false).unwrap();
+        assert_eq!(after.active_sheet().get_display(3, 3), "20");
+        let (added, _) = base.prepare_guarded_structure(0, vec![step(Axis::Row, 7, 1, false)]).unwrap();
+        assert_eq!(added.active_sheet().tables()[0].totals_row(), Some(8));
+        assert_eq!(added.active_sheet().get_raw(7, 3), "=[@[Amount]]*2");
+        assert_eq!(added.active_sheet().get_display(8, 3), "180");
+    }
+
+    #[test]
+    fn totals_row_candidates_refuse_spills_without_changing_live_state() {
+        let mut base = fixture(true);
+        let id = base.active_sheet().tables()[0].id;
+        base.set_table_totals_visible(id, true, Default::default()).unwrap();
+        base.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(IF(ROWS(Sales[Amount])=4,1,5))");
+        let revision = base.revision();
+        assert!(base.prepare_guarded_structure(0, vec![step(Axis::Row, 7, 1, false)]).is_err());
+        assert_eq!(base.revision(), revision);
+        assert_eq!(base.active_sheet().tables()[0].totals_row(), Some(7));
+        assert_eq!(base.active_sheet().get_display(7, 3), "180");
+    }
+
+}
+
+#[cfg(test)]
+mod row_visibility_recalc_tests {
+    use super::*;
+    use visigrid_engine::RecalcClock;
+
+    #[test]
+    fn plain_insert_undo_does_not_recalculate_when_hidden_flags_already_match() {
+        let mut wb = Workbook::new();
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(0), utc_offset_seconds: Some(0), seed: None }));
+        wb.active_sheet_mut().set_manual_hidden_rows([5].into()).unwrap();
+        wb.set_cell_value_tracked(0, 0, 0, "=NOW()");
+        let history = RowLayoutHistory::capture(StructureLayout::default(), wb.active_sheet(),
+            StructureStep { axis: Axis::Row, at: 1, count: 1, delete: false }).unwrap();
+        wb.structural_edit(0, Axis::Row, 1, 1, false).unwrap();
+        let value = wb.active_sheet().get_display(0, 0);
+        wb.active_sheet_mut().delete_rows(1, 1);
+        wb.set_recalc_clock(Some(RecalcClock { now_ms: Some(86_400_000), utc_offset_seconds: Some(0), seed: None }));
+        history.apply(&mut wb, 0, true).unwrap();
+        assert_eq!(wb.active_sheet().manual_hidden_rows(), [5].into());
+        assert_eq!(wb.active_sheet().get_display(0, 0), value, "visibility-only replay need not evaluate NOW again");
+        wb.recompute_full_ordered();
+        assert_ne!(wb.active_sheet().get_display(0, 0), value, "the clock change makes a full recalc observable");
     }
 }

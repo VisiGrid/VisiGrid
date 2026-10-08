@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -321,6 +321,16 @@ pub struct Sheet {
     /// Spilled values from array formulas: (row, col) -> Value
     #[serde(skip)]
     spill_values: HashMap<(usize, usize), Value>,
+    /// Occupancy dependencies are separate from formula value dependencies:
+    /// an obstruction can itself refer to its blocked parent without a cycle.
+    #[serde(skip)]
+    blocked_spills: HashMap<(usize, usize), HashSet<(usize, usize)>>,
+    /// Authored writes (including undo) can replace derived receivers. Retry
+    /// those parents without treating occupancy as a formula dependency.
+    #[serde(skip)]
+    edited_spill_parents: HashSet<(usize, usize)>,
+    #[serde(skip)]
+    retired_spill_cells: HashSet<(usize, usize)>,
     /// Cells whose value was kept because this build could not recompute the
     /// formula — a custom function it has no definition for.
     ///
@@ -387,6 +397,10 @@ pub struct Sheet {
     /// storing this does not install a display mapping or mutation guard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) table_view_spec: Option<crate::table_view::TableViewSpec>,
+    /// Canonical worksheet rows hidden manually, independent of filter masks.
+    /// Native/full-JSON use their existing layout fields for persistence.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) manual_hidden_rows: BTreeSet<usize>,
     /// Cells recovered without their Table definitions. Never save this view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
@@ -415,6 +429,11 @@ pub struct Sheet {
 }
 
 impl CellLookup for Sheet {
+    fn subtotal_skip_cell(&self, sheet: &SheetRef, row: usize, col: usize, ignore_hidden: bool) -> bool {
+        if !matches!(sheet, SheetRef::Current) && *sheet != SheetRef::Id(self.id) { return false; }
+        self.subtotal_excluded(row, col, ignore_hidden)
+    }
+
     fn is_table_name(&self, name: &str) -> bool { self.tables().iter().any(|t| t.name.eq_ignore_ascii_case(name)) }
     fn resolve_table_reference(&self, reference: &crate::formula::structured::StructuredReference, cell: Option<(usize, usize)>) -> crate::formula::parser::BoundExpr {
         let target = match &reference.table {
@@ -560,6 +579,12 @@ impl CellLookup for Sheet {
 }
 
 impl Sheet {
+    pub(crate) fn exceptional_reference_sources(&self) -> Vec<(usize, usize)> {
+        if self.cells.has_unparsed_formulas() {
+            self.cells_iter().filter(|(_, c)| c.frozen_formula().is_some() || matches!(c.value(), ValueRef::Formula { ast: None, .. })).map(|(p, _)| p).collect()
+        } else { self.cells.frozen_positions().collect() }
+    }
+
     /// Create a new sheet with the given dimensions and a unique ID
     /// Number of cells actually stored (non-empty or formatted), not the grid size.
     pub fn populated_cell_count(&self) -> usize {
@@ -585,6 +610,9 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
+            blocked_spills: HashMap::new(),
+            edited_spill_parents: HashSet::new(),
+            retired_spill_cells: HashSet::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             blocked_spill_extents: HashMap::new(),
@@ -599,6 +627,7 @@ impl Sheet {
             pivots: Vec::new(),
             data_tables: Vec::new(),
             table_view_spec: None,
+            manual_hidden_rows: BTreeSet::new(),
             read_only_reason: None,
             canonical_content_protection: None,
             canonical_wire_identity: false,
@@ -624,6 +653,9 @@ impl Sheet {
             rows,
             cols,
             spill_values: HashMap::new(),
+            blocked_spills: HashMap::new(),
+            edited_spill_parents: HashSet::new(),
+            retired_spill_cells: HashSet::new(),
             kept_uncomputable: std::collections::HashSet::new(),
             pending_spills: RefCell::new(Vec::new()),
             blocked_spill_extents: HashMap::new(),
@@ -638,6 +670,7 @@ impl Sheet {
             pivots: Vec::new(),
             data_tables: Vec::new(),
             table_view_spec: None,
+            manual_hidden_rows: BTreeSet::new(),
             read_only_reason: None,
             canonical_content_protection: None,
             canonical_wire_identity: false,
@@ -706,7 +739,7 @@ impl Sheet {
     /// count the write otherwise.
     #[inline]
     fn accept_value_write(&mut self, row: usize, col: usize) -> bool {
-        if self.is_pivot_owned(row, col) || self.table_header_at(row, col).is_some() {
+        if self.is_pivot_owned(row, col) || self.table_at(row, col).is_some_and(|t| row == t.range.start_row || t.totals_row() == Some(row)) {
             return false;
         }
         self.edit_generation = self.edit_generation.wrapping_add(1);
@@ -715,10 +748,54 @@ impl Sheet {
 
     pub fn tables(&self) -> &[crate::table::DataTable] { &self.data_tables }
 
+    /// Includes the legacy copy retained in totals metadata for old files.
+    pub fn manual_hidden_rows(&self) -> BTreeSet<usize> {
+        self.manual_hidden_rows.iter().copied().chain(self.tables().iter()
+            .filter_map(|t| t.totals.as_ref()).flat_map(|t| t.hidden_rows.iter().copied())).collect()
+    }
+
+    /// Import/host synchronization. Callers recalculate the workbook after a
+    /// change; live edits use Workbook::prepare_table_row_visibility for history.
+    pub fn set_manual_hidden_rows(&mut self, hidden: BTreeSet<usize>) -> Result<(), String> {
+        if let Some(reason) = &self.read_only_reason { return Err(format!("Read-only recovery: {reason}")); }
+        if hidden.iter().any(|row| *row >= NUM_ROWS) {
+            return Err("Hidden rows exceed the worksheet boundary.".into());
+        }
+        let legacy: BTreeSet<_> = hidden.iter().copied().filter(|row| *row < self.rows).collect();
+        if self.manual_hidden_rows == hidden && self.tables().iter().all(|t| t.totals.as_ref().is_none_or(|t| t.hidden_rows == legacy)) {
+            return Ok(());
+        }
+        let values_changed = self.manual_hidden_rows() != hidden;
+        for table in &mut self.data_tables {
+            if let Some(totals) = &mut table.totals { totals.hidden_rows = legacy.clone(); }
+        }
+        self.manual_hidden_rows = hidden;
+        self.mark_table_changed();
+        if values_changed { self.clear_computed_cache(); }
+        Ok(())
+    }
+
     pub fn has_table_history(&self) -> bool { self.table_id_high_water > 0 || !self.data_tables.is_empty() }
 
+    pub(crate) fn subtotal_excluded(&self, row: usize, col: usize, ignore_hidden: bool) -> bool {
+        if ignore_hidden && (self.manual_hidden_rows.contains(&row) || self.tables().iter().any(|t| t.totals.as_ref().is_some_and(|t| t.hidden_rows.contains(&row)))) { return true; }
+        if self.get_cell_opt(row, col).is_some_and(|cell| {
+            matches!(cell.value(), crate::cell::ValueRef::Formula { ast: Some(ast), .. }
+                if crate::formula::eval_subtotal::contains_subtotal(ast))
+        }) { return true; }
+        let Some(spec) = self.table_view_spec() else { return false; };
+        let Some(table) = self.tables().iter().find(|t| t.id == spec.table) else { return false; };
+        if row <= table.range.start_row || row > table.range.end_row { return false; }
+        spec.filters.iter().any(|f| {
+            table.columns.iter().position(|c| c.id == f.column).is_some_and(|offset| {
+                !f.criteria.passes(&crate::filter::FilterKey::from_value(
+                    &self.get_computed_value(row, table.range.start_col + offset)))
+            })
+        })
+    }
+
     pub fn table_at(&self, row: usize, col: usize) -> Option<&crate::table::DataTable> {
-        self.data_tables.iter().find(|t| t.range.contains(row, col))
+        self.data_tables.iter().find(|t| t.full_range().contains(row, col))
     }
 
     pub fn table_header_at(&self, row: usize, col: usize) -> Option<&crate::table::DataTable> {
@@ -728,6 +805,9 @@ impl Sheet {
     /// Shared preflight for hosts. Low-level void setters additionally refuse
     /// these writes; callers use this to reject an entire batch with a reason.
     pub fn table_value_write_error(&self, row: usize, col: usize) -> Option<String> {
+        if let Some(t) = self.tables().iter().find(|t| t.totals_row() == Some(row) && t.full_range().contains(row, col)) {
+            return Some(format!("{} has a protected totals row. Use the Table’s Edit total control to change its function, label or formula.", t.name));
+        }
         self.table_header_at(row, col).map(|t| format!(
             "'{}' has a protected table header; use the table column rename operation.", t.name
         ))
@@ -737,7 +817,7 @@ impl Sheet {
     /// cannot leave a second exception registry out of sync.
     pub fn is_calculated_exception(&self, row: usize, col: usize) -> bool {
         let Some(table) = self.table_at(row, col) else { return false; };
-        if row == table.range.start_row { return false; }
+        if row == table.range.start_row || table.totals_row() == Some(row) { return false; }
         let Some(expected) = table.formula_at(row, col) else { return false; };
         let actual = self.get_raw(row, col);
         actual != expected && !(actual.starts_with('=')
@@ -747,6 +827,9 @@ impl Sheet {
     pub fn table_structural_error(&self, is_row: bool, at: usize, count: usize, delete: bool) -> Option<String> {
         if count == 0 { return None; }
         let Some(end) = at.checked_add(count) else { return Some("Structural edit overflows the sheet bounds.".into()); };
+        if is_row && !delete && self.manual_hidden_rows.last().is_some_and(|row| *row >= at && row.checked_add(count).is_none_or(|r| r >= NUM_ROWS)) {
+            return Some("This would push manually hidden rows past the worksheet boundary.".into());
+        }
         for t in self.tables() {
             let (start, last) = if is_row { (t.range.start_row, t.range.end_row) }
                 else { (t.range.start_col, t.range.end_col) };
@@ -755,7 +838,9 @@ impl Sheet {
             }
             if !delete {
                 let limit = if is_row { self.rows } else { self.cols };
-                if at <= last && last.checked_add(count).is_none_or(|v| v >= limit) {
+                let edge = if is_row { t.full_range().end_row.max(t.totals.as_ref()
+                    .and_then(|totals| totals.hidden_rows.last().copied()).unwrap_or(0)) } else { last };
+                if at <= edge && edge.checked_add(count).is_none_or(|v| v >= limit) {
                     return Some(format!("This would push {} past the sheet boundary.", t.name));
                 }
             }
@@ -763,17 +848,31 @@ impl Sheet {
         None
     }
 
-    fn shift_tables(&mut self, is_row: bool, at: usize, count: usize, delete: bool) {
-        if count == 0 || self.data_tables.is_empty() { return; }
-        for t in &mut self.data_tables {
-            let (start, end) = if is_row { (t.range.start_row, t.range.end_row) }
-                else { (t.range.start_col, t.range.end_col) };
-            if let Some((start, end)) = crate::structural::shift_span(start, end, at, count, delete) {
-                if is_row { t.range.start_row = start; t.range.end_row = end; }
-                else { t.range.start_col = start; t.range.end_col = end; }
+    pub(crate) fn tables_after_row_edit(&self, at: usize, count: usize, delete: bool) -> Result<Vec<crate::table::DataTable>, String> {
+        if let Some(error) = self.table_structural_error(true, at, count, delete) { return Err(error); }
+        let mut tables = self.tables().to_vec();
+        if count == 0 { return Ok(tables); }
+        let end = at.checked_add(count).filter(|end| *end <= self.rows)
+            .ok_or("Structural edit exceeds the sheet boundary.")?;
+        for t in &mut tables {
+            let footer = t.totals_row();
+            let (start, last) = crate::structural::shift_span(t.range.start_row, t.range.end_row, at, count, delete)
+                .ok_or("Cannot remove a Table header. Convert to a range first.")?;
+            t.range.start_row = start;
+            t.range.end_row = if !delete && footer == Some(at) { last + count } else { last };
+            if let Some(totals) = &mut t.totals {
+                if delete && footer.is_some_and(|row| row >= at && row < end) {
+                    // Removing the footer hides it but retains its settings.
+                    totals.visible = false;
+                    totals.shown = Some(false);
+                }
+                totals.hidden_rows = totals.hidden_rows.iter().filter_map(|row| {
+                    crate::structural::shift_span(*row, *row, at, count, delete)
+                        .map(|(row, _)| row).filter(|row| *row < self.rows)
+                }).collect();
             }
         }
-        self.mark_table_changed();
+        Ok(tables)
     }
 
     pub(crate) fn mark_table_changed(&mut self) {
@@ -781,9 +880,15 @@ impl Sheet {
     }
 
     pub(crate) fn write_table_header(&mut self, row: usize, col: usize, value: CellValue) {
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| { cell.value = value; cell.clear_spill_state(); });
+    }
+
+    pub(crate) fn empty_table_footer_cell(&self, row: usize, col: usize) -> Cell {
+        Cell::with_format(std::sync::Arc::new(self.inherited_format(row, col)))
     }
 
     /// Write one pivot output cell, bypassing the ownership guard. Numbers stay
@@ -792,6 +897,8 @@ impl Sheet {
     /// writes them. `Value::Empty` clears the cell.
     pub(crate) fn write_pivot_cell(&mut self, row: usize, col: usize, value: &crate::formula::eval::Value) {
         use crate::formula::eval::Value;
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         match value {
@@ -852,6 +959,8 @@ impl Sheet {
         }
 
         // Clear any existing spill from this cell before setting new value
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
 
         // Invalidate computed cache (cell changed, dependents may need recompute)
@@ -868,6 +977,12 @@ impl Sheet {
     /// For values arriving from a source that already declared them as strings
     /// — see `Cell::set_text`. No spill evaluation, because text cannot spill.
     pub fn set_text(&mut self, row: usize, col: usize, text: &str) {
+        self.set_text_exact(row, col, text.trim());
+    }
+
+    /// Import text whose source declared its type; keep whitespace verbatim.
+    /// Ordinary typed entry and set_text retain their existing trimming behavior.
+    pub fn set_text_exact(&mut self, row: usize, col: usize, text: &str) {
         let (row, col) = self.merge_origin_coord(row, col);
         self.set_text_at(row, col, text);
     }
@@ -878,9 +993,11 @@ impl Sheet {
         if !self.accept_value_write(row, col) {
             return;
         }
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
-        self.with_cell(row, col, |cell| cell.set_text(text));
+        self.with_cell(row, col, |cell| cell.set_text_exact(text));
     }
 
     /// Set a cell without evaluating it.
@@ -899,6 +1016,8 @@ impl Sheet {
         if !self.accept_value_write(row, col) {
             return;
         }
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.clear_computed(row, col);
         self.with_cell(row, col, |cell| cell.set(value));
@@ -933,9 +1052,8 @@ impl Sheet {
     pub fn set_cycle_error(&mut self, row: usize, col: usize) {
         // Redirect hidden merge cells to the merge origin
         let (row, col) = self.merge_origin_coord(row, col);
-        if !self.accept_value_write(row, col) {
-            return;
-        }
+        // This updates a computed cache, not authored content. In particular,
+        // protected Table totals still need to display calculation errors.
         // Cached as text, exactly what the cell used to hold, so everything
         // downstream (#VALUE! in arithmetic, inspectors, exports) behaves as
         // before. Only the formula is no longer lost.
@@ -1071,17 +1189,16 @@ impl Sheet {
     /// path and by the ordered recompute, so both answer the question the same
     /// way — placing an array is one rule and belongs in one place.
     pub fn place_spill(&mut self, row: usize, col: usize, array: &crate::formula::eval::Array2D) {
+        self.clear_spill_error(row, col);
         match self.check_spill_collision(row, col, array.rows(), array.cols()) {
             Ok(()) => {
-                // A collision reported earlier is over once the array fits.
-                // Nothing else clears it on the recalc path, so a #SPILL!
-                // would otherwise outlive the obstruction that caused it.
-                self.clear_spill_error(row, col);
                 self.apply_spill(row, col, array);
             }
             Err(blocked_by) => {
+                self.blocked_spills.entry(blocked_by).or_default().insert((row, col));
                 self.cells.update(row, col, |cell| {
-                    cell.set_spill_error(Some(SpillError { blocked_by }));
+                    cell.set_spill_error(Some(SpillError { blocked_by,
+                        dimensions: Some(SpillInfo { rows: array.rows(), cols: array.cols() }) }));
                 });
                 self.blocked_spill_extents.insert((row, col), (array.rows(), array.cols()));
             }
@@ -1099,10 +1216,49 @@ impl Sheet {
 
     /// Forget a #SPILL! on a cell, whatever it currently holds.
     pub fn clear_spill_error(&mut self, row: usize, col: usize) {
+        if let Some(blocker) = self.cells.get(row, col).and_then(|c| c.spill_error()).map(|e| e.blocked_by) {
+            if let Some(parents) = self.blocked_spills.get_mut(&blocker) {
+                parents.remove(&(row, col));
+                if parents.is_empty() { self.blocked_spills.remove(&blocker); }
+            }
+        }
         self.blocked_spill_extents.remove(&(row, col));
         self.cells.update(row, col, |cell| {
             cell.set_spill_error(None);
         });
+    }
+
+    pub(crate) fn reset_spill_blockers(&mut self) {
+        self.blocked_spills.clear();
+        self.edited_spill_parents.clear();
+        self.retired_spill_cells.clear();
+    }
+
+    fn note_spill_write(&mut self, row: usize, col: usize) {
+        if let Some(info) = self.get_cell_opt(row, col).and_then(|c| c.spill_info().cloned()) {
+            for dr in 0..info.rows {
+                for dc in 0..info.cols {
+                    if dr != 0 || dc != 0 { self.retired_spill_cells.insert((row + dr, col + dc)); }
+                }
+            }
+        }
+        if let Some(parent) = self.get_spill_parent(row, col) {
+            self.edited_spill_parents.insert(parent);
+        }
+    }
+
+    pub(crate) fn take_edited_spill_parents(&mut self) -> HashSet<(usize, usize)> {
+        std::mem::take(&mut self.edited_spill_parents)
+    }
+
+    pub(crate) fn take_retired_spill_cells(&mut self) -> HashSet<(usize, usize)> {
+        std::mem::take(&mut self.retired_spill_cells)
+    }
+
+    pub(crate) fn spills_blocked_by(&self, row: usize, col: usize) -> impl Iterator<Item=(usize, usize)> + '_ {
+        self.blocked_spills.get(&(row, col)).into_iter().flatten().copied().filter(move |(r, c)| {
+            self.cells.get(*r, *c).and_then(|cell| cell.spill_error()).is_some_and(|e| e.blocked_by == (row, col))
+        })
     }
 
     /// Anchors showing #SPILL! whose refused extent contains (row, col): the
@@ -1671,6 +1827,8 @@ impl Sheet {
     /// Restore an authoritative cell image for guarded history replay. Derived
     /// spill state and computed caches are rebuilt by the workbook, never saved.
     pub(crate) fn restore_history_cell(&mut self, row: usize, col: usize, image: Option<Cell>) {
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         self.cells.remove(row, col);
         self.spill_values.remove(&(row, col));
@@ -1693,8 +1851,60 @@ impl Sheet {
         self.with_cell(row, col, |cell| cell.set_comment(comment));
     }
 
+    /// Undo materializing a previously absent cell solely for cell metadata.
+    /// Preserve any intervening value/format/other metadata and all derived
+    /// spill state: removing this metadata slot must not clear a spill receiver.
+    pub fn remove_empty_metadata_cell(&mut self, row: usize, col: usize) {
+        let empty = self.cells.get(row, col).is_some_and(|cell| {
+            matches!(cell.value(), ValueRef::Empty)
+                && *cell.format() == self.inherited_format(row, col)
+                && cell.comment().is_none()
+                && cell.style_id().is_none()
+                && cell.frozen_formula().is_none()
+                && cell.spill_parent().is_none()
+                && cell.spill_info().is_none()
+                && cell.spill_error().is_none()
+        });
+        if empty { self.cells.remove(row, col); }
+    }
+
     pub fn comments(&self) -> impl Iterator<Item = ((usize, usize), &crate::cell::CellComment)> {
         self.cells.iter().filter_map(|(pos, cell)| cell.comment().map(|comment| (pos, comment)))
+    }
+
+    pub(crate) fn share_cell_cow_from(&mut self, other: &Sheet) {
+        self.cells.share_cow_from(&other.cells);
+    }
+
+    pub(crate) fn reset_cell_cow(&self) {
+        self.cells.reset_cow();
+    }
+
+    /// Bytes of this sheet's shared storage that `live` no longer holds, plus
+    /// the maps cloned outright at capture.
+    pub(crate) fn unshared_cow_bytes(&self, live: &Sheet) -> usize {
+        self.cells.unshared_bytes(&live.cells).saturating_add(self.rewind_private_maps())
+    }
+
+    /// Every copy-on-write allocation, as when `live` has no matching sheet.
+    pub(crate) fn all_cow_bytes(&self) -> usize {
+        self.cells.unshared_bytes(&Default::default()).saturating_add(self.rewind_private_maps())
+    }
+
+    fn rewind_private_maps(&self) -> usize {
+        let spills: usize = self.spill_values.iter().map(|(_, value)| match value {
+            crate::formula::eval::Value::Text(text) | crate::formula::eval::Value::Error(text) => text.len(),
+            _ => 0,
+        }).sum();
+        let blocked: usize = self.blocked_spills.values()
+            .map(|set| set.capacity().saturating_mul(std::mem::size_of::<(usize, usize)>()))
+            .sum();
+        let map = |capacity: usize, item: usize, extra: usize| capacity.saturating_mul(item).saturating_add(extra);
+        map(self.spill_values.capacity(), std::mem::size_of::<((usize, usize), crate::formula::eval::Value)>(), spills)
+            .saturating_add(map(self.blocked_spills.capacity(), std::mem::size_of::<((usize, usize), std::collections::HashSet<(usize, usize)>)>(), blocked))
+            .saturating_add(self.format_pool.capacity().saturating_mul(std::mem::size_of::<std::sync::Arc<CellFormat>>()))
+            .saturating_add(self.row_formats.capacity().saturating_mul(std::mem::size_of::<(usize, CellFormat)>()))
+            .saturating_add(self.col_formats.capacity().saturating_mul(std::mem::size_of::<(usize, CellFormat)>()))
     }
 
     pub fn get_format(&self, row: usize, col: usize) -> CellFormat {
@@ -1800,6 +2010,8 @@ impl Sheet {
             return;
         }
 
+        self.note_spill_write(row, col);
+        self.clear_spill_error(row, col);
         self.clear_spill_from(row, col);
         let comment = self
             .cells
@@ -2016,7 +2228,7 @@ impl Sheet {
     /// Replace all merged regions and rebuild the lookup index.
     /// Used by undo/redo to restore merge state.
     pub fn set_merges(&mut self, regions: Vec<MergedRegion>) {
-        if regions.iter().any(|m| self.tables().iter().any(|t| t.range.intersects(crate::table::TableRange {
+        if regions.iter().any(|m| self.tables().iter().any(|t| t.full_range().intersects(crate::table::TableRange {
             start_row: m.start.0, start_col: m.start.1, end_row: m.end.0, end_col: m.end.1,
         }))) { return; }
         self.merged_regions = regions;
@@ -2071,7 +2283,7 @@ impl Sheet {
     /// Add a merged region. Returns Err if it overlaps an existing merge.
     pub fn add_merge(&mut self, region: MergedRegion) -> Result<(), String> {
         let range = crate::table::TableRange { start_row: region.start.0, start_col: region.start.1, end_row: region.end.0, end_col: region.end.1 };
-        if self.tables().iter().any(|t| t.range.intersects(range)) {
+        if self.tables().iter().any(|t| t.full_range().intersects(range)) {
             return Err("Cannot merge cells inside a Table.".into());
         }
         if region.is_degenerate() {
@@ -2129,7 +2341,13 @@ impl Sheet {
 
     /// Remove degenerate (1×1) merges and rebuild the index.
     pub fn normalize_merges(&mut self) {
-        self.merged_regions.retain(|m| !m.is_degenerate());
+        // Insertion can extend metadata past the fixed worksheet boundary.
+        self.merged_regions.retain_mut(|m| {
+            if m.start.0 >= self.rows || m.start.1 >= self.cols { return false; }
+            m.end.0 = m.end.0.min(self.rows - 1);
+            m.end.1 = m.end.1.min(self.cols - 1);
+            !m.is_degenerate()
+        });
         self.rebuild_merge_index();
         #[cfg(debug_assertions)]
         self.debug_assert_no_merge_overlap();
@@ -2193,19 +2411,24 @@ impl Sheet {
     /// Insert rows at the specified position, shifting existing rows down
     pub fn insert_rows(&mut self, at_row: usize, count: usize) {
         if self.table_structural_error(true, at_row, count, false).is_some() { return; }
-        self.shift_tables(true, at_row, count, false);
+        let Ok(tables) = self.tables_after_row_edit(at_row, count, false) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(true, at_row, count, false);
+        self.manual_hidden_rows = self.manual_hidden_rows.iter().filter_map(|row| {
+            crate::structural::shift_span(*row, *row, at_row, count, false)
+                .map(|(row, _)| row).filter(|row| *row < NUM_ROWS)
+        }).collect();
         self.cells.insert_rows(at_row, count, self.rows);
 
         // Adjust merged regions (grid-line semantics)
         for m in &mut self.merged_regions {
             if at_row <= m.start.0 {
                 // Insertion at or above merge → shift entire merge down
-                m.start.0 += count;
-                m.end.0 += count;
+                m.start.0 = m.start.0.saturating_add(count);
+                m.end.0 = m.end.0.saturating_add(count);
             } else if at_row <= m.end.0 {
                 // Insertion inside merge → expand merge
-                m.end.0 += count;
+                m.end.0 = m.end.0.saturating_add(count);
             }
         }
         self.normalize_merges();
@@ -2217,38 +2440,22 @@ impl Sheet {
     /// Delete rows at the specified position, shifting remaining rows up
     pub fn delete_rows(&mut self, start_row: usize, count: usize) {
         if self.table_structural_error(true, start_row, count, true).is_some() { return; }
-        self.shift_tables(true, start_row, count, true);
+        let Ok(tables) = self.tables_after_row_edit(start_row, count, true) else { return; };
+        self.install_column_tables(tables);
         self.print_setup.adjust(true, start_row, count, true);
-        let end_row = start_row + count; // exclusive
+        self.manual_hidden_rows = self.manual_hidden_rows.iter().filter_map(|row| {
+            crate::structural::shift_span(*row, *row, start_row, count, true)
+                .map(|(row, _)| row).filter(|row| *row < NUM_ROWS)
+        }).collect();
 
         // Remove cells in the deleted rows; those below move up
         self.cells.delete_rows(start_row, count);
 
-        // Adjust merged regions (grid-line semantics)
-        for m in &mut self.merged_regions {
-            if end_row <= m.start.0 {
-                // Deletion entirely above → shift up
-                m.start.0 -= count;
-                m.end.0 -= count;
-            } else if start_row > m.end.0 {
-                // Deletion entirely below → no effect
-            } else if start_row <= m.start.0 && end_row > m.end.0 {
-                // Deletion engulfs entire merge → mark degenerate
-                m.start.0 = start_row;
-                m.end.0 = m.start.0;
-                m.end.1 = m.start.1;
-            } else if start_row <= m.start.0 {
-                // Deletion clips top of merge; surviving rows shift up by count
-                m.start.0 = start_row;
-                m.end.0 -= count;
-            } else if end_row > m.end.0 {
-                // Deletion clips bottom of merge
-                m.end.0 = start_row - 1;
-            } else {
-                // Deletion entirely inside merge → shrink
-                m.end.0 -= count;
-            }
-        }
+        self.merged_regions.retain_mut(|m| {
+            if let Some((start, end)) = crate::structural::shift_edge_span(m.start.0, m.end.0, start_row, count, true, self.rows) {
+                m.start.0 = start; m.end.0 = end; true
+            } else { false }
+        });
         self.normalize_merges();
         self.row_formats = self.row_formats.drain().filter_map(|(i, f)| {
             if i >= start_row && i < start_row + count { None }
@@ -2278,10 +2485,10 @@ impl Sheet {
         // Adjust merged regions (grid-line semantics)
         for m in &mut self.merged_regions {
             if at_col <= m.start.1 {
-                m.start.1 += count;
-                m.end.1 += count;
+                m.start.1 = m.start.1.saturating_add(count);
+                m.end.1 = m.end.1.saturating_add(count);
             } else if at_col <= m.end.1 {
-                m.end.1 += count;
+                m.end.1 = m.end.1.saturating_add(count);
             }
         }
         self.normalize_merges();
@@ -2296,36 +2503,15 @@ impl Sheet {
         let Ok(tables) = self.tables_after_column_edit(start_col, count, true) else { return; };
         self.install_column_tables(tables);
         self.print_setup.adjust(false, start_col, count, true);
-        let end_col = start_col + count; // exclusive
 
         // Remove cells in the deleted columns; those right of them move left
         self.cells.delete_cols(start_col, count);
 
-        // Adjust merged regions (grid-line semantics)
-        for m in &mut self.merged_regions {
-            if end_col <= m.start.1 {
-                // Deletion entirely left → shift left
-                m.start.1 -= count;
-                m.end.1 -= count;
-            } else if start_col > m.end.1 {
-                // Deletion entirely right → no effect
-            } else if start_col <= m.start.1 && end_col > m.end.1 {
-                // Deletion engulfs entire merge → mark degenerate
-                m.start.1 = start_col;
-                m.end.1 = m.start.1;
-                m.end.0 = m.start.0;
-            } else if start_col <= m.start.1 {
-                // Deletion clips left side; surviving cols shift left by count
-                m.start.1 = start_col;
-                m.end.1 -= count;
-            } else if end_col > m.end.1 {
-                // Deletion clips right side
-                m.end.1 = start_col - 1;
-            } else {
-                // Deletion entirely inside merge → shrink
-                m.end.1 -= count;
-            }
-        }
+        self.merged_regions.retain_mut(|m| {
+            if let Some((start, end)) = crate::structural::shift_edge_span(m.start.1, m.end.1, start_col, count, true, self.cols) {
+                m.start.1 = start; m.end.1 = end; true
+            } else { false }
+        });
         self.normalize_merges();
         self.col_formats = self.col_formats.drain().filter_map(|(i, f)| {
             if i >= start_col && i < start_col + count { None }
@@ -2411,268 +2597,87 @@ impl Sheet {
         self.validations.has_validation(row, col)
     }
 
-    /// Validate a value against the cell's validation rule.
-    ///
-    /// Returns `ValidationResult::Valid` if no rule exists or validation passes.
+    /// Validate a proposed value without changing this sheet. Workbook callers
+    /// should use Workbook::validate_cell_input for cross-sheet/name resolution.
     pub fn validate_cell_input(&self, row: usize, col: usize, value: &str) -> super::validation::ValidationResult {
-        use super::validation::{ValidationResult, ValidationType};
-
-        let rule = match self.validations.get(row, col) {
-            Some(r) => r,
-            None => return ValidationResult::Valid,
+        use crate::validation::evaluation::{input_value, validate_rule};
+        use crate::validation::ValidationResult;
+        let Some(rule) = self.validations.get(row, col) else { return ValidationResult::Valid; };
+        let rule = rule.at(row, col);
+        if rule.ignore_blank && value.trim().is_empty() { return ValidationResult::Valid; }
+        let typed = match input_value(&rule, value) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-
-        // Check ignore_blank
-        if rule.ignore_blank && value.trim().is_empty() {
-            return ValidationResult::Valid;
+        if rule.has_reference_sources() || value.trim_start().starts_with('=') {
+            let workbook = crate::workbook::Workbook::from_sheets(vec![self.clone()], 0);
+            return workbook.validate_cell_input(0, row, col, value);
         }
-
-        // Validate based on type
-        // NOTE: No AnyValue case - rule absence handles "any value" semantics
-        match &rule.rule_type {
-            ValidationType::List(source) => {
-                let resolved = self.resolve_list_source(source);
-                let trimmed_value = value.trim();
-
-                // Case-sensitive matching (per spec)
-                if resolved.contains(trimmed_value) {
-                    ValidationResult::Valid
-                } else if resolved.items.is_empty() {
-                    // Empty list source (e.g., invalid range) - accept any value
-                    ValidationResult::Valid
-                } else {
-                    let display_items: Vec<&str> = resolved.items.iter()
-                        .take(5)
-                        .map(|s| s.as_str())
-                        .collect();
-                    let suffix = if resolved.items.len() > 5 { ", ..." } else { "" };
-                    ValidationResult::Invalid {
-                        rule: rule.clone(),
-                        reason: format!("Value must be one of: {}{}", display_items.join(", "), suffix),
-                    }
-                }
-            }
-
-            ValidationType::WholeNumber(constraint) => {
-                use super::validation::{parse_numeric_input, NumericParseError};
-
-                // Use strict parsing: no decimal point allowed
-                let num = match parse_numeric_input(value, false) {
-                    Ok(n) => n,
-                    Err(NumericParseError::FractionalNotAllowed) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a whole number (no decimals)".to_string(),
-                        };
-                    }
-                    Err(_) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a whole number".to_string(),
-                        };
-                    }
-                };
-
-                self.validate_numeric_constraint(num, constraint, rule, "whole number")
-            }
-
-            ValidationType::Decimal(constraint) => {
-                use super::validation::parse_numeric_input;
-
-                // Allow decimal input
-                let num = match parse_numeric_input(value, true) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        return ValidationResult::Invalid {
-                            rule: rule.clone(),
-                            reason: "Value must be a number".to_string(),
-                        };
-                    }
-                };
-
-                self.validate_numeric_constraint(num, constraint, rule, "number")
-            }
-
-            ValidationType::TextLength(constraint) => {
-                let len = value.len() as f64;
-                self.validate_numeric_constraint(len, constraint, rule, "text length")
-            }
-
-            ValidationType::Date(_) | ValidationType::Time(_) => {
-                // TODO: Implement date/time parsing and validation
-                ValidationResult::Valid
-            }
-
-            ValidationType::Custom(_formula) => {
-                // TODO: Evaluate custom formula
-                ValidationResult::Valid
-            }
-        }
+        validate_rule(&rule, &typed, value, |source| self.validation_formula(row, col, source),
+            |source| self.resolve_list_source_at(row, col, source))
     }
 
-    /// Helper to validate a numeric value against a constraint.
-    fn validate_numeric_constraint(
-        &self,
-        value: f64,
-        constraint: &super::validation::NumericConstraint,
-        rule: &super::validation::ValidationRule,
-        type_name: &str,
-    ) -> super::validation::ValidationResult {
-        use super::validation::{ValidationResult, eval_numeric_constraint};
-
-        // Resolve constraint values - fail validation if constraint can't be resolved
-        let v1 = match self.resolve_constraint_value(&constraint.value1) {
-            Ok(n) => n,
-            Err(e) => {
-                return ValidationResult::Invalid {
-                    rule: rule.clone(),
-                    reason: format!("Validation constraint error: {}", e),
-                };
-            }
-        };
-
-        let v2 = match &constraint.value2 {
-            Some(cv) => match self.resolve_constraint_value(cv) {
-                Ok(n) => Some(n),
-                Err(e) => {
-                    return ValidationResult::Invalid {
-                        rule: rule.clone(),
-                        reason: format!("Validation constraint error: {}", e),
-                    };
-                }
-            },
-            None => None,
-        };
-
-        // Use the shared evaluation helper
-        let valid = eval_numeric_constraint(value, constraint.operator, v1, v2);
-
-        if valid {
-            ValidationResult::Valid
-        } else {
-            let reason = match constraint.operator {
-                super::validation::ComparisonOperator::Between => {
-                    format!("{} must be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
-                }
-                super::validation::ComparisonOperator::NotBetween => {
-                    format!("{} must not be between {} and {}", type_name, v1, v2.unwrap_or(0.0))
-                }
-                super::validation::ComparisonOperator::EqualTo => format!("{} must equal {}", type_name, v1),
-                super::validation::ComparisonOperator::NotEqualTo => format!("{} must not equal {}", type_name, v1),
-                super::validation::ComparisonOperator::GreaterThan => format!("{} must be greater than {}", type_name, v1),
-                super::validation::ComparisonOperator::LessThan => format!("{} must be less than {}", type_name, v1),
-                super::validation::ComparisonOperator::GreaterThanOrEqual => format!("{} must be at least {}", type_name, v1),
-                super::validation::ComparisonOperator::LessThanOrEqual => format!("{} must be at most {}", type_name, v1),
-            };
-
-            ValidationResult::Invalid {
-                rule: rule.clone(),
-                reason,
-            }
-        }
+    /// Validate the current typed value, without copying or mutating the sheet.
+    pub fn validate_cell(&self, row: usize, col: usize) -> super::validation::ValidationResult {
+        let Some(rule) = self.validations.get(row, col) else { return super::validation::ValidationResult::Valid; };
+        crate::validation::evaluation::validate_rule(&rule.at(row, col), &self.get_computed_value(row, col),
+            &self.get_display(row, col), |source| self.validation_formula(row, col, source),
+            |source| self.resolve_list_source_at(row, col, source))
     }
 
-    /// Resolve a constraint value to a number.
-    ///
-    /// Returns Err if:
-    /// - Cell reference is invalid
-    /// - Referenced cell is blank
-    /// - Referenced cell value is not numeric
-    /// - Formula evaluation fails or returns non-numeric
-    fn resolve_constraint_value(
-        &self,
-        value: &super::validation::ConstraintValue,
-    ) -> Result<f64, super::validation::ConstraintResolveError> {
-        use super::validation::{ConstraintValue, ConstraintResolveError};
-
-        match value {
-            ConstraintValue::Number(n) => Ok(*n),
-            ConstraintValue::CellRef(ref_str) => {
-                // Parse cell reference and get value
-                let (row, col) = self.parse_cell_ref(ref_str)
-                    .ok_or_else(|| ConstraintResolveError::InvalidReference(ref_str.clone()))?;
-
-                let display = self.get_display(row, col);
-                if display.is_empty() {
-                    return Err(ConstraintResolveError::BlankConstraint);
-                }
-
-                // Try to parse as number
-                display.parse::<f64>()
-                    .map_err(|_| ConstraintResolveError::NotNumeric)
-            }
-            ConstraintValue::Formula(_formula) => {
-                // TODO: Evaluate formula and require numeric result
-                // For now, return error since formula eval not implemented
-                Err(ConstraintResolveError::FormulaError("Formula constraints not yet implemented".to_string()))
-            }
-        }
+    fn validation_formula(&self, row: usize, col: usize, source: &str) -> crate::formula::eval::EvalResult {
+        use crate::formula::{eval::{evaluate, EvalResult, LookupWithContext}, parser::{parse, bind_expr_same_sheet}};
+        let formula = format!("={}", source.trim().trim_start_matches('='));
+        crate::formula::eval_budget::validation(|| match parse(&formula) {
+            Ok(expr) => evaluate(&bind_expr_same_sheet(&expr), &LookupWithContext::new(self, row, col)),
+            Err(error) => EvalResult::Error(error),
+        })
     }
 
     /// Resolve a list source to its items.
     ///
     /// Returns a ResolvedList with normalized items (trimmed whitespace).
     /// For range sources, reads cell values. For named ranges, looks up the range first.
-    fn resolve_list_source(&self, source: &super::validation::ListSource) -> super::validation::ResolvedList {
+    fn resolve_list_source_at(&self, row: usize, col: usize, source: &super::validation::ListSource) -> super::validation::ResolvedList {
         use super::validation::{ListSource, ResolvedList};
-
         match source {
-            ListSource::Inline(values) => {
-                ResolvedList::from_items(values.clone())
-            }
-            ListSource::Range(range_str) => {
-                // Parse range string like "A1:A10" or "=A1:A10"
-                let range_str = range_str.trim_start_matches('=').trim();
-                self.resolve_range_to_list(range_str)
-            }
-            ListSource::NamedRange(_name) => {
-                // Named range resolution requires workbook context
-                // This method is called from Sheet, which doesn't have workbook access
-                // The workbook-level method will handle this
-                ResolvedList::empty()
-            }
+            ListSource::Inline(values) => ResolvedList::from_items(values.clone()),
+            ListSource::Range(source) | ListSource::NamedRange(source) => self.resolve_validation_list_at(row, col, source),
         }
     }
 
-    /// Resolve a range string like "A1:A10" to a list of cell values.
-    pub fn resolve_range_to_list(&self, range_str: &str) -> super::validation::ResolvedList {
-        use super::validation::ResolvedList;
+    /// Resolve a range/formula source without workbook name/cross-sheet context.
+    pub fn resolve_range_to_list(&self, source: &str) -> super::validation::ResolvedList {
+        self.resolve_validation_list_at(0, 0, source)
+    }
 
-        // Parse range: "A1:B10" or just "A1"
-        let parts: Vec<&str> = range_str.split(':').collect();
-        if parts.is_empty() || parts.len() > 2 {
-            return ResolvedList::empty();
-        }
+    fn resolve_validation_list_at(&self, row: usize, col: usize, source: &str) -> super::validation::ResolvedList {
+        use crate::formula::eval::LookupWithContext;
+        crate::validation::list_source::resolve(source, &LookupWithContext::new(self, row, col),
+            |target, range| match target {
+                SheetRef::Current => self.resolve_list_cells(range),
+                _ => super::validation::ResolvedList::failed("#REF! List source requires workbook context"),
+            })
+    }
 
-        let start = match self.parse_cell_ref(parts[0]) {
-            Some(pos) => pos,
-            None => return ResolvedList::empty(),
-        };
-
-        let end = if parts.len() == 2 {
-            match self.parse_cell_ref(parts[1]) {
-                Some(pos) => pos,
-                None => return ResolvedList::empty(),
-            }
-        } else {
-            start
-        };
-
-        // Collect values from range
+    pub(crate) fn resolve_list_cells(&self, range: &super::validation::CellRange) -> super::validation::ResolvedList {
+        use super::validation::{ResolvedList, MAX_LIST_ITEMS};
+        // Read occupied cells in worksheet order; never enumerate a whole grid
+        // for an imported whole-column or otherwise mostly-empty list source.
+        let mut positions = self.cells_in_range(range.start_row, range.end_row, range.start_col, range.end_col);
+        positions.extend(self.spill_values.keys().copied().filter(|&(r,c)| range.contains(r,c)));
+        positions.sort_unstable();
+        positions.dedup();
         let mut items = Vec::new();
-        let (start_row, start_col) = start;
-        let (end_row, end_col) = end;
-
-        for row in start_row.min(end_row)..=start_row.max(end_row) {
-            for col in start_col.min(end_col)..=start_col.max(end_col) {
-                let display = self.get_display(row, col);
-                // Skip truly empty cells but include cells with whitespace (after trim)
-                if !display.is_empty() {
-                    items.push(display);
-                }
+        for (r,c) in positions {
+            if let Value::Error(error) = self.get_computed_value(r,c) { return ResolvedList::failed(error); }
+            let display = self.get_display(r,c);
+            if !display.is_empty() {
+                items.push(display);
+                // One extra item lets ResolvedList preserve its truncated flag.
+                if items.len() > MAX_LIST_ITEMS { break; }
             }
         }
-
         ResolvedList::from_items(items)
     }
 
@@ -2684,10 +2689,12 @@ impl Sheet {
         use super::validation::ValidationType;
 
         let rule = self.validations.get(row, col)?;
+        let resolved_rule = rule.at(row, col);
+        let rule = resolved_rule.as_ref();
 
         match &rule.rule_type {
             ValidationType::List(source) => {
-                Some(self.resolve_list_source(source))
+                Some(self.resolve_list_source_at(row, col, source))
             }
             _ => None,
         }
@@ -2706,34 +2713,11 @@ impl Sheet {
 
     /// Parse a simple cell reference like "A1" or "B10".
     pub fn parse_cell_ref(&self, ref_str: &str) -> Option<(usize, usize)> {
-        let ref_str = ref_str.trim().to_uppercase();
-        let mut col_str = String::new();
-        let mut row_str = String::new();
-
-        for ch in ref_str.chars() {
-            if ch.is_ascii_alphabetic() {
-                col_str.push(ch);
-            } else if ch.is_ascii_digit() {
-                row_str.push(ch);
-            }
+        let formula = format!("={}", ref_str.trim().trim_start_matches('='));
+        match crate::formula::parser::parse(&formula) {
+            Ok(crate::formula::parser::Expr::CellRef { sheet: UnboundSheetRef::Current, row, col, .. }) => Some((row, col)),
+            _ => None,
         }
-
-        if col_str.is_empty() || row_str.is_empty() {
-            return None;
-        }
-
-        // Convert column letters to index (A=0, B=1, ..., Z=25, AA=26, ...)
-        let col = col_str.chars().fold(0usize, |acc, c| {
-            acc * 26 + (c as usize - 'A' as usize + 1)
-        }) - 1;
-
-        // Convert row to 0-indexed
-        let row: usize = row_str.parse().ok()?;
-        if row == 0 {
-            return None;
-        }
-
-        Some((row - 1, col))
     }
 }
 

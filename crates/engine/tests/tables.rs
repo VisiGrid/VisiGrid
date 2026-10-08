@@ -249,3 +249,58 @@ fn table_undo_remove_checks_unchanged_headers_before_restoring_schema() {
     wb.set_cell_value_tracked(0, 0, 0, "Changed again");
     assert!(wb.apply_table_commit(&create, false).is_err());
 }
+
+
+#[test]
+fn interchange_batch_keeps_valid_tables_and_refuses_invalid_definitions_without_cell_writes() {
+    let mut source = book();
+    source.set_cell_value_tracked(0, 0, 0, "Amount");
+    source.set_cell_value_tracked(0, 1, 0, "10");
+    let id = source.create_table(SheetId(1), range(0, 0, 1, 0), "Sales").unwrap().table_id();
+    source.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let template = source.table(id).unwrap().1.clone();
+    let mut wb = book();
+    for row in [0, 4, 8, 12, 16] {
+        wb.set_cell_value_tracked(0, row, 0, "Amount");
+        wb.set_cell_value_tracked(0, row + 1, 0, "10");
+        wb.set_cell_value_tracked(0, row + 2, 0, "=SUBTOTAL(109,[Amount])");
+    }
+    wb.active_sheet_mut().add_merge(MergedRegion::new(10, 0, 10, 1)).unwrap();
+    wb.set_cell_value_tracked(0, 30, 0, "Amount");
+    wb.set_cell_value_tracked(0, 31, 0, "=SEQUENCE(2)");
+    let definition = |row, name: &str| {
+        let mut t = template.clone();
+        t.range = range(row, 0, row + 1, 0);
+        t.name = name.into();
+        t
+    };
+    let before: Vec<_> = wb.active_sheet().cells_iter().map(|(p,c)| (p,c.value().raw_display())).collect();
+    let mut wrong_header = definition(12, "WrongHeader");
+    wrong_header.columns[0].name = "Other".into();
+    let result = wb.restore_imported_tables(vec![
+        (0, definition(0, "FirstData")),
+        (0, definition(0, "Overlap")),
+        (0, definition(4, "firstdata")),
+        (0, definition(8, "MergedFooter")),
+        (0, wrong_header),
+        (1, definition(0, "MissingSheet")),
+        (0, definition(30, "SpilledFooter")),
+        (0, definition(4, "LastData")),
+    ]);
+    assert!(result[0].is_ok());
+    assert!(result[1..7].iter().all(Result::is_err));
+    assert!(result[7].is_ok());
+    assert_ne!(result[0], result[7]);
+    assert_eq!(wb.tables().count(), 2);
+    assert_eq!(before, wb.active_sheet().cells_iter().map(|(p,c)| (p,c.value().raw_display())).collect::<Vec<_>>());
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+    assert_eq!(wb.active_sheet().get_display(2, 0), "10");
+    assert_eq!(wb.active_sheet().get_display(6, 0), "10");
+    assert!(wb.named_ranges_mut().set(NamedRange::cell("FirstData", 0, 20, 0)).is_err());
+    wb.restore_tables(wb.saved_tables()).unwrap(); // Batch state meets strict native validation.
+    let existing = wb.saved_tables();
+    wb.active_sheet_mut().read_only_reason = Some("Recovering metadata".into());
+    assert!(wb.restore_imported_tables(vec![(0, definition(16, "BlockedData"))])[0].is_err());
+    assert_eq!(serde_json::to_value(wb.saved_tables()).unwrap(), serde_json::to_value(existing).unwrap());
+}
