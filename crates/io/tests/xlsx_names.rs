@@ -228,12 +228,40 @@ fn split_name_target_and_invalid_export_preserve_existing_destination() {
     wb.named_ranges_mut()
         .set(NamedRange::cell("Broken", 99, 0, 0))
         .unwrap();
-    assert!(
-        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored)
-            .unwrap_err()
-            .contains("missing target sheet")
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let (out, _) = xlsx::import(&path).unwrap();
+    assert_eq!(
+        out.named_ranges().get("Broken").unwrap().reference_string(),
+        "#REF!"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+}
+
+#[test]
+fn deleting_a_named_sheet_recalculates_dependents_and_exports_ref() {
+    let mut wb = Workbook::new();
+    let gone = wb.add_sheet_named("Gone").unwrap();
+    wb.set_cell_value_tracked(gone, 0, 0, "5");
+    wb.define_name_for_cell("OnGone", gone, 0, 0).unwrap();
+    wb.set_cell_value_tracked(0, 0, 0, "=OnGone*2");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "10");
+    assert!(wb.delete_sheet(gone));
+    assert_eq!(
+        wb.get_named_range("OnGone").unwrap().reference_string(),
+        "#REF!"
+    );
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 0), "#REF!");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gone.xlsx");
+    for order in [xlsx::ExportOrder::Stored, xlsx::ExportOrder::Sorted] {
+        xlsx::export_with_order(&wb, &path, None, order).unwrap();
+        let (loaded, report) = xlsx::import(&path).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(
+            loaded.get_named_range("OnGone").unwrap().reference_string(),
+            "#REF!"
+        );
+        assert_eq!(loaded.sheet(0).unwrap().get_display(0, 0), "#REF!");
+    }
 }
 
 #[test]

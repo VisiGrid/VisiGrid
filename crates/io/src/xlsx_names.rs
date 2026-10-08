@@ -177,9 +177,13 @@ pub(crate) fn export(wb: &Workbook, out: &mut rust_xlsxwriter::Workbook) -> Resu
                 end_col,
             } => (sheet, start_row, start_col, end_row, end_col, true),
         };
-        let sheet = wb
-            .sheet(sheet)
-            .ok_or_else(|| format!("Defined name '{}' has a missing target sheet", name.name))?;
+        let Some(sheet) = wb.sheet(sheet) else {
+            // A name left pointing at a sheet that is already gone, for
+            // example after a delete that predates name invalidation.
+            out.define_name(&name.name, "=#REF!")
+                .map_err(|e| e.to_string())?;
+            continue;
+        };
         if r0 > r1 || c0 > c1 || r1 >= NUM_ROWS || c1 >= NUM_COLS {
             return Err(format!(
                 "Defined name '{}' has an invalid Excel target",

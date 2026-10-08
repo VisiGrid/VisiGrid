@@ -44,11 +44,15 @@ fn cached(sheet: &Sheet, row: usize, col: usize, omitted: &mut Omitted) -> Cache
                 .get_cell_opt(row, col)
                 .and_then(|c| c.spill_error())
                 .and_then(|e| e.dimensions.as_ref());
-            if let Some(rich) = ModernError::from_error(&e, dimensions) {
+            // A cached #SPILL!/#CALC! is only a guess. Writing it as rich
+            // data makes Excel repair the sheet and turn every dynamic array
+            // into a CSE array. Keep the formula and let Excel recalculate.
+            if ModernError::from_error(&e, dimensions).is_some() {
+                omitted.unsupported += 1;
                 return Cache {
-                    kind: Some("e"),
-                    value: Some("#VALUE!".into()),
-                    rich: Some(rich),
+                    kind: None,
+                    value: None,
+                    rich: None,
                 };
             }
             let code = [

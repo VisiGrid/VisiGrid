@@ -418,7 +418,7 @@ Phase 3 shipped in 0.45.0 through PR #86. Deferred append/resize/create/review-c
 
 ## Phase 4: Excel totals-row interchange
 
-Import retains a visible Excel totals row, its labels, standard `totalsRowFunction` settings and scalar custom `totalsRowFormula`, including dormant column settings when the footer is hidden. Worksheet cells remain authoritative; export does not replace them with generated totals. Unsupported array totals formulas or invalid totals metadata warn and retain plain cells rather than partially installing a Table. Values-only import retains the footer's cached values and labels, dropping formula/function metadata.
+Import retains a visible Excel totals row, its labels, standard `totalsRowFunction` settings and scalar custom `totalsRowFormula`, including dormant column settings when the footer is hidden. Worksheet cells remain authoritative; export does not replace them with generated totals. A table with no records and a visible totals row is exported with the totals row off and the footer cells written as values, because Excel cannot put a totals row directly under the header. Nothing below the table moves. Unsupported array totals formulas or invalid totals metadata warn and retain plain cells rather than partially installing a Table. Values-only import retains the footer's cached values and labels, dropping formula/function metadata.
 
 `DataTable.range` remains headers plus records. `full_range()` additionally includes the visible footer, which owns its cells and cannot overlap another Table, pivot, merge or spill. Filters, sorting, calculated-column fill and Table-backed pivot sources exclude the footer. `[#Totals]` resolves only the visible footer; `[#All]` includes it; ordinary column/body references exclude it. Local structured references resolve in footer formulas.
 
@@ -636,7 +636,7 @@ Validation, 2026-10-04: 463 I/O and 854 desktop tests passed across the broad re
 
 ## Phase 4: Modern XLSX error caches
 
-Formula and spill-receiver caches preserve `#SPILL!`, `#CALC!`, `#CONNECT!`, `#BLOCKED!`, `#UNKNOWN!`, `#BUSY!` and `#TIMEOUT!` using Excel rich-value metadata. Blocked array anchors retain their attempted dimensions for the spill-error descriptor. Conventional worksheet caches contain `#VALUE!`, so readers without rich-error support can still open the file. Dynamic-array cell metadata and rich-error value metadata coexist. Exports do not recalculate or mutate the source.
+Export writes the formula for `#SPILL!`, `#CALC!`, `#CONNECT!`, `#BLOCKED!`, `#UNKNOWN!`, `#BUSY!` and `#TIMEOUT!` and leaves out the cached result, including `vm` and `xl/richData`. Excel recalculates on open. Dynamic-array cell metadata (`cm`) is still written. Exports do not recalculate or mutate the source.
 
 Import resolves the workbook's relationships, structure keys and metadata index layers before replacing error labels. Values-only import retains the saved modern label; normal import recalculates supported formulas. Literal text resembling an error is unchanged. Malformed, unsupported or external rich metadata retains conventional cached errors and produces a warning. Metadata is bounded to 16 MiB per part, 200,000 nodes, depth 32 and one million mapped error cells. Files without rich values do not incur a second worksheet scan. Native schema versions are unchanged.
 

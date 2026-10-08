@@ -408,8 +408,9 @@ impl Workbook {
         !self.sheets.iter().any(|s| s.id != exclude_id && s.name_key == key)
     }
 
-    /// Delete a sheet by index
-    /// Returns false if it's the last sheet (can't delete)
+    /// Delete a sheet by index. Names aimed at it become `#REF!` and their
+    /// dependents recalculate. Returns false if it is the last sheet, the
+    /// index is out of range, or another sheet's Table still references it.
     pub fn delete_sheet(&mut self, index: usize) -> bool {
         if self.sheets.len() <= 1 || index >= self.sheets.len() {
             return false;
@@ -417,6 +418,8 @@ impl Workbook {
 
         if self.has_external_table_references(self.sheets[index].id) { return false; }
         self.sheets.remove(index);
+        // Name targets still use the indexes from before this removal.
+        self.named_ranges.remove_sheet(index);
         self.refresh_table_name_reservations();
 
         // Adjust active sheet if needed
@@ -426,6 +429,8 @@ impl Workbook {
             self.active_sheet -= 1;
         }
 
+        self.rebuild_dep_graph();
+        self.recompute_full_ordered();
         true
     }
 

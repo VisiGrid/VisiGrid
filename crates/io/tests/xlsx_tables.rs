@@ -2335,10 +2335,27 @@ fn empty_body_and_dormant_totals_metadata_roundtrip() {
             assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "0");
         }
         let output = dir.path().join("out.xlsx");
-        xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
-        let (loaded, report) = xlsx::import(&output).unwrap();
-        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
-        assert_eq!(loaded.tables().next().unwrap().1.totals, t.totals);
+        let report = xlsx::export_with_order(&wb, &output, None, xlsx::ExportOrder::Stored).unwrap();
+        let metadata = xml(&output, "xl/tables/table1.xml");
+        if empty {
+            let warning = "Table Sales has no records; its totals row is exported as values.";
+            assert!(report.warnings.iter().any(|w| w == warning), "{:?}", report.warnings);
+            assert!(!metadata.contains("totalsRow"), "{metadata}");
+            let sheet = xml(&output, "xl/worksheets/sheet1.xml");
+            assert!(!sheet.contains("<f"), "{sheet}");
+            let (loaded, report) = xlsx::import(&output).unwrap();
+            assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+            assert!(loaded.tables().next().unwrap().1.totals_row().is_none());
+            assert_eq!(loaded.sheet(0).unwrap().get_display(1, 0), "Total");
+            assert_eq!(loaded.sheet(0).unwrap().get_display(1, 1), "0");
+            assert_eq!(loaded.sheet(0).unwrap().get_display(1, 2), "0");
+            assert!(!loaded.sheet(0).unwrap().get_raw(1, 1).starts_with('='));
+        } else {
+            assert!(metadata.contains("totalsRowFunction"), "{metadata}");
+            let (loaded, report) = xlsx::import(&output).unwrap();
+            assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+            assert_eq!(loaded.tables().next().unwrap().1.totals, t.totals);
+        }
     }
 }
 

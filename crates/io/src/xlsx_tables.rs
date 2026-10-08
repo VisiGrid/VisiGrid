@@ -566,6 +566,12 @@ pub(crate) fn export_warnings(
         if table.range.data_rows() == 0 && table.totals_row().is_none() {
             return Err(format!("Table {} has only headers. Add an empty record before exporting it to Excel; no file was written.", table.name));
         }
+        if totals_exported_as_values(table) {
+            warnings.push(format!(
+                "Table {} has no records; its totals row is exported as values.",
+                table.name
+            ));
+        }
         if let Some(view) = wb
             .sheet_by_id(sheet_id)
             .and_then(|s| s.table_view_spec())
@@ -616,7 +622,7 @@ pub(crate) fn write(
             .is_none_or(|v| v.show_filter_buttons);
         let xlsx_table = rust_xlsxwriter::Table::new()
             .set_name(&table.name)
-            .set_total_row(table.totals_row().is_some())
+            .set_total_row(table.totals_row().is_some() && !totals_exported_as_values(table))
             .set_columns(&columns)
             .set_style(rust_xlsxwriter::TableStyle::Medium2)
             .set_banded_rows(table.style.banded_rows)
@@ -659,7 +665,16 @@ pub(crate) fn excel_formula(source: &str) -> String {
         };
         out.replace_range(start..end, &replacement);
     }
-    super::xlsx_functions::excel_function_names(&out)
+    super::xlsx_functions::prefix_future_functions(&super::xlsx_functions::excel_function_names(
+        &out,
+    ))
+}
+
+/// Excel cannot represent a header plus a totals row with nothing between
+/// them. Export keeps that footer row as the table's one data row and writes
+/// its cells as values, so nothing below the table moves.
+pub(crate) fn totals_exported_as_values(table: &visigrid_engine::table::DataTable) -> bool {
+    table.range.data_rows() == 0 && table.totals_row().is_some()
 }
 
 /// Add calculated-column metadata without asking the writer to fill cells.
@@ -711,6 +726,20 @@ pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
                     if e.local_name().as_ref() == b"table" {
                         table =
                             attr(e, b"name")?.and_then(|n| wb.table_by_name(&n).map(|(_, t)| t));
+                        if table.is_some_and(totals_exported_as_values) {
+                            let mut start = e.clone();
+                            start.clear_attributes();
+                            for attr in e.attributes() {
+                                let attr = attr.map_err(|e| e.to_string())?;
+                                if attr.key.as_ref() != b"totalsRowShown"
+                                    && attr.key.as_ref() != b"totalsRowCount"
+                                {
+                                    start.push_attribute(attr);
+                                }
+                            }
+                            writer.write_event(if matches!(event, Event::Empty(_)) { Event::Empty(start) } else { Event::Start(start) }).map_err(|e| e.to_string())?;
+                            continue;
+                        }
                         if let Some(totals) = table.and_then(|t| t.totals.as_ref()) {
                             let mut start = e.clone();
                             start.clear_attributes();
@@ -773,7 +802,11 @@ pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
                     if e.local_name().as_ref() == b"tableColumn" {
                         if let Some(t) = table {
                             let mut column = e.clone();
-                            let total = t.totals.as_ref().and_then(|totals| totals.columns.get(offset));
+                            let total = t
+                                .totals
+                                .as_ref()
+                                .filter(|_| !totals_exported_as_values(t))
+                                .and_then(|totals| totals.columns.get(offset));
                             if let Some(total) = total {
                                 if let Some(function) = &total.function { column.push_attribute(("totalsRowFunction", function.as_str())); }
                                 if let Some(label) = &total.label { column.push_attribute(("totalsRowLabel", label.as_str())); }

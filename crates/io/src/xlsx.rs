@@ -1776,6 +1776,36 @@ fn cell_address(row: usize, col: usize) -> String {
     format!("{}{}", col_to_letter(col), row + 1)
 }
 
+fn demoted_totals_cell(sheet: &Sheet, row: usize, col: usize) -> bool {
+    sheet.tables().iter().any(|table| {
+        crate::xlsx_tables::totals_exported_as_values(table)
+            && table.totals_row() == Some(row)
+            && col >= table.range.start_col
+            && col <= table.range.end_col
+    })
+}
+
+fn write_computed_value(
+    worksheet: &mut Worksheet,
+    sheet: &Sheet,
+    row: usize,
+    col: usize,
+    format: &Format,
+) -> Result<(), String> {
+    let row32 = row as u32;
+    let col16 = col as u16;
+    let write = match sheet.get_computed_value(row, col) {
+        Value::Number(n) if n.is_finite() => {
+            worksheet.write_number_with_format(row32, col16, n, format)
+        }
+        Value::Boolean(b) => worksheet.write_boolean_with_format(row32, col16, b, format),
+        Value::Text(s) => worksheet.write_string_with_format(row32, col16, &s, format),
+        Value::Empty => worksheet.write_blank(row32, col16, format),
+        other => worksheet.write_string_with_format(row32, col16, &other.to_text(), format),
+    };
+    write.map(|_| ()).map_err(|e| format!("Failed to write cell ({row}, {col}): {e}"))
+}
+
 /// Export cells from a VisiGrid sheet to an Excel worksheet
 /// Returns (cells_exported, formulas_exported, formulas_as_values, converted_formulas, precision_warnings)
 fn export_sheet_cells(
@@ -1854,8 +1884,13 @@ fn export_sheet_cells(
                 cells_exported += 1;
             }
             ValueRef::Formula { source, ast } => {
+                // A zero-record table's visible footer cannot stay a formula:
+                // that row is exported as the table's only data row.
+                if ast.is_some() && demoted_totals_cell(sheet, row, col) {
+                    let format = apply_number_format(format, &cell.format().number_format);
+                    write_computed_value(worksheet, sheet, row, col, &format)?;
                 // Try to export as formula if it has a valid AST
-                if ast.is_some() {
+                } else if ast.is_some() {
                     // Export the formula string (strip leading '=')
                     let excel_source = crate::xlsx_tables::excel_formula(source);
                     let formula_str = excel_source.strip_prefix('=').unwrap_or(&excel_source);

@@ -1,6 +1,7 @@
-//! Modern Excel errors use rich values plus a conventional #VALUE! fallback.
-//! MS-XLSX 2.3.6.1.3, 2.2.4.4 and 2.6.175. Never emit #SPILL! as a raw
-//! worksheet t="e" value: readers of the original error vocabulary reject it.
+//! Read modern Excel errors from rich values plus a conventional #VALUE!
+//! fallback. MS-XLSX 2.3.6.1.3, 2.2.4.4 and 2.6.175. Export does not write
+//! these parts: a guessed rich value makes Excel repair dynamic arrays.
+//! Never emit #SPILL! as a raw worksheet t="e" value.
 use quick_xml::{
     events::{BytesEnd, BytesStart, BytesText, Event},
     Reader, Writer,

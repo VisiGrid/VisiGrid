@@ -43,8 +43,7 @@ fn values(path: &Path) -> (Workbook, xlsx::ImportResult) {
 }
 
 #[test]
-fn blocked_spill_and_calc_errors_keep_rich_caches_and_readable_fallbacks() {
-    use calamine::{CellErrorType, Data, Reader};
+fn blocked_spill_and_calc_errors_keep_the_formula_and_omit_rich_data() {
     let mut wb = Workbook::new();
     wb.set_cell_value_tracked(0, 1, 1, "obstruction");
     wb.set_cell_value_tracked(0, 0, 0, "=SEQUENCE(3,2)");
@@ -67,35 +66,32 @@ fn blocked_spill_and_calc_errors_keep_rich_caches_and_readable_fallbacks() {
     );
     let (bytes, report) =
         xlsx::export_to_buffer_with_order(&wb, None, xlsx::ExportOrder::Stored).unwrap();
-    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert!(
-        xlsx::table_export_warnings_with_order(&wb, None, xlsx::ExportOrder::Stored)
-            .unwrap()
-            .is_empty()
+        report.warnings.iter().any(|w| w.contains("recalculate in Excel")),
+        "{:?}",
+        report.warnings
+    );
+    assert_eq!(
+        xlsx::table_export_warnings_with_order(&wb, None, xlsx::ExportOrder::Stored).unwrap(),
+        report.warnings
     );
     let sheet = xml(&bytes, "xl/worksheets/sheet1.xml");
-    assert!(sheet.contains("vm="));
-    assert!(!sheet.contains("<v>#SPILL!</v>"));
-    assert!(xml(&bytes, "xl/richData/rdrichvalue.xml").contains("<v>8</v><v>2</v><v>1</v>"));
+    assert!(!sheet.contains("vm="), "{sheet}");
+    assert!(sheet.contains("SEQUENCE(3,2)"), "{sheet}");
+    assert!(sheet.contains("FILTER(E1:E2,E1:E2"), "{sheet}");
+    assert!(!sheet.contains("<v>#SPILL!</v>") && !sheet.contains("<v>#VALUE!</v>"), "{sheet}");
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+    assert!(zip.by_name("xl/richData/rdrichvalue.xml").is_err());
+    assert!(zip.by_name("xl/richData/rdrichvaluestructure.xml").is_err());
     let meta = xml(&bytes, "xl/metadata.xml");
-    assert!(meta.contains("XLDAPR") && meta.contains("XLRICHVALUE"));
-    assert!(meta.contains("dynamicArrayProperties"));
+    assert!(meta.contains("XLDAPR"), "{meta}");
+    assert!(!meta.contains("XLRICHVALUE"), "{meta}");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("errors.xlsx");
     std::fs::write(&path, &bytes).unwrap();
-    // An independent reader without rich error support still opens the workbook.
-    let mut excel: calamine::Xlsx<_> = calamine::open_workbook(&path).unwrap();
-    let range = excel.worksheet_range("Sheet1").unwrap();
-    assert_eq!(
-        range.get_value((0, 0)),
-        Some(&Data::Error(CellErrorType::Value))
-    );
-    let (saved, report) = values(&path);
-    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-    assert_eq!(saved.active_sheet().get_raw(0, 0), "#SPILL!");
-    assert_eq!(saved.active_sheet().get_raw(0, 6), "#CALC!");
-    assert_eq!(saved.active_sheet().get_raw(5, 1), "4");
     let (mut live, _) = xlsx::import(&path).unwrap();
+    assert!(live.active_sheet().get_raw(0, 0).contains("SEQUENCE"));
+    assert!(live.active_sheet().get_raw(0, 6).contains("FILTER"));
     assert!(live.active_sheet().get_display(0, 0).starts_with("#SPILL!"));
     live.clear_cell_tracked(0, 1, 1);
     assert_eq!(live.active_sheet().get_display(2, 1), "6");
@@ -138,18 +134,19 @@ fn modern_scalar_and_receiver_errors_roundtrip_without_converting_literal_text()
     wb.active_sheet().cache_computed(10, 0, Value::Number(1.0));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all-errors.xlsx");
-    let report = xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
-    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+    assert!(zip.by_name("xl/richData/rdrichvalue.xml").is_err());
+    let sheet = xml(&bytes, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("CUSTOM_ERROR()"), "{sheet}");
+    assert!(sheet.contains("CUSTOM_ARRAY()"), "{sheet}");
+    assert!(!sheet.contains("vm="), "{sheet}");
     let (loaded, report) = values(&path);
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     for (r, label) in labels.iter().enumerate() {
-        assert_eq!(loaded.active_sheet().get_raw(r, 0), *label);
         assert_eq!(loaded.active_sheet().get_raw(r, 2), *label);
     }
-    assert_eq!(loaded.active_sheet().get_raw(10, 1), "#CALC!");
-    let bytes = std::fs::read(&path).unwrap();
-    let rich = xml(&bytes, "xl/richData/rdrichvalue.xml");
-    assert!(rich.contains("count=\"7\""), "{rich}");
 }
 
 // Independent metadata fixture with non-identity indexes, reordered structure
