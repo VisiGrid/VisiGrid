@@ -41,7 +41,7 @@ fn record_view(
     );
 }
 
-fn build(history: &History, base: &Workbook, before: usize) -> crate::history::PreviewBuildResult {
+fn build(history: &mut History, base: &Workbook, before: usize) -> crate::history::PreviewBuildResult {
     history
         .build_workbook_before(before, Some(base), 100, 10_000)
         .unwrap()
@@ -50,7 +50,7 @@ fn build(history: &History, base: &Workbook, before: usize) -> crate::history::P
 #[test]
 fn loaded_base_projection_is_rebuilt_without_any_history() {
     let base = fixture(true);
-    let preview = build(&History::new(), &base, 0);
+    let preview = build(&mut History::new(), &base, 0);
     let rows = preview_rows(preview.view_state.per_sheet.first());
     assert_eq!(
         (4..=6).map(|r| rows.view_to_data(r)).collect::<Vec<_>>(),
@@ -79,14 +79,14 @@ fn scrubbing_reconstructs_criteria_edits_hidden_records_and_clear_view() {
     );
     record_view(&mut history, &mut wb, None);
     let fp = history.fingerprint();
-    let before_edit = build(&history, &base, 1);
+    let before_edit = build(&mut history, &base, 1);
     let rows = preview_rows(before_edit.view_state.per_sheet.first());
     assert_eq!(
         (3..=5).map(|r| rows.view_to_data(r)).collect::<Vec<_>>(),
         vec![6, 3, 5]
     );
     assert_eq!(before_edit.workbook.active_sheet().get_display(0, 1), "100");
-    let before_clear = build(&history, &base, 2);
+    let before_clear = build(&mut history, &base, 2);
     let rows = preview_rows(before_clear.view_state.per_sheet.first());
     assert!(rows.data_to_view(3).is_none());
     assert!(rows.data_to_view(4).is_none());
@@ -98,7 +98,7 @@ fn scrubbing_reconstructs_criteria_edits_hidden_records_and_clear_view() {
         before_clear.workbook.active_sheet().get_display(5, 3),
         "198"
     );
-    let cleared = build(&history, &base, 3);
+    let cleared = build(&mut history, &base, 3);
     assert!(cleared.view_state.per_sheet[0].table_rows.is_none());
     assert!(cleared.workbook.active_sheet().table_view_spec().is_none());
     assert_eq!(history.fingerprint(), fp);
@@ -119,7 +119,7 @@ fn empty_table_projection_and_canonical_highlight_have_safe_focus() {
             .map(|r| TableCellWrite::value(r, 1, String::new()))
             .collect(),
     );
-    let preview = build(&history, &base, 1);
+    let preview = build(&mut history, &base, 1);
     let rows = preview_rows(preview.view_state.per_sheet.first());
     let range = base.active_sheet().tables()[0].range;
     assert_eq!(
@@ -129,7 +129,7 @@ fn empty_table_projection_and_canonical_highlight_have_safe_focus() {
     for row in 3..=6 {
         assert!(rows.data_to_view(row).is_none());
     }
-    let before = build(&history, &base, 0);
+    let before = build(&mut history, &base, 0);
     let rows = preview_rows(before.view_state.per_sheet.first());
     assert_eq!(
         preview_selection(&rows, (5, 2), (5, 2), Some(range)),
@@ -178,7 +178,7 @@ fn later_rewind_replays_retained_prefix_and_skips_audit_without_double_edits() {
         &mut wb,
         vec![TableCellWrite::value(5, 2, "66".into())],
     );
-    let preview = build(&history, &base, 1);
+    let preview = build(&mut history, &base, 1);
     let id = history.entry_at(1).unwrap().id;
     wb.restore_snapshot_monotonic(&preview.workbook);
     history.truncate_and_append_rewind(1, id, 1, "Edit".into(), 1, 0);
@@ -187,11 +187,11 @@ fn later_rewind_replays_retained_prefix_and_skips_audit_without_double_edits() {
         &mut wb,
         vec![TableCellWrite::value(6, 2, "77".into())],
     );
-    let again = build(&history, &base, 3);
+    let again = build(&mut history, &base, 3);
     assert_eq!(again.workbook.active_sheet().get_raw(3, 2), "55");
     assert_eq!(again.workbook.active_sheet().get_raw(5, 2), "20");
     assert_eq!(again.workbook.active_sheet().get_raw(6, 2), "77");
-    let original = build(&history, &base, 0);
+    let original = build(&mut history, &base, 0);
     assert_eq!(original.workbook.active_sheet().get_raw(3, 2), "30");
 }
 
@@ -201,7 +201,7 @@ fn every_sheet_gets_its_own_projection_and_invalid_layout_is_refused() {
     let other = visigrid_engine::sheet::Sheet::new_with_name(SheetId(99), 30, 8, "Other");
     assert!(base.restore_sheet(1, other));
     base.set_active_sheet(1);
-    let preview = build(&History::new(), &base, 0);
+    let preview = build(&mut History::new(), &base, 0);
     assert!(preview.view_state.per_sheet[0].table_rows.is_some());
     assert!(preview.view_state.per_sheet[1].table_rows.is_none());
     assert_eq!(preview.workbook.active_sheet_index(), 1);

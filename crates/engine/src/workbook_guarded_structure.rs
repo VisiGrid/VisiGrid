@@ -625,14 +625,16 @@ impl GuardedStructureCommit {
         for p in &self.cells {
             p.install(candidate.sheet_by_id_mut(p.sheet).unwrap(), undo);
         }
-        candidate.rebuild_dep_graph();
-        let report = candidate.recompute_full_ordered();
-        let allowed_cycles = if undo { &self.before_cycles } else { &self.after_cycles };
-        if (report.had_cycles && !candidate.dep_graph.find_cycle_members().is_subset(allowed_cycles))
-            || report.errors.iter().any(|e| e.error.contains("not settled")) {
-            return Err("History replay would create a cycle or an unsettled calculation.".into());
+        if !super::recalc_deferred() {
+            candidate.rebuild_dep_graph();
+            let report = candidate.recompute_full_ordered();
+            let allowed_cycles = if undo { &self.before_cycles } else { &self.after_cycles };
+            if (report.had_cycles && !candidate.dep_graph.find_cycle_members().is_subset(allowed_cycles))
+                || report.errors.iter().any(|e| e.error.contains("not settled")) {
+                return Err("History replay would create a cycle or an unsettled calculation.".into());
+            }
         }
-        if self.sheet_change.is_some() || !self.renamed_sheets.is_empty() || self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some()) {
+        if !super::recalc_deferred() && (self.sheet_change.is_some() || !self.renamed_sheets.is_empty() || self.names.is_some() || candidate.tables().any(|(_, table)| table.totals.is_some())) {
             // A pivot can source an unchanged formula whose result depends on
             // the restored footer or name. Authored-cell patches alone miss
             // that sheet when only a name definition changed.

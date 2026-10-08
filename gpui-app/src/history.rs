@@ -1128,16 +1128,22 @@ impl History {
         a.iter().zip(b.iter()).all(|(pa, pb)| pa.row == pb.row && pa.col == pb.col)
     }
 
+    pub fn has_rewind_base(&self) -> bool {
+        self.rewind_base.is_some()
+    }
+
     pub fn set_rewind_base(&mut self, workbook: &Workbook) {
         // The clone shares cells, pools and the dependency graph until an edit
-        // diverges, so it costs about nothing at any workbook size. Charging
-        // workbook_bytes here dropped rewind on load.
-        self.rewind_base_bytes = 0;
-        self.rewind_base = Some((workbook.clone(), crate::app::PreviewViewState {
+        // diverges, so it costs about nothing at any workbook size. Copies
+        // made for a previous baseline are not this baseline's bytes.
+        let cloned = workbook.clone_sharing_cell_cow();
+        cloned.reset_shared_cell_cow();
+        self.rewind_base = Some((cloned, crate::app::PreviewViewState {
             per_sheet: vec![Default::default(); workbook.sheet_count()],
         }));
         self.rewind_base_needs_calc = false;
         self.base_invalidated = false;
+        self.refresh_rewind_charge();
         self.drop_rewind_if_over_budget();
     }
 
@@ -1175,36 +1181,29 @@ impl History {
         if self.rewind_base.is_some() { entries.saturating_add(self.rewind_base_bytes) } else { entries }
     }
 
-    /// Byte change of applying a value edit to the current baseline. `None`
-    /// means the caller charges the history payload instead of walking cells.
-    fn value_delta(&self, action: &UndoAction) -> Option<isize> {
-        match action {
-            UndoAction::Values { sheet_index, changes } => {
-                let (workbook, _) = self.rewind_base.as_ref()?;
-                let sheet = workbook.sheet(*sheet_index)?;
-                Some(changes.iter().map(|change| change.new_value.len() as isize - sheet.get_raw(change.row, change.col).len() as isize).sum())
-            }
-            UndoAction::Group { actions, .. } => {
-                let mut total = 0isize;
-                for action in actions {
-                    total = total.saturating_add(self.value_delta(action)?);
-                }
-                Some(total)
-            }
-            _ => None,
-        }
+    /// Bytes the baseline holds beyond the live workbook: copy-on-write chunks
+    /// and pages, plus maps cloned outright at capture.
+    fn refresh_rewind_charge(&mut self) {
+        self.rewind_base_bytes = self.rewind_base.as_ref().map(|(workbook, _)| workbook.rewind_retained_bytes()).unwrap_or(0);
     }
 
-    fn charge_advanced_base(&mut self, action: &UndoAction, value_delta: Option<isize>) {
-        if let Some(delta) = value_delta {
-            self.rewind_base_bytes = self.rewind_base_bytes.saturating_add_signed(delta);
+    fn evicted_baseline_error() -> PreviewBuildError {
+        PreviewBuildError::InvariantViolation("Older undo history was evicted to stay within the history limit. Rewind from the original snapshot is unavailable; ordinary undo is still available for retained changes.".into())
+    }
+
+    /// Evicted edits are stored without calculation. The first preview calculates
+    /// the baseline in place and clears the flag, so scrubbing does not do it again.
+    fn settle_rewind_base(&mut self) {
+        if !self.rewind_base_needs_calc {
             return;
         }
-        // Snapshots and plan commits already include their workbook measure in
-        // this payload. Other edits charge the undo record, not a cell walk.
-        if self.rewind_base.is_some() {
-            self.rewind_base_bytes = self.rewind_base_bytes.saturating_add(action.estimated_history_bytes());
+        if let Some((workbook, _)) = self.rewind_base.as_mut() {
+            workbook.rebuild_dep_graph();
+            workbook.recompute_full_ordered();
         }
+        self.rewind_base_needs_calc = false;
+        self.refresh_rewind_charge();
+        self.drop_rewind_if_over_budget();
     }
 
     fn advance_rewind_base(&mut self, action: &UndoAction) {
@@ -1214,13 +1213,12 @@ impl History {
         }
         // Store the evicted edit. Calculating here repeated a workbook recalc
         // on every keystroke once history held max_entries.
-        let value_delta = self.value_delta(action);
         let applied = self.rewind_base.as_mut().is_some_and(|(workbook, view)| {
             Self::apply_action_forward(workbook, view, action, false).is_ok()
         });
         if applied {
             self.rewind_base_needs_calc = true;
-            self.charge_advanced_base(action, value_delta);
+            self.refresh_rewind_charge();
             return;
         }
         self.fail_rewind();
@@ -1283,6 +1281,9 @@ impl History {
 
     fn push_entry(&mut self, entry: HistoryEntry) {
         if self.save_point > self.undo_stack.len() { self.save_point = usize::MAX; }
+        // A live edit may already have copied a shared chunk. Count it before
+        // the new entry joins the budget.
+        self.refresh_rewind_charge();
         self.undo_stack.push(entry);
         self.redo_stack.clear();
         self.enforce_byte_budget();
@@ -1737,7 +1738,7 @@ impl History {
     /// - too many actions to replay
     /// - unsupported action in replay prefix
     pub fn build_workbook_before(
-        &self,
+        &mut self,
         i: usize,
         base: Option<&Workbook>,
         max_replay: usize,
@@ -1757,11 +1758,8 @@ impl History {
         }
 
         if self.base_invalidated {
-            return Err(PreviewBuildError::InvariantViolation("Older undo history was evicted to stay within the history limit. Rewind from the original snapshot is unavailable; ordinary undo is still available for retained changes.".into()));
+            return Err(Self::evicted_baseline_error());
         }
-        // No snapshot has been captured to replay from.
-        let base = self.rewind_base.as_ref().map(|(w, _)| w).or(base).ok_or(PreviewBuildError::NoBaseSnapshot)?;
-
         // REPLAY GATE: Scan [0..i) for unsupported actions BEFORE starting replay.
         // This ensures deterministic failure - same history always fails the same way.
         for entry in self.undo_stack.iter().take(i) {
@@ -1770,16 +1768,19 @@ impl History {
             }
         }
 
+        // Evicted edits were stored without calculation. Settle that prefix
+        // once, on the stored baseline, so the next scrub clones the result.
+        self.settle_rewind_base();
+        if self.base_invalidated {
+            return Err(Self::evicted_baseline_error());
+        }
+        // No snapshot has been captured to replay from.
+        let base = self.rewind_base.as_ref().map(|(w, _)| w).or(base).ok_or(PreviewBuildError::NoBaseSnapshot)?;
+
         let start = Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
 
-        // Start with a clone of base workbook. Evicted edits were stored
-        // without calculation; one recompute here settles that prefix.
         let mut workbook = base.clone();
-        if self.rewind_base_needs_calc {
-            workbook.rebuild_dep_graph();
-            workbook.recompute_full_ordered();
-        }
 
         // Initialize preview view state (one entry per sheet, identity order)
         let sheet_count = workbook.sheet_count();
@@ -2947,7 +2948,7 @@ mod tests {
     /// rather than replay from something that isn't there.
     #[test]
     fn preview_without_a_base_snapshot_is_refused() {
-        let history = History::new();
+        let mut history = History::new();
         let result = history.build_workbook_before(0, None, 100, 1_000);
         assert!(matches!(result, Err(PreviewBuildError::NoBaseSnapshot)));
 
@@ -3346,9 +3347,17 @@ mod byte_budget_tests {
         assert_eq!(CALLS.load(Ordering::SeqCst), 0, "eviction must not calculate");
         let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
         assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
+        let calls_after_open = CALLS.load(Ordering::SeqCst);
         assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "=REWINDSPIKE()");
         assert_eq!(opened.workbook.active_sheet().get_display(0, 0), "1");
         assert_eq!(opened.workbook.active_sheet().get_display(0, 1), "2");
+        let again = history.build_workbook_before(0, None, 20, 10_000).expect("second preview");
+        assert_eq!(CALLS.load(Ordering::SeqCst), calls_after_open, "a second preview must not recalculate the settled baseline");
+        assert_eq!(again.workbook.active_sheet().get_display(0, 1), "2");
+        let later = history.build_workbook_before(1, None, 20, 10_000).expect("scrub");
+        assert_eq!(CALLS.load(Ordering::SeqCst), calls_after_open, "scrubbing past the settled prefix must not recalculate it");
+        assert_eq!(later.workbook.active_sheet().get_raw(2, 0), "z");
+        assert_eq!(later.workbook.active_sheet().get_display(0, 1), "2");
     }
 
     #[test]
@@ -3422,6 +3431,66 @@ mod byte_budget_tests {
     }
 
     #[test]
+    fn evicted_row_insert_waits_for_rewind_and_then_matches_the_live_sheet() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use visigrid_engine::custom_fns;
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        use visigrid_engine::table::TableRange;
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn spike(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+            (name == "TABLESPIKE").then(|| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                EvalResult::Number(1.0)
+            })
+        }
+        struct Reset(Option<custom_fns::CustomFnHandler>);
+        impl Drop for Reset {
+            fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
+        }
+        let _lock = REWIND_SPIKE.lock().unwrap();
+        let _reset = Reset(custom_fns::default_custom_fn_handler());
+        custom_fns::set_default_custom_fn_handler(Some(spike));
+
+        let mut base = Workbook::new();
+        base.set_cell_value_tracked(0, 0, 0, "Amount");
+        base.set_cell_value_tracked(0, 1, 0, "10");
+        base.set_cell_value_tracked(0, 2, 0, "20");
+        let id = base.create_table(base.active_sheet_id(), TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap().table_id();
+        // No cell references, so inserting a row does not rewrite this formula.
+        // Only a full recalculation evaluates it.
+        base.set_cell_value_tracked(0, 6, 0, "=TABLESPIKE()");
+        let rows = base.prepare_table_row_history(0, 2, 1, false).unwrap().expect("table row history");
+        let mut live = base.clone();
+        live.apply_table_row_history(&rows, false).unwrap();
+        CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(live.active_sheet().get_display(7, 0), "1");
+        assert!(live.table(id).unwrap().1.range.end_row > 2);
+
+        let mut history = History::new();
+        history.max_entries = 1;
+        history.set_rewind_base(&base);
+        history.record_action_with_provenance(UndoAction::RowsInserted {
+            sheet_index: 0,
+            table_rows: Some(rows),
+            row_layout: None,
+            print_setup_before: visigrid_engine::print_setup::PrintSetup::default(),
+            at_row: 2,
+            count: 1,
+            formula_rewrites: vec![],
+        }, None);
+        history.record_change(0, 8, 0, String::new(), "kept".into());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "evicting a row insert must not calculate");
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored insert");
+        assert_eq!(opened.workbook.table(id).unwrap().1.range, live.table(id).unwrap().1.range);
+        assert_eq!(opened.workbook.active_sheet().get_display(7, 0), live.active_sheet().get_display(7, 0));
+        assert_eq!(opened.workbook.active_sheet().get_raw(6, 0), "");
+        assert_eq!(opened.workbook.active_sheet().get_raw(8, 0), "");
+    }
+
+    #[test]
     fn failed_eviction_replay_reports_that_rewind_is_unavailable() {
         let mut history = History::new();
         history.set_rewind_base(&Workbook::new());
@@ -3437,12 +3506,19 @@ mod byte_budget_tests {
 
     #[test]
     fn rewind_base_larger_than_the_budget_is_dropped_with_a_notice() {
+        let mut workbook = Workbook::new();
+        for row in 0..1024 {
+            workbook.set_cell_value_tracked(0, row, 0, "xxxxxxxxxx");
+        }
         let mut history = History::new();
-        history.set_rewind_base(&Workbook::new());
-        assert_eq!(history.rewind_base_bytes, 0, "a shared baseline is not charged until an edit diverges");
-        history.rewind_base_bytes = 50;
-        history.max_bytes = 49;
-        history.record_change(0, 0, 0, String::new(), "a".into());
+        history.max_bytes = 1_000_000;
+        history.set_rewind_base(&workbook);
+        assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared column, got {}", history.rewind_base_bytes);
+        workbook.set_cell_value_tracked(0, 0, 0, "y");
+        history.record_change(0, 0, 0, "xxxxxxxxxx".into(), "y".into());
+        assert!(history.rewind_base_bytes > 2_000, "a one-character edit copies the whole chunk, got {}", history.rewind_base_bytes);
+        history.max_bytes = history.rewind_base_bytes - 1;
+        history.record_change(0, 1, 0, String::new(), "z".into());
         assert!(history.base_invalidated);
         assert!(history.rewind_base.is_none());
         let notice = history.take_notice().unwrap_or_default();
@@ -3461,7 +3537,8 @@ mod byte_budget_tests {
         history.max_bytes = 1_000;
         history.max_entries = 1;
         history.set_rewind_base(&workbook);
-        assert_eq!(history.rewind_base_bytes, 0);
+        assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared cells, got {}", history.rewind_base_bytes);
+        assert!(history.rewind_base_bytes < bytes / 2);
         history.record_change(0, 0, 1, String::new(), "a".into());
         history.record_change(0, 0, 2, String::new(), "b".into());
         assert!(history.rewind_base.is_some(), "a one-character divergence stays inside the budget");

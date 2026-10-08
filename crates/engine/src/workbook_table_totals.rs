@@ -66,8 +66,10 @@ impl Workbook {
             }).collect();
             let sheet = candidate.sheet_by_id_mut(sheet_id).unwrap();
             sheet.set_manual_hidden_rows(hidden)?;
-            candidate.rebuild_dep_graph();
-            candidate.recompute_full_ordered();
+            if !super::super::recalc_deferred() {
+                candidate.rebuild_dep_graph();
+                candidate.recompute_full_ordered();
+            }
             let changed: std::collections::HashSet<_> = values.into_iter().filter_map(|(id, row, col, before)| {
                 (candidate.sheet_by_id(id)?.get_computed_value(row, col) != before).then_some(id)
             }).collect();

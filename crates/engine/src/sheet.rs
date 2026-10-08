@@ -1872,6 +1872,36 @@ impl Sheet {
         self.cells.iter().filter_map(|(pos, cell)| cell.comment().map(|comment| (pos, comment)))
     }
 
+    pub(crate) fn share_cell_cow_from(&mut self, other: &Sheet) {
+        self.cells.share_cow_from(&other.cells);
+    }
+
+    pub(crate) fn reset_cell_cow(&self) {
+        self.cells.reset_cow();
+    }
+
+    /// Bytes this sheet holds beyond a workbook it still shares storage with:
+    /// copy-on-write chunks and pages, plus maps cloned outright at capture.
+    pub(crate) fn rewind_retained_bytes(&self) -> usize {
+        self.cells.cow_bytes().saturating_add(self.rewind_private_maps())
+    }
+
+    fn rewind_private_maps(&self) -> usize {
+        let spills: usize = self.spill_values.iter().map(|(_, value)| match value {
+            crate::formula::eval::Value::Text(text) | crate::formula::eval::Value::Error(text) => text.len(),
+            _ => 0,
+        }).sum();
+        let blocked: usize = self.blocked_spills.values()
+            .map(|set| set.capacity().saturating_mul(std::mem::size_of::<(usize, usize)>()))
+            .sum();
+        let map = |capacity: usize, item: usize, extra: usize| capacity.saturating_mul(item).saturating_add(extra);
+        map(self.spill_values.capacity(), std::mem::size_of::<((usize, usize), crate::formula::eval::Value)>(), spills)
+            .saturating_add(map(self.blocked_spills.capacity(), std::mem::size_of::<((usize, usize), std::collections::HashSet<(usize, usize)>)>(), blocked))
+            .saturating_add(self.format_pool.capacity().saturating_mul(std::mem::size_of::<std::sync::Arc<CellFormat>>()))
+            .saturating_add(self.row_formats.capacity().saturating_mul(std::mem::size_of::<(usize, CellFormat)>()))
+            .saturating_add(self.col_formats.capacity().saturating_mul(std::mem::size_of::<(usize, CellFormat)>()))
+    }
+
     pub fn get_format(&self, row: usize, col: usize) -> CellFormat {
         self.cells
             .get(row, col)

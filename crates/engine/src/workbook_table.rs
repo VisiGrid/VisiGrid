@@ -350,7 +350,7 @@ impl Workbook {
                 .columns
                 .clone();
         }
-        if corrected || !history.rules.is_empty() {
+        if !super::recalc_deferred() && (corrected || !history.rules.is_empty()) {
             self.rebuild_dep_graph();
             self.recompute_full_ordered();
         }
@@ -1366,7 +1366,6 @@ impl Workbook {
         if super::recalc_deferred() {
             // Eviction stores the commit. Opening rewind recalculates once.
         } else if let Some(extra) = incremental {
-            let original_graph = self.dep_graph.clone();
             let mut dirty: rustc_hash::FxHashSet<_> = extra.iter().copied().chain(self.table_readers.get(&commit.id).into_iter().flat_map(|r| r.iter().copied())).collect();
             dirty.extend(commit.cells.iter().map(|(c, _)| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));
             dirty.extend(commit.formulas.iter().map(|c| c.cell));
@@ -1392,19 +1391,33 @@ impl Workbook {
                     if dirty.insert(reader) { pending.push(reader); }
                 }
             }
-            // Rebind the complete touched closure, including visibility edges,
-            // before evaluating it. Runtime dynamic edges settle below.
-            for cell in &dirty { self.update_cell_deps(cell.sheet, cell.row, cell.col); }
-            let seeds: Vec<_> = dirty.iter().copied().collect();
-            match self.recalc_dirty_set(&seeds) {
-                super::Recalculated::Cells(cells) => {
-                    dirty.extend(cells);
-                    std::sync::Arc::make_mut(&mut self.dep_graph).inherit_untouched_cycles(&original_graph, &dirty);
-                    let sheets: HashSet<_> = dirty.iter().map(|c| c.sheet).collect();
-                    for id in sheets { self.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
-                }
-                super::Recalculated::All => {
-                    for sheet in &mut self.sheets { sheet.mark_table_changed(); }
+            // Rebinding about a third of a large workbook costs more than
+            // calculating all of it. A handful of formulas stays on the rebind:
+            // that is the path the small-workbook regressions lock, and it is
+            // not the slow one.
+            let formulas = self.dep_graph.formula_cell_count();
+            let closure = dirty.iter().filter(|cell| self.dep_graph.has_own_deps(**cell)).count();
+            if formulas > 0 && closure >= 32 && closure.saturating_mul(3) > formulas {
+                self.rebuild_dep_graph();
+                let report = self.recompute_full_ordered();
+                self.incremental_errors.extend(report.errors.into_iter()
+                    .filter(|e| e.error.contains("not settled")));
+            } else {
+                // Rebind the complete touched closure, including visibility edges,
+                // before evaluating it. Runtime dynamic edges settle below.
+                let original_graph = self.dep_graph.clone();
+                for cell in &dirty { self.update_cell_deps(cell.sheet, cell.row, cell.col); }
+                let seeds: Vec<_> = dirty.iter().copied().collect();
+                match self.recalc_dirty_set(&seeds) {
+                    super::Recalculated::Cells(cells) => {
+                        dirty.extend(cells);
+                        std::sync::Arc::make_mut(&mut self.dep_graph).inherit_untouched_cycles(&original_graph, &dirty);
+                        let sheets: HashSet<_> = dirty.iter().map(|c| c.sheet).collect();
+                        for id in sheets { self.sheet_by_id_mut(id).unwrap().mark_table_changed(); }
+                    }
+                    super::Recalculated::All => {
+                        for sheet in &mut self.sheets { sheet.mark_table_changed(); }
+                    }
                 }
             }
         } else {

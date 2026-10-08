@@ -3,6 +3,8 @@ use visigrid_engine::{
     workbook::Workbook,
 };
 
+static APPEND_HANDLER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn assert_same_graph(wb: &Workbook, rebuilt: &Workbook) {
     use std::collections::HashSet;
     let formulas = wb.dep_graph().formula_cells().collect::<HashSet<_>>();
@@ -114,6 +116,7 @@ fn append_does_not_evaluate_unrelated_table_or_name_readers() {
             custom_fns::set_default_custom_fn_handler(None);
         }
     }
+    let _lock = APPEND_HANDLER.lock().unwrap();
     custom_fns::set_default_custom_fn_handler(Some(handler));
     let _reset = Reset;
     let (mut wb, id, other) = linked();
@@ -173,4 +176,41 @@ fn dirty_append_matches_full_calculation_and_later_subtotal_filter_edits() {
     assert_eq!(wb.sheet(0).unwrap().get_display(1,3), "60");
     wb.set_cell_value_tracked(0,3,1,"no");
     assert_eq!(wb.sheet(0).unwrap().get_display(0,3), "0");
+}
+
+#[test]
+fn broad_table_reader_append_falls_back_to_a_full_calculation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use visigrid_engine::{custom_fns, formula::eval::{EvalArg, EvalResult}};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn handler(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+        if name != "APPENDFULL" { return None; }
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(EvalResult::Number(7.0))
+    }
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(None); } }
+    let _lock = APPEND_HANDLER.lock().unwrap();
+    custom_fns::set_default_custom_fn_handler(Some(handler));
+    let _reset = Reset;
+    let (mut wb, id, other) = linked();
+    for row in 0..40 {
+        wb.set_cell_value_tracked(other, row, 1, "=SUM(Sales[Amount])");
+    }
+    for row in 0..5 {
+        wb.set_cell_value_tracked(other, row, 2, "=APPENDFULL()");
+    }
+    assert!(CALLS.load(Ordering::SeqCst) >= 5);
+    CALLS.store(0, Ordering::SeqCst);
+    wb.append_table_rows(id, 1, &[(3, 0, "5".into())]).unwrap();
+    assert!(CALLS.load(Ordering::SeqCst) >= 5, "a closure that is most of the workbook takes the full path");
+    let mut full = wb.clone();
+    full.rebuild_dep_graph();
+    full.recompute_full_ordered();
+    assert_same_graph(&wb, &full);
+    for (index, sheet) in wb.sheets().iter().enumerate() {
+        for ((row, col), _) in sheet.cells_iter() {
+            assert_eq!(sheet.get_display(row, col), full.sheet(index).unwrap().get_display(row, col), "{index}:{row}:{col}");
+        }
+    }
 }

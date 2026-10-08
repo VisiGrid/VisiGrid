@@ -1131,7 +1131,7 @@ impl Spreadsheet {
     /// nothing at any size and afterwards only the chunks edits touch.
     pub(crate) fn capture_base_workbook(&mut self, cx: &mut Context<Self>) {
         self.table_dialog = None;
-        let snapshot = self.wb(cx).clone();
+        let snapshot = self.wb(cx).clone_sharing_cell_cow();
         self.history.set_rewind_base(&snapshot);
         self.base_workbook = Some(snapshot);
     }
@@ -1140,7 +1140,7 @@ impl Spreadsheet {
         let font_catalog = crate::fonts::FontCatalog::new(cx);
         let workbook_data = Workbook::new();
         let initial_sheet_id = workbook_data.active_sheet().id;
-        let base_workbook = Some(workbook_data.clone()); // Capture initial state for replay
+        let base_workbook = Some(workbook_data.clone_sharing_cell_cow());
         let workbook = cx.new(|_| workbook_data);
 
         let focus_handle = cx.focus_handle();

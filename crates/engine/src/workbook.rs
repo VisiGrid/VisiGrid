@@ -888,6 +888,28 @@ impl Workbook {
     ///
     /// Call this after loading a workbook to populate the graph.
     /// Iterates all formula cells and extracts their references.
+    /// Clone that keeps the cell-storage copy meter. Later writes on either
+    /// workbook charge the same total, which rewind uses as its byte budget.
+    pub fn clone_sharing_cell_cow(&self) -> Self {
+        let mut cloned = self.clone();
+        for (dst, src) in cloned.sheets.iter_mut().zip(self.sheets.iter()) {
+            dst.share_cell_cow_from(src);
+        }
+        cloned
+    }
+
+    pub fn rewind_retained_bytes(&self) -> usize {
+        self.sheets.iter().map(Sheet::rewind_retained_bytes).sum()
+    }
+
+    /// Zero the shared copy meter. A new rewind baseline still shares every
+    /// chunk, so copies made for the previous baseline are not charged again.
+    pub fn reset_shared_cell_cow(&self) {
+        for sheet in &self.sheets {
+            sheet.reset_cell_cow();
+        }
+    }
+
     pub fn rebuild_dep_graph(&mut self) {
         self.pending_dynamic_refs.get_mut().clear();
         self.dep_graph = Arc::default();
@@ -2354,8 +2376,10 @@ impl Workbook {
 
         self.apply_rule_changes(&rule_changes, false);
         if fill_rules && is_row && !delete { self.fill_inserted_calculated_rows(sheet_index, at, count); }
-        self.rebuild_dep_graph();
-        self.recompute_full_ordered();
+        if !recalc_deferred() {
+            self.rebuild_dep_graph();
+            self.recompute_full_ordered();
+        }
         if self.tables().any(|(_, t)| t.totals.is_some()) {
             // Footer changes can alter indirect pivot sources on other sheets.
             for sheet in &mut self.sheets { sheet.mark_table_changed(); }

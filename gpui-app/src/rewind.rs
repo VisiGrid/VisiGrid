@@ -173,10 +173,13 @@ impl Spreadsheet {
         let sheet_idx = self.history.display_entries().iter().find(|e| e.id == entry_id)
             .and_then(|e| e.sheet_index).unwrap_or(self.sheet_index(cx));
 
-        // Build the preview workbook and view state (state BEFORE this action)
+        // Build the preview workbook and view state (state BEFORE this action).
+        // The fallback clone is only needed when no rewind baseline was captured;
+        // borrowing it beside the mutable history call would overlap fields.
+        let fallback = if self.history.has_rewind_base() { None } else { self.base_workbook.clone() };
         let build_result = self.history.build_workbook_before(
             history_index,
-            self.base_workbook.as_ref(),
+            fallback.as_ref(),
             MAX_PREVIEW_REPLAY,
             MAX_PREVIEW_BUILD_MS,
         ).map_err(|e| match e {
@@ -303,8 +306,9 @@ impl Spreadsheet {
 
         // Build first: a refused scrub must not replace the current snapshot
         // or disturb the live projection saved when Space was first pressed.
+        let fallback = if self.history.has_rewind_base() { None } else { self.base_workbook.clone() };
         match self.history.build_workbook_before(
-            new_idx, self.base_workbook.as_ref(), MAX_PREVIEW_REPLAY, MAX_PREVIEW_BUILD_MS,
+            new_idx, fallback.as_ref(), MAX_PREVIEW_REPLAY, MAX_PREVIEW_BUILD_MS,
         ).and_then(|build| {
             self.validate_preview_layout(&build.workbook, &build.view_state)
                 .map_err(crate::history::PreviewBuildError::InvariantViolation)?;
