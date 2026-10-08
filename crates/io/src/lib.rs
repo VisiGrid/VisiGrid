@@ -30,6 +30,8 @@ pub mod xlsx;
 #[cfg(feature = "native")]
 mod xlsx_comments;
 #[cfg(feature = "native")]
+mod xlsx_functions;
+#[cfg(feature = "native")]
 mod xlsx_tables;
 #[cfg(feature = "native")]
 mod xlsx_table_filters;

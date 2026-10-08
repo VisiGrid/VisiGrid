@@ -658,6 +658,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                             };
                             // Strip ODS OpenFormula namespace prefix (e.g. "=of:SUM()" → "=SUM()")
                             let formula_str = strip_ods_prefix(&formula_str);
+                            // Excel's _xlfn./_xlws./_xlpm. prefixes are file syntax (#89).
+                            let formula_str = crate::xlsx_functions::from_excel(&formula_str);
 
                             // Analyze formula for unknown functions
                             match parse_formula(&formula_str) {
@@ -770,11 +772,11 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
                 // Only backfill if the cell is currently empty (calamine didn't import it)
                 if sheet.get_raw(*row, *col).is_empty() {
-                    let formula_str = if formula_text.starts_with('=') {
+                    let formula_str = crate::xlsx_functions::from_excel(&if formula_text.starts_with('=') {
                         formula_text.clone()
                     } else {
                         format!("={}", formula_text)
-                    };
+                    });
                     eprintln!("[XLSX backfill] {}{}: ={}",
                         col_to_letter(*col), *row + 1, formula_text);
                     sheet.set_value_deferred(*row, *col, &formula_str);
