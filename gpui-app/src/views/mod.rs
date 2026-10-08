@@ -78,7 +78,12 @@ use crate::theme::TokenKey;
 pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     if let Some(notice) = app.history.take_notice() {
         // A caller may already have reported a more specific undo limit.
-        if app.status_message.as_deref().is_none_or(|message| !message.contains("too large to undo")) {
+        // Keep that wording, and add the rewind sentence when both happened.
+        if let Some(message) = app.status_message.as_deref().filter(|message| message.contains("too large to undo")) {
+            if notice.contains("Rewind is unavailable") && !message.contains("Rewind is unavailable") {
+                app.status_message = Some(format!("{message}. Rewind is unavailable; ordinary undo still works for recent changes."));
+            }
+        } else {
             app.status_message = Some(notice);
         }
     }

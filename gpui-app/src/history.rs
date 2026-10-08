@@ -1129,7 +1129,10 @@ impl History {
     }
 
     pub fn set_rewind_base(&mut self, workbook: &Workbook) {
-        self.rewind_base_bytes = visigrid_engine::history_size::workbook_bytes(workbook);
+        // The clone shares cells, pools and the dependency graph until an edit
+        // diverges, so it costs about nothing at any workbook size. Charging
+        // workbook_bytes here dropped rewind on load.
+        self.rewind_base_bytes = 0;
         self.rewind_base = Some((workbook.clone(), crate::app::PreviewViewState {
             per_sheet: vec![Default::default(); workbook.sheet_count()],
         }));
@@ -1141,8 +1144,11 @@ impl History {
     pub fn take_notice(&mut self) -> Option<String> { self.pending_notice.take() }
 
     fn note_rewind_unavailable(&mut self) {
-        if self.pending_notice.is_none() {
-            self.pending_notice = Some("Rewind is unavailable; ordinary undo still works for recent changes.".into());
+        const SENTENCE: &str = "Rewind is unavailable; ordinary undo still works for recent changes.";
+        match self.pending_notice.as_deref() {
+            Some(existing) if existing.contains("Rewind is unavailable") => {}
+            Some(existing) => self.pending_notice = Some(format!("{existing}. {SENTENCE}")),
+            None => self.pending_notice = Some(SENTENCE.into()),
         }
     }
 
@@ -1169,8 +1175,8 @@ impl History {
         if self.rewind_base.is_some() { entries.saturating_add(self.rewind_base_bytes) } else { entries }
     }
 
-    /// Byte change of applying `action` to the current baseline. `None` means
-    /// the action replaces workbook state, so the caller remeasures.
+    /// Byte change of applying a value edit to the current baseline. `None`
+    /// means the caller charges the history payload instead of walking cells.
     fn value_delta(&self, action: &UndoAction) -> Option<isize> {
         match action {
             UndoAction::Values { sheet_index, changes } => {
@@ -1189,13 +1195,15 @@ impl History {
         }
     }
 
-    fn charge_advanced_base(&mut self, value_delta: Option<isize>) {
+    fn charge_advanced_base(&mut self, action: &UndoAction, value_delta: Option<isize>) {
         if let Some(delta) = value_delta {
             self.rewind_base_bytes = self.rewind_base_bytes.saturating_add_signed(delta);
             return;
         }
-        if let Some((workbook, _)) = &self.rewind_base {
-            self.rewind_base_bytes = visigrid_engine::history_size::workbook_bytes(workbook);
+        // Snapshots and plan commits already include their workbook measure in
+        // this payload. Other edits charge the undo record, not a cell walk.
+        if self.rewind_base.is_some() {
+            self.rewind_base_bytes = self.rewind_base_bytes.saturating_add(action.estimated_history_bytes());
         }
     }
 
@@ -1212,7 +1220,7 @@ impl History {
         });
         if applied {
             self.rewind_base_needs_calc = true;
-            self.charge_advanced_base(value_delta);
+            self.charge_advanced_base(action, value_delta);
             return;
         }
         self.fail_rewind();
@@ -1582,9 +1590,9 @@ impl History {
         self.entry_bytes.clear();
         self.last_record_too_large = false;
         self.base_invalidated = false;
-        // Load paths capture the opened workbook and then clear the stacks.
-        // Dropping the base here made the next eviction refuse rewind until
-        // the process restarted.
+        // The base stays, so a later eviction can still rewind. Load paths
+        // clear and then capture: capture may notice that the baseline does
+        // not fit, and a clear after that capture would erase the notice.
         self.pending_notice = None;
         self.next_id = 1;
     }
@@ -1899,6 +1907,9 @@ impl History {
         action: &UndoAction,
         settle: bool,
     ) -> Result<(), PreviewBuildError> {
+        // Nested groups each hold a guard. Depth stays above zero until the
+        // outermost evicted action returns, including inside a cloned replay.
+        let _defer_recalc = (!settle).then(visigrid_engine::workbook::DeferRecalcGuard::enter);
         crate::validation_ui::plan::validate_history(workbook, action, true)
             .map_err(PreviewBuildError::InvariantViolation)?;
         if view_state.per_sheet.iter().any(|v| v.structure_layout.is_some())
@@ -1939,7 +1950,7 @@ impl History {
                     workbook.end_batch();
                 } else {
                     let sheet = workbook.sheet_mut(*sheet_index).unwrap();
-                    for change in changes { sheet.set_value(change.row, change.col, &change.new_value); }
+                    for change in changes { sheet.set_value_deferred(change.row, change.col, &change.new_value); }
                 }
             }
             UndoAction::Format { sheet_index, patches, .. } => {
@@ -1997,8 +2008,10 @@ impl History {
                 }
             }
             UndoAction::TableViewChanged { commit, .. } => {
-                workbook.rebuild_dep_graph();
-                workbook.recompute_full_ordered();
+                if settle {
+                    workbook.rebuild_dep_graph();
+                    workbook.recompute_full_ordered();
+                }
                 workbook.apply_table_view_commit(commit, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::TableBatchChanged { commit, .. } => {
@@ -2034,7 +2047,7 @@ impl History {
                 }
             }
             UndoAction::TableCellsChanged { commit, .. } => {
-                workbook.rebuild_dep_graph();
+                if settle { workbook.rebuild_dep_graph(); }
                 commit.replay(workbook, false).map_err(PreviewBuildError::InvariantViolation)?;
             }
             UndoAction::ReviewCopy { history } => {
@@ -3207,6 +3220,7 @@ mod comment_tests {
 #[cfg(test)]
 mod byte_budget_tests {
     use super::*;
+    static REWIND_SPIKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn retagging_a_source_reaccounts_its_retained_payload() {
@@ -3317,6 +3331,7 @@ mod byte_budget_tests {
         impl Drop for Reset {
             fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
         }
+        let _lock = REWIND_SPIKE.lock().unwrap();
         let _reset = Reset(custom_fns::default_custom_fn_handler());
         custom_fns::set_default_custom_fn_handler(Some(spike));
         let mut base = Workbook::new();
@@ -3325,13 +3340,85 @@ mod byte_budget_tests {
         let mut history = History::new();
         history.max_entries = 1;
         history.set_rewind_base(&base);
-        history.record_change(0, 0, 0, String::new(), "4".into());
+        // A formula, not a literal: set_value would evaluate REWINDSPIKE here.
+        history.record_change(0, 0, 0, String::new(), "=REWINDSPIKE()".into());
         history.record_change(0, 2, 0, String::new(), "z".into());
         assert_eq!(CALLS.load(Ordering::SeqCst), 0, "eviction must not calculate");
         let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
         assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
-        assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "4");
-        assert_eq!(opened.workbook.active_sheet().get_display(0, 1), "5");
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "=REWINDSPIKE()");
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 0), "1");
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 1), "2");
+    }
+
+    #[test]
+    fn evicted_table_edits_wait_for_rewind_and_then_match_the_live_sheet() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use visigrid_engine::custom_fns;
+        use visigrid_engine::filter::{ColumnFilter, NormalizedFilterKey};
+        use visigrid_engine::formula::eval::{EvalArg, EvalResult};
+        use visigrid_engine::table::TableRange;
+        use visigrid_engine::table_view::{TableFilter, TableViewSpec};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn spike(name: &str, _: &[EvalArg]) -> Option<EvalResult> {
+            (name == "TABLESPIKE").then(|| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                EvalResult::Number(1.0)
+            })
+        }
+        struct Reset(Option<custom_fns::CustomFnHandler>);
+        impl Drop for Reset {
+            fn drop(&mut self) { custom_fns::set_default_custom_fn_handler(self.0); }
+        }
+        let _lock = REWIND_SPIKE.lock().unwrap();
+        let _reset = Reset(custom_fns::default_custom_fn_handler());
+        custom_fns::set_default_custom_fn_handler(Some(spike));
+
+        let mut base = Workbook::new();
+        base.set_cell_value_tracked(0, 0, 0, "Amount");
+        base.set_cell_value_tracked(0, 1, 0, "10");
+        base.set_cell_value_tracked(0, 2, 0, "20");
+        let id = base.create_table(base.active_sheet_id(), TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap().table_id();
+        base.set_cell_value_tracked(0, 0, 2, "=TABLESPIKE()+SUBTOTAL(109,Sales[Amount])");
+        CALLS.store(0, Ordering::SeqCst);
+
+        let mut live = base.clone();
+        let mut spec = TableViewSpec::new(id);
+        spec.filters.push(TableFilter {
+            column: live.table(id).unwrap().1.columns[0].id,
+            criteria: ColumnFilter { selected: Some([NormalizedFilterKey::Number(10.0.into())].into()), text_filter: None },
+        });
+        let view = live.set_table_view_spec(live.active_sheet_id(), Some(spec)).unwrap();
+        let style = live.set_table_style(id, visigrid_engine::table::TableStyle { banded_rows: false, ..Default::default() }).unwrap();
+        let mut edited = live.clone();
+        edited.set_cell_value_tracked(0, 1, 0, "99");
+        let cells = crate::table_cell_history::TableCellsCommit::capture(live.active_sheet(), edited.active_sheet(), [(1, 0)]);
+        edited.recompute_full_ordered();
+        CALLS.store(0, Ordering::SeqCst);
+
+        let mut history = History::new();
+        history.max_entries = 1;
+        history.set_rewind_base(&base);
+        history.record_action_with_provenance(UndoAction::TableViewChanged {
+            sheet_index: 0, commit: Box::new(view), description: "Filter".into(),
+        }, None);
+        history.record_action_with_provenance(UndoAction::TableCommit {
+            header_layout: None, sheet_index: 0, commit: Box::new(style), description: "Banding".into(),
+        }, None);
+        history.record_action_with_provenance(UndoAction::TableCellsChanged {
+            sheet_index: 0, commit: Box::new(cells), description: "Cell".into(),
+        }, None);
+        history.record_change(0, 4, 0, String::new(), "kept".into());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "evicting Table edits must not calculate");
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
+        assert_eq!(opened.workbook.active_sheet().get_raw(1, 0), edited.active_sheet().get_raw(1, 0));
+        assert_eq!(opened.workbook.active_sheet().get_display(0, 2), edited.active_sheet().get_display(0, 2));
+        assert_eq!(opened.workbook.active_sheet().table_view_spec(), edited.active_sheet().table_view_spec());
+        assert_eq!(opened.workbook.table(id).unwrap().1.style, edited.table(id).unwrap().1.style);
+        assert_eq!(opened.workbook.active_sheet().get_raw(4, 0), "");
     }
 
     #[test]
@@ -3352,12 +3439,49 @@ mod byte_budget_tests {
     fn rewind_base_larger_than_the_budget_is_dropped_with_a_notice() {
         let mut history = History::new();
         history.set_rewind_base(&Workbook::new());
-        assert!(history.rewind_base_bytes > 1, "an empty workbook still occupies the baseline");
-        history.max_bytes = history.rewind_base_bytes - 1;
+        assert_eq!(history.rewind_base_bytes, 0, "a shared baseline is not charged until an edit diverges");
+        history.rewind_base_bytes = 50;
+        history.max_bytes = 49;
         history.record_change(0, 0, 0, String::new(), "a".into());
         assert!(history.base_invalidated);
         assert!(history.rewind_base.is_none());
         let notice = history.take_notice().unwrap_or_default();
         assert!(notice.contains("Rewind is unavailable"), "{notice}");
+    }
+
+    #[test]
+    fn shared_baseline_keeps_rewind_for_a_workbook_larger_than_the_budget() {
+        let mut workbook = Workbook::new();
+        for row in 0..200 {
+            workbook.set_cell_value_tracked(0, row, 0, "xxxxxxxxxx");
+        }
+        let bytes = visigrid_engine::history_size::workbook_bytes(&workbook);
+        assert!(bytes > 1_000, "the fixture must be larger than the budget, got {bytes}");
+        let mut history = History::new();
+        history.max_bytes = 1_000;
+        history.max_entries = 1;
+        history.set_rewind_base(&workbook);
+        assert_eq!(history.rewind_base_bytes, 0);
+        history.record_change(0, 0, 1, String::new(), "a".into());
+        history.record_change(0, 0, 2, String::new(), "b".into());
+        assert!(history.rewind_base.is_some(), "a one-character divergence stays inside the budget");
+        assert!(!history.base_invalidated);
+        assert!(history.rewind_base_bytes < history.max_bytes);
+        let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 1), "a");
+        assert_eq!(opened.workbook.active_sheet().get_raw(0, 0), "xxxxxxxxxx");
+    }
+
+    #[test]
+    fn too_large_edit_also_says_rewind_is_unavailable() {
+        let mut history = History::new();
+        history.set_rewind_base(&Workbook::new());
+        history.max_bytes = 32_000;
+        history.record_change(0, 0, 0, String::new(), "a".into());
+        history.record_change(0, 1, 0, String::new(), "b".repeat(40_000));
+        let notice = history.take_notice().unwrap_or_default();
+        assert!(notice.contains("too large to undo"), "{notice}");
+        assert!(notice.contains("Rewind is unavailable"), "{notice}");
+        assert!(history.rewind_base.is_none());
     }
 }

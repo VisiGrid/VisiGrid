@@ -45,6 +45,7 @@ fn stale_not_settled_error_does_not_block_a_later_resize_after_indirect_is_fixed
     // a leftover that the next edit does not clear.
     wb.set_cell_value_tracked(0,0,4,"=INDIRECT(RESIZEADDRESS())");
     wb.set_cell_value_tracked(0,0,4,"1");
+    assert!(wb.incremental_errors_contain("not settled"), "the leftover settlement error is still recorded just before resize");
     wb.resize_table(id, TableRange {start_row:0,start_col:0,end_row:2,end_col:0}).expect("a fixed sheet must resize");
     assert_eq!(wb.table(id).unwrap().1.range.end_row, 2);
 }

@@ -67,3 +67,33 @@ fn measure_guarded_append_and_cycle_scans() {
         println!("{rows} formulas: append_ms={append_ms:?}; cached_cycle_pair_ms={cycle_ms:?}; uncached_cycle_pair_ms={uncached_cycle_ms:?}");
     }
 }
+
+/// 100k formulas that read the Table, so the append rebind closure includes them.
+/// The unrelated-formula probe above stays the comparison against the earlier band.
+#[test]
+#[ignore = "manual timing probe; not a wall-clock CI assertion"]
+fn measure_append_when_formulas_read_the_table() {
+    let rows = 100_000;
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "Amount");
+    wb.set_cell_value_tracked(0, 1, 0, "1");
+    let id = wb.create_table(wb.active_sheet_id(), TableRange {
+        start_row: 0, start_col: 0, end_row: 1, end_col: 0,
+    }, "Sales").unwrap().table_id();
+    wb.set_table_totals_visible(id, true, Default::default()).unwrap();
+    let other = wb.add_sheet_named("Readers").unwrap();
+    for row in 0..rows {
+        wb.sheet_mut(other).unwrap().set_value_deferred(row, 0, "=SUM(Sales[Amount])");
+    }
+    wb.rebuild_dep_graph();
+    wb.recompute_full_ordered();
+    let mut append_ms = Vec::new();
+    for _ in 0..3 {
+        let mut candidate = wb.clone();
+        let t = Instant::now();
+        black_box(candidate.append_table_rows(id, 1, &[]).unwrap());
+        append_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(candidate.sheet(other).unwrap().get_display(0, 0), "1");
+    }
+    println!("{rows} table-reading formulas: append_ms={append_ms:?}");
+}

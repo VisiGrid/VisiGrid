@@ -210,6 +210,33 @@ impl Default for Workbook {
     }
 }
 
+thread_local! {
+    static DEFER_RECALC_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// While this guard is alive, batch and Table replay store edits and skip
+/// recalculation. Rewind calculates the stored baseline once, after the guard
+/// is gone. The flag is thread-local so a workbook cloned inside replay still
+/// sees it; it is not part of the workbook.
+pub struct DeferRecalcGuard;
+
+impl DeferRecalcGuard {
+    pub fn enter() -> Self {
+        DEFER_RECALC_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for DeferRecalcGuard {
+    fn drop(&mut self) {
+        DEFER_RECALC_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+pub(crate) fn recalc_deferred() -> bool {
+    DEFER_RECALC_DEPTH.with(|depth| depth.get() > 0)
+}
+
 impl Workbook {
     /// Create a new workbook with one default sheet
     pub fn new() -> Self {
@@ -1241,6 +1268,12 @@ impl Workbook {
         std::mem::take(&mut self.incremental_errors)
     }
 
+    /// Whether an earlier incremental pass left an error whose text contains `text`.
+    /// Does not clear the list. A later structural edit decides for itself.
+    pub fn incremental_errors_contain(&self, text: &str) -> bool {
+        self.incremental_errors.iter().any(|error| error.error.contains(text))
+    }
+
     pub fn recompute_full_ordered(&mut self) -> crate::recalc::RecalcReport {
         match crate::custom_fns::default_custom_fn_handler() {
             Some(handler) => self.recompute_full_ordered_inner(Some(&handler)),
@@ -2129,7 +2162,14 @@ impl Workbook {
             let mut changed = std::mem::take(&mut self.batch_changed);
             let format_changed = std::mem::take(&mut self.batch_format_changed);
             let vacated = std::mem::take(&mut self.batch_vacated);
-            let recalculated = if !changed.is_empty() {
+            // Evicted history stores the write and recalculates once when
+            // rewind opens. An error inherited from an earlier pass is not a
+            // failure of this stored write.
+            let deferred = recalc_deferred();
+            if deferred && !changed.is_empty() {
+                self.incremental_errors.clear();
+            }
+            let recalculated = if !changed.is_empty() && !deferred {
                 with_reported(self.recalc_dirty_set(&changed), &vacated)
             } else {
                 Recalculated::Cells(Vec::new())
@@ -2140,7 +2180,7 @@ impl Workbook {
                 // The batch is the caller's unit of work: hand back what its
                 // recalc could not settle instead of leaving it in the side
                 // channel for someone else to find.
-                let errors = self.take_incremental_errors();
+                let errors = if deferred { Vec::new() } else { self.take_incremental_errors() };
                 return BatchOutcome { written: changed, recalculated, errors };
             }
         }

@@ -39,6 +39,8 @@ impl Spreadsheet {
         self.wb_mut(cx, |wb| *wb = Workbook::new());
         self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
         self.debug_assert_sheet_cache_sync(cx);
+        // Clear first so a notice from this capture is not wiped.
+        self.history.clear();
         self.capture_base_workbook(cx); // Capture base state for replay
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.cycle_banner.reset_for_new_file();
@@ -56,7 +58,6 @@ impl Spreadsheet {
         self.view_state.selection_end = None;
         self.view_state.scroll_row = self.view_state.frozen_rows;
         self.view_state.scroll_col = self.view_state.frozen_cols;
-        self.history.clear();
         self.bump_cells_rev();  // Invalidate cell search cache
 
         // Reset document meta for new document
@@ -200,7 +201,6 @@ impl Spreadsheet {
                 }
                 self.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                 self.debug_assert_sheet_cache_sync(cx);
-                self.capture_base_workbook(cx); // Capture base state for replay
                 self.rewind_preview = crate::app::RewindPreviewState::Off;
                 self.import_result = None;
                 self.import_filename = None;
@@ -246,7 +246,9 @@ impl Spreadsheet {
                 self.view_state.selection_end = None;
                 self.view_state.scroll_row = self.view_state.frozen_rows;
                 self.view_state.scroll_col = self.view_state.frozen_cols;
+                // Fingerprint above still sees the history this file was opened with.
                 self.history.clear();
+                self.capture_base_workbook(cx);
                 self.bump_cells_rev();
                 self.add_recent_file(path);
 
@@ -413,7 +415,6 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);  // Keep per-sheet sizing cache in sync
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.capture_base_workbook(cx); // Capture base state for replay
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
@@ -423,6 +424,7 @@ impl Spreadsheet {
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
+                        this.capture_base_workbook(cx); // Capture base state for replay
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 
@@ -601,7 +603,6 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.capture_base_workbook(cx);
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_result = None;
                         this.import_filename = Some(filename_for_completion.clone());
@@ -614,6 +615,7 @@ impl Spreadsheet {
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
+                        this.capture_base_workbook(cx);
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 
@@ -664,7 +666,6 @@ impl Spreadsheet {
         self.workbook = cx.new(|_| workbook);
         self.update_cached_sheet_id(cx);
         self.debug_assert_sheet_cache_sync(cx);
-        self.capture_base_workbook(cx);
         self.rewind_preview = crate::app::RewindPreviewState::Off;
         self.cycle_banner.reset_for_new_file();
         self.import_result = None;
@@ -682,6 +683,7 @@ impl Spreadsheet {
         self.view_state.frozen_rows = 0;
         self.view_state.frozen_cols = 0;
         self.history.clear();
+        self.capture_base_workbook(cx);
         self.bump_cells_rev();
         self.add_recent_file(&path.to_path_buf());
         self.finalize_load(path);
@@ -802,7 +804,6 @@ impl Spreadsheet {
                         this.workbook = cx.new(|_| workbook);
                         this.update_cached_sheet_id(cx);
                         this.debug_assert_sheet_cache_sync(cx);
-                        this.capture_base_workbook(cx);
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
@@ -812,6 +813,7 @@ impl Spreadsheet {
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
+                        this.capture_base_workbook(cx);
                         this.bump_cells_rev();
                         this.add_recent_file(&path_for_recent);
 

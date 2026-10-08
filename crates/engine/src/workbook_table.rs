@@ -1363,7 +1363,9 @@ impl Workbook {
         self.apply_rule_changes(&commit.rules, undo);
         // Membership changes affect symbolic shape dependencies even when no
         // cell was written (including empty -> nonempty bodies).
-        if let Some(extra) = incremental {
+        if super::recalc_deferred() {
+            // Eviction stores the commit. Opening rewind recalculates once.
+        } else if let Some(extra) = incremental {
             let original_graph = self.dep_graph.clone();
             let mut dirty: rustc_hash::FxHashSet<_> = extra.iter().copied().chain(self.table_readers.get(&commit.id).into_iter().flat_map(|r| r.iter().copied())).collect();
             dirty.extend(commit.cells.iter().map(|(c, _)| crate::cell_id::CellId::new(commit.sheet_id, c.row, c.col)));

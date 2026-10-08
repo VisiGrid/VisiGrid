@@ -152,8 +152,9 @@ impl Workbook {
             // Criteria changes dirty the document without changing body records.
             // SUBTOTAL formulas additionally need their visibility dependencies rebuilt.
             self.increment_revision();
-            // Totals depend on criteria, not only on cell values.
-            if self.sheets().iter().any(|s| s.cells_iter().any(|(_, c)| {
+            // Totals depend on criteria, not only on cell values. Eviction
+            // stores the criteria; rewind recalculates the baseline once.
+            if !super::recalc_deferred() && self.sheets().iter().any(|s| s.cells_iter().any(|(_, c)| {
                 matches!(c.value(), crate::cell::ValueRef::Formula { ast: Some(ast), .. }
                     if crate::formula::eval_subtotal::contains_subtotal(ast))
             })) {
