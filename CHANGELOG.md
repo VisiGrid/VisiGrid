@@ -4,9 +4,9 @@
 
 ### Import recipes
 
-- **Open a JSON export with File → Open.** Opening a `.json`, `.jsonl` or `.ndjson` file (File → Open, the command line, or dragging it onto the window) starts an import recipe on it, as **New Import Recipe…** does. It used to say "Unknown file type: json" and open an empty workbook. ([#PR](https://github.com/VisiGrid/VisiGrid/pull/PR), closes [#133](https://github.com/VisiGrid/VisiGrid/issues/133))
-- **Change a column's type from the recipe preview.** The type under each preview column (`Text ›`) is now a button, like the CSV import dialog's: click it for the next type, right-click for the previous one. It edits the selected **Set types** step, or adds one. ([#PR](https://github.com/VisiGrid/VisiGrid/pull/PR))
-- **The recipe preview scrolls sideways.** Columns past the right edge of the preview could not be reached; scroll with a trackpad, a tilting wheel or Shift+wheel. ([#PR](https://github.com/VisiGrid/VisiGrid/pull/PR))
+- **Open a JSON export with File → Open.** Opening a `.json`, `.jsonl` or `.ndjson` file (File → Open, the command line, or dragging it onto the window) starts an import recipe on it, as **New Import Recipe…** does. It used to say "Unknown file type: json" and open an empty workbook. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134), closes [#133](https://github.com/VisiGrid/VisiGrid/issues/133))
+- **Change a column's type from the recipe preview.** The type under each preview column (`Text ›`) is now a button, like the CSV import dialog's: click it for the next type, right-click for the previous one. It edits the selected **Set types** step, or adds one. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134))
+- **The recipe preview scrolls sideways.** Columns past the right edge of the preview could not be reached; scroll with a trackpad, a tilting wheel or Shift+wheel. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134))
 
 ### Fixed
 
