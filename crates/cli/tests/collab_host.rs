@@ -377,3 +377,40 @@ fn large_sheets_snapshot_as_bands_and_load_back() {
     let bad = b.call(json!({"cmd": "load_band", "key": bands[0]["key"], "data": "AAAA"}));
     assert_eq!(bad["ok"], json!(false), "a band is checked against its key");
 }
+
+/// read_cells answers with exactly the snapshot's entries for the asked
+/// cells (computed values after a submit included), the tab's stable key
+/// and name, and nothing for empty cells.
+#[test]
+fn read_cells_matches_the_snapshot_for_the_asked_cells() {
+    let mut h = Host::spawn();
+    h.ok(json!({"cmd": "load", "document": blank(), "seq": 0}));
+    let ops = [
+        CollabOp::SetCell { sheet: 1, sheet_name: "Sheet1".into(), row: 0, col: 0, content: val("1") },
+        CollabOp::SetCell { sheet: 1, sheet_name: "Sheet1".into(), row: 1, col: 0, content: formula("=A1*2") },
+        CollabOp::SetCell { sheet: 1, sheet_name: "Sheet1".into(), row: 0, col: 1, content: CellContent::Text("007".into()) },
+    ];
+    submit(&mut h, 0, &ops, &[]);
+    submit(&mut h, 1, &[CollabOp::SetCell { sheet: 1, sheet_name: "Sheet1".into(), row: 0, col: 0, content: val("5") }], &[]);
+
+    let read = h.ok(json!({"cmd": "read_cells", "sheet_index": 0, "cells": [[1, 0], [0, 0], [0, 1], [9, 9], [0, 0]]}));
+    assert_eq!(read["sheet"], json!(1));
+    assert_eq!(read["sheet_name"], json!("Sheet1"));
+    let snapshot = h.ok(json!({"cmd": "snapshot"}));
+    let all = snapshot["document"]["sheets"][0]["cells"].as_array().unwrap().clone();
+    let expected: Vec<Value> = all
+        .into_iter()
+        .filter(|c| [(0, 0), (0, 1), (1, 0)].contains(&(c["row"].as_u64().unwrap(), c["col"].as_u64().unwrap())))
+        .collect();
+    assert_eq!(read["cells"], json!(expected), "the snapshot's own entries, sorted, empty cells absent");
+    assert_eq!(read["cells"][2]["value"], json!(10.0), "A2 recalculated after A1 changed");
+    assert_eq!(read["cells"][1]["value"], json!("007"), "text stays text");
+
+    for bad in [
+        json!({"cmd": "read_cells", "sheet_index": 3, "cells": [[0, 0]]}),
+        json!({"cmd": "read_cells", "sheet_index": 0, "cells": [[0]]}),
+        json!({"cmd": "read_cells", "cells": [[0, 0]]}),
+    ] {
+        assert_eq!(h.call(bad.clone())["ok"], json!(false), "{bad}");
+    }
+}

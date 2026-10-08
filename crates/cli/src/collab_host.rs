@@ -149,6 +149,7 @@ impl Host {
             "submit" => self.submit(req),
             "snapshot" => self.snapshot(),
             "band" => self.band(req),
+            "read_cells" => self.read_cells(req),
             "load_band" => self.load_band(req),
             "finish_load" => self.finish_load(),
             "replace_document" => self.replace_document(req),
@@ -298,6 +299,31 @@ impl Host {
         let reply = json!({"document": document, "bands": list, "seq": self.seq, "checksum": collab_checksum(wb)});
         self.bands = bands.into_iter().map(|b| (b.reference.key, b.data)).collect();
         Ok(fields(reply))
+    }
+
+    /// The cells at `cells` ([[row, col], ...], at most 10,000) of the tab at
+    /// `sheet_index`, in snapshot form (value, formula, fmt; an empty cell
+    /// has no entry), with the tab's stable key and name. A server write
+    /// reads the cells it touches before and after applying, instead of
+    /// snapshotting the whole workbook twice.
+    fn read_cells(&mut self, req: &Map<String, Value>) -> Reply {
+        let wb = self.wb()?;
+        let index = req.get("sheet_index").and_then(Value::as_u64).ok_or("read_cells needs sheet_index")? as usize;
+        let sheet = wb.sheets().get(index).ok_or_else(|| format!("no sheet at index {index}"))?;
+        let list = req.get("cells").and_then(Value::as_array).ok_or("read_cells needs cells")?;
+        if list.len() > 10_000 {
+            return Err("read_cells reads at most 10,000 cells".into());
+        }
+        let mut wanted = Vec::with_capacity(list.len());
+        for rc in list {
+            let pair = rc.as_array().filter(|p| p.len() == 2);
+            let (Some(r), Some(c)) = (pair.and_then(|p| p[0].as_u64()), pair.and_then(|p| p[1].as_u64())) else {
+                return Err("read_cells cells are [row, col] pairs".into());
+            };
+            wanted.push((r as usize, c as usize));
+        }
+        let cells = visigrid_io::json::cells_at(sheet, &wanted)?;
+        Ok(fields(json!({"sheet": sheet.id.0, "sheet_name": sheet.name, "cells": cells})))
     }
 
     /// One band of the last snapshot, base64.
