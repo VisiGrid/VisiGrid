@@ -642,6 +642,7 @@ pub(crate) fn write(
 
 /// OOXML uses the long this-row selector. Rewrite parsed references only, so
 /// quoted strings, sheet names and escaped @ characters remain untouched.
+/// Function names and LET/LAMBDA names then take Excel's stored form.
 pub(crate) fn excel_formula(source: &str) -> String {
     use visigrid_engine::formula::structured::{source_references, TableSection};
     let mut out = source.to_string();
@@ -658,7 +659,7 @@ pub(crate) fn excel_formula(source: &str) -> String {
         };
         out.replace_range(start..end, &replacement);
     }
-    out
+    super::xlsx_functions::excel_function_names(&out)
 }
 
 /// Add calculated-column metadata without asking the writer to fill cells.

@@ -40,6 +40,8 @@ mod xlsx_arrays;
 #[cfg(feature = "native")]
 mod xlsx_rich_errors;
 #[cfg(feature = "native")]
+mod xlsx_functions;
+#[cfg(feature = "native")]
 mod xlsx_tables;
 #[cfg(feature = "native")]
 mod xlsx_table_filters;

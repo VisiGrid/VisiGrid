@@ -20,11 +20,10 @@ pub(crate) struct Pending {
 const MAX_ARRAYS: usize = 4096;
 const MAX_ARRAY_CELLS: usize = 5_000_000;
 
-pub(crate) use visigrid_engine::formula::excel_namespaces::normalize_formula;
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_formula;
+    use visigrid_engine::formula::excel_namespaces::normalize_formula;
     #[test]
     fn function_namespaces_leave_literals_and_reference_names_intact() {
         assert_eq!(
