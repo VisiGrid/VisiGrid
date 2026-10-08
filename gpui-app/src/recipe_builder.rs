@@ -245,6 +245,18 @@ pub fn on_error_label(e: OnError) -> &'static str {
     }
 }
 
+/// A column rule as a Set types value ("text", "date:ymd"); None for auto.
+fn type_name(rule: ColumnRule) -> Option<&'static str> {
+    Some(match rule {
+        ColumnRule::Text => "text",
+        ColumnRule::Number => "number",
+        ColumnRule::Date(DateOrder::Ymd) => "date:ymd",
+        ColumnRule::Date(DateOrder::Dmy) => "date:dmy",
+        ColumnRule::Date(DateOrder::Mdy) => "date:mdy",
+        _ => return None,
+    })
+}
+
 fn cycle<T: Copy + PartialEq>(all: &[T], current: T, back: bool) -> T {
     let i = all.iter().position(|x| *x == current).unwrap_or(0);
     let n = all.len();
@@ -914,6 +926,38 @@ impl RecipeBuilder {
     /// Insert a step of kind `kind` (an index into ADD_KINDS) after the
     /// selected one, with settings that change nothing until edited where
     /// that is possible.
+    /// A click on a preview column's type: change it with a Set types step,
+    /// the selected step if it is one, else a new one after it (at the start
+    /// from the file's preview). The type moves on from the one the preview
+    /// shows, so a click always changes it.
+    pub fn cycle_preview_type(&mut self, column: usize, back: bool) {
+        let Some((name, rule)) = self.preview.as_ref().and_then(|p| p.columns.get(column)).map(|c| (c.name.clone(), c.rule)) else {
+            return;
+        };
+        let at = match (self.selected, self.step()) {
+            (Some(i), Some(Step::Types { .. })) => i,
+            (selected, _) => {
+                let at = selected.map_or(0, |i| i + 1);
+                let step = Step::Types { columns: BTreeMap::new(), on_error: OnError::Fail, missing: Missing::Fail };
+                self.recipe.steps.insert(at, step);
+                self.selected = Some(at);
+                self.reveal_selected();
+                at
+            }
+        };
+        if let Some(Step::Types { columns, .. }) = self.recipe.steps.get_mut(at) {
+            let current = columns.get(&name).cloned().unwrap_or_else(|| type_name(rule).unwrap_or("auto").to_string());
+            let current = TYPE_CYCLE.iter().copied().find(|t| *t == current).unwrap_or("auto");
+            match cycle(&TYPE_CYCLE, current, back) {
+                "auto" => columns.remove(&name),
+                next => columns.insert(name, next.to_string()),
+            };
+        }
+        self.pane = Pane::Editor;
+        self.text_selected = false;
+        self.changed();
+    }
+
     pub fn add_step(&mut self, kind: usize) {
         let cols = self.step_columns_after_selected();
         let step = match kind {
@@ -1539,17 +1583,7 @@ impl Spreadsheet {
             let types: BTreeMap<String, String> = o
                 .columns
                 .iter()
-                .filter_map(|(name, rule)| {
-                    let t = match rule {
-                        ColumnRule::Text => "text",
-                        ColumnRule::Number => "number",
-                        ColumnRule::Date(DateOrder::Ymd) => "date:ymd",
-                        ColumnRule::Date(DateOrder::Dmy) => "date:dmy",
-                        ColumnRule::Date(DateOrder::Mdy) => "date:mdy",
-                        _ => return None,
-                    };
-                    Some((name.clone(), t.to_string()))
-                })
+                .filter_map(|(name, rule)| Some((name.clone(), type_name(*rule)?.to_string())))
                 .collect();
             let skipped: Vec<String> = o.columns.iter().filter(|(_, r)| *r == ColumnRule::Skip).map(|(n, _)| n.clone()).collect();
             if !skipped.is_empty() {
@@ -1997,6 +2031,33 @@ mod tests {
         assert_eq!(b.source_value(2).0, "Found by itself");
         b.change_source(2, true);
         assert_eq!(b.source_value(2).0, "meta.tags");
+    }
+
+    #[test]
+    fn clicking_a_preview_type_sets_it_with_a_set_types_step() {
+        let mut b = builder("ID,Amount,When\n007,5,2026-09-01\n008,7,2026-09-02\n", vec![]);
+        let col = |b: &RecipeBuilder, name: &str| b.preview.as_ref().unwrap().columns.iter().position(|c| c.name == name).unwrap();
+        // From the file's preview: a new Set types step at the start, and the
+        // type moves on from the one shown (auto -> text)
+        b.cycle_preview_type(col(&b, "When"), false);
+        assert_eq!(b.recipe.steps.len(), 1);
+        assert_eq!(b.selected, Some(0));
+        assert!(matches!(b.step(), Some(Step::Types { columns, .. }) if columns["When"] == "text"), "{:?}", b.step());
+        // The selected step is a Set types step: the same one changes
+        b.cycle_preview_type(col(&b, "When"), false);
+        b.cycle_preview_type(col(&b, "When"), false);
+        assert!(matches!(b.step(), Some(Step::Types { columns, .. }) if columns["When"] == "date:ymd"));
+        assert_eq!(b.preview.as_ref().unwrap().columns[col(&b, "When")].rule, visigrid_io::csv_import::ColumnRule::Date(visigrid_io::csv_import::DateOrder::Ymd));
+        b.cycle_preview_type(col(&b, "Amount"), true); // right-click: back from auto to date:mdy
+        assert!(matches!(b.step(), Some(Step::Types { columns, .. }) if columns.len() == 2));
+        assert_eq!(b.recipe.steps.len(), 1, "no second step");
+
+        // After another kind of step: a new Set types step goes after it
+        b.add_step(9); // Sort
+        b.cycle_preview_type(col(&b, "ID"), false);
+        assert_eq!(b.recipe.steps.len(), 3);
+        assert_eq!(b.selected, Some(2));
+        assert!(matches!(b.step(), Some(Step::Types { columns, .. }) if columns.len() == 1));
     }
 
     #[test]

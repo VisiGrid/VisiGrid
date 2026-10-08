@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Import recipes
+
+- **Open a JSON export with File → Open.** Opening a `.json`, `.jsonl` or `.ndjson` file (File → Open, the command line, or dragging it onto the window) starts an import recipe on it, as **New Import Recipe…** does. It used to say "Unknown file type: json" and open an empty workbook. ([#PR](https://github.com/VisiGrid/VisiGrid/pull/PR), closes [#133](https://github.com/VisiGrid/VisiGrid/issues/133))
+- **Change a column's type from the recipe preview.** The type under each preview column (`Text ›`) is now a button, like the CSV import dialog's: click it for the next type, right-click for the previous one. It edits the selected **Set types** step, or adds one. ([#PR](https://github.com/VisiGrid/VisiGrid/pull/PR))
+- **The recipe preview scrolls sideways.** Columns past the right edge of the preview could not be reached; scroll with a trackpad, a tilting wheel or Shift+wheel. ([#PR](https://github.com/VisiGrid/VisiGrid/pull/PR))
+
 ### Fixed
 
 - **A near-zero total takes a custom format's zero section.** With an accounting format such as `#,##0.00;(#,##0.00);"-"`, a total that rounds to zero now shows `-`, as an exact 0 does, instead of `0.00` (since 0.51.0). ([#129](https://github.com/VisiGrid/VisiGrid/pull/129))
