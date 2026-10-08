@@ -145,6 +145,13 @@ impl Spreadsheet {
             return;
         }
 
+        // A JSON export (an API response, JSON Lines) has no sheet layout to
+        // open: it loads through an import recipe, so open the builder on it
+        if matches!(ext_lower.as_str(), "json" | "jsonl" | "ndjson") {
+            self.new_recipe_from_file(path, None, cx);
+            return;
+        }
+
         // Excel files import in the background, for everyone. The
         // synchronous path froze the window for the length of the import and
         // told the user to buy a licence to stop it.
