@@ -405,7 +405,7 @@ impl Spreadsheet {
         };
         self.view_state.select_cell(focus, old_focus.1);
         self.ensure_visible(cx);
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::TableCellsChanged {
                 sheet_index: self.sheet_index(cx),
                 commit: Box::new(commit),

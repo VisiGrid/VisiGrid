@@ -352,7 +352,7 @@ impl Spreadsheet {
             }
             Ok(commit) => {
                 if !commit.is_noop() {
-                    self.history.record_action_with_provenance(
+                    self.record_action_with_provenance(cx,
                         UndoAction::TableViewChanged {
                             sheet_index: self.sheet_index(cx),
                             commit: Box::new(commit),
@@ -707,7 +707,7 @@ mod tests {
             .set_table_view_spec(SheetId(7), Some(spec.clone()))
             .unwrap();
         let mut history = crate::history::History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableViewChanged {
                 sheet_index: 0,
                 commit: Box::new(commit),

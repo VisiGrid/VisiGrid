@@ -1880,10 +1880,15 @@ impl Sheet {
         self.cells.reset_cow();
     }
 
-    /// Bytes this sheet holds beyond a workbook it still shares storage with:
-    /// copy-on-write chunks and pages, plus maps cloned outright at capture.
-    pub(crate) fn rewind_retained_bytes(&self) -> usize {
-        self.cells.cow_bytes().saturating_add(self.rewind_private_maps())
+    /// Bytes of this sheet's shared storage that `live` no longer holds, plus
+    /// the maps cloned outright at capture.
+    pub(crate) fn unshared_cow_bytes(&self, live: &Sheet) -> usize {
+        self.cells.unshared_bytes(&live.cells).saturating_add(self.rewind_private_maps())
+    }
+
+    /// Every copy-on-write allocation, as when `live` has no matching sheet.
+    pub(crate) fn all_cow_bytes(&self) -> usize {
+        self.cells.unshared_bytes(&Default::default()).saturating_add(self.rewind_private_maps())
     }
 
     fn rewind_private_maps(&self) -> usize {

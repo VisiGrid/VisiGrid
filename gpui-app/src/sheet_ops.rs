@@ -13,6 +13,7 @@ use gpui::*;
 use visigrid_engine::sheet::Sheet;
 use visigrid_engine::workbook::Workbook;
 use crate::app::{Spreadsheet, display_filename, ext_lower, is_native_ext, DocumentMeta, DocumentSource};
+use crate::history::{CellChange, CellFormatPatch, FormatActionKind, MutationSource, UndoAction};
 use crate::mode::Mode;
 use crate::session::SessionManager;
 use crate::window_registry::{WindowInfo, WindowRegistry};
@@ -86,7 +87,7 @@ impl Spreadsheet {
         let result = self.workbook.update(cx, |wb, _| crate::table_command_scope::restore_freeze_panes(wb, sheet_id, frozen));
         if let Err(error) = result { self.status_message = Some(error); cx.notify(); return; }
         self.sync_freeze_panes(frozen);
-        self.history.record_action_with_provenance(crate::history::UndoAction::FreezePanesChanged {
+        self.record_action_with_provenance(cx, crate::history::UndoAction::FreezePanesChanged {
             sheet_id, old_frozen_rows: before.0, old_frozen_cols: before.1,
             new_frozen_rows: frozen.0, new_frozen_cols: frozen.1,
         }, None);
@@ -296,6 +297,61 @@ impl Spreadsheet {
     #[inline]
     pub fn wb_mut<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Workbook) -> R) -> R {
         self.workbook.update(cx, |wb, _| f(wb))
+    }
+
+    pub fn record_change(&mut self, cx: &App, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
+        let live = self.workbook.clone();
+        self.history.record_change(live.read(cx), sheet_index, row, col, old_value, new_value);
+    }
+
+    pub fn record_change_with_source(&mut self, cx: &App, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.record_change_with_source(live.read(cx), sheet_index, row, col, old_value, new_value, source);
+    }
+
+    pub fn record_batch(&mut self, cx: &App, sheet_index: usize, changes: Vec<CellChange>) {
+        let live = self.workbook.clone();
+        self.history.record_batch(live.read(cx), sheet_index, changes);
+    }
+
+    pub fn record_batch_from(&mut self, cx: &App, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.record_batch_from(live.read(cx), sheet_index, changes, source);
+    }
+
+    pub fn record_batch_with_provenance(&mut self, cx: &App, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<visigrid_engine::provenance::Provenance>) {
+        let live = self.workbook.clone();
+        self.history.record_batch_with_provenance(live.read(cx), sheet_index, changes, provenance);
+    }
+
+    pub fn record_format(&mut self, cx: &App, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
+        let live = self.workbook.clone();
+        self.history.record_format(live.read(cx), sheet_index, patches, kind, description);
+    }
+
+    pub fn record_format_from(&mut self, cx: &App, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.record_format_from(live.read(cx), sheet_index, patches, kind, description, source);
+    }
+
+    pub fn record_format_with_provenance(&mut self, cx: &App, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String, provenance: Option<visigrid_engine::provenance::Provenance>) {
+        let live = self.workbook.clone();
+        self.history.record_format_with_provenance(live.read(cx), sheet_index, patches, kind, description, provenance);
+    }
+
+    pub fn record_named_range_action(&mut self, cx: &App, action: UndoAction) {
+        let live = self.workbook.clone();
+        self.history.record_named_range_action(live.read(cx), action);
+    }
+
+    pub fn record_action_with_provenance(&mut self, cx: &App, action: UndoAction, provenance: Option<visigrid_engine::provenance::Provenance>) {
+        let live = self.workbook.clone();
+        self.history.record_action_with_provenance(live.read(cx), action, provenance);
+    }
+
+    pub fn retag_last_source(&mut self, cx: &App, source: MutationSource) {
+        let live = self.workbook.clone();
+        self.history.retag_last_source(live.read(cx), source);
     }
 
     /// Shorthand for sheet mutation by index: `self.sheet_mut(idx, cx, |s| s.method())`

@@ -490,7 +490,7 @@ impl Spreadsheet {
         for rule in after {
             actions.push(crate::history::UndoAction::CondFormatAdded { sheet_index, rule });
         }
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::Group {
                 actions,
                 description: description.to_string(),

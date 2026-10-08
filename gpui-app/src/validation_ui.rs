@@ -161,7 +161,7 @@ impl Spreadsheet {
         };
         let sheet_index = self.wb(cx).sheet_index_by_id(commit.sheet_id).unwrap();
         self.workbook.update(cx, |wb, _| commit.apply(wb, true))?;
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::ValidationChanged {
                 sheet_index,
                 commit: Box::new(commit),

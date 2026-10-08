@@ -66,13 +66,13 @@ impl Spreadsheet {
         let sheet_index = candidate.active_sheet_index();
         self.install_table_batch(&candidate, cx);
         if changed {
-            self.history
-                .record_named_range_action(UndoAction::TableBatchChanged {
+            self
+                .record_named_range_action(cx, UndoAction::TableBatchChanged {
                     sheet_index,
                     commit: Box::new(commit),
                     description,
                 });
-            self.history.retag_last_source(source);
+            self.retag_last_source(cx, source);
             self.is_modified = true;
             self.cached_title = None;
         }
@@ -149,12 +149,12 @@ impl Spreadsheet {
         let before_row_view = self.row_view.clone();
         self.install_table_batch(&candidate, cx);
         let after = self.wb(cx).clone();
-        self.history.record_named_range_action(UndoAction::WorkbookSnapshot {
+        self.record_named_range_action(cx, UndoAction::WorkbookSnapshot {
             commit: Box::new(crate::history::WorkbookSnapshotCommit::new(description, before, after)),
             before_row_view,
             after_row_view: self.row_view.clone(),
         });
-        self.history.retag_last_source(MutationSource::Human);
+        self.retag_last_source(cx, MutationSource::Human);
         self.is_modified = true;
         self.cached_title = None;
         Ok(())
@@ -250,7 +250,7 @@ mod tests {
         commit.replay(&mut wb, false).unwrap();
         assert_eq!(wb.sheet(1).unwrap().get_raw(0, 0), "12");
         let mut history = History::new();
-        history.record_named_range_action(UndoAction::TableBatchChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
             sheet_index: 0,
             commit: Box::new(commit),
             description: "Automation".into(),

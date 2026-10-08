@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Tables Phase 4 (0.52.0): linked-footer appends recalculate affected formulas incrementally and share unchanged dependency snapshots; static append history fingerprints affected sheets while keeping global guards for dynamic references and broader structural transactions. An append whose formula closure is most of the workbook uses a full recalculation instead. Rewind calculates an evicted baseline once, including row and Table structure edits, and charges copied column chunks, string-pool pages and capture-time maps at their real size.
+- Tables Phase 4 (0.52.0): linked-footer appends recalculate affected formulas incrementally and share unchanged dependency snapshots; static append history fingerprints affected sheets while keeping global guards for dynamic references and broader structural transactions. An append whose formula closure is most of the workbook uses a full recalculation instead. Rewind calculates an evicted baseline once, including row and Table structure edits, and charges copied column chunks, string-pool pages and capture-time maps at their real size by comparing the baseline with the live workbook, so a replacement does not reset the charge.
 - Large Table conversion now warns about the row count, expected wait, frozen window and undo/redo cost. Undo history has an approximate 1 GiB byte budget; oversized conversions report that they cannot be undone.
 - Refuse row/column inserts that would push merges, validation, conditional formatting or non-empty cells off the grid, preserving exact undo semantics. Extend deleted-name and Phase 4 rich-error persistence regressions; remove the unused hidden-row scanner.
 

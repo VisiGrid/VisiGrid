@@ -192,7 +192,7 @@ impl Spreadsheet {
             self.install_structure_layout(sheet_id, &layout.after);
         }
         self.finish_creation_view(&commit, cx);
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::TableCommit {
                 sheet_index: index,
                 commit: Box::new(commit),
@@ -596,7 +596,7 @@ mod tests {
         .unwrap();
         let shifted = header_layout.as_ref().unwrap().after.clone();
         let mut history = History::new();
-        history.record_action_with_provenance(action(commit, header_layout), None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action(commit, header_layout), None);
         assert_eq!(history.undo_count(), 1);
         let preview = history
             .build_workbook_before(1, Some(&before), 100, 10_000)
@@ -677,7 +677,7 @@ mod tests {
         )
         .unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::FreezePanesChanged {
                 sheet_id: before.active_sheet_id(),
                 old_frozen_rows: 0,
@@ -687,7 +687,7 @@ mod tests {
             },
             None,
         );
-        history.record_action_with_provenance(action(commit, layout), None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action(commit, layout), None);
         for (at, frozen) in [(0, 0), (1, 3), (2, 4)] {
             let preview = history
                 .build_workbook_before(at, Some(&base), 100, 10_000)

@@ -538,14 +538,14 @@ mod tests {
         let mut history = History::new();
 
         // Add first entry
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "A".to_string(),
         }]);
 
         // Add second entry
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 1,
             old_value: "".to_string(),
             new_value: "B".to_string(),
@@ -568,7 +568,7 @@ mod tests {
         let mut history = History::new();
 
         // First entry
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "A".to_string(),
@@ -577,14 +577,14 @@ mod tests {
         let first_id = history.entry_at(0).unwrap().id;
 
         // Second entry: change same cell
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "A".to_string(),
             new_value: "B".to_string(),
         }]);
 
         // Third entry: change same cell again
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "B".to_string(),
             new_value: "C".to_string(),
@@ -604,7 +604,7 @@ mod tests {
         let mut history = History::new();
 
         // First entry
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "A".to_string(),
@@ -613,14 +613,14 @@ mod tests {
         let first_id = history.entry_at(0).unwrap().id;
 
         // Second entry: change cell
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "A".to_string(),
             new_value: "B".to_string(),
         }]);
 
         // Third entry: change back to original
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "B".to_string(),
             new_value: "A".to_string(),
@@ -637,7 +637,7 @@ mod tests {
     fn test_formula_vs_value_classification() {
         let mut history = History::new();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "plain text".to_string(),
@@ -646,14 +646,14 @@ mod tests {
         let first_id = history.entry_at(0).unwrap().id;
 
         // Add formula change
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 1,
             old_value: "".to_string(),
             new_value: "=SUM(A1:A10)".to_string(),
         }]);
 
         // Add value change
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 2,
             old_value: "".to_string(),
             new_value: "100".to_string(),

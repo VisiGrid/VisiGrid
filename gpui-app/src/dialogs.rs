@@ -1547,7 +1547,7 @@ impl Spreadsheet {
 
         // Record change in history with AI source
         let sheet_idx = self.sheet_index(cx);
-        self.history.record_change_with_source(sheet_idx, row, col, old_value, formula.clone(), source);
+        self.record_change_with_source(cx, sheet_idx, row, col, old_value, formula.clone(), source);
 
         // Set the cell value using the standard helper
         self.set_cell_value(row, col, &formula, cx);

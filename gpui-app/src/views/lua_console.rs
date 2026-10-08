@@ -1028,13 +1028,13 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
                 ],
                 description: "Lua script".into(),
             };
-            app.history.record_action_with_provenance(group, None);
+            app.record_action_with_provenance(cx, group, None);
             app.is_modified = true;
         } else if !guarded && has_values {
-            app.history.record_batch(sheet_index, changes);
+            app.record_batch(cx, sheet_index, changes);
             app.is_modified = true;
         } else if !guarded && has_formats {
-            app.history.record_format(
+            app.record_format(cx,
                 sheet_index,
                 format_patches,
                 crate::history::FormatActionKind::CellStyle,
@@ -1605,13 +1605,13 @@ fn handle_debug_completed(
                     ],
                     description: "Lua debug".into(),
                 };
-                app.history.record_action_with_provenance(group, None);
+                app.record_action_with_provenance(cx, group, None);
                 app.is_modified = true;
             } else if !guarded && has_values {
-                app.history.record_batch(target_index, changes);
+                app.record_batch(cx, target_index, changes);
                 app.is_modified = true;
             } else if !guarded && has_formats {
-                app.history.record_format(
+                app.record_format(cx,
                     target_index,
                     format_patches,
                     crate::history::FormatActionKind::CellStyle,

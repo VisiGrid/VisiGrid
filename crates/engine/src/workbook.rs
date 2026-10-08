@@ -884,12 +884,7 @@ impl Workbook {
         ids
     }
 
-    /// Rebuild the dependency graph from scratch.
-    ///
-    /// Call this after loading a workbook to populate the graph.
-    /// Iterates all formula cells and extracts their references.
-    /// Clone that keeps the cell-storage copy meter. Later writes on either
-    /// workbook charge the same total, which rewind uses as its byte budget.
+    /// Clone that shares the cell-storage copy meter with this workbook.
     pub fn clone_sharing_cell_cow(&self) -> Self {
         let mut cloned = self.clone();
         for (dst, src) in cloned.sheets.iter_mut().zip(self.sheets.iter()) {
@@ -898,8 +893,18 @@ impl Workbook {
         cloned
     }
 
-    pub fn rewind_retained_bytes(&self) -> usize {
-        self.sheets.iter().map(Sheet::rewind_retained_bytes).sum()
+    /// Bytes of this workbook's chunks, string and formula pages, and
+    /// capture-time maps that `live` does not share. Arc identity is the
+    /// comparison, so replacing the live workbook with a clone keeps the
+    /// charge, and freeing a copy drops it.
+    pub fn unshared_cow_bytes(&self, live: &Workbook) -> usize {
+        if std::ptr::eq(self, live) {
+            return 0;
+        }
+        self.sheets.iter().map(|sheet| match live.sheet_by_id(sheet.id) {
+            Some(other) => sheet.unshared_cow_bytes(other),
+            None => sheet.all_cow_bytes(),
+        }).sum()
     }
 
     /// Zero the shared copy meter. A new rewind baseline still shares every
@@ -910,6 +915,10 @@ impl Workbook {
         }
     }
 
+    /// Rebuild the dependency graph from scratch.
+    ///
+    /// Call this after loading a workbook to populate the graph.
+    /// Iterates all formula cells and extracts their references.
     pub fn rebuild_dep_graph(&mut self) {
         self.pending_dynamic_refs.get_mut().clear();
         self.dep_graph = Arc::default();

@@ -112,7 +112,7 @@ impl Spreadsheet {
                 let index = self.sheet_index(cx);
                 self.workbook.update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
                 self.install_structure_layout(id, &history.after);
-                self.history.record_action_with_provenance(UndoAction::TableStructureChanged {
+                self.record_action_with_provenance(cx, UndoAction::TableStructureChanged {
                     sheet_index: index, history: Box::new(history), description: description.clone(),
                 }, None);
                 self.sync_table_view(cx);
@@ -157,7 +157,7 @@ mod tests {
         assert!(unhide.after.hidden_rows.is_empty());
         let mut stack = History::new();
         for h in [history, unhide] {
-            stack.record_action_with_provenance(UndoAction::TableStructureChanged {
+            stack.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
                 sheet_index: 0, history: Box::new(h), description: "Row visibility".into(),
             }, None);
         }
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(history.after.shifted(sheet, &steps).unwrap().hidden_rows, [3].into());
         assert_eq!(deletion.candidate(&deleted, true).unwrap().active_sheet().manual_hidden_rows(), [3].into());
         let mut stack = History::new();
-        stack.record_action_with_provenance(UndoAction::TableStructureChanged {
+        stack.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0, history: Box::new(history), description: "Hide sorted record".into(),
         }, None);
         let preview = stack.build_workbook_before(1, Some(&wb), 100, 10_000).unwrap();
@@ -356,7 +356,7 @@ mod tests {
         assert!(!rows.is_data_row_visible(3));
         assert_eq!(shown.sheet(0).unwrap().table_view_spec(), table_spec.as_ref());
         let mut stack = History::new();
-        stack.record_action_with_provenance(UndoAction::SortApplied {
+        stack.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::SortApplied {
             sheet_index: other,
             previous_row_order: (0..12).collect(),
             new_row_order: rows.row_order().to_vec(),
@@ -364,7 +364,7 @@ mod tests {
             new_sort_state: (0, true),
         }, None);
         for h in [history, unhide] {
-            stack.record_action_with_provenance(UndoAction::TableStructureChanged {
+            stack.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
                 sheet_index: other, history: Box::new(h), description: "Worksheet visibility".into(),
             }, None);
         }

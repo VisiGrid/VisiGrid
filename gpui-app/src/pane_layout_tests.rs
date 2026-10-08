@@ -155,7 +155,7 @@ fn freeze_metadata_preserves_criteria_values_totals_and_history() {
     restore_freeze_panes(&mut wb, sid, (5, 2)).unwrap();
     assert_eq!(wb.revision(), revision);
     let mut history = History::new();
-    history.record_action_with_provenance(action, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action, None);
     for pos in [0, 1] {
         let preview = history
             .build_workbook_before(pos, Some(&base), 100, 10_000)

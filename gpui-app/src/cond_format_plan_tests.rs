@@ -293,7 +293,7 @@ fn grouped_history_preflights_all_rules_and_allows_canonical_hidden_restoration(
         &wb, &group
     ));
     let mut history = History::new();
-    history.record_action_with_provenance(group, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), group, None);
     assert!(history
         .build_workbook_before(1, Some(&wb), 100, 10_000)
         .is_err());
@@ -316,7 +316,7 @@ fn history_rewind_and_json_roundtrip_keep_hidden_rules_and_totals_values() {
         validate_history(&base, &action, direction).unwrap();
     }
     let mut history = History::new();
-    history.record_action_with_provenance(action, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action, None);
     for position in [0, 1] {
         let preview = history
             .build_workbook_before(position, Some(&base), 100, 10_000)

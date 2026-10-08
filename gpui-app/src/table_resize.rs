@@ -392,7 +392,7 @@ mod tests {
         let before = fixture(true);
         let (after, commit) = resize(&before, 7, 4).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableCommit { header_layout: None,
                 sheet_index: 0,
                 commit: Box::new(commit),
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(undone.active_sheet().tables()[0].columns.len(), 3);
         let redone = prepare_resize_replay(&undone, &commit, false).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(UndoAction::TableCommit {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
             header_layout: None, sheet_index: 0, commit: Box::new(commit), description: "Widen Table".into(),
         }, None);
         let preview = history.build_workbook_before(1, Some(&base), 100, 10_000).unwrap();

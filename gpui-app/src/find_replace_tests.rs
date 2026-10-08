@@ -93,7 +93,7 @@ fn replace_all_can_hide_every_match_with_totals_and_sparse_undo_redo_rewind() {
     commit.replay(&mut after, false).unwrap();
     assert_eq!(after.active_sheet().get_display(7, 3), "0");
     let mut history = History::new();
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableCellsChanged {
             sheet_index: 0,
             commit: Box::new(commit),

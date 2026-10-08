@@ -237,7 +237,7 @@ impl Spreadsheet {
             }
             wb.bump_revision_for_structure();
         });
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::Comments {
                 sheet_index,
                 patches: vec![CommentPatch {

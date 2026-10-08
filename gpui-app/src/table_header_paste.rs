@@ -576,7 +576,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableCommit { header_layout: None,
                 sheet_index: 0,
                 commit: Box::new(commit),
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(redone.active_sheet().tables(), after.active_sheet().tables());
         let mut history = History::new();
         for commit in [rename, headers] {
-            history.record_action_with_provenance(UndoAction::TableCommit {
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
                 header_layout: None, sheet_index: 0, commit: Box::new(commit), description: "Rename".into(),
             }, None);
         }

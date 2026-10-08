@@ -243,7 +243,7 @@ mod tests {
             assert_eq!(candidate.active_sheet().table_view_spec(), Some(&spec));
             assert!(commit.is_saved_view_change());
             wb = candidate;
-            history.record_action_with_provenance(
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
                 UndoAction::TableCommit {
                     sheet_index: 0,
                     commit: Box::new(commit.clone()),

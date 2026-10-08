@@ -377,7 +377,7 @@ fn test_multi_edit_applies_once_and_single_undo() {
 
     // Record as single batch (this is what multi-edit does)
     // sheet_index = 0 for this test
-    history.record_batch(0, changes);
+    history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes);
 
     // Verify all 6 cells have the formula
     for (row, col) in selection.iter() {
@@ -440,7 +440,7 @@ fn test_format_coalescing_same_cells_merges() {
         before: CellFormat::default(),
         after: CellFormat { bold: true, ..Default::default() },
     }];
-    history.record_format(0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Second decimal change on same cell within 500ms window
     let patches2 = vec![CellFormatPatch { remove_cell_on_undo: false,
@@ -449,7 +449,7 @@ fn test_format_coalescing_same_cells_merges() {
         before: CellFormat { bold: true, ..Default::default() },
         after: CellFormat { bold: true, italic: true, ..Default::default() },
     }];
-    history.record_format(0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Should have coalesced into single entry
     let entry = history.undo().expect("Should have undo entry");
@@ -481,7 +481,7 @@ fn test_format_coalescing_different_cells_separate() {
         before: CellFormat::default(),
         after: CellFormat { bold: true, ..Default::default() },
     }];
-    history.record_format(0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches1, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Second decimal change on DIFFERENT cell (0,1) within 500ms window
     let patches2 = vec![CellFormatPatch { remove_cell_on_undo: false,
@@ -490,7 +490,7 @@ fn test_format_coalescing_different_cells_separate() {
         before: CellFormat::default(),
         after: CellFormat { bold: true, ..Default::default() },
     }];
-    history.record_format(0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches2, FormatActionKind::DecimalPlaces, "Decimal +".into());
 
     // Should have TWO separate entries because cells are different
     let entry1 = history.undo().expect("Should have first undo entry");
@@ -547,7 +547,7 @@ fn test_format_undo_restores_mixed_state() {
         CellFormatPatch { remove_cell_on_undo: false, row: 1, col: 0, before: before_a2.clone(), after: sheet.get_format(1, 0) },
         CellFormatPatch { remove_cell_on_undo: false, row: 2, col: 0, before: before_a3.clone(), after: sheet.get_format(2, 0) },
     ];
-    history.record_format(0, patches, FormatActionKind::Bold, "Bold on".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::Bold, "Bold on".into());
 
     // Now undo
     let entry = history.undo().expect("Should have undo entry");
@@ -900,7 +900,7 @@ fn apply_ops_with_history(
     }
 
     // Record as single batch (like Lua script commit)
-    history.record_batch(0, changes.clone());
+    history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes.clone());
 
     changes
 }
@@ -1416,7 +1416,7 @@ fn test_fill_handle_undo_single_entry() {
     }
 
     // Record as single batch
-    history.record_batch(0, changes);
+    history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes);
 
     // Verify fill occurred
     assert_eq!(sheet.get_raw(1, 0), "100", "A2 filled");
@@ -3363,7 +3363,7 @@ fn test_format_painter_undo_reverts_multi_cell() {
         }
     }
     assert_eq!(patches.len(), 3, "All 3 cells should change");
-    history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
 
     // Verify formats changed
     for col in 0..3 {
@@ -3447,7 +3447,7 @@ fn test_format_painter_locked_mode_persists() {
             }
         }
         assert_eq!(patches.len(), 3, "Selection A: all 3 cells should change");
-        history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+        history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
 
         // Locked mode: painter stays active (don't clear)
         assert!(painter.is_some(), "Painter should still be active after apply (locked)");
@@ -3471,7 +3471,7 @@ fn test_format_painter_locked_mode_persists() {
             }
         }
         assert_eq!(patches.len(), 3, "Selection B: all 3 cells should change");
-        history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+        history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
     }
 
     // Verify painter still active
@@ -3563,7 +3563,7 @@ fn test_format_painter_applies_to_range() {
 
     // All 6 cells should have been painted
     assert_eq!(patches.len(), 6, "All 6 cells in 3×2 range should change");
-    history.record_format(0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::PasteFormats, "Format Painter".into());
 
     // Verify all 6 cells have the painted format
     for row in 0..3 {
@@ -3931,7 +3931,7 @@ fn test_hide_unhide_rows_undo() {
     for &r in &rows_to_hide {
         hidden_rows.insert(r);
     }
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::RowVisibilityChanged {
             sheet_id,
             rows: rows_to_hide.clone(),

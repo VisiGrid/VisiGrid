@@ -115,7 +115,7 @@ fn comment_history_replays_hidden_records_after_filter_changes_and_rewinds() {
     let mut base = fixture(true);
     let edit = action(3, 2, None, note("Keep with West"));
     let mut history = History::new();
-    history.record_action_with_provenance(edit.clone(), None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), edit.clone(), None);
     let mut wb = base.clone();
     replay(&mut wb, &edit, true).unwrap();
     wb.active_sheet_mut()
@@ -284,7 +284,7 @@ fn missing_history_sheet_and_unsafe_rewind_return_errors() {
         assert!(validate_history(&wb, &missing, forward).is_err());
     }
     let mut history = History::new();
-    history.record_action_with_provenance(action(5, 7, None, note("Unsafe")), None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action(5, 7, None, note("Unsafe")), None);
     assert!(history
         .build_workbook_before(1, Some(&wb), 100, 10_000)
         .is_err());

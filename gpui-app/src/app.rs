@@ -1977,7 +1977,7 @@ impl Spreadsheet {
         } else {
             let old_value = self.sheet(cx).get_raw(row, col);
             if old_value != value {
-                self.history.record_change(self.sheet_index(cx), row, col, old_value, value.to_string());
+                self.record_change(cx, self.sheet_index(cx), row, col, old_value, value.to_string());
                 self.set_cell_value(row, col, value, cx);
                 self.bump_cells_rev();
             }
@@ -3298,7 +3298,7 @@ impl Spreadsheet {
         if old != new {
             // Use SheetId (stable across sheet reorder/delete) instead of index
             let sheet_id = self.cached_sheet_id;
-            self.history.record_action_with_provenance(
+            self.record_action_with_provenance(cx,
                 crate::history::UndoAction::ColumnWidthSet {
                     sheet_id,
                     col,
@@ -3325,7 +3325,7 @@ impl Spreadsheet {
         if old != new {
             // Use SheetId (stable across sheet reorder/delete) instead of index
             let sheet_id = self.cached_sheet_id;
-            self.history.record_action_with_provenance(
+            self.record_action_with_provenance(cx,
                 crate::history::UndoAction::RowHeightSet {
                     sheet_id,
                     row,
@@ -3628,9 +3628,9 @@ impl Spreadsheet {
         if !actions.is_empty() {
             let count = actions.len();
             if count == 1 {
-                self.history.record_action_with_provenance(actions.remove(0), None);
+                self.record_action_with_provenance(cx, actions.remove(0), None);
             } else {
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     crate::history::UndoAction::Group {
                         actions,
                         description: "Auto-fit column widths".to_string(),
@@ -4083,7 +4083,7 @@ impl Spreadsheet {
         let (row, col) = self.view_state.active_cell();
         let old_value = self.sheet(cx).get_raw(row, col);
         self.set_cell_value(row, col, &date_str, cx);
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, date_str);
+        self.record_change(cx, self.sheet_index(cx), row, col, old_value, date_str);
         self.is_modified = true;
         self.status_message = Some("Date inserted".to_string());
         cx.notify();
@@ -4097,7 +4097,7 @@ impl Spreadsheet {
         let (row, col) = self.view_state.active_cell();
         let old_value = self.sheet(cx).get_raw(row, col);
         self.set_cell_value(row, col, &time_str, cx);
-        self.history.record_change(self.sheet_index(cx), row, col, old_value, time_str);
+        self.record_change(cx, self.sheet_index(cx), row, col, old_value, time_str);
         self.is_modified = true;
         self.status_message = Some("Time inserted".to_string());
         cx.notify();

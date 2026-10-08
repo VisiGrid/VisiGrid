@@ -322,8 +322,8 @@ impl Spreadsheet {
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.install_structure_layout(id, &history.after);
         self.finish_table_structure(index, first.axis, count, cx);
-        self.history
-            .record_named_range_action(UndoAction::TableStructureChanged {
+        self
+            .record_named_range_action(cx, UndoAction::TableStructureChanged {
                 sheet_index: index,
                 history: Box::new(history),
                 description: description.clone(),
@@ -744,18 +744,18 @@ mod tests {
         let (_, commit) = b.prepare_guarded_structure(0, steps.clone()).unwrap();
         let after = layout.shifted(b.active_sheet(), &steps).unwrap();
         let mut h = History::new();
-        h.record_named_range_action(UndoAction::ColumnWidthSet {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::ColumnWidthSet {
             sheet_id: b.active_sheet_id(),
             col: 5,
             old: None,
             new: Some(120.0),
         });
-        h.record_named_range_action(UndoAction::ColVisibilityChanged {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::ColVisibilityChanged {
             sheet_id: b.active_sheet_id(),
             cols: vec![6],
             hidden: true,
         });
-        h.record_named_range_action(UndoAction::TableStructureChanged {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
                 source_frozen: None,
@@ -765,7 +765,7 @@ mod tests {
             }),
             description: "Insert column".into(),
         });
-        h.record_named_range_action(UndoAction::ColVisibilityChanged {
+        h.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::ColVisibilityChanged {
             sheet_id: b.active_sheet_id(),
             cols: vec![7],
             hidden: false,
@@ -796,7 +796,7 @@ mod tests {
         before.heights.insert(9, 40.0);
         let after = before.shifted(b.active_sheet(), &steps).unwrap();
         let mut history = History::new();
-        history.record_named_range_action(UndoAction::TableStructureChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0,
             history: Box::new(TableStructureHistory {
                 source_frozen: None,
@@ -987,7 +987,7 @@ mod metadata_tests {
         assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
         assert_eq!(after.active_sheet().get_raw(4, 3), "10");
         let mut history = crate::history::History::new();
-        history.record_action_with_provenance(crate::history::UndoAction::TableStructureChanged {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), crate::history::UndoAction::TableStructureChanged {
             sheet_index: 0, description: "Insert totals column".into(),
             history: Box::new(TableStructureHistory { commit: commit.clone(), source_frozen: None,
                 before: StructureLayout::default(), after: StructureLayout::default() }),
@@ -1021,7 +1021,7 @@ mod metadata_tests {
         assert_eq!(after.active_sheet().get_display(4, 3), "0");
         assert_eq!(after.active_sheet().table_view_spec(), spec.as_ref());
         let mut history = crate::history::History::new();
-        history.record_named_range_action(UndoAction::TableStructureChanged {
+        history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableStructureChanged {
             sheet_index: 0, description: "Delete visible records".into(),
             history: Box::new(TableStructureHistory { commit: commit.clone(), source_frozen: None,
                 before: StructureLayout::default(), after: StructureLayout::default() }),

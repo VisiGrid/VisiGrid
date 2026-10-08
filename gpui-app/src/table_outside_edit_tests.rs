@@ -291,7 +291,7 @@ fn rewind_rebuilds_all_sheet_views_after_an_outside_edit() {
     let writes = vec![TableCellWrite::value(0, 0, "-1".into())];
     let after = prepare_table_writes(&base, 1, &writes).unwrap();
     let mut history = History::new();
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableCellsChanged {
             sheet_index: 1,
             commit: Box::new(commit(&base, &after, 1, &writes)),
@@ -376,7 +376,7 @@ fn merged_title_edits_support_undo_redo_and_rewind_with_table_criteria() {
     assert!(after.restore_cell_tracked(1, 8, 1, None).is_err());
     assert_eq!(records(&after), records(&before));
     let mut history = History::new();
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableCellsChanged {
             sheet_index: 1,
             commit: Box::new(edit),

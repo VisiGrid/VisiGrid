@@ -250,7 +250,7 @@ impl Spreadsheet {
                 self.view_state.select_cell(row, write.col);
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     UndoAction::TableAppend {
                         sheet_index: index,
                         history: Box::new(history),
@@ -320,7 +320,7 @@ impl Spreadsheet {
                 self.view_state.additional_selections.clear();
                 self.tab_chain_origin_col = Some(range.start_col);
                 self.ensure_visible(cx);
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     UndoAction::TableAppend {
                         sheet_index: index,
                         history: Box::new(history),
@@ -422,7 +422,7 @@ mod tests {
             assert_eq!(undone.active_sheet().get_raw(6, 3), before.active_sheet().get_raw(6, 3));
             assert_eq!(entry.replay(&undone, false).unwrap().active_sheet().manual_hidden_rows(), [7, 8].into());
             let mut history = History::new();
-            history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with hidden footer".into() }, None);
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with hidden footer".into() }, None);
             for (end, footer) in [(0, 7), (1, 8)] {
                 let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
                 assert_eq!(preview.workbook.table(id).unwrap().1.totals_row(), Some(footer));
@@ -458,7 +458,7 @@ mod tests {
         let redone = entry.replay(&undone, false).unwrap();
         assert_eq!(redone.active_sheet().get_raw(0, 0), "=D9");
         let mut history = History::new();
-        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with linked totals".into() }, None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with linked totals".into() }, None);
         for (end, reference) in [(0, "=D8"), (1, "=D9")] {
             let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
             assert_eq!(preview.workbook.active_sheet().get_raw(0, 0), reference);
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(undone.active_sheet().get_raw(0, 0), before.active_sheet().get_raw(0, 0));
         assert_eq!(redone.active_sheet().get_raw(0, 0), after.active_sheet().get_raw(0, 0));
         let mut history = History::new();
-        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with dynamic totals references".into() }, None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with dynamic totals references".into() }, None);
         for (end, expected) in [(0, &before), (1, &after)] {
             let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
             let sheet = preview.workbook.active_sheet();
@@ -514,7 +514,7 @@ mod tests {
         let redone = entry.replay(&undone, false).unwrap();
         assert!(redone.active_sheet().validations.has_validation(8, 3));
         let mut history = History::new();
-        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with footer rules".into() }, None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with footer rules".into() }, None);
         for (end, row) in [(0, 7), (1, 8)] {
             let preview = history.build_workbook_before(end, Some(&before), 100, 10_000).unwrap();
             let sheet = preview.workbook.active_sheet();
@@ -540,7 +540,7 @@ mod tests {
         let redone = entry.replay(&restored, false).unwrap();
         assert_eq!(redone.active_sheet().get_raw(8, 3), after.active_sheet().get_raw(8, 3));
         let mut history = History::new();
-        history.record_action_with_provenance(UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with totals".into() }, None);
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableAppend { sheet_index: 0, history: Box::new(entry), description: "Append with totals".into() }, None);
         let preview = history.build_workbook_before(1, Some(&before), 100, 10_000).unwrap();
         assert_eq!(preview.workbook.table(id).unwrap().1.totals_row(), Some(8));
         assert_eq!(preview.workbook.active_sheet().get_raw(4, 3), "999");
@@ -829,7 +829,7 @@ mod tests {
         let (_, commit) =
             prepare_append(&before, id, Some(TableCellWrite::value(6, 3, "15".into()))).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableAppend {
                 sheet_index: 0,
                 history: Box::new(commit),
@@ -1111,7 +1111,7 @@ mod tests {
         let (before, id) = book(true);
         let (after, commit) = typed(&before, TableCellWrite::value(7, 1, "West".into())).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableAppend {
                 sheet_index: 0,
                 history: Box::new(commit),

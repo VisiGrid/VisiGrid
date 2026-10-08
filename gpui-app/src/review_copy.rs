@@ -186,7 +186,7 @@ impl Spreadsheet {
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.install_structure_layout(history.sheet.id, &history.layout);
         self.finish_review_copy_view(history.sheet.id, cx);
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::ReviewCopy {
                 history: Box::new(history),
             },
@@ -449,7 +449,7 @@ mod tests {
         let (after, h) = copy(&before, &prepared);
         let index = h.index;
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::ReviewCopy {
                 history: Box::new(h),
             },
@@ -592,7 +592,7 @@ mod tests {
         let (after, copy) = prepare_copy(&before, &prepared, &shifted, (0, 0), "Result").unwrap();
         let index = copy.index;
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableStructureChanged {
                 sheet_index: 0,
                 history: Box::new(TableStructureHistory {
@@ -605,7 +605,7 @@ mod tests {
             },
             None,
         );
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::ReviewCopy {
                 history: Box::new(copy),
             },
@@ -653,7 +653,7 @@ mod tests {
             let redone = h.replay(&undone, false).unwrap();
             assert_eq!(signature(&redone), signature(&after));
             let mut history = History::new();
-            history.record_action_with_provenance(UndoAction::ReviewCopy { history: Box::new(h) }, None);
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::ReviewCopy { history: Box::new(h) }, None);
             let preview = history.build_workbook_before(1, Some(&before), 100, 10_000).unwrap();
             assert_eq!(signature(&preview.workbook), signature(&after));
             let copied = after.sheet(index).unwrap().tables()[0].id;

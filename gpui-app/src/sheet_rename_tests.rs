@@ -125,7 +125,7 @@ fn rename_rewrites_hidden_calculated_rules_totals_and_validation_with_history() 
     assert_eq!(wb.active_sheet().get_raw(4, 3), "=[@Amount]*Inputs!$A$1");
     commit.replay(&mut wb, false).unwrap();
     let mut history = History::new();
-    history.record_named_range_action(UndoAction::TableBatchChanged {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
         sheet_index: 0,
         commit: Box::new(commit),
         description: "Rename Inputs".into(),

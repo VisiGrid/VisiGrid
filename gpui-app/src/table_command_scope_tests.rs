@@ -143,7 +143,7 @@ fn metadata_rewind_preserves_filtered_records_and_restores_the_other_sheet() {
         description: "Style report".into(),
     };
     assert!(metadata_history_allowed(&base, &action));
-    history.record_action_with_provenance(action, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action, None);
     for position in [0, 1] {
         let result = history
             .build_workbook_before(position, Some(&base), 100, 10_000)
@@ -197,8 +197,8 @@ fn freeze_and_structural_history_rewind_together_on_an_unfiltered_sheet() {
     let after = layout.shifted(wb.sheet(1).unwrap(), &steps).unwrap();
     let (_, commit) = wb.prepare_guarded_structure(1, steps).unwrap();
     let mut history = History::new();
-    history.record_action_with_provenance(freeze(), None);
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), freeze(), None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableStructureChanged {
             sheet_index: 1,
             history: Box::new(TableStructureHistory {
@@ -211,7 +211,7 @@ fn freeze_and_structural_history_rewind_together_on_an_unfiltered_sheet() {
         },
         None,
     );
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::FreezePanesChanged {
             sheet_id: SheetId(99),
             old_frozen_rows: 2,
@@ -310,7 +310,7 @@ fn styling_a_cleared_view_does_not_block_edits_in_another_filtered_table() {
         patches[0].row = 3;
         patches[0].col = 6; // Beside the cleared Table's body.
     }
-    history.record_action_with_provenance(formatting, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), formatting, None);
     let styled = history
         .build_workbook_before(1, Some(&wb), 100, 10_000)
         .unwrap()

@@ -207,7 +207,7 @@ fn other_sheet_fill_refreshes_filters_and_history_rewind() {
     assert_eq!(records(&a), vec![5, 3, 6]);
     h.replay(&mut a, false).unwrap();
     let mut history = History::new();
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableCellsChanged {
             sheet_index: 1,
             commit: Box::new(h),

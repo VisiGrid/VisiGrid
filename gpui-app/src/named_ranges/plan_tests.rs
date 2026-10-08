@@ -132,7 +132,7 @@ fn create_delete_description_recalculate_atomically_and_replay() {
         base.active_sheet().table_view_spec()
     );
     let mut history = History::new();
-    history.record_named_range_action(UndoAction::TableBatchChanged {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
         sheet_index: 0,
         commit: Box::new(commit),
         description: "Create name".into(),

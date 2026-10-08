@@ -177,12 +177,17 @@ impl Spreadsheet {
         // The fallback clone is only needed when no rewind baseline was captured;
         // borrowing it beside the mutable history call would overlap fields.
         let fallback = if self.history.has_rewind_base() { None } else { self.base_workbook.clone() };
-        let build_result = self.history.build_workbook_before(
+        let built = self.history.build_workbook_before(
             history_index,
             fallback.as_ref(),
             MAX_PREVIEW_REPLAY,
             MAX_PREVIEW_BUILD_MS,
-        ).map_err(|e| match e {
+        );
+        {
+            let live = self.workbook.clone();
+            self.history.observe_live(live.read(cx));
+        }
+        let build_result = built.map_err(|e| match e {
             crate::history::PreviewBuildError::InvalidIndex => "Invalid history index".to_string(),
             crate::history::PreviewBuildError::TooManyActions(n) => {
                 format!("Preview unavailable — history too large to replay (limit: {} actions)", n)
@@ -307,9 +312,14 @@ impl Spreadsheet {
         // Build first: a refused scrub must not replace the current snapshot
         // or disturb the live projection saved when Space was first pressed.
         let fallback = if self.history.has_rewind_base() { None } else { self.base_workbook.clone() };
-        match self.history.build_workbook_before(
+        let built = self.history.build_workbook_before(
             new_idx, fallback.as_ref(), MAX_PREVIEW_REPLAY, MAX_PREVIEW_BUILD_MS,
-        ).and_then(|build| {
+        );
+        {
+            let live = self.workbook.clone();
+            self.history.observe_live(live.read(cx));
+        }
+        match built.and_then(|build| {
             self.validate_preview_layout(&build.workbook, &build.view_state)
                 .map_err(crate::history::PreviewBuildError::InvariantViolation)?;
             Ok(build)
@@ -455,7 +465,9 @@ impl Spreadsheet {
         self.clipboard_visual_range = None;
 
         // 3. Truncate history and append audit entry
+        let live = self.workbook.clone();
         self.history.truncate_and_append_rewind(
+            live.read(cx),
             plan.truncate_at,
             target_entry_id,
             target_index,

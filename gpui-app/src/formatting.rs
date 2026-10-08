@@ -94,7 +94,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             self.workbook.update(cx, |wb, _| plan::apply(wb, index, &patches, true));
-            self.history.record_format(index, patches, kind, description.into());
+            self.record_format(cx, index, patches, kind, description.into());
             self.bump_cells_rev();
             self.is_modified = true;
             self.request_title_refresh(cx);
@@ -286,7 +286,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Bold {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Bold, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Bold, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -314,7 +314,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Italic {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Italic, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Italic, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -342,7 +342,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Underline {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Underline, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Underline, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -370,7 +370,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Strikethrough {}", if value { "on" } else { "off" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Strikethrough, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Strikethrough, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -399,7 +399,7 @@ impl Spreadsheet {
         if count > 0 {
             let font_name = font.as_deref().unwrap_or("default");
             let desc = format!("Font '{}'", font_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Font, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Font, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -434,7 +434,7 @@ impl Spreadsheet {
                 Alignment::CenterAcrossSelection => "Center Across",
             };
             let desc = format!("Align {}", align_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Alignment, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Alignment, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -585,7 +585,7 @@ impl Spreadsheet {
             format!("{n} merged titles")
         };
         let description = format!("Convert {what} to Center Across");
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::Group {
                 actions: vec![
                     UndoAction::SetMerges {
@@ -643,7 +643,7 @@ impl Spreadsheet {
                 VerticalAlignment::Bottom => "Bottom",
             };
             let desc = format!("V-Align {}", valign_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::VerticalAlignment, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::VerticalAlignment, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -675,7 +675,7 @@ impl Spreadsheet {
                 TextOverflow::Overflow => "Overflow",
             };
             let desc = overflow_name.to_string();
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::TextOverflow, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::TextOverflow, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -722,7 +722,7 @@ impl Spreadsheet {
                 NumberFormat::Custom(_) => "Custom",
             };
             let desc = format!("{} format", format_name);
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::NumberFormat, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::NumberFormat, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -799,7 +799,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = format!("Decimal {}", if delta > 0 { "+" } else { "-" });
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::DecimalPlaces, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::DecimalPlaces, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -827,7 +827,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = if color.is_some() { "Background color" } else { "Clear background" };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::BackgroundColor, desc.to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::BackgroundColor, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -859,7 +859,7 @@ impl Spreadsheet {
             } else {
                 "Clear font size".to_string()
             };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontSize, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::FontSize, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -887,7 +887,7 @@ impl Spreadsheet {
         let count = patches.len();
         if count > 0 {
             let desc = if color.is_some() { "Text color" } else { "Clear text color" };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::FontColor, desc.to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::FontColor, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -925,7 +925,7 @@ impl Spreadsheet {
             } else {
                 format!("Cell Style: {}", style.label())
             };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::CellStyle, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::CellStyle, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -1027,7 +1027,7 @@ impl Spreadsheet {
         }
         let count = patches.len();
         if count > 0 {
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::PasteFormats, "Format Painter".to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::PasteFormats, "Format Painter".to_string());
             self.is_modified = true;
             self.status_message = Some(format!("Format Painter → {} cell{}", count, if count == 1 { "" } else { "s" }));
         } else {
@@ -1069,7 +1069,7 @@ impl Spreadsheet {
             // Rescan border flag: clearing formats may have removed the only bordered cells
             self.active_sheet_mut(cx, |s| s.scan_border_flag());
             let desc = "Clear Formatting".to_string();
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::ClearFormatting, desc.clone());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::ClearFormatting, desc.clone());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -1303,7 +1303,7 @@ impl Spreadsheet {
                 BorderApplyMode::Right => "Right border",
                 BorderApplyMode::Clear => "Clear borders",
             };
-            self.history.record_format(self.sheet_index(cx), patches, FormatActionKind::Border, desc.to_string());
+            self.record_format(cx, self.sheet_index(cx), patches, FormatActionKind::Border, desc.to_string());
             self.is_modified = true;
             self.status_message = Some(format!("{} → {} cell{}", desc, count, if count == 1 { "" } else { "s" }));
         }
@@ -1467,7 +1467,7 @@ impl Spreadsheet {
         );
 
         // Record undo
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::SetMerges {
                 sheet_index,
                 before,
@@ -1537,7 +1537,7 @@ impl Spreadsheet {
         let count = origins_to_remove.len();
 
         // Record undo
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::SetMerges {
                 sheet_index,
                 before,

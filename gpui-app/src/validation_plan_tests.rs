@@ -58,7 +58,7 @@ fn imported_relative_rules_keep_their_origin_through_filtered_edit_and_rewind() 
         );
     }
     let mut history = History::new();
-    history.record_action_with_provenance(action(commit.clone()), None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action(commit.clone()), None);
     let replay = history
         .build_workbook_before(1, Some(&base), 100, 10000)
         .unwrap()
@@ -273,7 +273,7 @@ fn grouped_validation_preflight_tracks_sequence_and_refuses_a_late_failure() {
     assert!(validate_history(&base, &bad, true).is_err());
     assert_eq!(base.active_sheet().validations, snapshot);
     let mut history = History::new();
-    history.record_action_with_provenance(bad, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), bad, None);
     assert!(history
         .build_workbook_before(1, Some(&base), 100, 10_000)
         .is_err());
@@ -301,7 +301,7 @@ fn replay_and_rewind_keep_targets_after_criteria_changes_and_save_reopen() {
         .unwrap();
     let edit = action(commit.clone());
     let mut history = History::new();
-    history.record_action_with_provenance(edit.clone(), None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), edit.clone(), None);
     let preview = history
         .build_workbook_before(1, Some(&base), 100, 10_000)
         .unwrap()

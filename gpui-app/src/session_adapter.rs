@@ -894,7 +894,7 @@ impl Spreadsheet {
         if outcome.response.error.is_none() && outcome.response.applied > 0 {
             for (sheet_idx, changes) in &outcome.value_changes {
                 if !changes.is_empty() {
-                    self.history.record_batch_from(
+                    self.record_batch_from(cx,
                         *sheet_idx,
                         changes
                             .iter()
@@ -911,7 +911,7 @@ impl Spreadsheet {
             }
             for (sheet_idx, patches) in &outcome.format_patches {
                 if !patches.is_empty() {
-                    self.history.record_format_from(
+                    self.record_format_from(cx,
                         *sheet_idx,
                         patches
                             .iter()
@@ -1114,8 +1114,8 @@ impl Spreadsheet {
                 match result {
                     Ok(desc) => {
                         if let Some(client) = client.clone() {
-                            self.history
-                                .retag_last_source(MutationSource::Agent { client });
+                            self
+                                .retag_last_source(cx, MutationSource::Agent { client });
                         }
                         desc
                     }
@@ -1145,8 +1145,8 @@ impl Spreadsheet {
                             match self.session_refresh_pivot(id, cx) {
                                 Ok(d) => {
                                     if let Some(client) = client.clone() {
-                                        self.history
-                                            .retag_last_source(MutationSource::Agent { client });
+                                        self
+                                            .retag_last_source(cx, MutationSource::Agent { client });
                                     }
                                     done.push(d);
                                 }
@@ -1190,8 +1190,8 @@ impl Spreadsheet {
         // record one; sheet rename records its agent source at publication).
         if row_col_op {
             if let Some(client) = client {
-                self.history
-                    .retag_last_source(MutationSource::Agent { client });
+                self
+                    .retag_last_source(cx, MutationSource::Agent { client });
             }
         }
 

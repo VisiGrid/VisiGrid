@@ -37,8 +37,10 @@ thread_local! {
 }
 
 /// Counts bytes `Arc::make_mut` copies while this meter is entered. A normal
-/// clone starts a fresh meter. Rewind shares the live workbook's meter, so
-/// each later copy on either side is added to the same total.
+/// clone starts a fresh meter, so rewind does not read it: a workbook
+/// replacement would drop the total. The budget compares baseline and live
+/// arcs instead, and this counter stays so a copy is still measurable on the
+/// workbook that made it.
 #[derive(Debug)]
 struct CowMeter(Arc<AtomicUsize>);
 
@@ -54,7 +56,6 @@ struct CowGuard;
 
 impl CowMeter {
     fn share(&self) -> Self { Self(Arc::clone(&self.0)) }
-    fn get(&self) -> usize { self.0.load(Ordering::Relaxed) }
     fn reset(&self) { self.0.store(0, Ordering::Relaxed); }
     fn enter(&self) -> CowGuard {
         COW_METER.with(|stack| stack.borrow_mut().push(Arc::clone(&self.0)));
@@ -150,6 +151,18 @@ impl<T: Clone> Paged<T> {
     fn iter(&self) -> impl Iterator<Item = &T> {
         self.pages.iter().flat_map(|p| p.iter())
     }
+}
+
+/// Bytes of `baseline` pages whose allocation `live` does not still hold.
+fn unshared_paged<T>(baseline: &Paged<T>, live: &Paged<T>, bytes: impl Fn(&[T]) -> usize) -> usize {
+    let live_pages: std::collections::HashSet<usize> = live.pages.iter().map(|page| Arc::as_ptr(page) as usize).collect();
+    baseline.pages.iter().fold(0, |total, page| {
+        if live_pages.contains(&(Arc::as_ptr(page) as usize)) {
+            total
+        } else {
+            total.saturating_add(bytes(&page[..]))
+        }
+    })
 }
 
 #[inline]
@@ -761,8 +774,41 @@ impl ColumnStore {
         self.cow = other.cow.share();
     }
 
-    pub(crate) fn cow_bytes(&self) -> usize {
-        self.cow.get()
+    /// Bytes of chunks and pages this store holds that `live` does not. The
+    /// arc addresses are the comparison, so the total survives a clone that
+    /// replaces either workbook and drops when the allocation is freed.
+    pub(crate) fn unshared_bytes(&self, live: &ColumnStore) -> usize {
+        if std::ptr::eq(self, live) {
+            return 0;
+        }
+        let live_chunks: std::collections::HashSet<usize> = live.columns.iter()
+            .flat_map(|column| column.chunks.iter().map(|(_, chunk)| Arc::as_ptr(chunk) as usize))
+            .collect();
+        let mut total = 0usize;
+        for column in &self.columns {
+            for (_, chunk) in &column.chunks {
+                if !live_chunks.contains(&(Arc::as_ptr(chunk) as usize)) {
+                    total = total.saturating_add(chunk_bytes(chunk));
+                }
+            }
+        }
+        total = total.saturating_add(unshared_paged(&self.strings.entries, &live.strings.entries, string_page_bytes));
+        if !Arc::ptr_eq(&self.strings.index, &live.strings.index) {
+            total = total.saturating_add(index_bytes(&self.strings.index));
+        }
+        total = total.saturating_add(unshared_paged(&self.formulas.entries, &live.formulas.entries, formula_page_bytes));
+        let baseline_values = self.formulas.values.borrow();
+        let live_values = live.formulas.values.borrow();
+        total = total.saturating_add(unshared_paged(&baseline_values, &live_values, value_page_bytes));
+        drop(baseline_values);
+        drop(live_values);
+        if !Arc::ptr_eq(&self.formats, &live.formats) {
+            total = total.saturating_add(format_table_bytes(&self.formats));
+        }
+        if !Arc::ptr_eq(&self.extras, &live.extras) {
+            total = total.saturating_add(extras_bytes(&self.extras));
+        }
+        total
     }
 
     pub(crate) fn reset_cow(&self) {

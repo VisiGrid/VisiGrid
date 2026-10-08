@@ -50,13 +50,13 @@ fn sheet_lifecycle_preserves_rules_criteria_and_history_across_input_deletion() 
         base.active_sheet().table_view_spec()
     );
     let mut history = History::new();
-    history.record_named_range_action(UndoAction::TableBatchChanged {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
         sheet_index: 0,
         commit: Box::new(delete.clone()),
         description: "Delete Inputs".into(),
     });
     let (added, add) = candidate.prepare_sheet_add(Some("New Input")).unwrap();
-    history.record_named_range_action(UndoAction::TableBatchChanged {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
         sheet_index: 0,
         commit: Box::new(add.clone()),
         description: "Add new input".into(),
@@ -160,7 +160,7 @@ fn sheet_lifecycle_rewind_keeps_prior_view_history_on_its_sheet() {
     let mut history = History::new();
     let mut order: Vec<_> = (0..10).collect();
     order.swap(0, 1);
-    history.record_named_range_action(UndoAction::SortApplied {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::SortApplied {
         sheet_index: 1,
         previous_row_order: (0..10).collect(),
         previous_sort_state: None,
@@ -168,7 +168,7 @@ fn sheet_lifecycle_rewind_keeps_prior_view_history_on_its_sheet() {
         new_sort_state: (0, true),
     });
     let (_, delete) = base.prepare_sheet_delete(SheetId(10)).unwrap();
-    history.record_named_range_action(UndoAction::TableBatchChanged {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
         sheet_index: 0,
         commit: Box::new(delete),
         description: "Delete first sheet".into(),

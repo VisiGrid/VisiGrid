@@ -109,7 +109,7 @@ impl Spreadsheet {
                 mode: FillMode::Both,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
 
@@ -210,7 +210,7 @@ impl Spreadsheet {
                 mode: FillMode::Both,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
 
@@ -390,7 +390,7 @@ impl Spreadsheet {
         self.end_batch_and_broadcast(cx);
 
         if !changes.is_empty() {
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, None);
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, None);
             self.bump_cells_rev();
             self.is_modified = true;
             self.maybe_smoke_recalc(cx);
@@ -856,7 +856,7 @@ impl Spreadsheet {
                 mode: FillMode::Both,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
@@ -1030,7 +1030,7 @@ impl Spreadsheet {
                 mode: FillMode::Both,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 

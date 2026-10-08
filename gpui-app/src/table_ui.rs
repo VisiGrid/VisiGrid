@@ -713,7 +713,7 @@ impl Spreadsheet {
     ) {
         self.update_header_insertion_view(&commit, false, cx);
         let conversion = commit.is_conversion();
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             UndoAction::TableCommit { header_layout: None,
                 sheet_index: self
                     .wb(cx)
@@ -1075,7 +1075,7 @@ mod tests {
         after.apply_table_commit(&commit, true).unwrap();
         after.apply_table_commit(&commit, false).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(UndoAction::TableCommit {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
             sheet_index: other, commit: Box::new(commit), header_layout: None,
             description: "Convert hidden totals to range".into(),
         }, None);

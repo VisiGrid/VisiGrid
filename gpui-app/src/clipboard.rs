@@ -689,7 +689,7 @@ impl Spreadsheet {
             self.wb_mut(cx, |wb| wb.bump_revision_for_structure());
             actions.push(UndoAction::Comments { sheet_index, patches: comment_patches, description: "Cut comments".into() });
         }
-        self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Cut".into() }, None);
+        self.record_action_with_provenance(cx, UndoAction::Group { actions, description: "Cut".into() }, None);
 
         self.bump_cells_rev();  // Invalidate cell search cache
         self.is_modified = true;
@@ -965,7 +965,7 @@ impl Spreadsheet {
                     if !format_patches.is_empty() {
                         actions.push(UndoAction::Format { sheet_index, patches: format_patches, kind: FormatActionKind::PasteFormats, description: "Paste formats".into() });
                     }
-                    self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
+                    self.record_action_with_provenance(cx, UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                     self.bump_cells_rev();
                     self.is_modified = true;
                 }
@@ -1200,7 +1200,7 @@ impl Spreadsheet {
                 if !format_patches.is_empty() {
                     actions.push(UndoAction::Format { sheet_index, patches: format_patches, kind: FormatActionKind::PasteFormats, description: "Paste formats".into() });
                 }
-                self.history.record_action_with_provenance(UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
+                self.record_action_with_provenance(cx, UndoAction::Group { actions, description: "Paste".into() }, Some(provenance));
                 self.bump_cells_rev();
                 self.is_modified = true;
             }
@@ -1522,7 +1522,7 @@ impl Spreadsheet {
                 mode: PasteMode::Values,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
 
@@ -1808,7 +1808,7 @@ impl Spreadsheet {
                 mode: PasteMode::Formulas,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, Some(provenance));
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, Some(provenance));
             self.bump_cells_rev();
             self.is_modified = true;
         }
@@ -1928,7 +1928,7 @@ impl Spreadsheet {
                 mode: PasteMode::Formats,
             }.to_provenance(&self.sheet(cx).name);
 
-            self.history.record_format_with_provenance(
+            self.record_format_with_provenance(cx,
                 self.sheet_index(cx),
                 format_patches,
                 FormatActionKind::PasteFormats,
@@ -2045,7 +2045,7 @@ impl Spreadsheet {
             } else {
                 None  // Discontiguous selection - no provenance
             };
-            self.history.record_batch_with_provenance(self.sheet_index(cx), changes, provenance);
+            self.record_batch_with_provenance(cx, self.sheet_index(cx), changes, provenance);
             self.bump_cells_rev();  // Invalidate cell search cache
             self.is_modified = true;
         }

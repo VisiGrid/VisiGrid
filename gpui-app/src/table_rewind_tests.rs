@@ -14,7 +14,7 @@ fn record_cells(history: &mut History, wb: &mut Workbook, writes: Vec<TableCellW
         after.active_sheet(),
         writes.iter().map(|w| (w.row, w.col)),
     );
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableCellsChanged {
             sheet_index: 0,
             commit: Box::new(commit),
@@ -31,7 +31,7 @@ fn record_view(
     spec: Option<visigrid_engine::table_view::TableViewSpec>,
 ) {
     let commit = wb.set_table_view_spec(SheetId(7), spec).unwrap();
-    history.record_action_with_provenance(
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
         UndoAction::TableViewChanged {
             sheet_index: 0,
             commit: Box::new(commit),
@@ -181,7 +181,7 @@ fn later_rewind_replays_retained_prefix_and_skips_audit_without_double_edits() {
     let preview = build(&mut history, &base, 1);
     let id = history.entry_at(1).unwrap().id;
     wb.restore_snapshot_monotonic(&preview.workbook);
-    history.truncate_and_append_rewind(1, id, 1, "Edit".into(), 1, 0);
+    history.truncate_and_append_rewind(&wb, 1, id, 1, "Edit".into(), 1, 0);
     record_cells(
         &mut history,
         &mut wb,

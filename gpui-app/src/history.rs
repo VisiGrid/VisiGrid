@@ -939,13 +939,14 @@ impl History {
     }
 
     /// Record a single cell value change (human source)
-    pub fn record_change(&mut self, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
-        self.record_change_with_source(sheet_index, row, col, old_value, new_value, MutationSource::Human);
+    pub fn record_change(&mut self, live: &Workbook, sheet_index: usize, row: usize, col: usize, old_value: String, new_value: String) {
+        self.record_change_with_source(live, sheet_index, row, col, old_value, new_value, MutationSource::Human);
     }
 
     /// Record a single cell value change with explicit source
     pub fn record_change_with_source(
         &mut self,
+        live: &Workbook,
         sheet_index: usize,
         row: usize,
         col: usize,
@@ -968,41 +969,42 @@ impl History {
             provenance: None,  // Single cell edits don't need Lua provenance
             source,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record multiple cell value changes as a single undoable operation
-    pub fn record_batch(&mut self, sheet_index: usize, changes: Vec<CellChange>) {
-        self.record_batch_with_provenance(sheet_index, changes, None);
+    pub fn record_batch(&mut self, live: &Workbook, sheet_index: usize, changes: Vec<CellChange>) {
+        self.record_batch_with_provenance(live, sheet_index, changes, None);
     }
 
     /// Re-tag the most recent undo entry's source. Used after routing a
     /// session client's edit through a normal GUI mutation path.
-    pub fn retag_last_source(&mut self, source: MutationSource) {
+    pub fn retag_last_source(&mut self, live: &Workbook, source: MutationSource) {
         if let Some(entry) = self.undo_stack.last_mut() {
             entry.source = source;
             self.entry_bytes.remove(&entry.id);
-            self.enforce_byte_budget();
+            self.enforce_byte_budget(live);
         }
     }
 
     /// Record a value batch attributed to a specific source (session clients).
-    pub fn record_batch_from(&mut self, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
-        self.record_batch_with_provenance(sheet_index, changes, None);
-        self.retag_last_source(source);
+    pub fn record_batch_from(&mut self, live: &Workbook, sheet_index: usize, changes: Vec<CellChange>, source: MutationSource) {
+        self.record_batch_with_provenance(live, sheet_index, changes, None);
+        self.retag_last_source(live, source);
     }
 
     /// Record a format batch attributed to a specific source (session clients).
     pub fn record_format_from(
         &mut self,
+        live: &Workbook,
         sheet_index: usize,
         patches: Vec<CellFormatPatch>,
         kind: FormatActionKind,
         description: String,
         source: MutationSource,
     ) {
-        self.record_format(sheet_index, patches, kind, description);
-        self.retag_last_source(source);
+        self.record_format(live, sheet_index, patches, kind, description);
+        self.retag_last_source(live, source);
     }
 
     /// Source of the entry that `undo()` would revert next.
@@ -1016,7 +1018,7 @@ impl History {
     }
 
     /// Record multiple cell value changes with optional Lua provenance
-    pub fn record_batch_with_provenance(&mut self, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<Provenance>) {
+    pub fn record_batch_with_provenance(&mut self, live: &Workbook, sheet_index: usize, changes: Vec<CellChange>, provenance: Option<Provenance>) {
         if changes.is_empty() {
             return;
         }
@@ -1029,11 +1031,11 @@ impl History {
             provenance,
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record format changes with coalescing support
-    pub fn record_format(&mut self, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
+    pub fn record_format(&mut self, live: &Workbook, sheet_index: usize, patches: Vec<CellFormatPatch>, kind: FormatActionKind, description: String) {
         if patches.is_empty() {
             return;
         }
@@ -1058,7 +1060,7 @@ impl History {
                         // Clear redo stack since we modified history
                         self.entry_bytes.remove(&last.id);
                         self.redo_stack.clear();
-                        self.enforce_byte_budget();
+                        self.enforce_byte_budget(live);
                         return;
                     }
                 }
@@ -1074,12 +1076,13 @@ impl History {
             provenance: None,  // Format changes don't need Lua provenance
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record format changes with optional Lua provenance (for Paste Formats)
     pub fn record_format_with_provenance(
         &mut self,
+        live: &Workbook,
         sheet_index: usize,
         patches: Vec<CellFormatPatch>,
         kind: FormatActionKind,
@@ -1098,16 +1101,16 @@ impl History {
             provenance,
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Record a named range action (create, delete, rename)
-    pub fn record_named_range_action(&mut self, action: UndoAction) {
-        self.record_action_with_provenance(action, None);
+    pub fn record_named_range_action(&mut self, live: &Workbook, action: UndoAction) {
+        self.record_action_with_provenance(live, action, None);
     }
 
     /// Record any action with optional Lua provenance
-    pub fn record_action_with_provenance(&mut self, action: UndoAction, provenance: Option<Provenance>) {
+    pub fn record_action_with_provenance(&mut self, live: &Workbook, action: UndoAction, provenance: Option<Provenance>) {
         let id = self.next_entry_id();
         let entry = HistoryEntry {
             id,
@@ -1116,7 +1119,7 @@ impl History {
             provenance,
             source: MutationSource::Human,
         };
-        self.push_entry(entry);
+        self.push_entry(live, entry);
     }
 
     /// Check if two patch lists affect the same cells
@@ -1143,7 +1146,7 @@ impl History {
         }));
         self.rewind_base_needs_calc = false;
         self.base_invalidated = false;
-        self.refresh_rewind_charge();
+        self.refresh_rewind_charge(workbook);
         self.drop_rewind_if_over_budget();
     }
 
@@ -1181,10 +1184,17 @@ impl History {
         if self.rewind_base.is_some() { entries.saturating_add(self.rewind_base_bytes) } else { entries }
     }
 
-    /// Bytes the baseline holds beyond the live workbook: copy-on-write chunks
-    /// and pages, plus maps cloned outright at capture.
-    fn refresh_rewind_charge(&mut self) {
-        self.rewind_base_bytes = self.rewind_base.as_ref().map(|(workbook, _)| workbook.rewind_retained_bytes()).unwrap_or(0);
+    /// Bytes of baseline allocations the live workbook no longer shares.
+    fn refresh_rewind_charge(&mut self, live: &Workbook) {
+        self.rewind_base_bytes = self.rewind_base.as_ref().map(|(workbook, _)| workbook.unshared_cow_bytes(live)).unwrap_or(0);
+    }
+
+    /// Recompute the retained-copy charge against the current workbook and drop
+    /// rewind when it no longer fits. Call this after a preview settles the
+    /// baseline, which can copy pages the last edit did not.
+    pub fn observe_live(&mut self, live: &Workbook) {
+        self.refresh_rewind_charge(live);
+        self.drop_rewind_if_over_budget();
     }
 
     fn evicted_baseline_error() -> PreviewBuildError {
@@ -1202,11 +1212,10 @@ impl History {
             workbook.recompute_full_ordered();
         }
         self.rewind_base_needs_calc = false;
-        self.refresh_rewind_charge();
         self.drop_rewind_if_over_budget();
     }
 
-    fn advance_rewind_base(&mut self, action: &UndoAction) {
+    fn advance_rewind_base(&mut self, live: &Workbook, action: &UndoAction) {
         if self.rewind_base.is_none() {
             self.base_invalidated = true;
             return;
@@ -1218,15 +1227,15 @@ impl History {
         });
         if applied {
             self.rewind_base_needs_calc = true;
-            self.refresh_rewind_charge();
+            self.refresh_rewind_charge(live);
             return;
         }
         self.fail_rewind();
     }
 
-    fn evict_oldest_undo(&mut self) {
+    fn evict_oldest_undo(&mut self, live: &Workbook) {
         let removed = self.undo_stack.remove(0);
-        self.advance_rewind_base(&removed.action);
+        self.advance_rewind_base(live, &removed.action);
         self.entry_bytes.remove(&removed.id);
         self.save_point = if self.save_point == 0 { usize::MAX } else { self.save_point - 1 };
     }
@@ -1237,7 +1246,7 @@ impl History {
     pub(crate) fn set_byte_budget_for_test(&mut self, bytes: usize) { self.max_bytes = bytes; }
 
 
-    fn enforce_byte_budget(&mut self) {
+    fn enforce_byte_budget(&mut self, live: &Workbook) {
         let ids: std::collections::HashSet<_> = self.undo_stack.iter().chain(&self.redo_stack).map(|e| e.id).collect();
         self.entry_bytes.retain(|id, _| ids.contains(id));
         for entry in self.undo_stack.iter().chain(&self.redo_stack) {
@@ -1250,7 +1259,7 @@ impl History {
             self.pending_notice = Some(if conversion { "Converted; this change is too large to undo" } else { "This change is too large to undo; earlier undo history was cleared" }.into());
             // Advance across every discarded action, so the next retained
             // change can still rewind to the state after this barrier.
-            for entry in std::mem::take(&mut self.undo_stack) { self.advance_rewind_base(&entry.action); }
+            for entry in std::mem::take(&mut self.undo_stack) { self.advance_rewind_base(live, &entry.action); }
             // There is no safe undo path across an unrecorded mutation.
             self.undo_stack.clear(); self.redo_stack.clear(); self.entry_bytes.clear();
             self.save_point = usize::MAX;
@@ -1263,13 +1272,13 @@ impl History {
             self.entry_bytes.remove(&removed.id);
         }
         while self.undo_stack.len() > self.max_entries {
-            self.evict_oldest_undo();
+            self.evict_oldest_undo(live);
         }
         let mut guard = self.undo_stack.len().saturating_add(1);
         while self.charged_bytes() > self.max_bytes && !self.undo_stack.is_empty() && guard > 0 {
             guard -= 1;
             let before = self.charged_bytes();
-            self.evict_oldest_undo();
+            self.evict_oldest_undo(live);
             // Replaying into the baseline can move the bytes instead of freeing
             // them. Drop rewind and keep discarding entries without that copy.
             if self.charged_bytes() >= before && self.rewind_base.is_some() {
@@ -1279,14 +1288,14 @@ impl History {
         self.drop_rewind_if_over_budget();
     }
 
-    fn push_entry(&mut self, entry: HistoryEntry) {
+    fn push_entry(&mut self, live: &Workbook, entry: HistoryEntry) {
         if self.save_point > self.undo_stack.len() { self.save_point = usize::MAX; }
         // A live edit may already have copied a shared chunk. Count it before
         // the new entry joins the budget.
-        self.refresh_rewind_charge();
+        self.refresh_rewind_charge(live);
         self.undo_stack.push(entry);
         self.redo_stack.clear();
-        self.enforce_byte_budget();
+        self.enforce_byte_budget(live);
     }
 
     /// Pop the last entry for undo
@@ -1674,6 +1683,7 @@ impl History {
     /// * `preview_build_ms` - Time spent building preview (milliseconds)
     pub fn truncate_and_append_rewind(
         &mut self,
+        live: &Workbook,
         truncate_at: usize,
         target_entry_id: u64,
         target_index: usize,
@@ -1718,7 +1728,7 @@ impl History {
             source: MutationSource::Human,  // Rewind is always user-initiated
         };
         self.undo_stack.push(entry);
-        self.enforce_byte_budget();
+        self.enforce_byte_budget(live);
 
         // Update save point if it was beyond truncation
         // (Document is now "dirty" relative to last save)
@@ -2654,7 +2664,7 @@ mod tests {
                     print_setup_before, at_row: at, count: 1, formula_rewrites: vec![],
                 }
             };
-            history.record_named_range_action(action);
+            history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), action);
         }
         for (index, expected) in layouts.iter().enumerate() {
             let preview = history.build_workbook_before(index, Some(&base), 100, 10_000).unwrap();
@@ -3006,12 +3016,12 @@ mod tests {
         }];
 
         // History 1: Values then Format
-        history1.record_batch(0, changes.clone());
-        history1.record_format(0, patches.clone(), FormatActionKind::Bold, "Bold".into());
+        history1.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes.clone());
+        history1.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches.clone(), FormatActionKind::Bold, "Bold".into());
 
         // History 2: Format then Values
-        history2.record_format(0, patches, FormatActionKind::Bold, "Bold".into());
-        history2.record_batch(0, changes);
+        history2.record_format(&visigrid_engine::workbook::Workbook::new(), 0, patches, FormatActionKind::Bold, "Bold".into());
+        history2.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, changes);
 
         // Fingerprints should be different because action kind order differs:
         // history1: (id=1, Values), (id=2, Format)
@@ -3028,7 +3038,7 @@ mod tests {
     fn fingerprint_is_deterministic() {
         let mut history = History::new();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "x".to_string(),
             new_value: "y".to_string(),
@@ -3047,7 +3057,7 @@ mod tests {
 
         let fp_empty = history.fingerprint();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "test".to_string(),
@@ -3066,7 +3076,7 @@ mod tests {
 
         // Add some history entries
         for i in 0..5 {
-            history.record_batch(0, vec![CellChange {
+            history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
                 row: i, col: 0,
                 old_value: "".to_string(),
                 new_value: format!("value{}", i),
@@ -3078,6 +3088,7 @@ mod tests {
         // Truncate at index 2 (keep entries 0, 1; discard 2, 3, 4)
         let target_id = history.entry_at(2).unwrap().id;
         history.truncate_and_append_rewind(
+            &visigrid_engine::workbook::Workbook::new(),
             2,
             target_id,
             2,
@@ -3117,7 +3128,7 @@ mod tests {
     fn fingerprint_mismatch_detected() {
         let mut history = History::new();
 
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 0, col: 0,
             old_value: "".to_string(),
             new_value: "initial".to_string(),
@@ -3127,7 +3138,7 @@ mod tests {
         let fp_before = history.fingerprint();
 
         // Simulate concurrent change
-        history.record_batch(0, vec![CellChange {
+        history.record_batch(&visigrid_engine::workbook::Workbook::new(), 0, vec![CellChange {
             row: 1, col: 0,
             old_value: "".to_string(),
             new_value: "concurrent".to_string(),
@@ -3227,8 +3238,8 @@ mod byte_budget_tests {
     fn retagging_a_source_reaccounts_its_retained_payload() {
         let mut history = History::new();
         history.max_bytes = 32_000;
-        history.record_change(0, 0, 0, String::new(), "a".into());
-        history.retag_last_source(MutationSource::Agent { client: "x".repeat(40_000) });
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "a".into());
+        history.retag_last_source(&visigrid_engine::workbook::Workbook::new(), MutationSource::Agent { client: "x".repeat(40_000) });
         assert!(history.last_record_too_large());
         assert!(!history.can_undo());
         assert!(history.is_dirty());
@@ -3237,14 +3248,14 @@ mod byte_budget_tests {
     #[test]
     fn oldest_entries_are_evicted_by_bytes_and_redo_transfers_keep_the_budget() {
         let mut history = History::new();
-        history.record_change(0, 0, 0, String::new(), "a".repeat(4_000));
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "a".repeat(4_000));
         let first = history.undo_stack.last().map(|e| e.id);
         let one = history.entry_bytes.values().sum::<usize>();
         assert!(one > 4_000, "history bytes should count the stored text, got {one}");
         // Two measured entries do not fit; the oldest one is dropped.
         history.max_bytes = one + one / 2;
         history.mark_saved();
-        history.record_change(0, 1, 0, String::new(), "b".repeat(4_000));
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 1, 0, String::new(), "b".repeat(4_000));
         assert!(history.undo_stack.iter().all(|e| Some(e.id) != first));
         assert!(history.is_dirty());
         assert!(matches!(history.build_workbook_before(0, Some(&Workbook::new()), 100, 1_000), Err(PreviewBuildError::InvariantViolation(_))));
@@ -3261,16 +3272,16 @@ mod byte_budget_tests {
     fn oversized_mutation_clears_both_stacks_and_cannot_jump_back_over_it() {
         let mut history = History::new();
         history.max_bytes = 32_000;
-        history.record_change(0, 0, 0, String::new(), "a".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "a".into());
         history.mark_saved();
         history.undo().unwrap();
-        history.record_change(0, 1, 0, String::new(), "b".repeat(40_000));
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 1, 0, String::new(), "b".repeat(40_000));
         assert!(history.last_record_too_large());
         assert!(!history.can_undo());
         assert!(!history.can_redo());
         assert!(history.is_dirty());
         assert!(history.entry_bytes.is_empty());
-        history.record_change(0, 2, 0, String::new(), "c".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 2, 0, String::new(), "c".into());
         assert!(!history.last_record_too_large());
         assert!(history.can_undo());
     }
@@ -3283,7 +3294,7 @@ mod byte_budget_tests {
         history.max_entries = 3;
         history.set_rewind_base(&base);
         for i in 0..8 {
-            history.record_change(0, i, 0, String::new(), format!("v{i}"));
+            history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, i, 0, String::new(), format!("v{i}"));
         }
         assert!(!history.base_invalidated);
         assert!(history.rewind_base.is_some());
@@ -3302,15 +3313,15 @@ mod byte_budget_tests {
         let base = Workbook::new();
         let mut history = History::new();
         history.set_rewind_base(&base);
-        history.record_change(0, 0, 0, String::new(), "stale".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "stale".into());
         history.clear();
         assert!(history.rewind_base.is_some());
         assert!(!history.base_invalidated);
         assert!(!history.can_undo());
         history.max_entries = 2;
-        history.record_change(0, 0, 0, String::new(), "b".into());
-        history.record_change(0, 1, 0, String::new(), "c".into());
-        history.record_change(0, 2, 0, String::new(), "d".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "b".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 1, 0, String::new(), "c".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 2, 0, String::new(), "d".into());
         let oldest = history.build_workbook_before(0, None, 20, 10_000).expect("rewind after clear and eviction");
         assert_eq!(oldest.workbook.active_sheet().get_raw(0, 0), "b");
         assert_eq!(oldest.workbook.active_sheet().get_raw(1, 0), "");
@@ -3342,8 +3353,8 @@ mod byte_budget_tests {
         history.max_entries = 1;
         history.set_rewind_base(&base);
         // A formula, not a literal: set_value would evaluate REWINDSPIKE here.
-        history.record_change(0, 0, 0, String::new(), "=REWINDSPIKE()".into());
-        history.record_change(0, 2, 0, String::new(), "z".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "=REWINDSPIKE()".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 2, 0, String::new(), "z".into());
         assert_eq!(CALLS.load(Ordering::SeqCst), 0, "eviction must not calculate");
         let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
         assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
@@ -3410,16 +3421,16 @@ mod byte_budget_tests {
         let mut history = History::new();
         history.max_entries = 1;
         history.set_rewind_base(&base);
-        history.record_action_with_provenance(UndoAction::TableViewChanged {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableViewChanged {
             sheet_index: 0, commit: Box::new(view), description: "Filter".into(),
         }, None);
-        history.record_action_with_provenance(UndoAction::TableCommit {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
             header_layout: None, sheet_index: 0, commit: Box::new(style), description: "Banding".into(),
         }, None);
-        history.record_action_with_provenance(UndoAction::TableCellsChanged {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCellsChanged {
             sheet_index: 0, commit: Box::new(cells), description: "Cell".into(),
         }, None);
-        history.record_change(0, 4, 0, String::new(), "kept".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 4, 0, String::new(), "kept".into());
         assert_eq!(CALLS.load(Ordering::SeqCst), 0, "evicting Table edits must not calculate");
         let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
         assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored prefix");
@@ -3471,7 +3482,7 @@ mod byte_budget_tests {
         let mut history = History::new();
         history.max_entries = 1;
         history.set_rewind_base(&base);
-        history.record_action_with_provenance(UndoAction::RowsInserted {
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::RowsInserted {
             sheet_index: 0,
             table_rows: Some(rows),
             row_layout: None,
@@ -3480,7 +3491,7 @@ mod byte_budget_tests {
             count: 1,
             formula_rewrites: vec![],
         }, None);
-        history.record_change(0, 8, 0, String::new(), "kept".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 8, 0, String::new(), "kept".into());
         assert_eq!(CALLS.load(Ordering::SeqCst), 0, "evicting a row insert must not calculate");
         let opened = history.build_workbook_before(0, None, 20, 10_000).expect("rewind");
         assert!(CALLS.load(Ordering::SeqCst) > 0, "opening rewind calculates the stored insert");
@@ -3495,8 +3506,8 @@ mod byte_budget_tests {
         let mut history = History::new();
         history.set_rewind_base(&Workbook::new());
         history.max_entries = 1;
-        history.record_change(5, 0, 0, String::new(), "a".into());
-        history.record_change(0, 0, 0, String::new(), "b".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 5, 0, 0, String::new(), "a".into());
+        history.record_change(&visigrid_engine::workbook::Workbook::new(), 0, 0, 0, String::new(), "b".into());
         assert!(history.base_invalidated);
         assert!(history.rewind_base.is_none());
         assert!(history.can_undo());
@@ -3515,10 +3526,10 @@ mod byte_budget_tests {
         history.set_rewind_base(&workbook);
         assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared column, got {}", history.rewind_base_bytes);
         workbook.set_cell_value_tracked(0, 0, 0, "y");
-        history.record_change(0, 0, 0, "xxxxxxxxxx".into(), "y".into());
+        history.record_change(&workbook, 0, 0, 0, "xxxxxxxxxx".into(), "y".into());
         assert!(history.rewind_base_bytes > 2_000, "a one-character edit copies the whole chunk, got {}", history.rewind_base_bytes);
         history.max_bytes = history.rewind_base_bytes - 1;
-        history.record_change(0, 1, 0, String::new(), "z".into());
+        history.record_change(&workbook, 0, 1, 0, String::new(), "z".into());
         assert!(history.base_invalidated);
         assert!(history.rewind_base.is_none());
         let notice = history.take_notice().unwrap_or_default();
@@ -3539,8 +3550,8 @@ mod byte_budget_tests {
         history.set_rewind_base(&workbook);
         assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared cells, got {}", history.rewind_base_bytes);
         assert!(history.rewind_base_bytes < bytes / 2);
-        history.record_change(0, 0, 1, String::new(), "a".into());
-        history.record_change(0, 0, 2, String::new(), "b".into());
+        history.record_change(&workbook, 0, 0, 1, String::new(), "a".into());
+        history.record_change(&workbook, 0, 0, 2, String::new(), "b".into());
         assert!(history.rewind_base.is_some(), "a one-character divergence stays inside the budget");
         assert!(!history.base_invalidated);
         assert!(history.rewind_base_bytes < history.max_bytes);
@@ -3551,14 +3562,39 @@ mod byte_budget_tests {
 
     #[test]
     fn too_large_edit_also_says_rewind_is_unavailable() {
+        let live = Workbook::new();
         let mut history = History::new();
-        history.set_rewind_base(&Workbook::new());
+        history.set_rewind_base(&live);
         history.max_bytes = 32_000;
-        history.record_change(0, 0, 0, String::new(), "a".into());
-        history.record_change(0, 1, 0, String::new(), "b".repeat(40_000));
+        history.record_change(&live, 0, 0, 0, String::new(), "a".into());
+        history.record_change(&live, 0, 1, 0, String::new(), "b".repeat(40_000));
         let notice = history.take_notice().unwrap_or_default();
         assert!(notice.contains("too large to undo"), "{notice}");
         assert!(notice.contains("Rewind is unavailable"), "{notice}");
         assert!(history.rewind_base.is_none());
+    }
+
+    #[test]
+    fn table_swap_keeps_the_copied_chunks_and_a_later_edit_on_the_charge() {
+        let mut workbook = Workbook::new();
+        for row in 0..2048 {
+            workbook.set_cell_value_tracked(0, row, 0, "xxxxxxxxxx");
+        }
+        let second = workbook.add_sheet();
+        for row in 0..1024 {
+            workbook.set_cell_value_tracked(second, row, 0, "yyyyyyyyyy");
+        }
+        let mut history = History::new();
+        history.set_rewind_base(&workbook);
+        assert!(history.rewind_base_bytes < 1_000, "capture charges copied maps, not the shared columns, got {}", history.rewind_base_bytes);
+        workbook.create_table_without_headers(workbook.active_sheet_id(), visigrid_engine::table::TableRange {
+            start_row: 0, start_col: 0, end_row: 2, end_col: 0,
+        }, "Sales").unwrap();
+        history.record_change(&workbook, 0, 3, 0, String::new(), "n".into());
+        let after_insert = history.rewind_base_bytes;
+        assert!(after_insert > 8_000, "creating a table copies both chunks of the column, got {after_insert}");
+        workbook.set_cell_value_tracked(second, 0, 0, "z");
+        history.record_change(&workbook, second, 0, 0, "yyyyyyyyyy".into(), "z".into());
+        assert!(history.rewind_base_bytes > after_insert, "a later edit stays charged after the workbook is replaced, got {} then {after_insert}", history.rewind_base_bytes);
     }
 }

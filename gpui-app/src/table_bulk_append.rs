@@ -221,7 +221,7 @@ impl Spreadsheet {
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
                 let description = format!("Paste and append {} Table row(s)", plan.count);
-                self.history.record_action_with_provenance(
+                self.record_action_with_provenance(cx,
                     UndoAction::TableAppend {
                         sheet_index: index,
                         history: Box::new(history),
@@ -621,7 +621,7 @@ mod tests {
         ];
         let (after, commit) = prepare_append_writes(&before, id, 1, &writes).unwrap();
         let mut history = History::new();
-        history.record_action_with_provenance(
+        history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(),
             UndoAction::TableAppend {
                 sheet_index: 0,
                 history: Box::new(commit),

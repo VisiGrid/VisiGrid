@@ -89,7 +89,7 @@ fn visible_formatting_tracks_canonical_records_and_preserves_formulas_comments_a
         base.active_sheet().comment(5, 3)
     );
     let mut history = History::new();
-    history.record_action_with_provenance(action(p), None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), action(p), None);
     for position in [0, 1] {
         let preview = history
             .build_workbook_before(position, Some(&base), 100, 10_000)
@@ -345,10 +345,10 @@ fn formatting_undo_restores_absence_and_coalescing_keeps_original_before_state()
     assert!(p[0].remove_cell_on_undo);
     let mut history = History::new();
     apply(&mut wb, 0, &p, true);
-    history.record_format(0, p, FormatActionKind::Bold, "Bold".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, p, FormatActionKind::Bold, "Bold".into());
     let p = patches(&wb, &[((0, 5), (0, 5))], Operation::Bold(false)).unwrap();
     apply(&mut wb, 0, &p, true);
-    history.record_format(0, p, FormatActionKind::Bold, "Normal".into());
+    history.record_format(&visigrid_engine::workbook::Workbook::new(), 0, p, FormatActionKind::Bold, "Normal".into());
     let entry = history.undo().unwrap();
     let UndoAction::Format { patches, .. } = entry.action else {
         panic!("format history")
@@ -382,7 +382,7 @@ fn history_can_revisit_hidden_records_and_preflights_all_group_destinations() {
     assert!(validate_history(&wb, &group, true).is_err());
     assert!(wb.active_sheet().get_format(5, 2).is_default());
     let mut history = History::new();
-    history.record_action_with_provenance(group, None);
+    history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), group, None);
     assert!(history
         .build_workbook_before(1, Some(&wb), 100, 10_000)
         .is_err());

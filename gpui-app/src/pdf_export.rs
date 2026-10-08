@@ -570,7 +570,7 @@ impl Spreadsheet {
         match result {
             Ok(before) => {
                 if before != after {
-                    self.history.record_action_with_provenance(
+                    self.record_action_with_provenance(cx,
                         crate::history::UndoAction::PrintSetupChanged {
                             sheet_id,
                             before,

@@ -54,7 +54,7 @@ fn extraction_uses_sorted_record_and_skips_hidden_formulas() {
     commit.replay(&mut wb, false).unwrap();
     assert_eq!(wb.active_sheet().get_raw(5, 3), "=Amount*2");
     let mut history = History::new();
-    history.record_named_range_action(UndoAction::TableBatchChanged {
+    history.record_named_range_action(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableBatchChanged {
         sheet_index: 0,
         commit: Box::new(commit),
         description: "Extract Amount".into(),

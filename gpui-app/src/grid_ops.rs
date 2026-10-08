@@ -225,7 +225,7 @@ impl Spreadsheet {
         }
 
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::RowsInserted {
+        self.record_named_range_action(cx, crate::history::UndoAction::RowsInserted {
             sheet_index,
             table_rows,
             row_layout,
@@ -328,7 +328,7 @@ impl Spreadsheet {
         }
 
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::RowsDeleted {
+        self.record_named_range_action(cx, crate::history::UndoAction::RowsDeleted {
             sheet_index,
             table_rows,
             row_layout,
@@ -407,7 +407,7 @@ impl Spreadsheet {
         }
 
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::ColsInserted {
+        self.record_named_range_action(cx, crate::history::UndoAction::ColsInserted {
             sheet_index,
             table_columns,
             at_col,
@@ -486,7 +486,7 @@ impl Spreadsheet {
         }
 
         // Record undo entry
-        self.history.record_named_range_action(crate::history::UndoAction::ColsDeleted {
+        self.record_named_range_action(cx, crate::history::UndoAction::ColsDeleted {
             sheet_index,
             table_columns,
             at_col,
@@ -544,7 +544,7 @@ impl Spreadsheet {
         }
 
         if !self.sync_manual_row_visibility(sheet_id, cx) { return; }
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::RowVisibilityChanged {
                 sheet_id,
                 rows: rows.clone(),
@@ -593,7 +593,7 @@ impl Spreadsheet {
         }
 
         if !self.sync_manual_row_visibility(sheet_id, cx) { return; }
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::RowVisibilityChanged {
                 sheet_id,
                 rows: rows.clone(),
@@ -624,7 +624,7 @@ impl Spreadsheet {
             set.insert(c);
         }
 
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::ColVisibilityChanged {
                 sheet_id,
                 cols: cols.clone(),
@@ -659,7 +659,7 @@ impl Spreadsheet {
             set.remove(&c);
         }
 
-        self.history.record_action_with_provenance(
+        self.record_action_with_provenance(cx,
             crate::history::UndoAction::ColVisibilityChanged {
                 sheet_id,
                 cols: cols.clone(),

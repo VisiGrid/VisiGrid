@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(redone.active_sheet().get_display(7, 3), "270");
         let mut history = History::new();
         for commit in [update, replace] {
-            history.record_action_with_provenance(UndoAction::TableCommit {
+            history.record_action_with_provenance(&visigrid_engine::workbook::Workbook::new(), UndoAction::TableCommit {
                 sheet_index: 0, commit: Box::new(commit), header_layout: None,
                 description: "Column formula".into(),
             }, None);

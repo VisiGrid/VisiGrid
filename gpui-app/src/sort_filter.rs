@@ -178,7 +178,7 @@ impl Spreadsheet {
             None
         };
 
-        self.history.record_action_with_provenance(crate::history::UndoAction::SortApplied {
+        self.record_action_with_provenance(cx, crate::history::UndoAction::SortApplied {
             sheet_index: self.sheet_index(cx),
             previous_row_order: undo_item.previous_row_order,
             previous_sort_state,
@@ -446,7 +446,7 @@ impl Spreadsheet {
             );
 
             // Record undo action (no provenance for clear)
-            self.history.record_action_with_provenance(crate::history::UndoAction::SortCleared {
+            self.record_action_with_provenance(cx, crate::history::UndoAction::SortCleared {
                 sheet_index: self.sheet_index(cx),
                 previous_row_order,
                 previous_sort_state,
