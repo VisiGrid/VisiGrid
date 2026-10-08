@@ -484,7 +484,7 @@ fn render_right(b: &RecipeBuilder, c: &Colors, body_h: f32, cx: &mut Context<Spr
     if let (Some(i), Some(step)) = (b.selected, b.step()) {
         right = right.child(render_editor(b, i, step, c, (body_h * 0.42).max(150.0), cx));
     }
-    right.child(render_preview(b, c))
+    right.child(render_preview(b, c, cx))
 }
 
 fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h: f32, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
@@ -711,7 +711,7 @@ fn column_label(name: &str, present: bool) -> String {
     if present { name.to_string() } else { format!("{name}  (not in the file)") }
 }
 
-fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
+fn render_preview(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let Some(p) = &b.preview else { return div() };
     let title = match b.selected {
         None if b.recipe.source.is_remote() => "Preview of the report".to_string(),
@@ -729,7 +729,7 @@ fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
     );
     const W: f32 = 140.0;
     let mut header = div().flex().bg(c.panel).border_b_1().border_color(c.border);
-    for col in &p.columns {
+    for (ci, col) in p.columns.iter().enumerate() {
         let typed = !matches!(col.rule, ColumnRule::Auto);
         header = header.child(
             div()
@@ -752,7 +752,10 @@ fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
                         .child(col.name.clone()),
                 )
                 .child(
+                    // Click to change the type (right-click goes back), with
+                    // a Set types step: as the CSV import dialog's pills
                     div()
+                        .id(ElementId::Name(format!("recipe-preview-type-{ci}").into()))
                         .px(px(7.0))
                         .rounded(px(9.0))
                         .border_1()
@@ -760,7 +763,11 @@ fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
                         .when(typed, |d| d.bg(c.accent.opacity(0.12)))
                         .text_size(px(11.0))
                         .text_color(c.text)
-                        .child(rule_label(col.rule)),
+                        .cursor_pointer()
+                        .hover(|d| d.border_color(c.accent))
+                        .child(format!("{} ›", rule_label(col.rule)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(with_builder(move |b| b.cycle_preview_type(ci, false))))
+                        .on_mouse_down(MouseButton::Right, cx.listener(with_builder(move |b| b.cycle_preview_type(ci, true)))),
                 ),
         );
     }
@@ -815,7 +822,8 @@ fn render_preview(b: &RecipeBuilder, c: &Colors) -> impl IntoElement {
                 .border_1()
                 .border_color(c.border)
                 .bg(c.grid_bg)
-                .child(div().flex().flex_col().child(header).child(body)),
+                // As wide as its columns, so the panel scrolls across them
+                .child(div().flex_shrink_0().w(px(W * p.columns.len() as f32)).flex().flex_col().child(header).child(body)),
         )
 }
 
