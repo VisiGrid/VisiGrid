@@ -32,6 +32,18 @@ console_error_panic_hook = "0.1"
 blake3 = "1"
 # The collaboration replica (CollabClient). No simulator (no RNG backend in
 # the browser), and visigrid-json only from io (no DuckDB, SQLite or XLSX).
-visigrid-collab = { path = "../collab", default-features = false }
-visigrid-io = { path = "../io", default-features = false, features = ["recipes"] }
-uuid = "1"
+# Optional: only the `collab` build carries them (see [features]).
+visigrid-collab = { path = "../collab", default-features = false, optional = true }
+visigrid-io = { path = "../io", default-features = false, features = ["recipes"], optional = true }
+uuid = { version = "1", optional = true }
+
+# Two browser builds from one commit. The default is the lean engine (formula
+# evaluation, verification, inspection, formula help) that every page of the
+# web app loads. `collab` adds the live-editing replica (CollabClient) and its
+# document I/O; `recipes` adds CSV recipe previews on top of it. The web app
+# loads the collab build only where live editing runs, so its size (~4x) is
+# not paid by the classic editor.
+[features]
+default = []
+collab = ["dep:visigrid-collab", "dep:visigrid-io", "dep:uuid"]
+recipes = ["collab"]

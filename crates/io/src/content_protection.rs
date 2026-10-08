@@ -7,6 +7,18 @@ use visigrid_engine::{sheet::Sheet, workbook::Workbook};
 /// Extra output members are permitted. Formula cached results may legitimately
 /// change after supported recalculation; their surrounding metadata may not.
 pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
+    // Paths are built only on the way into a container or on a loss: a band
+    // checks every cell this way, and allocating a path per scalar member made
+    // loading large sheets several times slower.
+    fn scalar_same(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => x == y || decimal_number(x) == decimal_number(y),
+            _ => a == b,
+        }
+    }
+    fn is_container(v: &Value) -> bool {
+        matches!(v, Value::Object(_) | Value::Array(_))
+    }
     fn visit(a: &Value, b: &Value, path: &str) -> Option<String> {
         match (a, b) {
             (Value::Object(a), Value::Object(b)) => {
@@ -21,7 +33,7 @@ pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
                     {
                         continue;
                     }
-                    let next = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                    let next = || format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
                     let Some(other) = b.get(key) else {
                         // The codec omits empty cell lists. Recognize that one
                         // default only at actual workbook/sheet bodies; unknown
@@ -31,9 +43,15 @@ pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
                         if key == "cells" && body && value.as_array().is_some_and(Vec::is_empty) {
                             continue;
                         }
-                        return Some(next);
+                        return Some(next());
                     };
-                    if let Some(loss) = visit(value, other, &next) {
+                    if !is_container(value) {
+                        if !scalar_same(value, other) {
+                            return Some(next());
+                        }
+                        continue;
+                    }
+                    if let Some(loss) = visit(value, other, &next()) {
                         return Some(loss);
                     }
                 }
@@ -56,18 +74,23 @@ pub fn first_loss(source: &Value, projected: &Value) -> Option<String> {
                     } else {
                         b.get(i)
                     };
-                    let next = format!("{path}/{i}");
+                    let next = || format!("{path}/{i}");
                     let Some(other) = other else {
-                        return Some(next);
+                        return Some(next());
                     };
-                    if let Some(loss) = visit(value, other, &next) {
+                    if !is_container(value) {
+                        if !scalar_same(value, other) {
+                            return Some(next());
+                        }
+                        continue;
+                    }
+                    if let Some(loss) = visit(value, other, &next()) {
                         return Some(loss);
                     }
                 }
                 None
             }
-            (Value::Number(a), Value::Number(b)) if decimal_number(a) == decimal_number(b) => None,
-            _ if a == b => None,
+            _ if scalar_same(a, b) => None,
             _ => Some(path.to_owned()),
         }
     }
@@ -127,6 +150,8 @@ fn numeric_cell_loss(cell: &NumericCell) -> bool {
     let Some(raw) = &cell.value else { return false };
     let literal = raw.get().trim();
     if !literal.starts_with(|c: char| c == '-' || c.is_ascii_digit()) { return false; }
+    // Up to 15 digits, an integer is exact as an f64.
+    if f64_exact(literal) { return false; }
     let projected = literal.parse::<f64>().ok().and_then(serde_json::Number::from_f64);
     let Some(projected) = projected else { return true };
     match (decimal_literal(literal), decimal_literal(&projected.to_string())) {
@@ -135,11 +160,56 @@ fn numeric_cell_loss(cell: &NumericCell) -> bool {
     }
 }
 
-// The normal Value parser retains u64 integers but rounds larger integers
-// and precise fractions. Inspect original tokens, including opaque metadata,
-// while skipping quoted strings and their escapes.
-fn parsed_number_loss(content: &str) -> bool {
+/// A JSON number literal with at most 15 significant digits, in the normal
+/// f64 range. Every such decimal survives a round trip through f64 exactly
+/// (doubles carry 15.95 digits), so neither the parser nor the f64 projection
+/// can change it, and the costlier comparison below is unnecessary.
+fn f64_exact(literal: &str) -> bool {
+    let unsigned = literal.strip_prefix('-').unwrap_or(literal);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m, e)) => match e.parse::<i32>() {
+            Ok(e) => (m, e),
+            Err(_) => return false,
+        },
+        None => (unsigned, 0),
+    };
+    let (mut seen_point, mut fraction, mut significant, mut trailing_zeros) = (false, 0i32, 0usize, 0i32);
+    for b in mantissa.bytes() {
+        match b {
+            b'.' if !seen_point => seen_point = true,
+            b'0'..=b'9' => {
+                if seen_point {
+                    fraction += 1;
+                }
+                if b == b'0' {
+                    if significant > 0 {
+                        trailing_zeros += 1;
+                    }
+                } else {
+                    significant += 1 + trailing_zeros as usize;
+                    trailing_zeros = 0;
+                }
+            }
+            _ => return false,
+        }
+    }
+    if significant == 0 {
+        return true;
+    }
+    if significant > 15 {
+        return false;
+    }
+    // value = digits × 10^scale, with `significant` digits
+    let scale = exponent - fraction + trailing_zeros;
+    let magnitude = scale + significant as i32;
+    (-300..=300).contains(&magnitude)
+}
+
+/// Whether the literals in `content` can lose precision, and whether every
+/// one was f64-exact (then no per-value f64 check is needed either).
+fn scan_numbers(content: &str) -> (bool, bool) {
     let bytes = content.as_bytes();
+    let mut all_exact = true;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'"' {
@@ -156,14 +226,32 @@ fn parsed_number_loss(content: &str) -> bool {
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_digit() || matches!(bytes[i], b'.' | b'e' | b'E' | b'+' | b'-')) { i += 1; }
             let literal = &content[start..i];
+            if f64_exact(literal) { continue; }
+            all_exact = false;
+            if exact_integer(literal) { continue; }
             let parsed = serde_json::from_str::<Value>(literal).ok();
-            let Some(Value::Number(parsed)) = parsed else { return true };
-            if decimal_literal(literal) != decimal_literal(&parsed.to_string()) { return true; }
+            let Some(Value::Number(parsed)) = parsed else { return (true, false) };
+            if decimal_literal(literal) != decimal_literal(&parsed.to_string()) { return (true, false); }
         } else {
             i += 1;
         }
     }
-    false
+    (false, all_exact)
+}
+
+/// A JSON integer literal (optional `-`, digits only) that fits i64 or u64.
+fn exact_integer(literal: &str) -> bool {
+    let digits = literal.strip_prefix('-').unwrap_or(literal);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (literal.parse::<i64>().is_ok() || literal.parse::<u64>().is_ok())
+}
+
+// The normal Value parser retains u64 integers but rounds larger integers
+// and precise fractions. Inspect original tokens, including opaque metadata,
+// while skipping quoted strings and their escapes.
+fn parsed_number_loss(content: &str) -> bool {
+    scan_numbers(content).0
 }
 
 pub(crate) fn inline_number_loss(content: &str) -> Result<Option<String>, String> {
@@ -179,7 +267,10 @@ pub(crate) fn inline_number_loss(content: &str) -> Result<Option<String>, String
 }
 
 pub(crate) fn band_cell_number_loss(content: &str) -> Result<bool, String> {
-    if parsed_number_loss(content) { return Ok(true); }
+    let (loss, all_exact) = scan_numbers(content);
+    if loss { return Ok(true); }
+    // Every literal, the value included, is exact as an f64.
+    if all_exact { return Ok(false); }
     let cell: NumericCell = serde_json::from_str(content).map_err(|e| e.to_string())?;
     Ok(numeric_cell_loss(&cell))
 }

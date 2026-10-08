@@ -625,10 +625,13 @@ impl McpServer {
         for source in &sources {
             crate::recipe_cmd::check_paths(&recipe_path, source, output.as_deref(), None).map_err(|e| e.message)?;
         }
+        // read_snapshot also reads the recipes its Merge steps name
         let snapshot = if recipe.source.is_remote() {
             recipe.read_snapshot(dir, None)?
         } else {
-            recipe::Snapshot::read_all(&sources)?
+            let mut snapshot = recipe::Snapshot::read_all(&sources)?;
+            recipe.attach_joined(dir, &mut snapshot, 0)?;
+            snapshot
         };
         let result = recipe::run(&recipe, &snapshot);
         let report = &result.report;

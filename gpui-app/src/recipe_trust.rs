@@ -19,6 +19,17 @@ pub use visigrid_io::recipe_trust::{approve, is_approved};
 /// file itself, or for a pattern the folder, the pattern and the file it
 /// matches now. Err when it cannot be read at all (then only Cancel).
 pub fn describe_source(recipe_path: &Path, recipe: &Recipe) -> Result<(String, String), String> {
+    let (what, mut detail) = describe_own(recipe_path, recipe)?;
+    // Merge steps read other recipes' sources too: name each one
+    let dir = recipe_path.parent().unwrap_or(Path::new("."));
+    for (with, path) in recipe.merged_recipes(dir) {
+        let reads = Recipe::load(&path).map(|r| r.source.path().to_string()).unwrap_or_else(|e| format!("can't be read: {e}"));
+        detail.push_str(&format!(" · also merges {with}, which reads {reads}"));
+    }
+    Ok((what, detail))
+}
+
+fn describe_own(recipe_path: &Path, recipe: &Recipe) -> Result<(String, String), String> {
     let dir = recipe_path.parent().unwrap_or(Path::new("."));
     // A VisiBooks report: name the server, entity and report, and whether a
     // key for that server is saved (the key itself never leaves the keychain)

@@ -219,8 +219,9 @@ impl NumberFormat {
     }
 
     /// True when value < 0 and the negative style includes red coloring
+    /// (not for a value that displays as zero, which has no minus sign)
     pub fn should_render_red(&self, value: f64) -> bool {
-        if value >= 0.0 {
+        if value >= 0.0 || shows_zero(&CellValue::format_signed(-value, self)) {
             return false;
         }
         match self {
@@ -917,6 +918,11 @@ fn split_format_parts(section: &str) -> (&str, &str, &str) {
 /// Format an absolute value with optional thousands grouping.
 /// Works from the numeric value directly (no string parsing).
 /// Decimals clamped to 0..=10 as a safety net against overflow.
+/// Whether a formatted value is zero: no digit other than 0 in it.
+fn shows_zero(formatted: &str) -> bool {
+    !formatted.bytes().any(|b| (b'1'..=b'9').contains(&b))
+}
+
 fn format_grouped(abs: f64, decimals: u8, thousands: bool) -> String {
     let decimals = decimals.min(10) as u32;
     let scale = 10_i64.pow(decimals);
@@ -1206,8 +1212,26 @@ impl CellValue {
         self.as_ref().is_cycle_error()
     }
 
-    /// Format a number according to the specified format
+    /// Format a number according to the specified format. A negative value
+    /// that rounds to zero at the shown precision displays as zero, with no
+    /// minus sign or parentheses: a balanced total that is -2.8e-17 in
+    /// floating point, or -0.004 at two decimals, shows 0.00.
     pub fn format_number(n: f64, format: &NumberFormat) -> String {
+        if n.is_sign_negative() && !matches!(format, NumberFormat::Date { .. } | NumberFormat::Time | NumberFormat::DateTime) {
+            let unsigned = Self::format_signed(-n, format);
+            if shows_zero(&unsigned) {
+                // A custom code renders it as 0, so a zero section applies:
+                // #,##0.00;(#,##0.00);"-" shows "-", as a true 0 does
+                return match format {
+                    NumberFormat::Custom(_) => Self::format_signed(0.0, format),
+                    _ => unsigned,
+                };
+            }
+        }
+        Self::format_signed(n, format)
+    }
+
+    fn format_signed(n: f64, format: &NumberFormat) -> String {
         match format {
             NumberFormat::General => {
                 if n.fract() == 0.0 && n.abs() < 1e15 {

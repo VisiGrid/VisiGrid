@@ -9,7 +9,7 @@ use visigrid_io::recipe::Step;
 use crate::app::Spreadsheet;
 use crate::recipe_builder::{
     cli_line, filter_op_label, missing_label, on_error_label, rule_label, step_kind, step_missing, type_label,
-    EditorRow, Pane, RecipeBuilder, TotalPart, ADD_KINDS,
+    EditorRow, Pane, RecipeBuilder, TotalPart, ADD_KINDS, MERGE_KIND,
 };
 use crate::theme::TokenKey;
 use crate::ui::{dialog_header_with_subtitle, modal_overlay, Button, DialogFrame};
@@ -343,7 +343,19 @@ fn render_steps(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) ->
                     .when(on, |d| d.bg(accent.opacity(0.18)))
                     .child(div().text_color(text).child(format!("{}  {}", add_kind_key(k), label)))
                     .child(div().text_color(muted).child(help.to_string()))
-                    .on_mouse_down(MouseButton::Left, cx.listener(with_builder(move |b| b.add_step(k)))),
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if k == MERGE_KIND {
+                            if let Some(b) = this.recipe_builder.as_mut() {
+                                b.add_menu = None;
+                            }
+                            this.recipe_builder_pick_merge(cx);
+                        } else if let Some(b) = this.recipe_builder.as_mut() {
+                            b.error = None;
+                            b.add_step(k);
+                        }
+                        cx.notify();
+                    })),
             );
         }
         list.push(menu.into_any_element());
@@ -491,6 +503,7 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
         Step::FillDown { .. } => "Empty cells in the checked columns take the value above.",
         Step::Replace { .. } => "None checked: every column. An empty Find in whole cells replaces empty cells.",
         Step::Split { .. } => "The new columns replace it. The last one keeps the rest, so nothing is lost.",
+        Step::Merge { .. } => "Rows match on the key columns, compared as typed.",
     };
     let mut rows = div().flex().flex_col();
     for (r, row) in b.editor_rows().iter().enumerate() {
@@ -561,6 +574,32 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
                 (format!("New column {}", index + 1), into.get(*index).cloned().unwrap_or_default(), true)
             }
             (EditorRow::AddSplitPiece, _) => ("+ Add a column".into(), "Add".into(), false),
+            (EditorRow::MergeWith, Step::Merge { with, .. }) => ("With recipe".into(), format!("{with} …"), false),
+            (EditorRow::MergeKey { index, here }, Step::Merge { on, right_on, .. }) => {
+                let here_name = on.get(*index).cloned().unwrap_or_default();
+                if *here {
+                    (format!("Key {}: this table's", index + 1), here_name, false)
+                } else {
+                    let there = right_on.get(*index).cloned().unwrap_or(here_name);
+                    let missing = !b.merge_columns.is_empty() && !b.merge_columns.iter().any(|c| c.eq_ignore_ascii_case(&there));
+                    ("    matches the other's".into(), if missing { format!("{there} (not there)") } else { there }, false)
+                }
+            }
+            (EditorRow::AddMergeKey, _) => ("+ Add a key column".into(), "Add".into(), false),
+            (EditorRow::RemoveMergeKey { index }, _) => (format!("    Remove key {}", index + 1), "Remove".into(), false),
+            (EditorRow::MergeHow, Step::Merge { how, .. }) => ("Keep".into(), how.label().to_string(), false),
+            (EditorRow::MergeDuplicates, Step::Merge { duplicates, .. }) => (
+                "If the other table has a key twice".into(),
+                match duplicates {
+                    visigrid_io::recipe::OnDuplicate::Fail => "Fail the run".into(),
+                    visigrid_io::recipe::OnDuplicate::First => "Use the first".into(),
+                },
+                false,
+            ),
+            (EditorRow::MergeColumn { name, present }, Step::Merge { .. }) => {
+                checkbox = Some(b.merge_column_checked(name));
+                (format!("Bring {}", if *present { name.clone() } else { format!("{name}  (not in the other table)") }), String::new(), false)
+            }
             (EditorRow::DropEmpty, Step::Unpivot { drop_empty, .. }) => (
                 "Empty values".into(),
                 if *drop_empty { "Leave out".into() } else { "Keep as empty rows".into() },
@@ -631,6 +670,11 @@ fn render_editor(b: &RecipeBuilder, index: usize, step: &Step, c: &Colors, max_h
                     cx.stop_propagation();
                     if let Some(b) = this.recipe_builder.as_mut() {
                         b.pane = Pane::Editor;
+                        if b.editor_rows().get(r) == Some(&EditorRow::MergeWith) {
+                            b.editor_focus = r;
+                            this.recipe_builder_pick_merge(cx);
+                            return;
+                        }
                         b.activate_row(r, false);
                     }
                     cx.notify();

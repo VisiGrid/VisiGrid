@@ -457,7 +457,7 @@ impl Spreadsheet {
                 if let Err(e) = crate::recipe_trust::approve(&recipe_path, &recipe) {
                     this.status_message = Some(format!("Couldn't remember the approval: {e}"));
                 }
-                let snapshot = match Snapshot::read(&chosen) {
+                let snapshot = match Snapshot::read(&chosen).and_then(|mut s| recipe.attach_joined(&dir, &mut s, 0).map(|_| s)) {
                     Ok(s) => s,
                     Err(e) => {
                         this.status_message = Some(format!("Couldn't read {}: {e}", chosen.display()));

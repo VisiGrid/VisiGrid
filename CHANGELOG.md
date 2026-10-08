@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Tables Phase 4 (0.51.0): linked-footer appends recalculate affected formulas incrementally and share unchanged dependency snapshots; static append history fingerprints affected sheets while keeping global guards for dynamic references and broader structural transactions.
+- Tables Phase 4 (0.52.0): linked-footer appends recalculate affected formulas incrementally and share unchanged dependency snapshots; static append history fingerprints affected sheets while keeping global guards for dynamic references and broader structural transactions.
 - Large Table conversion now warns about the row count, expected wait, frozen window and undo/redo cost. Undo history has an approximate 1 GiB byte budget; oversized conversions report that they cannot be undone.
 - Refuse row/column inserts that would push merges, validation, conditional formatting or non-empty cells off the grid, preserving exact undo semantics. Extend deleted-name and Phase 4 rich-error persistence regressions; remove the unused hidden-row scanner.
 
@@ -140,6 +140,29 @@
 - Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
 - Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes remain protected. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
 
+### Fixed
+
+- **A near-zero total takes a custom format's zero section.** With an accounting format such as `#,##0.00;(#,##0.00);"-"`, a total that rounds to zero now shows `-`, as an exact 0 does, instead of `0.00` (since 0.51.0). ([#129](https://github.com/VisiGrid/VisiGrid/pull/129))
+
+## 0.51.0
+
+### Import recipes
+
+- **JSON files as a source.** A recipe can read a `.json` export or a JSON Lines file (`.jsonl`, `.ndjson`) into a Table that Refresh updates. In a `.json` file the records are found by themselves (the top-level array, or the largest array of records inside, such as `invoices`), or read from a path you choose under **Records at**. Nested objects become dotted columns (`customer.name`) in the order they first appear; a column of JSON numbers is a number column, and IDs too large to be exact stay text with every digit. A file pattern reads the newest match or appends every match, as for CSV. A new recipe saves the array it found, so a later export with a larger array elsewhere still reads the same records; a key repeated in one object, or two fields that make the same column, are noted in the run report (the last value is kept); and JSON Lines are read one record at a time, so a large `.jsonl` needs about as much memory as the same data as CSV. ([#125](https://github.com/VisiGrid/VisiGrid/pull/125), [#127](https://github.com/VisiGrid/VisiGrid/pull/127))
+
+### Fixed
+
+- **A total that rounds to zero no longer shows "-0.00".** A negative value too small to show at the displayed decimals (a few billionths left over from floating-point arithmetic, or -0.004 at two decimals) now displays as `0.00`: no minus sign, no parentheses, and not red under a red-negatives format. This applies to General, Number, Currency, Percent and custom formats such as `#,##0.00`; anything that shows a nonzero digit keeps its sign. ([#128](https://github.com/VisiGrid/VisiGrid/pull/128))
+- **Formulas on large cloud sheets follow edits again.** A sheet loaded in row bands stayed in manual calculation after loading, so editing a cell left every formula over it at its loaded value (a `=SUM` over the column didn't move) until a full recalculation. Since 0.50.0. ([#126](https://github.com/VisiGrid/VisiGrid/pull/126))
+
+## 0.50.1
+
+### Fixed
+
+- **Large cloud workbooks load about 3× faster again.** Since 0.50.0, each 16,384-row block of a large shared sheet was checked cell by cell with several costly conversions before loading, so a 1,000,000 × 20 sheet took about 7 minutes in the browser instead of about 80 seconds. Plain cells and ordinary numbers now take a fast path that reaches the same decision; anything unusual still gets the full check, so unsupported content is refused exactly as before. ([#124](https://github.com/VisiGrid/VisiGrid/pull/124))
+
+## 0.50.0
+
 ### Workbook content protection
 
 - Workbooks containing unsupported content open read-only and retain their complete original document, including stored formula results. Protected native copies carry an upgrade marker so VisiGrid 0.42 and later refuses to overwrite the preview with missing content; use an updated client to open the protected original. Versions before 0.42 do not recognize this marker. ([#120](https://github.com/VisiGrid/VisiGrid/pull/120))
@@ -147,6 +170,7 @@
 ### Import recipes
 
 - **VisiBooks reports as a source.** A recipe can read the trial balance, general ledger, or AR/AP aging of a VisiBooks entity into a Table that Refresh updates, with dates that move with the calendar (last month end, year start). The read-only API key is saved in the system keychain for one server with `vgrid visibooks key`, never in the recipe or workbook; `vgrid visibooks entities` lists what it can read. Run **New Recipe from VisiBooks…**. ([#118](https://github.com/VisiGrid/VisiGrid/pull/118))
+- **Merge step.** Join the rows so far with another recipe's result on key columns (left, inner, full, or only the rows with no match), like Merge Queries or a VLOOKUP over a whole column. Keys compare as their columns are typed, a key twice in the other table fails the run instead of multiplying rows, and every run counts what matched. In the builder: **Merge with a recipe**. ([#119](https://github.com/VisiGrid/VisiGrid/pull/119))
 
 ## 0.49.2
 

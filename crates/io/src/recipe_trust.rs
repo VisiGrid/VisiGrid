@@ -26,8 +26,39 @@ pub fn config_dir() -> PathBuf {
 /// covered and a recipe edited to read elsewhere is not.
 pub fn approval_key(recipe_path: &Path, recipe: &Recipe) -> String {
     let recipe_path = std::path::absolute(recipe_path).unwrap_or_else(|_| recipe_path.to_path_buf());
-    let text = format!("{}\0{}", recipe_path.display(), recipe.source.identity());
+    let mut text = format!("{}\0{}", recipe_path.display(), recipe.source.identity());
+    // A recipe that merges others reads their sources too: the approval
+    // covers each one, so editing a merged recipe to read elsewhere (another
+    // file, entity or server) asks again
+    chain(&recipe_path, recipe, &mut Vec::new(), &mut text);
     blake3::hash(text.as_bytes()).to_hex()[..32].to_string()
+}
+
+/// Each merged recipe and what it reads (its source's identity: a file, or
+/// a VisiBooks server, entity and report), recursively. `seen` is the chain
+/// being followed, so a loop ends at once; the run refuses it separately.
+fn chain(recipe_path: &Path, recipe: &Recipe, seen: &mut Vec<PathBuf>, text: &mut String) {
+    if seen.len() >= crate::recipe::MAX_MERGE_DEPTH {
+        return;
+    }
+    let dir = recipe_path.parent().unwrap_or(Path::new("."));
+    for (_, path) in recipe.merged_recipes(dir) {
+        let path = std::path::absolute(&path).unwrap_or(path);
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.contains(&key) {
+            text.push_str(&format!("\0loop\0{}", path.display()));
+            continue;
+        }
+        match Recipe::load(&path) {
+            Ok(merged) => {
+                text.push_str(&format!("\0merge\0{}\0{}", path.display(), merged.source.identity()));
+                seen.push(key);
+                chain(&path, &merged, seen, text);
+                seen.pop();
+            }
+            Err(_) => text.push_str(&format!("\0merge\0{}", path.display())),
+        }
+    }
 }
 
 fn load() -> BTreeSet<String> {

@@ -29,7 +29,8 @@ jobs:
       - name: Check secure native collaboration socket
         run: cargo check --locked -p visigrid-collab --no-default-features --features socket
       - name: Build browser engine
-        run: cargo build --release --locked -p visigrid-engine-wasm --target wasm32-unknown-unknown
+        # The live client needs the collaboration replica: the full browser build.
+        run: cargo build --release --locked -p visigrid-engine-wasm --features recipes --target wasm32-unknown-unknown
       - name: Install matching bindings generator
         run: |
           if ! command -v wasm-bindgen >/dev/null || [ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.126" ]; then
