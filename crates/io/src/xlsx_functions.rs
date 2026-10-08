@@ -42,11 +42,16 @@ pub(crate) fn from_excel(source: &str) -> String {
     if !source.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"_xl")) {
         return source.to_owned();
     }
+    let tokens = tokenize(source);
     let mut out = String::with_capacity(source.len());
-    for token in tokenize(source) {
+    for (i, token) in tokens.iter().enumerate() {
         let mut text = token.text;
         if token.kind == Kind::Ident {
-            while let Some(rest) = ["_xlfn.", "_xlws.", "_xlpm."].iter().find_map(|prefix| {
+            // Function namespaces only wrap calls; a parameter prefix marks
+            // every use of a LET or LAMBDA name.
+            let call = tokens.get(i + 1).is_some_and(|t| t.kind == Kind::Open);
+            let prefixes: &[&str] = if call { &["_xlfn.", "_xlws.", "_xlpm."] } else { &["_xlpm."] };
+            while let Some(rest) = prefixes.iter().find_map(|prefix| {
                 text.get(..prefix.len()).filter(|head| head.eq_ignore_ascii_case(prefix)).map(|_| &text[prefix.len()..])
             }) {
                 text = rest;
@@ -331,6 +336,16 @@ mod tests {
         assert_eq!(
             from_excel("=_xlfn.XLOOKUP(\"_xlfn.x\",'_xlfn.S'!A1:A2,Sales[_xlpm.c])"),
             "=XLOOKUP(\"_xlfn.x\",'_xlfn.S'!A1:A2,Sales[_xlpm.c])"
+        );
+        // Not calls: a sheet, a Table field and a defined name keep the prefix.
+        assert_eq!(
+            from_excel("='_xlfn.SEQUENCE'!A1+Sales[_xlfn.SEQUENCE]+_xlfn.Name"),
+            "='_xlfn.SEQUENCE'!A1+Sales[_xlfn.SEQUENCE]+_xlfn.Name"
+        );
+        assert_eq!(from_excel("=(_xlfn.SEQUENCE(2)+1)*2"), "=(SEQUENCE(2)+1)*2");
+        assert_eq!(
+            from_excel("=_xlfn.SEQUENCE(2)+LEN(\"é\"\"_xlfn.SEQUENCE(2)\")+Sales[a']_xlfn.SEQUENCE(2)]"),
+            "=SEQUENCE(2)+LEN(\"é\"\"_xlfn.SEQUENCE(2)\")+Sales[a']_xlfn.SEQUENCE(2)]"
         );
         for f in ["=SUM(A1:A3)", "=LET(x,5,x)", "=A1&\"_xl\""] {
             assert_eq!(from_excel(f), f);
