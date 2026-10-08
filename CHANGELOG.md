@@ -1,154 +1,53 @@
 # Changelog
 
-## Unreleased
+## 0.52.0
 
-- Tables Phase 4 (0.52.0): linked-footer appends recalculate affected formulas incrementally and share unchanged dependency snapshots; static append history fingerprints affected sheets while keeping global guards for dynamic references and broader structural transactions. An append whose formula closure is most of the workbook uses a full recalculation instead. Rewind calculates an evicted baseline once, including row and Table structure edits, and charges copied column chunks, string-pool pages and capture-time maps at their real size by comparing the baseline with the live workbook, so a replacement does not reset the charge.
-- Large Table conversion now warns about the row count, expected wait, frozen window and undo/redo cost. Undo history has an approximate 1 GiB byte budget; oversized conversions report that they cannot be undone.
-- Refuse row/column inserts that would push merges, validation, conditional formatting or non-empty cells off the grid, preserving exact undo semantics. Extend deleted-name and Phase 4 rich-error persistence regressions; remove the unused hidden-row scanner.
+### Tables
 
-- Keep names targeting a deleted sheet as `#REF!` definitions through undo/redo and native, JSON and XLSX saves; reserve their names until explicitly deleted.
-- Extend body-and-totals validation/conditional-format coverage through repeated appends, preserve released body rules when shrinking, and keep merged ranges inside worksheet bounds. Refuse structural edits that would collapse distinct validation rules onto the same range; equivalent rules may merge.
-- Reuse dependency-graph cycle proofs instead of scanning the entire graph twice per guarded history entry. Avoid an extra full recalculation when plain-row undo has already restored the correct hidden-row flags.
+- **Totals row.** Show a footer under a Table from the Table bar and pick, for each column, Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or your own formula. Totals follow the Table's filter, and stay with the Table when you add records, resize it, insert or delete rows and columns around it, rename it or its columns, copy its sheet or convert it to a range. A formula that points at the footer, such as `=Sales[[#Totals],[Amount]]`, follows it too. Excel Table totals rows open and save with their labels, functions and custom formulas. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Saved views.** **Views…** saves a Table's sort and filter under a name, so you can switch between setups. Excel has no equivalent, so .xlsx export leaves them out and says so. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Keep working while a Table is sorted or filtered.** Formatting, Format Painter, conditional formatting, data validation, comments, freeze panes, hiding and unhiding records, Find & Replace, named ranges (including Extract Named Range), and adding, deleting or renaming sheets no longer ask you to clear the Table's sort or filter first. They change only the records you can see, and each is one undo step. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Find follows the rows as shown.** Find moves in displayed order and skips filtered-out and hidden rows; Replace keeps leading zeros and spacing in what it doesn't replace. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Hidden rows stay hidden.** Rows you hide by hand survive saving as .sheet, JSON and .xlsx, and `SUBTOTAL` leaves them out the same way everywhere. Ctrl+Arrow and reference picking skip them. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Large Tables.** Adding a row to a large Table recalculates only the formulas that read it. Converting a very large Table to a range now says how long it will take and what undo will cost first, and works past the old 100,000-cell limit. Undo history is capped at about 1 GB; when History rewind can't keep its starting point within that, it says so instead of using more memory. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
 
-- Harden Table release workflows: allow existing cycles through sheet changes, conversion and undo/redo; keep validation and conditional-format ranges within worksheet bounds after insertion; accept valid typed dates and times in date/time validation.
-- Keep edited imported validation sources anchored at the selected cell while preserving unchanged rules exactly.
-- Exclude hidden columns from Find/Replace and stale replacement plans. Keep manual row visibility and structural history aligned even on sheets without Tables.
-- Preserve continuous column-wide rule coverage when moving totals, and rewrite recognizable sheet/footer references inside unsupported formula syntax without discarding surrounding text.
-- Fix XLSX conditional-format styles and priorities for interleaved ranges; warn and omit structured-reference conditional-format rules that Excel cannot represent. Preserve blocked array-formula identity, ignore out-of-grid hidden rows with a warning, accept function-named defined ranges, and reject new R1C1-shaped names. Omit invalid legacy names from Excel copies with a warning while preserving native definitions.
+Files with a totals row or saved views use a newer Table format. VisiGrid 0.51 and earlier open them read-only rather than drop those settings.
 
-- Convert large calculated Tables to ordinary ranges beyond the 100,000-cell history limit. Index dependent-formula checks, store compact formula history, and reduce temporary history allocations while retaining atomic validation and stale undo protection.
+### Data validation
 
-- Convert Tables referenced by another Table’s custom totals, including dormant settings and independently stored footer formulas. Preserve local reference ownership when a dormant footer overlaps another Table, including during column renaming.
+- **Validation rules are saved.** .sheet files now keep data-validation rules and exclusions, and .xlsx keeps date, time, text-length and custom rules, input and error messages, alert styles and dropdown settings both ways. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Dropdowns from formulas.** A dropdown's list can come from `OFFSET`, `INDIRECT`, a name, a Table column or another sheet. A source that's broken is reported instead of allowing anything. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Checks use the value, not the display.** Formatted percentages, dates and rounded numbers are validated as the numbers they are. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
 
-- Preserve conditional formatting and validation when converting Tables to ranges, including this-row references and dropdown sources. Evaluate conditional-format rules in their target cell context, and support standard error literals inside formulas so converted rules retain error handling.
+### Excel files
 
-- Add or restore Table totals in a manually hidden row while preserving worksheet visibility. Report the hidden footer row in desktop status, retain totals settings and history, and keep existing collision checks.
+- **Conditional formatting exports to .xlsx**, with its order, ranges and styles, and imports more faithfully. Rules Excel can't represent are listed when you export. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Named ranges and their descriptions** open and save. A name whose sheet was deleted is saved as `#REF!`, as Excel does. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Spills round-trip.** An exported array formula keeps its whole spill range and results, and reopening it gives a live spill again. `#SPILL!` and `#CALC!` from Excel files open as those errors. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Saved results for other readers.** Formulas carry their calculated values, typed as numbers, text, TRUE/FALSE or errors, so pandas and file previews read the same results. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **LET, LAMBDA and newer functions open in Excel.** Excel offered to repair an .xlsx containing LET or LAMBDA, and a newer function typed in lowercase, such as `=xlookup(...)`, showed `#NAME?`. Export now writes them as Excel stores them, and import reads Excel's form back. ([#89](https://github.com/VisiGrid/VisiGrid/issues/89), [#132](https://github.com/VisiGrid/VisiGrid/pull/132))
 
-- Convert Tables with manually hidden rows to ordinary ranges without losing visibility or changing which rows their totals include. Preserve frozen formula sources, add guarded atomic undo/redo/rewind, and allow conversion while unrelated Tables have active criteria. Referenced conditional-format/validation rules retain their Table binding through A1 rewrites, including per-record references, origins and overlapping-rule precedence.
+### Formulas
 
-- Append and resize Tables whose totals row is manually hidden, or whose new footer position is hidden. Keep worksheet visibility flags in place, preserve totals and undo/redo, and keep Add row/Tab focus on visible records when the appended row stays hidden.
+- **Named ranges evaluate on the sheet they're defined on**, wherever the formula that uses them is. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **`INDIRECT` and `OFFSET` follow their targets.** When the cell an `INDIRECT` or `OFFSET` points at changes, or the formula starts pointing somewhere else, everything downstream recalculates. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Clearing what blocks a spill brings the spill back.** ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
 
-- Export formula-based conditional formatting to XLSX, including stored-order Table exports. Preserve rule precedence, per-range anchors, supported font/fill/border/number overrides and moved totals-row rules; report unsupported properties and omitted inert rules in export review.
-- Improve conditional-format import: rebase Excel’s shared range anchors, retain borders and number formats, and preserve explicit font-off settings. Report unmapped differential-style properties.
-
-- Move conditional formatting, validation rules and validation exclusions with Table totals when appending or resizing. Preserve surrounding rule coverage and relative-reference meaning, replace destination coverage, and restore exact metadata with undo/redo and History rewind.
-- Keep cross-sheet conditional-format references readable in the inspector instead of displaying an erroneous `#REF!` qualifier.
-
-- Append or resize Tables with totals while using `INDIRECT` and `OFFSET`. Explicit footer references follow moved cells; literal addresses and numeric offsets retain their authored meaning. Recalculate and validate before applying, with atomic undo/redo and History rewind.
-
-- Add and delete worksheets while Table sorting/filtering is active, with atomic recalculation, undo/redo and History rewind. Deleted sheet/Table references become permanent `#REF!` tokens; surviving named ranges keep their original sheet targets, and names on the deleted sheet retain a broken `#REF!` target. Deleting a source used by a PivotTable on another sheet is explicitly refused.
-- Keep sheet identities and pane targets stable through sheet deletion and undo. History retains the removed sheet and sparse changes to surviving sheets, rather than a full workbook snapshot.
-
-- Rename worksheets through active Table sorting and filters without breaking formula references. Cell formulas, calculated-column rules, totals, conditional formatting and validation sources update atomically, with undo/redo and History rewind. Session and browser renames use the same checked behavior; quoted text such as `INDIRECT("OldName!A1")` remains literal.
-
-- Extract Named Range works through Table sorting and filters, targeting canonical visible formulas on the current sheet. The name and formula changes share one atomic undo/redo and History rewind step; stale dialogs and unsafe edits leave the workbook unchanged.
-- Extract actual reference tokens while preserving formula spelling, quoted text and structured headers. Respect qualified sheet targets and LET/LAMBDA scopes, and explicitly show that hidden formulas are excluded.
-
-- Table `SUBTOTAL` sums and averages use the same compensated summation as worksheet aggregates, keeping totals consistent when large values cancel or many small amounts accumulate.
-
-- Support nested named, cross-sheet and Table references in formula-backed dropdowns and worksheet `INDIRECT`/`OFFSET` expressions. Share reference bounds and geometry checks across both paths.
-- Track runtime reference targets so source edits and retargeting update formulas, downstream cells and spills. Recalculate changed bindings in dependency order and report targets that fail to settle.
-- Dynamic reference cycles retain their formulas and can recover when a selector changes; the inspector and XLSX import report retain cycle diagnostics.
-
-- Resolve formula-backed validation dropdowns from dynamic ranges, names and Table columns, including `OFFSET`, A1 `INDIRECT`, `IF`, `CHOOSE`, `INDEX` and supported one-dimensional array results. Formula sources retain commas and imported relative-reference origins through editing and file round trips.
-- Full-workbook JSON now preserves named ranges and descriptions, fixing named formulas and dropdown sources after reopening. Files containing names use JSON v5; older readers reject that version instead of silently losing definitions. Name-free exports keep their existing version.
-- Report broken dropdown sources instead of silently treating them as permissive empty lists. Include spilled source values, track source errors/truncation and snapshot dropdown choices until the captured workbook state changes, avoiding formula evaluation on every render. Bound temporary validation arrays before allocation while retaining sparse whole-column reference lists.
-
-- Evaluate date/time validation, custom formulas and formula-based numeric/text-length bounds with target-cell, named-range, cross-sheet and structured-reference context. Formula errors and non-scalar results are reported instead of silently passing.
-- Check existing cells and bounds using typed values, fixing validation of formatted percentages, dates and rounded numbers. Proposed-input checks privately recalculate dependent formulas and spills; desktop marker refresh avoids per-cell workbook copies. Validation remains advisory, and host custom functions are not executed by these checks.
-
-- XLSX export preserves effective validation coverage through exclusions and overlapping rules. Relative Excel rules retain their reference origin across filtered edits, save/reopen and undo; each exported fragment receives the correct formula. Existing native fixed references export as absolute addresses.
-- Imported formula-backed validation origins use native validation metadata v2 and full JSON v4. Version-aware older readers reject unsupported metadata; releases predating native validation persistence can still drop rules on re-save. Numeric bounds and dropdown sources resolve per target; workbook list checks now share the dropdown's named/cross-sheet source, and text-length rules count Unicode characters.
-- Report unsupported/malformed XLSX validation definitions and sheet-level parsing failures. Invalid range lists are omitted as a whole rather than changing their reference origin.
-
-- XLSX import/export now preserves date, time, text-length and custom validation metadata alongside list and numeric rules. Preserve dropdown visibility, disabled messages and alert styles, large numeric bounds, Unicode and XML-escaped formula text. Empty inline lists and items containing commas are reported as skipped on export instead of becoming a different list. Evaluation support is described above.
-
-- Edit data-validation rules and exclusions through sorted/filtered Tables. Changes target visible stored records, preserve hidden rules and use sparse undo/redo and history rewind. Stale dialogs and unsafe adjacent ranges refuse before mutation.
-- Preserve imported rule types, messages, alerts and unchanged inline-list sources in the validation editor. Fix existing-rule dialogs losing their target range, sorted validation dropdowns reading/writing the wrong row, and F8 jumping to hidden validation failures.
-
-- Full-fidelity JSON now retains data-validation exclusions, including on sheets with no current rules. Invalid validation ranges, duplicate rule ranges and excessive range counts are refused on import. Older readers may drop exclusions on re-save.
-
-- Create, rename, delete and describe named ranges while Table sorting/filtering is active, with atomic recalculation and undo/redo/rewind. Rename updates references on every sheet, including hidden records, calculated-column rules, dormant totals, conditional formatting and validation. Formula strings and unrelated tokens retain their original text.
-- Native files now retain data-validation rules and exclusions. Missing metadata remains compatible; corrupt, oversized or future validation metadata opens read-only. Older releases can still drop these rules on re-save.
-- Named-range dialogs capture their worksheet targets and refuse stale previews. Impact previews include all sheets and Table rules; Names-panel, F12 and palette navigation resolve the target sheet and visible records instead of treating stored rows as screen positions.
-
-- Freeze and unfreeze panes inside sorted/filtered Tables without clearing criteria. Frozen/body cells and overlays share visible-row geometry; keyboard/wheel/drag scrolling and hit-testing skip hidden rows and columns. Freeze changes support sheet-scoped undo/redo and rewind.
-- Preserve interior freeze boundaries with Table criteria in XLSX import and both export orders. Full-fidelity JSON now restores engine freeze state and retains it on exports without a host layout, using the existing format fields.
-
-- Author and manage conditional formatting through sorted/filtered Tables. New rules target visible stored records; partial clearing preserves hidden cells and formula anchors. Undo/redo and rewind retain rule order and validate all targets before replay.
-- Keep conditional-format previews private until Save/Add: saving or exporting while editing no longer captures a draft or temporarily removes the original rule. Stale drafts are refused without discarding text; editing preserves disabled rules and their precedence.
-
-- Format visible records in sorted/filtered Tables without clearing criteria: fonts, colors, alignment, number formats, styles, borders, Clear Formatting and Format Painter use canonical cells and atomic validation. F4 repeat and undo/redo keep the same targeting; hidden records stay unchanged.
-- Resolve Table borders against visible neighbors, preserve empty-cell absence through formatting undo, and keep the copied format available after a refused paste/painter operation. Adjacent body formatting and percentage-text conversion remain explicit refusals.
-
-- Add, edit and delete comments on visible sorted/filtered Table records without clearing criteria. Comments stay with canonical cells through undo/redo and history rewind; comment navigation can read hidden records without revealing them. Unsafe adjacent comments and stale drafts are refused before mutation.
-- Full-fidelity JSON now preserves comment text and authors, including comments on empty cells and spill receivers. The additive field leaves comment-free exports unchanged; older readers can still drop comments on re-save.
-
-- Find follows displayed row order and skips filtered-out and manually hidden rows. Replace and Replace All work through Table criteria with atomic validation, sparse undo/redo and History rewind, including edits on other sheets that affect a Table. Stale results and protected targets refuse the whole replacement.
-- Find/Replace retains original UTF-8 offsets and matches formula references at token boundaries. Text replacements preserve leading zeros, whitespace and literal formula-looking text; the shared literal paste/fill path now also preserves whitespace. Search refuses more than 100,000 matches rather than applying a truncated Replace All.
-
-- Save named Table sort/filter setups and switch between them from **Views…**. Rename, update and delete setups with undo/redo and history rewind; column renames keep stable bindings, and manual row hides remain separate. Native/full JSON files containing named views use Table metadata version 6 so older readers enter read-only recovery; XLSX export warns that named setups are omitted.
-
-- Fix worksheet Hide/Unhide targeting the wrong records after sorting. Hide skips filtered-out rows; Unhide removes manual flags without clearing filters. The operation also works alongside other-sheet Table criteria, and visibility-only rewind retains worksheet sort history.
-
-- Vertical navigation and formula reference picking skip manually hidden rows after clearing Table criteria. Ctrl+Arrow ignores hidden gaps and hidden values, and moving from a hidden row no longer skips the nearest visible row twice. Picked references under worksheet sorting use canonical cell addresses.
-
-- Hide and unhide records inside sorted or filtered Tables without clearing criteria. Navigation, paste, fill, cut, append and structural edits use the same visible rows; undo/redo and rewind restore visibility and totals together. Formula-reference outlines stay aligned with visible sorted records.
-- Preserve manual hides when importing sorted XLSX Tables and hidden records that pass a supported saved filter. Custom body row heights and freeze boundaries remain restricted.
-
-- Manually hidden rows survive headless native, full-JSON and XLSX saves and affect `SUBTOTAL` consistently, including sheets without Table totals. Visibility and row-structure history preserve the flags; projected-Table manual hiding uses the shared visibility state.
-- Fix the single-sheet native loader dropping formula sources. It now restores formulas, recalculates after all cells and layout are loaded, and retains cached results for unavailable custom functions.
-
-- Preserve supported modern Excel formula errors, including `#SPILL!` and `#CALC!`, through rich-value metadata and values-only import. Older readers receive a conventional error fallback; malformed metadata keeps fallback cells with a warning.
-- Clearing a spill obstruction retries the array and its dependents. Restoring an obstruction through ordinary value undo removes generated receivers and recalculates their readers.
-
-- XLSX exports retain the full calculated spill range, with typed cached values and individual cell formatting. Reopening supported array formulas rebuilds live spills instead of treating their cached values as obstructions. Unsupported or unsafe array metadata retains cached member cells with a warning; values-only import keeps the saved results.
-
-- XLSX formulas retain typed calculated results for values-only readers, including numeric-looking text, booleans and standard errors. Missing/unsupported caches are omitted with a warning; imported string caches preserve whitespace and escaped characters.
-
-- Preserve workbook-wide cell/range names and descriptions in XLSX, including references to moved Table totals; remap intact named targets during sorted export and report unsupported Excel name types explicitly.
-
-- Fixed references to Table totals follow the footer when rows are appended or the Table is resized. Formula cells, named targets, calculated rules, custom totals and rule formulas update together with undo/redo and rewind. Larger ranges retain their worksheet bounds; dynamic references still require explicit or structured references before moving totals.
-- Workbook named ranges now evaluate on their defined sheets, including references used in arithmetic, aggregates, lookup arguments, arrays and custom functions.
-
-- Reduce temporary memory used by guarded Table history. Workbook fingerprints now process one cell at a time while preserving the same stale-edit protection for undo/redo, structural changes and automation batches.
-
-- Manually hide/unhide rows on sheets with Table totals. Totals and dependents recalculate, and undo/redo and history rewind restore visibility and totals together. Safe rows outside an active Table view and rows on other sheets no longer require clearing workbook-wide criteria. Hiding records inside a sorted/filtered Table still requires clearing that Table's criteria first.
-
-- Large XLSX sheets without Table links no longer trigger the Table-parser size warning or prevent Tables on later sheets from loading. Table import now validates definitions in a batch, with a workbook limit of 1,024 definition attempts and 64 MiB of Table metadata. Skipped definitions keep their cells and produce an explicit warning.
-
-- Copy reviewed sheets containing Tables with visible or hidden totals. Copied footer formulas, custom settings and calculated rules bind to the new Tables; filters, overrides, formatting and comments survive. Undo/redo, history rewind and native/XLSX round trips preserve the independent copies. Dormant totals also reserve referenced Table names and prevent removal of a referenced sheet.
-
-- Resize Tables horizontally with visible or hidden totals. Surviving columns retain their rules and totals; released cells stay in place, and newly added footer cells must be empty. Combined width/height changes apply atomically, with undo/redo and history rewind. Undoing a total or calculated rule now restores originally absent cells so an earlier resize can also be undone.
-
-- Save checkbox-filter values in a stable order in native and JSON files. Existing files with unordered values still load without a format-version change.
-
-- Insert and delete worksheet rows around Tables with totals. Footers, custom formulas and manual hidden-row positions follow the moved cells; inserting at a visible footer adds calculated body records above it. Deleting the footer hides totals while retaining their settings. Filtered deletion preserves hidden records, with atomic undo/redo and history rewind. Headerless Table creation can move neighboring totals in the same undo step.
-
-- Insert and delete worksheet columns around Tables with visible or hidden totals. Footer settings, formulas, formatting and comments follow surviving columns; references to deleted fields become `#REF!`. Saved criteria remain active, with atomic validation, undo/redo and history rewind.
-
-- Edit calculated-column rules with visible or hidden Table totals. Preserve overrides or explicitly replace every record, including filtered-out records, with the scope shown in the dialog. The footer stays outside the fill and recalculates; saved criteria, undo/redo, history rewind and native/XLSX round trips retain the rules and totals.
-
-- Rename Tables and column headers with totals enabled or hidden. Structured cell formulas, calculated rules and custom totals settings follow the new names, including references from other Tables. Saved filters/sorting stay active, with undo/redo and history rewind.
-
-- Table sorting and filtering now display correctly on smaller imported sheets, including CSV files. The desktop projection respects the sheet's row extent, keeping visible records and totals consistent.
-
-- Adding Table records and vertical resizing now move the totals footer safely, including its formulas, formatting and comments. Filtered bulk paste, calculated-column fill and undo/redo/rewind preserve hidden records and neighboring notes. Occupied footer destinations and unsafe fixed references refuse before any write; structured `#Totals` references follow the footer.
-
-- Author native Table totals from the Table bar: show/hide the footer and choose Sum, Average, Count, Count numbers, Minimum, Maximum, standard deviation, variance, a label or a custom formula for each column. Aggregates follow Table filters; settings survive hiding, saving and XLSX round trips. Changes support undo/redo and history rewind with active criteria. Showing totals refuses occupied cells below the Table.
-
-- Import and export Excel Table totals rows, retaining labels, built-in function settings, custom formulas and dormant totals settings through XLSX and native saves. `SUBTOTAL` supports Table filters and imported manual row hiding; `[#Totals]` and `[#All]` resolve the footer correctly. Body edits recalculate totals and their dependents.
-- Tables with totals use Table metadata version 5; earlier releases open these files in read-only recovery. Ordinary footer writes remain protected. Sorting that moves records requires stored-order XLSX export (headless export falls back with a warning).
 ### Import recipes
 
 - **Open a JSON export with File → Open.** Opening a `.json`, `.jsonl` or `.ndjson` file (File → Open, the command line, or dragging it onto the window) starts an import recipe on it, as **New Import Recipe…** does. It used to say "Unknown file type: json" and open an empty workbook. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134), closes [#133](https://github.com/VisiGrid/VisiGrid/issues/133))
 - **Change a column's type from the recipe preview.** The type under each preview column (`Text ›`) is now a button, like the CSV import dialog's: click it for the next type, right-click for the previous one. It edits the selected **Set types** step, or adds one. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134))
 - **The recipe preview scrolls sideways.** Columns past the right edge of the preview could not be reached; scroll with a trackpad, a tilting wheel or Shift+wheel. ([#134](https://github.com/VisiGrid/VisiGrid/pull/134))
 
+### Full-workbook JSON
+
+- **Named ranges, comments, validation exclusions and frozen panes** now survive a full-workbook JSON save. Files with named ranges use JSON version 5, which older readers refuse rather than open without the names. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+
 ### Fixed
 
 - **A near-zero total takes a custom format's zero section.** With an accounting format such as `#,##0.00;(#,##0.00);"-"`, a total that rounds to zero now shows `-`, as an exact 0 does, instead of `0.00` (since 0.51.0). ([#129](https://github.com/VisiGrid/VisiGrid/pull/129))
-- **LET, LAMBDA and newer functions open in Excel.** Excel offered to repair an .xlsx containing LET or LAMBDA, and a newer function typed in lowercase, such as `=xlookup(...)`, showed `#NAME?`. Export now writes Excel's stored forms. Importing an .xlsx with those forms no longer turns its newer-function formulas into errors. ([#89](https://github.com/VisiGrid/VisiGrid/issues/89))
+- **Hide and Unhide after sorting** hid or showed the wrong records. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
+- **Sorting and filtering on small imported sheets**, including CSV files, showed the wrong rows. ([#111](https://github.com/VisiGrid/VisiGrid/pull/111))
 
 ## 0.51.0
 
