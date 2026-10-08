@@ -822,7 +822,6 @@ fn workbook_doc(
 /// The cells of `sheet` as written to a document, in row-major order, for
 /// every row or (bands) only the rows in `rows`.
 fn sheet_cells(sheet: &Sheet, rows: Option<std::ops::Range<usize>>) -> Vec<FullCell> {
-    let mut cells: Vec<FullCell> = Vec::new();
     let in_rows = |r: usize| rows.as_ref().map_or(true, |range| range.contains(&r));
 
     // A band reads only the store chunks its rows overlap, not the sheet.
@@ -832,7 +831,26 @@ fn sheet_cells(sheet: &Sheet, rows: Option<std::ops::Range<usize>>) -> Vec<FullC
         None => sheet.cells_iter().map(|(rc, _)| rc).collect(),
     };
     coords.sort_unstable();
+    collect_cells(sheet, coords, &|r, _| in_rows(r))
+}
 
+/// The visigrid-json `cells` entries for just these coordinates, exactly as
+/// `export_workbook` writes them (spill receivers included; an empty cell
+/// has no entry). The collaboration host answers `read_cells` with it, so a
+/// server write reads the cells it touches, not the whole workbook.
+pub fn cells_at(sheet: &Sheet, wanted: &[(usize, usize)]) -> Result<serde_json::Value, String> {
+    let mut coords: Vec<(usize, usize)> = wanted.to_vec();
+    coords.sort_unstable();
+    coords.dedup();
+    let set: std::collections::HashSet<(usize, usize)> = coords.iter().copied().collect();
+    let cells = collect_cells(sheet, coords, &|r, c| set.contains(&(r, c)));
+    serde_json::to_value(cells).map_err(|e| format!("cells: {e}"))
+}
+
+/// The `cells` entries for `coords` (sorted), then the spill receivers
+/// `keep_receiver` selects.
+fn collect_cells(sheet: &Sheet, coords: Vec<(usize, usize)>, keep_receiver: &dyn Fn(usize, usize) -> bool) -> Vec<FullCell> {
+    let mut cells: Vec<FullCell> = Vec::new();
     for (row, col) in coords {
         let raw = sheet.get_raw(row, col);
         let format = sheet.get_format(row, col);
@@ -929,7 +947,7 @@ fn sheet_cells(sheet: &Sheet, rows: Option<std::ops::Range<usize>>) -> Vec<FullC
 
     // Cells a formula spilled into. They hold no Cell of their own, so the loop
     // above never sees them.
-    let mut receivers: Vec<(usize, usize)> = sheet.spill_receiver_coords().filter(|&(r, _)| in_rows(r)).collect();
+    let mut receivers: Vec<(usize, usize)> = sheet.spill_receiver_coords().filter(|&(r, c)| keep_receiver(r, c)).collect();
     receivers.sort_unstable();
     if receivers.is_empty() { return cells; }
     let authored: BTreeMap<_, _> = cells.iter().enumerate()
