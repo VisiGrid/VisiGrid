@@ -510,7 +510,9 @@ pub(super) fn write_xml(
     if !buttons && filters.0.is_empty() {
         return Ok(());
     }
-    let r = table.range;
+    // A zero-record Table exports its footer as the one data row, so the
+    // filter covers it like the Table does.
+    let r = if super::xlsx_tables::totals_exported_as_values(table) { table.full_range() } else { table.range };
     let reference = format!(
         "{}{}:{}{}",
         super::xlsx::col_to_letter(r.start_col),

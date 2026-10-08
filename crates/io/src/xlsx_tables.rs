@@ -342,7 +342,7 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
             Event::End(e) if e.local_name().as_ref() == b"totalsRowFormula" => {
                 if !in_total_formula { return Err("Invalid totals formula close".into()); }
                 totals_columns.last_mut().ok_or("Missing totals column")?.formula =
-                    Some(format!("={}", total_formula.trim().trim_start_matches('=')));
+                    Some(super::xlsx_functions::from_excel(&format!("={}", total_formula.trim().trim_start_matches('='))));
                 in_total_formula = false;
             }
             Event::Text(t) if in_formula => formula.push_str(
@@ -360,7 +360,8 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
                 );
             }
             Event::End(e) if e.local_name().as_ref() == b"calculatedColumnFormula" => {
-                let source = format!("={}", formula.trim().trim_start_matches('='));
+                // Same _xlfn./_xlws./_xlpm. stripping as cell formulas (#89).
+                let source = super::xlsx_functions::from_excel(&format!("={}", formula.trim().trim_start_matches('=')));
                 if parse(&source).is_ok() {
                     columns.last_mut().unwrap().formula = Some(source);
                 } else {

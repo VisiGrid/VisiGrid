@@ -88,6 +88,24 @@ fn calculated_column_and_totals_formulas_prefix_future_functions() {
         xml.contains("<totalsRowFormula>ROWS(_xlfn._xlws.FILTER(A2:A3,A2:A3=A2))+ROWS(_xlfn._xlws.SORT(A2:A3))</totalsRowFormula>"),
         "{xml}"
     );
+
+    // The stored column rule and footer come back without Excel's prefixes,
+    // and a second export does not double or uppercase them.
+    let (loaded, report) = xlsx::import(&file).unwrap();
+    assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+    let table = loaded.tables().next().unwrap().1;
+    let rule = table.columns[2].formula.as_deref().unwrap_or_default();
+    assert!(!rule.to_ascii_lowercase().contains("_xl"), "{rule}");
+    assert!(rule.starts_with("=XLOOKUP("), "{rule}");
+    let footer = table.totals.as_ref().and_then(|t| t.columns[2].formula.as_deref()).unwrap_or_default();
+    assert!(!footer.to_ascii_lowercase().contains("_xl"), "{footer}");
+    let again = dir.path().join("again.xlsx");
+    xlsx::export_with_order(&loaded, &again, None, xlsx::ExportOrder::Stored).unwrap();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&again).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/tables/table1.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains("<calculatedColumnFormula>_xlfn.XLOOKUP("), "{xml}");
+    assert!(!xml.contains("_XLFN") && !xml.contains("_xlfn._xlfn."), "{xml}");
 }
 
 #[test]

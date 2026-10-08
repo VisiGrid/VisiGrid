@@ -2341,10 +2341,14 @@ fn empty_body_and_dormant_totals_metadata_roundtrip() {
             let warning = "Table Sales has no records; its totals row is exported as values.";
             assert!(report.warnings.iter().any(|w| w == warning), "{:?}", report.warnings);
             assert!(!metadata.contains("totalsRow"), "{metadata}");
+            // The filter covers the footer row exported as data, as the Table does.
+            assert!(metadata.contains("<autoFilter ref=\"A1:C2\""), "{metadata}");
+            assert!(!report.warnings.iter().any(|w| w.contains("filter range")), "{:?}", report.warnings);
             let sheet = xml(&output, "xl/worksheets/sheet1.xml");
             assert!(!sheet.contains("<f"), "{sheet}");
             let (loaded, report) = xlsx::import(&output).unwrap();
             assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+            assert!(!report.warnings.iter().any(|w| w.contains("filter range")), "{:?}", report.warnings);
             assert!(loaded.tables().next().unwrap().1.totals_row().is_none());
             assert_eq!(loaded.sheet(0).unwrap().get_display(1, 0), "Total");
             assert_eq!(loaded.sheet(0).unwrap().get_display(1, 1), "0");

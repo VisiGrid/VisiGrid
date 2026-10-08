@@ -268,7 +268,13 @@ fn expr_token(tokens: &[Token], i: usize, bound: &mut Vec<String>, out: &mut Str
         out.push_str("_xlpm.");
         out.push_str(token.text);
     } else {
-        out.push_str(&token.text.to_ascii_uppercase());
+        // Keep an existing _xlfn./_xlws. prefix as Excel spells it.
+        let mut name = token.text;
+        while let Some(prefix) = ["_xlfn.", "_xlws."].iter().find(|p| name.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p))) {
+            out.push_str(prefix);
+            name = &name[prefix.len()..];
+        }
+        out.push_str(&name.to_ascii_uppercase());
     }
     out.push('(');
     let args = arguments(tokens, i + 2);
@@ -362,6 +368,8 @@ mod tests {
         assert_eq!(x("=xlookup(\"c\",H1:H3,I1:I3)"), "=XLOOKUP(\"c\",H1:H3,I1:I3)");
         assert_eq!(x("=sum(a1:a3)+Stdev.S(B1:B2)"), "=SUM(a1:a3)+STDEV.S(B1:B2)");
         assert_eq!(x("=\"xlookup(\"&lower(A1)"), "=\"xlookup(\"&LOWER(A1)");
+        assert_eq!(x("=_xlfn.xlookup(1,A1,B1)"), "=_xlfn.XLOOKUP(1,A1,B1)");
+        assert_eq!(x("=_XLFN._xlws.filter(A1,A1>0)"), "=_xlfn._xlws.FILTER(A1,A1>0)");
     }
 
     #[test]
