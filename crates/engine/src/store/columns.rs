@@ -170,6 +170,13 @@ fn split(row: usize) -> (u32, usize) {
     ((row >> CHUNK_BITS) as u32, row & (CHUNK_ROWS - 1))
 }
 
+/// The offsets of chunk `idx` that rows `min_row..=max_row` cover.
+fn offsets_within(idx: u32, min_row: usize, max_row: usize) -> (usize, usize) {
+    let (lo, lo_off) = split(min_row);
+    let (hi, hi_off) = split(max_row);
+    (if idx == lo { lo_off } else { 0 }, if idx == hi { hi_off } else { CHUNK_ROWS - 1 })
+}
+
 #[inline]
 fn join(chunk: u32, off: usize) -> usize {
     ((chunk as usize) << CHUNK_BITS) | off
@@ -233,6 +240,24 @@ impl Cells {
                 SlotIter::Dense { cells: self, present, word: 0, bits: present[0] }
             }
         }
+    }
+
+    /// Present cells with `lo <= offset <= hi`, in offset order: a range
+    /// over a few rows of a chunk visits those rows, not all 1,024. (Visiting
+    /// every slot and filtering made each `SUM(B5:S5)` cost ~18,000 slot
+    /// checks on a 2,000-row sheet: ~75 µs, against ~0.5 µs for `=B5`.)
+    fn slots_between(&self, lo: usize, hi: usize) -> impl Iterator<Item = (usize, Slot)> + '_ {
+        let it = match self {
+            Cells::Sparse(v) => {
+                let start = v.partition_point(|e| (e.0 as usize) < lo);
+                SlotIter::Sparse(v[start..].iter())
+            }
+            Cells::Numbers { present, .. } | Cells::Texts { present, .. } | Cells::Mixed { present, .. } => {
+                let word = lo / 64;
+                SlotIter::Dense { cells: self, present, word, bits: present[word] & (!0u64 << (lo % 64)) }
+            }
+        };
+        it.take_while(move |&(off, _)| off <= hi)
     }
 
     fn entries(&self) -> Vec<(usize, Slot)> {
@@ -879,11 +904,10 @@ impl ColumnStore {
                 if *idx > hi {
                     break;
                 }
-                for (off, slot) in chunk.cells.slots() {
+                let (from, to) = offsets_within(*idx, min_row, max_row);
+                for (off, slot) in chunk.cells.slots_between(from, to) {
                     let row = join(*idx, off);
-                    if (min_row..=max_row).contains(&row) {
-                        f((row, col), self.view(row, col, chunk, off, slot));
-                    }
+                    f((row, col), self.view(row, col, chunk, off, slot));
                 }
             }
         }
@@ -916,11 +940,9 @@ impl ColumnStore {
                 if *idx > hi {
                     break;
                 }
-                for (off, slot) in chunk.cells.slots() {
+                let (from, to) = offsets_within(*idx, min_row, max_row);
+                for (off, slot) in chunk.cells.slots_between(from, to) {
                     let row = join(*idx, off);
-                    if !(min_row..=max_row).contains(&row) {
-                        continue;
-                    }
                     let scalar = match slot {
                         Slot::Empty => Scalar::Empty,
                         Slot::Number(n) => Scalar::Number(n),
