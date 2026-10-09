@@ -406,15 +406,33 @@ pub enum CollabOp {
         sheet: SheetKey,
         rect: Rect,
     },
-    /// V1 atomic range op standing in for sort / move / large paste: it
-    /// replaces a block of values. Concurrent overlapping ops are refused.
+    /// V1 atomic range op standing in for move / large paste: it replaces a
+    /// block of values. Concurrent overlapping ops are refused.
     ReplaceRange {
         sheet: SheetKey,
         row: usize,
         col: usize,
         values: Vec<Vec<CellContent>>,
     },
+    /// Reorder the rows of `rect`: afterwards row `rect.r0 + i` holds what
+    /// row `rect.r0 + order[i]` held, across columns `c0..=c1` only. Contents
+    /// and formats move; a moved formula's relative references shift with it,
+    /// as in a copy (Excel and Sheets sort this way). Row heights and cells
+    /// outside the columns stay.
+    ///
+    /// The writer computes `order` from its own replica ([`crate::sort`]), so
+    /// applying it needs no state: every replica moves the same rows, and a
+    /// concurrent edit to a sorted row follows its row.
+    SortRange {
+        sheet: SheetKey,
+        rect: Rect,
+        order: Vec<u32>,
+    },
 }
+
+/// The most rows one `SortRange` may reorder: its `order` must fit in one
+/// operation on the wire (the server takes 256 KiB of JSON per op).
+pub const MAX_SORT_ROWS: usize = 30_000;
 
 impl CollabOp {
     pub fn sheet(&self) -> SheetKey {
@@ -431,7 +449,8 @@ impl CollabOp {
             | CollabOp::SetFreeze { sheet, .. }
             | CollabOp::Merge { sheet, .. }
             | CollabOp::Unmerge { sheet, .. }
-            | CollabOp::ReplaceRange { sheet, .. } => *sheet,
+            | CollabOp::ReplaceRange { sheet, .. }
+            | CollabOp::SortRange { sheet, .. } => *sheet,
         }
     }
 
@@ -476,8 +495,61 @@ impl CollabOp {
                 }
                 Ok(())
             }
+            CollabOp::SortRange { rect, order, .. } => {
+                if rect.r0 > rect.r1 || rect.c0 > rect.c1 {
+                    return Err("sort rect is inverted".into());
+                }
+                let h = rect.r1 - rect.r0 + 1;
+                if h > MAX_SORT_ROWS {
+                    return Err(format!("a sort may reorder at most {MAX_SORT_ROWS} rows"));
+                }
+                if order.len() != h {
+                    return Err("sort order must list every row once".into());
+                }
+                let mut seen = vec![false; h];
+                for &i in order {
+                    match seen.get_mut(i as usize) {
+                        Some(s) if !*s => *s = true,
+                        _ => return Err("sort order must list every row once".into()),
+                    }
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
+    }
+
+    /// For a `SortRange`: where each row of its rectangle goes, indexed by
+    /// the row's offset from `rect.r0` (absolute destination rows).
+    pub fn sort_destinations(&self) -> Option<Vec<usize>> {
+        let CollabOp::SortRange { rect, order, .. } = self else { return None };
+        let mut to = vec![0usize; order.len()];
+        for (i, &from) in order.iter().enumerate() {
+            to[from as usize] = rect.r0 + i;
+        }
+        Some(to)
+    }
+
+    /// The `SortRange` that puts the rows of this one back.
+    pub fn sort_inverse(&self) -> Option<CollabOp> {
+        let CollabOp::SortRange { sheet, rect, order } = self else { return None };
+        let mut back = vec![0u32; order.len()];
+        for (i, &from) in order.iter().enumerate() {
+            back[from as usize] = i as u32;
+        }
+        Some(CollabOp::SortRange { sheet: *sheet, rect: *rect, order: back })
+    }
+
+    /// Where a `SortRange` moves row `row` of its rectangle's columns:
+    /// `Some(new row)` for a row inside `rect`, `None` outside. Rows the op
+    /// does not move map to themselves.
+    pub fn sorted_row(&self, row: usize) -> Option<usize> {
+        let CollabOp::SortRange { rect, order, .. } = self else { return None };
+        if row < rect.r0 || row > rect.r1 {
+            return None;
+        }
+        let from = (row - rect.r0) as u32;
+        order.iter().position(|&o| o == from).map(|i| rect.r0 + i)
     }
 
     /// The block a `ReplaceRange` covers.

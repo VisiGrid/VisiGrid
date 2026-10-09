@@ -176,8 +176,8 @@ impl Client {
 
     /// Transform every undo and redo entry past ops just applied to `wb`.
     fn shift_history(&mut self, ops: &[CollabOp]) {
-        // Only structure and sheet ops move or drop a later op; cell, format,
-        // line, freeze and merge ops leave it as it is (see `transform` with
+        // Only structure, sheet and sort ops move or drop a later op; cell,
+        // format, line, freeze and merge ops leave it as it is (see `transform` with
         // `Order::Later`). Skipping them keeps a large paste from costing
         // history x paste transforms.
         let movers: Vec<CollabOp> = ops.iter().filter(|op| moves_others(op)).cloned().collect();
@@ -634,6 +634,8 @@ pub fn positional_inverse(ops: &[CollabOp], before: &Workbook) -> Vec<CollabOp> 
                     delete: !*delete,
                 });
             }
+            // A sort moves cells: its inverse moves them back.
+            CollabOp::SortRange { .. } => inverse.extend(op.sort_inverse()),
             CollabOp::AddSheet { sheet, index, .. } => {
                 inverse.push(CollabOp::DeleteSheet { sheet: *sheet, index: *index });
             }
@@ -672,7 +674,15 @@ fn rebase(entry: &[CollabOp], inverse: &[CollabOp]) -> (Vec<CollabOp>, Vec<Colla
         let mut cur = vec![e.clone()];
         let mut next_inv = Vec::with_capacity(inv.len());
         for iv in &inv {
-            next_inv.extend(permissive(iv, &cur));
+            // A removed rename's inverse stops mattering once a later rename
+            // of the same sheet stays: that one decides the name from here
+            // on. Carried on, it would hand the old name to the undo history
+            // recorded after the later rename (found by the simulator).
+            let renamed_again = matches!(iv, CollabOp::RenameSheet { sheet, .. }
+                if cur.iter().any(|x| matches!(x, CollabOp::RenameSheet { sheet: s, .. } if s == sheet)));
+            if !renamed_again {
+                next_inv.extend(permissive(iv, &cur));
+            }
             cur = cur.iter().flat_map(|x| permissive(x, std::slice::from_ref(iv))).collect();
         }
         out.extend(cur);
@@ -685,7 +695,12 @@ fn rebase(entry: &[CollabOp], inverse: &[CollabOp]) -> (Vec<CollabOp>, Vec<Colla
 fn moves_others(op: &CollabOp) -> bool {
     matches!(
         op,
-        CollabOp::Structural { .. } | CollabOp::AddSheet { .. } | CollabOp::DeleteSheet { .. } | CollabOp::RenameSheet { .. } | CollabOp::MoveSheet { .. }
+        CollabOp::Structural { .. }
+            | CollabOp::AddSheet { .. }
+            | CollabOp::DeleteSheet { .. }
+            | CollabOp::RenameSheet { .. }
+            | CollabOp::MoveSheet { .. }
+            | CollabOp::SortRange { .. }
     )
 }
 

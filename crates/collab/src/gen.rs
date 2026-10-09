@@ -1,7 +1,7 @@
 //! Random operations, generated from one replica's own view and weighted
 //! toward the conflicts the transform table has to get right: a small hot
 //! region, edits next to concurrent inserts and deletes, overlapping deletes,
-//! cross-sheet formulas, renames, and atomic ranges.
+//! cross-sheet formulas, renames, atomic ranges, and sorts.
 //!
 //! Formulas avoid NOW/TODAY/RAND/INDIRECT/OFFSET: their determinism is Phase
 //! 0 work (VisiGrid#88), not the transform's.
@@ -11,6 +11,7 @@ use rand::Rng;
 use visigrid_engine::formula::parser::{format_parsed_expr, parse};
 use visigrid_engine::workbook::Workbook;
 
+use crate::sort::{sort_op, SortKey};
 use crate::op::{Axis, CellContent, CollabOp, FormatProps, HAlign, Rect, VAlign, BorderLine, BorderSpec, LineProps};
 
 /// Rows and columns most edits land in.
@@ -235,6 +236,32 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
             return Vec::new();
         }
         CollabOp::MoveSheet { sheet, index: rng.gen_range(0..sheets.len()) }
+    } else if roll < 98 {
+        // A sort of a block in the hot region, ordered by this replica's
+        // values. The hot region is sparse and often merged, so try a few
+        // blocks before giving up.
+        let mut found = None;
+        for _ in 0..6 {
+            let r0 = rng.gen_range(0..HOT_ROWS - 1);
+            let r1 = (r0 + rng.gen_range(1..=5)).min(HOT_ROWS);
+            let c0 = rng.gen_range(0..HOT_COLS);
+            let c1 = (c0 + rng.gen_range(0..3)).min(HOT_COLS);
+            let mut keys = vec![SortKey { col: rng.gen_range(c0..=c1), ascending: rng.gen_bool(0.6) }];
+            if rng.gen_bool(0.3) {
+                keys.push(SortKey { col: rng.gen_range(c0..=c1), ascending: rng.gen_bool(0.5) });
+            }
+            let rect = Rect::new(r0, c0, r1, c1);
+            // Already in order: the other direction usually is not.
+            let flipped: Vec<SortKey> = keys.iter().map(|k| SortKey { ascending: !k.ascending, ..*k }).collect();
+            if let Ok(Some(op)) = sort_op(wb, sheet, rect, &keys).and_then(|o| o.map_or_else(|| sort_op(wb, sheet, rect, &flipped), |op| Ok(Some(op)))) {
+                found = Some(op);
+                break;
+            }
+        }
+        match found {
+            Some(op) => op,
+            None => return Vec::new(),
+        }
     } else {
         let (h, w) = (rng.gen_range(1..=3), rng.gen_range(1..=2));
         let values = (0..h)

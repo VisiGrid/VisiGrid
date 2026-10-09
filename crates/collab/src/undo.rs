@@ -464,6 +464,32 @@ pub fn apply_recording(
                     }
                 }
             }
+            CollabOp::SortRange { sheet, rect, .. } => {
+                // The reverse order puts every row back, and a concurrent
+                // edit to a row goes back with it. A moved formula whose
+                // reference fell off the sheet (#REF!) cannot shift back, so
+                // its text is restored after the rows are.
+                inv.extend(op.sort_inverse());
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    let s = &scratch.sheets()[idx];
+                    let adjust = visigrid_engine::formula::parser::adjust_formula_refs;
+                    let dest = op.sort_destinations().expect("sort op");
+                    for (r, c) in s.cells_in_range(rect.r0, rect.r1, rect.c0, rect.c1) {
+                        let CellContent::Formula(f) = content_at(s, r, c) else { continue };
+                        let to = dest[r - rect.r0];
+                        let d = to as i32 - r as i32;
+                        if d != 0 && adjust(&adjust(&f, d, 0), -d, 0) != f {
+                            inv.push(CollabOp::SetCell {
+                                sheet: *sheet,
+                                sheet_name: s.name.clone(),
+                                row: r,
+                                col: c,
+                                content: CellContent::Formula(f),
+                            });
+                        }
+                    }
+                }
+            }
             CollabOp::AddSheet { sheet, index, .. } => {
                 inv.push(CollabOp::DeleteSheet { sheet: *sheet, index: *index });
             }

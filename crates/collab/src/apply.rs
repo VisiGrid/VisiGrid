@@ -280,6 +280,49 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             }
             Ok(())
         }
+        CollabOp::SortRange { sheet, rect, .. } => {
+            let idx = index_of(wb, *sheet)?;
+            let s = &wb.sheets()[idx];
+            // Never refused here, even over a merge (the writer refuses to
+            // start one; a merge sequenced first can still be under it).
+            // Transforms move concurrent edits as if the rows moved, so the
+            // rows must move on every replica whatever the state: cells move
+            // under a merge exactly, like any positional write.
+            // Where each source row goes, then every occupied cell (content
+            // and format) of the rectangle at its new row.
+            let to = op.sort_destinations().expect("sort op");
+            let default = CellFormat::default();
+            let mut moved = std::collections::BTreeMap::new();
+            let mut touched = std::collections::BTreeSet::new();
+            for (r, c) in s.cells_in_range(rect.r0, rect.r1, rect.c0, rect.c1) {
+                let dest = to[r - rect.r0];
+                let content = match crate::undo::content_at(s, r, c) {
+                    crate::op::CellContent::Formula(f) if dest != r => crate::op::CellContent::Formula(
+                        visigrid_engine::formula::parser::adjust_formula_refs(&f, dest as i32 - r as i32, 0),
+                    ),
+                    other => other,
+                };
+                touched.insert((r, c));
+                touched.insert((dest, c));
+                moved.insert((dest, c), (content, s.get_format(r, c)));
+            }
+            let id = s.id;
+            wb.begin_batch();
+            for (r, c) in touched {
+                let (content, fmt) = moved.remove(&(r, c)).unwrap_or((crate::op::CellContent::Clear, default.clone()));
+                write_content(wb, idx, r, c, &content);
+                if let Some(s) = wb.sheet_mut(idx) {
+                    s.set_format(r, c, fmt);
+                }
+                wb.note_format_changed(CellId::new(id, r, c));
+            }
+            let outcome = wb.end_batch_outcome();
+            if let Some(ch) = changes {
+                ch.full = true;
+                ch.recalculated(outcome.recalculated);
+            }
+            Ok(())
+        }
     }
 }
 
