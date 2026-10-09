@@ -117,6 +117,24 @@ fn standalone_and_legacy_name_contexts_use_the_shared_resolver() {
     ] {
         assert!(matches!(eval(formula), EvalResult::Error(_)), "{formula}");
     }
+    // Text that is not an address or a defined name is #REF!, as in Excel
+    // and 0.51.0 (0.52.0 said #NAME?).
+    for formula in ["=INDIRECT(\"nope\")", "=INDIRECT(\"A0\")", "=SUM(INDIRECT(\"nope\"))"] {
+        assert_eq!(eval(formula), EvalResult::Error("#REF!".into()), "{formula}");
+    }
+}
+
+#[test]
+fn indirect_of_text_that_is_not_a_reference_is_ref_in_a_workbook() {
+    let mut wb = Workbook::new();
+    wb.set_cell_value_tracked(0, 0, 0, "nope");
+    wb.set_cell_value_tracked(0, 0, 1, "=INDIRECT(A1)");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "#REF!");
+    // Defining the name makes the same formula resolve.
+    wb.set_cell_value_tracked(0, 2, 0, "7");
+    wb.define_name_for_cell("nope", 0, 2, 0).unwrap();
+    wb.set_cell_value_tracked(0, 0, 1, "=INDIRECT(A1)");
+    assert_eq!(wb.sheet(0).unwrap().get_display(0, 1), "7");
 }
 
 #[test]
