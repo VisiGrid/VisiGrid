@@ -1,8 +1,8 @@
 // Date/time functions: TODAY, NOW, DATE, DATEVALUE, YEAR, MONTH, DAY, WEEKDAY, DATEDIF,
-// EDATE, EOMONTH, HOUR, MINUTE, SECOND, WEEKNUM
+// EDATE, EOMONTH, HOUR, MINUTE, SECOND, WEEKNUM, ISOWEEKNUM, YEARFRAC
 
 use super::eval::{evaluate, CellLookup, EvalResult};
-use super::eval_helpers::{date_to_serial, serial_to_date, days_in_month, try_parse_date_string};
+use super::eval_helpers::{date_to_serial, serial_to_date, days_in_month, excel_error, try_parse_date_string};
 use super::parser::BoundExpr;
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -449,9 +449,120 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             let jan1_offset = (weekday0(date_to_serial(year, 1, 1)) - start).rem_euclid(7);
             EvalResult::Number(((doy - 1 + jan1_offset) / 7 + 1) as f64)
         }
+        "ISOWEEKNUM" => {
+            // ISOWEEKNUM(date): the ISO 8601 week, WEEKNUM(date, 21). A
+            // negative date is #NUM!.
+            if args.len() != 1 {
+                return Some(EvalResult::Error("ISOWEEKNUM requires exactly one argument".to_string()));
+            }
+            let serial = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) if n < 0.0 => return Some(EvalResult::Error("#NUM!".to_string())),
+                Ok(n) => n.floor(),
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            let weekday0 = |serial: f64| (serial as i64 + 6).rem_euclid(7); // 0 = Sunday
+            let (year, _, _) = serial_to_date(serial);
+            let doy = (serial - date_to_serial(year, 1, 1)) as i64 + 1;
+            EvalResult::Number(iso_week(serial, year, doy, weekday0) as f64)
+        }
+        "YEARFRAC" => {
+            // YEARFRAC(start_date, end_date, [basis]): the years between two
+            // dates, as a fraction, counted by a day-count basis: 0 or omitted
+            // US (NASD) 30/360, 1 actual/actual, 2 actual/360, 3 actual/365,
+            // 4 European 30/360. The order of the dates does not matter, and
+            // times of day are ignored. A basis outside 0-4, or a negative
+            // date, is #NUM!.
+            if args.len() < 2 || args.len() > 3 {
+                return Some(EvalResult::Error("YEARFRAC requires 2 or 3 arguments".to_string()));
+            }
+            let mut dates = [0.0; 2];
+            for (i, date) in dates.iter_mut().enumerate() {
+                *date = match evaluate(&args[i], lookup).to_number() {
+                    Ok(n) if n < 0.0 => return Some(EvalResult::Error("#NUM!".to_string())),
+                    Ok(n) => n.trunc(),
+                    Err(e) => return Some(EvalResult::Error(excel_error(e))),
+                };
+            }
+            let basis = match args.get(2) {
+                None => 0.0,
+                Some(a) => match evaluate(a, lookup).to_number() {
+                    Ok(n) => n.trunc(),
+                    Err(e) => return Some(EvalResult::Error(excel_error(e))),
+                },
+            };
+            if !(0.0..=4.0).contains(&basis) {
+                return Some(EvalResult::Error("#NUM!".to_string()));
+            }
+            let (start, end) = (dates[0].min(dates[1]), dates[0].max(dates[1]));
+            EvalResult::Number(year_frac(start, end, basis as u8))
+        }
         _ => return None,
     };
     Some(result)
+}
+
+fn is_leap(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// YEARFRAC from `start` to `end` (serials, start <= end) on a day-count
+/// basis. These follow Excel's results rather than the textbook rules, which
+/// differ at month ends and over leap days; the method is David A. Wheeler's
+/// reconstruction, which matches Excel ("YEARFRAC incompatibilities between
+/// spreadsheet programs", 2008).
+fn year_frac(start: f64, end: f64, basis: u8) -> f64 {
+    let (y1, m1, mut d1) = serial_to_date(start);
+    let (y2, m2, mut d2) = serial_to_date(end);
+    let days = end - start;
+    let thirty_360 = |d1: i32, d2: i32| {
+        ((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)) as f64 / 360.0
+    };
+    match basis {
+        0 => {
+            // US (NASD) 30/360, with Excel's handling of the end of February.
+            let last_of_feb = |m: i32, d: i32, y: i32| m == 2 && d == days_in_month(y, 2);
+            let start_feb = last_of_feb(m1, d1, y1);
+            if start_feb && last_of_feb(m2, d2, y2) {
+                d2 = 30;
+            }
+            if start_feb {
+                d1 = 30;
+            }
+            if d2 == 31 && d1 >= 30 {
+                d2 = 30;
+            }
+            if d1 == 31 {
+                d1 = 30;
+            }
+            thirty_360(d1, d2)
+        }
+        1 => {
+            // Actual/actual. Within a year the divisor is that year's length
+            // (366 when the span holds a February 29); across years it is the
+            // average length of every year the span touches.
+            if days == 0.0 {
+                return 0.0;
+            }
+            let within_a_year = y1 == y2 || (y2 == y1 + 1 && (m1 > m2 || (m1 == m2 && d1 >= d2)));
+            if within_a_year {
+                let march1 = |y: i32| date_to_serial(y, 3, 1);
+                let holds_feb29 = (is_leap(y1) && start < march1(y1) && end >= march1(y1))
+                    || (is_leap(y2) && end >= march1(y2) && start < march1(y2));
+                let length = if (y1 == y2 && is_leap(y1)) || holds_feb29 || (m2 == 2 && d2 == 29) { 366.0 } else { 365.0 };
+                days / length
+            } else {
+                let years = (y2 - y1 + 1) as f64;
+                let span = date_to_serial(y2 + 1, 1, 1) - date_to_serial(y1, 1, 1);
+                days / (span / years)
+            }
+        }
+        2 => days / 360.0,
+        3 => days / 365.0,
+        _ => {
+            // European 30/360: the 31st is the 30th, at either end.
+            thirty_360(d1.min(30), d2.min(30))
+        }
+    }
 }
 
 /// ISO 8601 week number for a serial whose Gregorian year is `year` and day of

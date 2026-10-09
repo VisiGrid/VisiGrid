@@ -1855,6 +1855,177 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
             ParameterInfo { name: "logical1", description: "A condition or range.", optional: false, repeatable: false },
             ParameterInfo { name: "logical2", description: "More conditions or ranges.", optional: true, repeatable: true },
         ],
+    },    FunctionInfo {
+        name: "RANK.AVG",
+        signature: "RANK.AVG(number, ref, [order])",
+        description: "Return a number's rank in a list. Equal numbers share the average of the ranks they span.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to rank.", optional: false, repeatable: false },
+            ParameterInfo { name: "ref", description: "The list of numbers.", optional: false, repeatable: false },
+            ParameterInfo { name: "order", description: "0 or omitted ranks the largest first; any other value ranks the smallest first.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "CORREL",
+        signature: "CORREL(array1, array2)",
+        description: "Return the correlation coefficient of two sets of values.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "array1", description: "The first set of values.", optional: false, repeatable: false },
+            ParameterInfo { name: "array2", description: "The second set, the same size. Pairs where either value is not a number are skipped.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "COUNTUNIQUE",
+        signature: "COUNTUNIQUE(value1, [value2], ...)",
+        description: "Count the distinct values in ranges and values, ignoring blanks.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "A value, range or array.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "More values, ranges or arrays.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "SPLIT",
+        signature: "SPLIT(text, delimiter, [split_by_each], [remove_empty_text])",
+        description: "Split text into pieces across a row. The result spills.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to split.", optional: false, repeatable: false },
+            ParameterInfo { name: "delimiter", description: "Where to split. By default each character is a delimiter of its own.", optional: false, repeatable: false },
+            ParameterInfo { name: "split_by_each", description: "TRUE or omitted splits at each character of delimiter; FALSE only at the whole delimiter.", optional: true, repeatable: false },
+            ParameterInfo { name: "remove_empty_text", description: "TRUE or omitted drops empty pieces; FALSE keeps them.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "CHAR",
+        signature: "CHAR(number)",
+        description: "Return the character with a code: 1-255 as in Windows-1252, higher numbers as Unicode.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The character code.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "CODE",
+        signature: "CODE(text)",
+        description: "Return the code of the first character in text.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text whose first character to read.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "CLEAN",
+        signature: "CLEAN(text)",
+        description: "Remove non-printing characters (codes 0-31) from text.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "text", description: "The text to clean.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "FIXED",
+        signature: "FIXED(number, [decimals], [no_commas])",
+        description: "Round a number and return it as text with thousands separators.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to format.", optional: false, repeatable: false },
+            ParameterInfo { name: "decimals", description: "Digits after the decimal point. Defaults to 2; negative rounds left of the point.", optional: true, repeatable: false },
+            ParameterInfo { name: "no_commas", description: "TRUE to leave out the thousands separators.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "DOLLAR",
+        signature: "DOLLAR(number, [decimals])",
+        description: "Round a number and return it as currency text, such as $1,234.57.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to format.", optional: false, repeatable: false },
+            ParameterInfo { name: "decimals", description: "Digits after the decimal point. Defaults to 2; negative rounds left of the point.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "ISOWEEKNUM",
+        signature: "ISOWEEKNUM(date)",
+        description: "Return the ISO 8601 week number of a date.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "date", description: "The date.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "YEARFRAC",
+        signature: "YEARFRAC(start_date, end_date, [basis])",
+        description: "Return the fraction of a year between two dates.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "start_date", description: "The first date.", optional: false, repeatable: false },
+            ParameterInfo { name: "end_date", description: "The second date.", optional: false, repeatable: false },
+            ParameterInfo { name: "basis", description: "Day count: 0 or omitted US 30/360, 1 actual/actual, 2 actual/360, 3 actual/365, 4 European 30/360.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "MAP",
+        signature: "MAP(array1, [array2, ...], lambda)",
+        description: "Apply a LAMBDA to each element of one or more arrays. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "array", description: "An array or range; each passes one element to the LAMBDA.", optional: false, repeatable: true },
+            ParameterInfo { name: "lambda", description: "A LAMBDA with one parameter per array.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "REDUCE",
+        signature: "REDUCE([initial_value], array, lambda)",
+        description: "Fold an array to one value with a LAMBDA of an accumulator and each element.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "initial_value", description: "The accumulator's starting value.", optional: true, repeatable: false },
+            ParameterInfo { name: "array", description: "The array or range to fold.", optional: false, repeatable: false },
+            ParameterInfo { name: "lambda", description: "A LAMBDA(accumulator, value) returning the new accumulator.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "SCAN",
+        signature: "SCAN([initial_value], array, lambda)",
+        description: "Fold an array with a LAMBDA and return every intermediate value. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "initial_value", description: "The accumulator's starting value.", optional: true, repeatable: false },
+            ParameterInfo { name: "array", description: "The array or range to scan.", optional: false, repeatable: false },
+            ParameterInfo { name: "lambda", description: "A LAMBDA(accumulator, value) returning the new accumulator.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "BYROW",
+        signature: "BYROW(array, lambda)",
+        description: "Apply a LAMBDA to each row of an array, giving one value per row. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The array or range.", optional: false, repeatable: false },
+            ParameterInfo { name: "lambda", description: "A LAMBDA with one parameter, the row.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "BYCOL",
+        signature: "BYCOL(array, lambda)",
+        description: "Apply a LAMBDA to each column of an array, giving one value per column. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "array", description: "The array or range.", optional: false, repeatable: false },
+            ParameterInfo { name: "lambda", description: "A LAMBDA with one parameter, the column.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "ARRAYFORMULA",
+        signature: "ARRAYFORMULA(array_formula)",
+        description: "Evaluate a formula over ranges and spill the result (Google Sheets). Formulas here already do this, so it returns its argument's value.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "array_formula", description: "A formula, range or array.", optional: false, repeatable: false },
+        ],
     },
 ];
 

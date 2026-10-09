@@ -1,7 +1,9 @@
 // Text functions: CONCATENATE, TEXTJOIN, LEFT, RIGHT, MID, LEN, UPPER, LOWER,
-// TRIM, TEXT, VALUE, FIND, SUBSTITUTE, REPT, HYPERLINK, TEXTSPLIT
+// TRIM, TEXT, VALUE, FIND, SUBSTITUTE, REPT, HYPERLINK, TEXTSPLIT, SPLIT, CHAR,
+// CODE, CLEAN, FIXED, DOLLAR
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
+use super::eval_helpers::excel_error;
 use super::parser::{BoundExpr, Expr};
 
 
@@ -515,9 +517,212 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
             EvalResult::Array(out)
         }
+        "SPLIT" => {
+            // SPLIT(text, delimiter, [split_by_each], [remove_empty_text]):
+            // Google Sheets' one-row split, which spills across. By default
+            // each character of delimiter splits on its own ("-/" splits at
+            // either), and empty pieces are dropped; FALSE for split_by_each
+            // splits only at the whole delimiter, FALSE for remove_empty_text
+            // keeps the empty pieces. As in Sheets, a piece that reads as a
+            // number becomes one ("007" is 7). Empty text or an empty
+            // delimiter is #VALUE!.
+            if args.len() < 2 || args.len() > 4 {
+                return Some(EvalResult::Error("SPLIT requires 2 to 4 arguments".to_string()));
+            }
+            let text_arg = |i: usize| -> Result<String, String> {
+                match evaluate(&args[i], lookup) {
+                    EvalResult::Error(e) => Err(e),
+                    EvalResult::Array(a) if a.rows() * a.cols() > 1 => Err("#VALUE!".to_string()),
+                    other => Ok(other.to_text()),
+                }
+            };
+            let text = match text_arg(0) {
+                Ok(t) if t.is_empty() => return Some(EvalResult::Error("#VALUE! SPLIT needs text to split".to_string())),
+                Ok(t) => t,
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            let delimiter = match text_arg(1) {
+                Ok(d) if d.is_empty() => return Some(EvalResult::Error("#VALUE! SPLIT needs a delimiter".to_string())),
+                Ok(d) => d,
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            let flag = |i: usize| -> Result<bool, String> {
+                match args.get(i).filter(|a| !matches!(a, Expr::Empty)) {
+                    None => Ok(true),
+                    Some(a) => evaluate(a, lookup).to_bool(),
+                }
+            };
+            let each = match flag(2) {
+                Ok(b) => b,
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            let remove_empty = match flag(3) {
+                Ok(b) => b,
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            let delimiters: Vec<String> = if each {
+                delimiter.chars().map(String::from).collect()
+            } else {
+                vec![delimiter]
+            };
+            let mut pieces = split_any(&text, &delimiters, false);
+            if remove_empty {
+                pieces.retain(|p| !p.is_empty());
+            }
+            let piece = |p: String| match crate::cell::parse_finite(p.trim()) {
+                Some(n) => Value::Number(n),
+                None => Value::Text(p),
+            };
+            match pieces.len() {
+                // Nothing but delimiters: a blank, as Sheets shows.
+                0 => EvalResult::Empty,
+                1 => EvalResult::from_value(&piece(pieces.remove(0))),
+                n => {
+                    if let Err(error) = super::eval_budget::array(1, n) { return Some(EvalResult::Error(error)); }
+                    let mut out = Array2D::new(1, n);
+                    for (c, p) in pieces.into_iter().enumerate() {
+                        out.set(0, c, piece(p));
+                    }
+                    EvalResult::Array(out)
+                }
+            }
+        }
+        "CHAR" => {
+            // CHAR(number): the character with that code. 1 to 255 are
+            // Windows-1252, as in Excel, so CHAR(128) is "€"; above 255 the
+            // number is a Unicode code point, as in Google Sheets. 0, a
+            // negative number, or a value that is not a character is #VALUE!.
+            if args.len() != 1 {
+                return Some(EvalResult::Error("CHAR requires exactly one argument".to_string()));
+            }
+            let code = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n.trunc(),
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            if !(1.0..=0x10FFFF as f64).contains(&code) {
+                return Some(EvalResult::Error("#VALUE!".to_string()));
+            }
+            match char_from_code(code as u32) {
+                Some(ch) => EvalResult::Text(ch.to_string()),
+                None => EvalResult::Error("#VALUE!".to_string()),
+            }
+        }
+        "CODE" => {
+            // CODE(text): the code of the first character — CHAR's inverse,
+            // so Windows-1252 for the characters it has and the Unicode code
+            // point for the rest. Empty text is #VALUE!.
+            if args.len() != 1 {
+                return Some(EvalResult::Error("CODE requires exactly one argument".to_string()));
+            }
+            let text = evaluate(&args[0], lookup).to_text();
+            match text.chars().next() {
+                Some(ch) => EvalResult::Number(code_of_char(ch) as f64),
+                None => EvalResult::Error("#VALUE!".to_string()),
+            }
+        }
+        "CLEAN" => {
+            // CLEAN(text): text without the control characters 0 to 31 (line
+            // breaks, tabs, bells). Other characters are kept, as in Excel.
+            if args.len() != 1 {
+                return Some(EvalResult::Error("CLEAN requires exactly one argument".to_string()));
+            }
+            let text = evaluate(&args[0], lookup).to_text();
+            EvalResult::Text(text.chars().filter(|c| (*c as u32) >= 32).collect())
+        }
+        "FIXED" | "DOLLAR" => {
+            // FIXED(number, [decimals], [no_commas]) and DOLLAR(number,
+            // [decimals]): a number rounded to decimals places (2 when
+            // omitted; negative rounds left of the point) and written as text
+            // with thousands separators. FIXED drops the separators when
+            // no_commas is TRUE. DOLLAR writes Excel's currency format,
+            // $#,##0.00_);($#,##0.00): a dollar sign, and a negative amount
+            // in parentheses. Decimals above 127 are #VALUE!.
+            let max_args = if name == "FIXED" { 3 } else { 2 };
+            if args.is_empty() || args.len() > max_args {
+                return Some(EvalResult::Error(format!("{name} requires 1 to {max_args} arguments")));
+            }
+            let number = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(excel_error(e))),
+            };
+            let decimals = match args.get(1) {
+                None => 2.0,
+                Some(a) => match evaluate(a, lookup).to_number() {
+                    Ok(n) => n.trunc(),
+                    Err(e) => return Some(EvalResult::Error(excel_error(e))),
+                },
+            };
+            if decimals > 127.0 {
+                return Some(EvalResult::Error("#VALUE!".to_string()));
+            }
+            let no_commas = match args.get(2) {
+                None => false,
+                Some(a) => match evaluate(a, lookup).to_bool() {
+                    Ok(b) => b,
+                    Err(e) => return Some(EvalResult::Error(excel_error(e))),
+                },
+            };
+            let decimals = decimals.max(-308.0) as i32;
+            let rounded = super::eval_helpers::round_to_digits(number, decimals, super::eval_helpers::RoundMode::Nearest);
+            let body = fixed_digits(rounded.abs(), decimals.max(0) as usize, !no_commas);
+            let negative = rounded < 0.0;
+            EvalResult::Text(match (name, negative) {
+                ("FIXED", true) => format!("-{body}"),
+                ("FIXED", false) => body,
+                (_, true) => format!("(${body})"),
+                (_, false) => format!("${body}"),
+            })
+        }
         _ => return None,
     };
     Some(result)
+}
+
+/// Windows-1252's characters for 128 to 159, where it differs from Latin-1.
+/// The five codes it leaves undefined map to the matching control character.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+/// CHAR's character for a code: Windows-1252 up to 255, Unicode above.
+fn char_from_code(code: u32) -> Option<char> {
+    match code {
+        128..=159 => Some(CP1252_HIGH[(code - 128) as usize]),
+        _ => char::from_u32(code),
+    }
+}
+
+/// CODE's number for a character: the inverse of `char_from_code`.
+fn code_of_char(ch: char) -> u32 {
+    match CP1252_HIGH.iter().position(|c| *c == ch) {
+        Some(i) => 128 + i as u32,
+        None => ch as u32,
+    }
+}
+
+/// `value` (already rounded, not negative) with `decimals` places, and
+/// thousands separators in the whole part when `commas` is set.
+fn fixed_digits(value: f64, decimals: usize, commas: bool) -> String {
+    let text = format!("{value:.decimals$}");
+    let (whole, fraction) = match text.split_once('.') {
+        Some((w, f)) => (w, Some(f)),
+        None => (text.as_str(), None),
+    };
+    let mut out = String::with_capacity(text.len() + whole.len() / 3);
+    for (i, digit) in whole.chars().enumerate() {
+        if commas && i > 0 && (whole.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    if let Some(f) = fraction {
+        out.push('.');
+        out.push_str(f);
+    }
+    out
 }
 
 #[cfg(test)]

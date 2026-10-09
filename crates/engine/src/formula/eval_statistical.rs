@@ -1,9 +1,9 @@
 // Statistical functions: STDEV, STDEV.S, STDEV.P, STDEVP, VAR, VAR.S, VAR.P,
-// VARP, RAND, RANDBETWEEN, LARGE, SMALL, RANK, RANK.EQ, MODE, MODE.SNGL,
-// PERCENTILE, PERCENTILE.INC, QUARTILE, QUARTILE.INC
+// VARP, RAND, RANDBETWEEN, LARGE, SMALL, RANK, RANK.EQ, RANK.AVG, MODE, MODE.SNGL,
+// PERCENTILE, PERCENTILE.INC, QUARTILE, QUARTILE.INC, CORREL, COUNTUNIQUE
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, Value};
-use super::eval_helpers::collect_numbers;
+use super::eval_helpers::{collect_numbers, excel_error};
 use super::parser::BoundExpr;
 
 pub(crate) fn try_evaluate<L: CellLookup>(
@@ -177,10 +177,12 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
             per_element(evaluate(&args[1], lookup), pick)
         }
-        "RANK" | "RANK.EQ" => {
+        "RANK" | "RANK.EQ" | "RANK.AVG" => {
             // RANK(number, ref, [order]): 1 + how many numbers in ref beat it —
             // larger for order 0 (the default), smaller otherwise. Ties share a
-            // rank. A number that is not in ref is #N/A.
+            // rank; RANK.AVG gives them the average of the ranks they span, so
+            // two numbers tied for second are both 2.5. A number that is not
+            // in ref is #N/A.
             if args.len() < 2 || args.len() > 3 {
                 return Some(EvalResult::Error(format!("{name} requires 2 or 3 arguments")));
             }
@@ -204,6 +206,10 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 return Some(EvalResult::Error("#N/A".to_string()));
             }
             let beaten = nums.iter().filter(|v| if ascending { **v < number } else { **v > number }).count();
+            if name == "RANK.AVG" {
+                let tied = nums.iter().filter(|v| **v == number).count();
+                return Some(EvalResult::Number(beaten as f64 + (tied + 1) as f64 / 2.0));
+            }
             EvalResult::Number((beaten + 1) as f64)
         }
         "MODE" | "MODE.SNGL" => {
@@ -278,6 +284,85 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             };
             per_element(evaluate(&args[1], lookup), at)
         }
+        "CORREL" => {
+            // CORREL(array1, array2): the Pearson correlation of paired
+            // values. Pairs where either side is not a number (text, a
+            // logical, a blank) are left out; an error in either array is the
+            // result. Arrays with different numbers of values are #N/A; fewer
+            // than two pairs, or a side with no spread, is #DIV/0!.
+            if args.len() != 2 {
+                return Some(EvalResult::Error("CORREL requires exactly 2 arguments".to_string()));
+            }
+            let mut sides = Vec::with_capacity(2);
+            for arg in args {
+                match super::eval_helpers::arg_values(arg, lookup) {
+                    Ok(got) => sides.push(got.values),
+                    Err(e) => return Some(EvalResult::Error(excel_error(e))),
+                }
+            }
+            if let Some(e) = sides.iter().flatten().find_map(|v| match v {
+                Value::Error(e) => Some(e.clone()),
+                _ => None,
+            }) {
+                return Some(EvalResult::Error(e));
+            }
+            if sides[0].len() != sides[1].len() {
+                return Some(EvalResult::Error("#N/A".to_string()));
+            }
+            let pairs: Vec<(f64, f64)> = sides[0].iter().zip(&sides[1])
+                .filter_map(|pair| match pair {
+                    (Value::Number(x), Value::Number(y)) => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
+            if pairs.len() < 2 {
+                return Some(EvalResult::Error("#DIV/0!".to_string()));
+            }
+            let n = pairs.len() as f64;
+            let mean_x = pairs.iter().map(|p| p.0).sum::<f64>() / n;
+            let mean_y = pairs.iter().map(|p| p.1).sum::<f64>() / n;
+            let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+            for (x, y) in &pairs {
+                sxy += (x - mean_x) * (y - mean_y);
+                sxx += (x - mean_x).powi(2);
+                syy += (y - mean_y).powi(2);
+            }
+            if sxx == 0.0 || syy == 0.0 {
+                return Some(EvalResult::Error("#DIV/0!".to_string()));
+            }
+            EvalResult::Number(sxy / (sxx * syy).sqrt())
+        }
+        "COUNTUNIQUE" => {
+            // COUNTUNIQUE(value1, [value2, ...]): Google Sheets' count of
+            // distinct values across every argument, ranges and arrays
+            // included. Blank cells and empty text are not values. Text
+            // compares without case, as UNIQUE does; a number and the same
+            // digits as text are different values, as are TRUE and 1. An
+            // error in any argument is the result.
+            if args.is_empty() {
+                return Some(EvalResult::Error("COUNTUNIQUE requires at least one argument".to_string()));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for arg in args {
+                let got = match super::eval_helpers::arg_values(arg, lookup) {
+                    Ok(got) => got,
+                    Err(e) => return Some(EvalResult::Error(excel_error(e))),
+                };
+                for value in got.values {
+                    let key = match value {
+                        Value::Error(e) => return Some(EvalResult::Error(e)),
+                        Value::Empty => continue,
+                        Value::Text(t) if t.is_empty() => continue,
+                        // -0 and 0 are one value.
+                        Value::Number(n) => format!("n{}", if n == 0.0 { 0.0 } else { n }),
+                        Value::Text(t) => format!("t{}", t.to_lowercase()),
+                        Value::Boolean(b) => format!("b{b}"),
+                    };
+                    seen.insert(key);
+                }
+            }
+            EvalResult::Number(seen.len() as f64)
+        }
         _ => return None,
     };
     Some(result)
@@ -326,12 +411,6 @@ fn per_element(arg: EvalResult, f: impl Fn(&EvalResult) -> EvalResult) -> EvalRe
         }
         other => f(&other),
     }
-}
-
-/// An evaluation error as Excel reports it. Engine conversion messages
-/// ("Cannot convert 'x' to number") become #VALUE!; error values pass through.
-fn excel_error(e: String) -> String {
-    if e.starts_with('#') { e } else { "#VALUE!".to_string() }
 }
 
 /// The numbers the new statistical functions read, Excel's way. In a

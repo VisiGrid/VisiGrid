@@ -178,49 +178,49 @@ mod tests {
 
     #[test]
     fn test_single_unknown_function() {
-        // BYROW is not implemented (it takes a LAMBDA)
-        let expr = parse("=BYROW(A1, B1:B10, C1:C10)").unwrap();
+        // DGET is not implemented (database functions are not)
+        let expr = parse("=DGET(A1, B1:B10, C1:C10)").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("BYROW"), Some(&1));
+        assert_eq!(counts.get("DGET"), Some(&1));
         assert_eq!(counts.len(), 1);
     }
 
     #[test]
     fn test_unknown_function_multiple_occurrences() {
-        let expr = parse("=BYROW(A1, B1:B10, C1:C10) + BYROW(A2, B1:B10, C1:C10)").unwrap();
+        let expr = parse("=DGET(A1, B1:B10, C1:C10) + DGET(A2, B1:B10, C1:C10)").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("BYROW"), Some(&2));
+        assert_eq!(counts.get("DGET"), Some(&2));
     }
 
     #[test]
     fn test_mixed_known_and_unknown() {
-        // SUM is known, BYROW and MAP are unknown
-        let expr = parse("=SUM(BYROW(A1, B1:B10, C1:C10), MAP(A1, A2, A3))").unwrap();
+        // SUM is known, DGET and CUBEVALUE are unknown
+        let expr = parse("=SUM(DGET(A1, B1:B10, C1:C10), CUBEVALUE(A1, A2, A3))").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("BYROW"), Some(&1));
-        assert_eq!(counts.get("MAP"), Some(&1));
+        assert_eq!(counts.get("DGET"), Some(&1));
+        assert_eq!(counts.get("CUBEVALUE"), Some(&1));
         assert!(counts.get("SUM").is_none()); // SUM is known
         assert_eq!(counts.len(), 2);
     }
 
     #[test]
     fn test_nested_unknown_functions() {
-        // IF is known, MAP and BYROW are unknown
-        let expr = parse("=IF(MAP(5) > 10, BYROW(A1, B1:B10, C1:C10), 0)").unwrap();
+        // IF is known, CUBEVALUE and DGET are unknown
+        let expr = parse("=IF(CUBEVALUE(5) > 10, DGET(A1, B1:B10, C1:C10), 0)").unwrap();
         let mut counts = HashMap::new();
         tally_unknown_functions(&expr, &mut counts);
-        assert_eq!(counts.get("MAP"), Some(&1));
-        assert_eq!(counts.get("BYROW"), Some(&1));
+        assert_eq!(counts.get("CUBEVALUE"), Some(&1));
+        assert_eq!(counts.get("DGET"), Some(&1));
         assert!(counts.get("IF").is_none());
     }
 
     #[test]
     fn test_has_unknown_functions() {
         let known = parse("=SUM(A1:A10)").unwrap();
-        let unknown = parse("=BYROW(A1, B1:B10, C1:C10)").unwrap();
+        let unknown = parse("=DGET(A1, B1:B10, C1:C10)").unwrap();
 
         assert!(!has_unknown_functions(&known));
         assert!(has_unknown_functions(&unknown));

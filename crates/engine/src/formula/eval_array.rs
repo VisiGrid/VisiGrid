@@ -1,4 +1,5 @@
-// Array/spill functions: SEQUENCE, TRANSPOSE, FILTER, UNIQUE, SORT, SORTBY, SPARKLINE
+// Array/spill functions: SEQUENCE, TRANSPOSE, FILTER, UNIQUE, SORT, SORTBY, SPARKLINE,
+// ARRAYFORMULA
 
 use super::eval::{evaluate, CellLookup, EvalResult, Value, Array2D};
 use super::eval_helpers::{collect_numbers, read_cell_value, value_compare};
@@ -378,6 +379,18 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             }
             EvalResult::Array(array)
+        }
+        "ARRAYFORMULA" => {
+            // ARRAYFORMULA(array_formula): Google Sheets' switch into array
+            // mode. Here every formula is already in array mode — operators
+            // and value functions go element by element over ranges, and an
+            // array result spills — so this evaluates its argument as an
+            // operator operand (a bare range becomes an array) and returns
+            // it. It exists so formulas written for Sheets keep working.
+            if args.len() != 1 {
+                return Some(EvalResult::Error("ARRAYFORMULA requires exactly one argument".to_string()));
+            }
+            super::eval::operand(&args[0], lookup)
         }
         _ => return None,
     };

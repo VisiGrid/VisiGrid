@@ -423,6 +423,12 @@ pub(crate) fn get_typed_for_sheet<L: CellLookup>(
     }
 }
 
+/// An evaluation error as Excel reports it. Engine conversion messages
+/// ("Cannot convert 'x' to number") become #VALUE!; error values pass through.
+pub(crate) fn excel_error(e: String) -> String {
+    if e.starts_with('#') { e } else { "#VALUE!".to_string() }
+}
+
 pub(crate) fn get_text_for_sheet<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Result<String, String> {
     match sheet {
         SheetRef::Current => Ok(lookup.get_text(row, col)),

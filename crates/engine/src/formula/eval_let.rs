@@ -22,15 +22,18 @@
 // Substitution is bounded (MAX_EXPANSION_NODES): chained LAMBDAs can grow
 // exponentially, and a formula that would expand past the bound is #CALC!.
 //
-// Not supported: a LAMBDA passed as a value to MAP/REDUCE/BYROW and the other
-// helper functions (which the engine does not implement), recursion (a LAMBDA
-// cannot call the LET name it is bound to), and LAMBDAs defined in the Name
-// Manager. A LAMBDA that is never called evaluates to #CALC!, as in Excel.
+// The helper functions MAP, REDUCE, SCAN, BYROW and BYCOL (eval_lambda.rs)
+// take a LAMBDA as an argument and call it through `call_with_values`.
+//
+// Not supported: recursion (a LAMBDA cannot call the LET name it is bound
+// to), and LAMBDAs defined in the Name Manager. A LAMBDA that is never called
+// evaluates to #CALC!, as in Excel.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::eval::{evaluate, Array2D, CellLookup, EvalResult, NamedRangeResolution};
+use super::functions::is_known_function;
 use crate::sheet::SheetRef;
 use super::parser::{BoundExpr, Expr, ARRAY_LITERAL, INVOKE};
 
@@ -145,6 +148,73 @@ fn evaluate_let_inner<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> EvalResu
         Some(body) => evaluate(&body, lookup),
         None => too_large(),
     }
+}
+
+/// Whether `expr` can be called by a helper function: a LAMBDA, a call or LET
+/// that may return one (`LAMBDA(x, LAMBDA(y, x+y))(1)`), or the bare name of a
+/// built-in function (`BYROW(A1:C3, SUM)`, Excel's eta-reduced LAMBDA). A
+/// number, text or reference is not, and the helper is #VALUE!.
+pub(super) fn is_callable<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> bool {
+    match expr {
+        Expr::Function { name, .. } => name == "LAMBDA" || name == "LET" || name == INVOKE,
+        Expr::NamedRange(n) => builtin_name(n, lookup),
+        _ => false,
+    }
+}
+
+/// How many parameters `expr` takes, when it is a LAMBDA written in place.
+/// None when that is only known by calling it (a LET or a curried call) or
+/// when any count will do (a built-in function's name).
+pub(super) fn lambda_arity(expr: &BoundExpr) -> Option<usize> {
+    match expr {
+        Expr::Function { name, args } if name == "LAMBDA" => lambda_parts(args).map(|(params, _)| params.len()),
+        _ => None,
+    }
+}
+
+/// A name that means a built-in function rather than a defined name or Table.
+fn builtin_name<L: CellLookup>(name: &str, lookup: &L) -> bool {
+    is_known_function(name)
+        && !lookup.is_table_name(name)
+        && lookup.resolve_named_reference(name).is_none()
+        && lookup.resolve_named_range(name).is_none()
+}
+
+/// Call `callee` (see `is_callable`) with already-evaluated arguments. Each
+/// value is bound as a literal, so it is never evaluated again and cannot be
+/// captured by a name inside the LAMBDA; a wrong number of arguments is
+/// #VALUE!, as with any other call. Values bound for the call are released
+/// once it returns, so a helper calling a LAMBDA a million times does not
+/// grow the value table.
+pub(super) fn call_with_values<L: CellLookup>(callee: &BoundExpr, values: Vec<EvalResult>, lookup: &L) -> EvalResult {
+    let mark = VALUES.with(|v| v.borrow().len());
+    let args: Vec<BoundExpr> = values.into_iter().map(literal).collect();
+    let result = match callee {
+        Expr::NamedRange(n) if builtin_name(n, lookup) => {
+            evaluate(&Expr::Function { name: n.clone(), args }, lookup)
+        }
+        _ => {
+            let mut invoke = Vec::with_capacity(args.len() + 1);
+            invoke.push(callee.clone());
+            invoke.extend(args);
+            let call = Expr::Function { name: INVOKE.to_string(), args: invoke };
+            match expand(&call, &Env::new()) {
+                None => too_large(),
+                // The callee is not a LAMBDA, so there is nothing to call.
+                Some(Expr::Function { name, .. }) if name == INVOKE => EvalResult::Error("#VALUE!".to_string()),
+                Some(expanded) => evaluate(&expanded, lookup),
+            }
+        }
+    };
+    VALUES.with(|v| v.borrow_mut().truncate(mark));
+    result
+}
+
+/// How many values are bound on this thread, for tests that check a helper
+/// releases what its calls bind.
+#[cfg(test)]
+pub(super) fn bound_value_count() -> usize {
+    VALUES.with(|v| v.borrow().len())
 }
 
 /// The largest expression one expansion may build. Chained LAMBDAs grow by

@@ -445,6 +445,32 @@ mod tests {
         assert_eq!(p("=_xlfn.Name"), "=_xlfn.Name");
     }
 
+    /// The Sheets-parity functions (P2). MAP, REDUCE, SCAN, BYROW, BYCOL,
+    /// RANK.AVG and ISOWEEKNUM are Excel 2010+ functions and need `_xlfn.`;
+    /// CHAR, CODE, CLEAN, FIXED, DOLLAR, CORREL and YEARFRAC predate the
+    /// prefix. SPLIT, COUNTUNIQUE and ARRAYFORMULA are Google Sheets
+    /// functions Excel lacks, so they are written as typed and Excel shows
+    /// #NAME? for them, as it does for a Sheets export.
+    #[test]
+    fn sheets_parity_functions_take_excels_prefixes() {
+        use super::prefix_future_functions as p;
+        assert_eq!(
+            p(&x("=MAP(A1:A3,LAMBDA(v,v*2))")),
+            "=_xlfn.MAP(A1:A3,_xlfn.LAMBDA(_xlpm.v,_xlpm.v*2))"
+        );
+        assert_eq!(
+            p(&x("=REDUCE(0,A1:A3,LAMBDA(acc,v,acc+v))")),
+            "=_xlfn.REDUCE(0,A1:A3,_xlfn.LAMBDA(_xlpm.acc,_xlpm.v,_xlpm.acc+_xlpm.v))"
+        );
+        for name in ["SCAN", "BYROW", "BYCOL", "RANK.AVG", "ISOWEEKNUM"] {
+            assert_eq!(p(&format!("={name}(A1)")), format!("=_xlfn.{name}(A1)"), "{name}");
+        }
+        for name in ["CHAR", "CODE", "CLEAN", "FIXED", "DOLLAR", "CORREL", "YEARFRAC", "SPLIT", "COUNTUNIQUE", "ARRAYFORMULA"] {
+            assert_eq!(p(&format!("={name}(A1)")), format!("={name}(A1)"), "{name}");
+        }
+        assert_eq!(super::from_excel("=_xlfn.MAP(A1:A3,_xlfn.LAMBDA(_xlpm.v,_xlpm.v*2))"), "=MAP(A1:A3,LAMBDA(v,v*2))");
+    }
+
     #[test]
     fn formulas_without_names_are_unchanged() {
         for f in ["=A1+B1", "=SUM(A1:A3)", "='My Sheet'!A1*2", "=Sales[[#This Row],[Amount]]*2", "=IF(A1,\"a,b\",{1,2})", "=SUM(A1"] {
