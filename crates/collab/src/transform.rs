@@ -19,6 +19,7 @@
 //! earlier op is left unchanged (the later one will never be sequenced).
 
 use crate::op::{Axis, CellContent, CollabOp, Rect, SheetKey};
+use visigrid_engine::formula::parser::adjust_formula_refs;
 use visigrid_engine::structural::{adjust_formula_text, StructuralEdit};
 
 /// Whether `a` is sequenced after `b`.
@@ -141,6 +142,26 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
         (SetCell { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
             Transformed::Dropped("its sheet was deleted")
         }
+        // A write into a sorted row follows its row; a formula's relative
+        // references shift with it, exactly as the sort shifts the cell's
+        // old formula.
+        (
+            SetCell {
+                sheet,
+                sheet_name,
+                row,
+                col,
+                content,
+            },
+            SortRange { sheet: bs, rect, .. },
+        ) if sheet == bs && rect.contains(*row, *col) => {
+            let to = b.sorted_row(*row).expect("row inside the sort");
+            let content = match content {
+                CellContent::Formula(f) if to != *row => CellContent::Formula(adjust_formula_refs(f, to as i32 - *row as i32, 0)),
+                other => other.clone(),
+            };
+            one(&SetCell { sheet: *sheet, sheet_name: sheet_name.clone(), row: to, col: *col, content })
+        }
         (SetCell { .. }, _) => one(a),
 
         // ---- a is a format range ----
@@ -199,6 +220,32 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
         }
         (SetFormat { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
             Transformed::Dropped("its sheet was deleted")
+        }
+        // Formats on sorted rows follow their rows: the part of the
+        // rectangle the sort covers splits into runs of rows that stay
+        // adjacent.
+        (SetFormat { sheet, rect, props }, SortRange { sheet: bs, rect: br, .. }) if sheet == bs && rect.intersects(br) => {
+            let overlap = rect.intersection(br).expect("intersects");
+            let to = b.sort_destinations().expect("sort op");
+            let mut rows: Vec<usize> = (overlap.r0..=overlap.r1).map(|r| to[r - br.r0]).collect();
+            rows.sort_unstable();
+            let mut out: Vec<CollabOp> =
+                rect.subtract(br).into_iter().map(|r| SetFormat { sheet: *sheet, rect: r, props: props.clone() }).collect();
+            let mut run: Option<(usize, usize)> = None;
+            for r in rows {
+                run = match run {
+                    Some((lo, hi)) if hi + 1 == r => Some((lo, r)),
+                    Some((lo, hi)) => {
+                        out.push(SetFormat { sheet: *sheet, rect: Rect::new(lo, overlap.c0, hi, overlap.c1), props: props.clone() });
+                        Some((r, r))
+                    }
+                    None => Some((r, r)),
+                };
+            }
+            if let Some((lo, hi)) = run {
+                out.push(SetFormat { sheet: *sheet, rect: Rect::new(lo, overlap.c0, hi, overlap.c1), props: props.clone() });
+            }
+            Transformed::Ops(out)
         }
         (SetFormat { .. }, _) => one(a),
         (SetBold { .. }, _) => unreachable!("transform normalizes SetBold to SetFormat"),
@@ -459,6 +506,12 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
             Transformed::Dropped("its sheet was deleted")
         }
         (ReplaceRange { .. }, _) => one(a),
+
+        // ---- sort (serialized against what would move under it; see `conflict`) ----
+        (SortRange { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
+            Transformed::Dropped("its sheet was deleted")
+        }
+        (SortRange { .. }, _) => one(a),
     }
 }
 
@@ -635,7 +688,9 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
                 Structural { sheet, .. } => *sheet == s,
                 SetCell { sheet, row, col, .. } => *sheet == s && rect.contains(*row, *col),
                 ReplaceRange { .. } => other.sheet() == s && rect.intersects(&other.replace_rect().unwrap()),
-                Merge { sheet, rect: r } | Unmerge { sheet, rect: r } => *sheet == s && rect.intersects(r),
+                Merge { sheet, rect: r } | Unmerge { sheet, rect: r } | SortRange { sheet, rect: r, .. } => {
+                    *sheet == s && rect.intersects(r)
+                }
                 _ => false,
             };
             if hit {
@@ -649,6 +704,28 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
         if sa != sb {
             return Some("another sheet was deleted at the same time".into());
         }
+    }
+    // A sort concurrent with a row or column insert or delete on any sheet
+    // is serialized. The sort shifts a moved formula's relative references
+    // by how far it moved; the structural edit rewrites references past its
+    // line. Applied in the two orders these give different text whenever a
+    // reference lands on the other side of the edit (any sheet's, since a
+    // moved formula's `Other!A6` shifts too).
+    let sort_vs = |x: &CollabOp, y: &CollabOp| -> Option<String> {
+        let SortRange { sheet, rect, .. } = x else { return None };
+        match y {
+            Structural { .. } => Some("rows or columns changed while a range was sorted".into()),
+            SortRange { sheet: s2, rect: r2, .. } if s2 == sheet && rect.intersects(r2) => {
+                Some("the range was sorted at the same time".into())
+            }
+            ReplaceRange { .. } if y.sheet() == *sheet && rect.intersects(&y.replace_rect().unwrap()) => {
+                Some("the range was being replaced at the same time".into())
+            }
+            _ => None,
+        }
+    };
+    if let Some(reason) = sort_vs(a, b).or_else(|| sort_vs(b, a)) {
+        return Some(reason);
     }
     let atomic_vs = |atomic: &CollabOp, other: &CollabOp| -> Option<String> {
         let rect = atomic.replace_rect()?;

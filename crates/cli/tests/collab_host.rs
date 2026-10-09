@@ -414,3 +414,26 @@ fn read_cells_matches_the_snapshot_for_the_asked_cells() {
         assert_eq!(h.call(bad.clone())["ok"], json!(false), "{bad}");
     }
 }
+
+#[test]
+fn a_sort_is_sequenced_and_a_concurrent_write_follows_its_row() {
+    let mut h = Host::spawn();
+    h.ok(json!({"cmd": "load", "document": blank(), "seq": 0}));
+    let ops: Vec<CollabOp> = ["30", "10", "20"].iter().enumerate().map(|(r, v)| set(r, 0, val(v))).collect();
+    submit(&mut h, 0, &ops, &[]);
+    // seq 2: sort A1:B3 by A ascending (30 moves to the bottom).
+    let sort = CollabOp::SortRange { sheet: 1, rect: visigrid_collab::op::Rect::new(0, 0, 2, 1), order: vec![1, 2, 0] };
+    let s = submit(&mut h, 1, &[sort], &[]);
+    assert_eq!(s["result"], json!("op"), "{s}");
+    let op2 = s["op"].clone();
+    // seq 3: B1 written before the sort was seen: it follows 30 to row 3.
+    let w = submit(&mut h, 1, &[set(0, 1, val("was beside 30"))], &[(2, op2)]);
+    assert_eq!(w["op"], json!([{"SetCell": {"sheet": 1, "sheet_name": "Sheet1", "row": 2, "col": 1, "content": {"Value": "was beside 30"}}}]));
+    // A row insert written before the sort is refused (serialized).
+    let ins = CollabOp::Structural { sheet: 1, sheet_name: "Sheet1".into(), axis: Axis::Row, at: 0, count: 1, delete: false };
+    let r = submit(&mut h, 1, &[ins], &[(2, s["op"].clone()), (3, w["op"].clone())]);
+    assert_eq!(r["result"], json!("refused"), "{r}");
+    let read = h.ok(json!({"cmd": "read_cells", "sheet_index": 0, "cells": [[0, 0], [1, 0], [2, 0], [2, 1]]}));
+    let values: Vec<Value> = read["cells"].as_array().unwrap().iter().map(|c| c["value"].clone()).collect();
+    assert_eq!(values, [json!(10.0), json!(20.0), json!(30.0), json!("was beside 30")], "{read}");
+}

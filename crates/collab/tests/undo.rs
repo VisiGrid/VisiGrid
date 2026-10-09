@@ -263,3 +263,31 @@ fn moving_a_sheet_tab_converges_undoes_and_serializes_against_concurrent_reorder
     room.sync();
     assert_eq!(order(&room), vec![key, 42, 41], "the move landed, the concurrent add was refused");
 }
+
+#[test]
+fn a_dropped_rename_does_not_rename_later_undo_history() {
+    // Found by the simulator: A renames the sheet twice and inserts a column
+    // while B's new tab takes A's first name. A's first rename is dropped,
+    // and undoing the insert must still name the sheet by A's second name,
+    // which stands: a stale name sends a delete whose formula rewrites
+    // differ between replicas.
+    let mut room = Room::new(2);
+    let key = room.key();
+    room.edit(1, vec![CollabOp::AddSheet { sheet: 50, name: "S0".into(), index: 1 }]);
+    let Some(ToServer::Submit(env)) = room.clients[1].poll_send() else { panic!("nothing to send") };
+    let Submitted::Committed(add) = room.server.submit(&env) else { panic!("add refused") };
+    let cols = |name: &str| CollabOp::Structural { sheet: key, sheet_name: name.into(), axis: Axis::Col, at: 0, count: 1, delete: false };
+    room.edit(0, vec![CollabOp::RenameSheet { sheet: key, name: "S0".into() }]);
+    room.edit(0, vec![CollabOp::RenameSheet { sheet: key, name: "S4".into() }]);
+    room.edit(0, vec![cols("S4")]);
+    for c in room.clients.iter_mut() {
+        c.receive(ToClient::Op(add.clone()));
+    }
+    assert!(room.undo(0).applied);
+    let sent: Vec<CollabOp> = room.clients[0].buffer.iter().flat_map(|p| p.ops.clone()).collect();
+    assert!(
+        matches!(sent.last(), Some(CollabOp::Structural { sheet_name, delete: true, .. }) if sheet_name == "S4"),
+        "undo names the sheet as it is now: {sent:?}"
+    );
+    room.sync();
+}

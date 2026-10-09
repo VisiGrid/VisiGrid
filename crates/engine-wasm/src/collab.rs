@@ -464,6 +464,26 @@ impl CollabCore {
         Ok(json!({"ops": visigrid_collab::op::ops_to_json(&ops), "key": key, "name": name, "dropped": dropped}))
     }
 
+    /// The op that sorts `rect` of `sheet` by `keys` (`[{col, ascending}]`)
+    /// as this replica stands: `{ops}` (empty when already in order) or
+    /// `{error}` with a message for the person sorting. Nothing is applied.
+    pub(crate) fn sort_ops(&self, sheet: SheetKey, rect: &Value, keys: &Value) -> Result<Value, String> {
+        let rect: visigrid_collab::op::Rect = serde_json::from_value(rect.clone()).map_err(|e| format!("invalid rect: {e}"))?;
+        let keys: Vec<visigrid_collab::sort::SortKey> = serde_json::from_value(keys.clone()).map_err(|e| format!("invalid keys: {e}"))?;
+        Ok(match visigrid_collab::sort::sort_op(&self.client.wb, sheet, rect, &keys) {
+            Ok(op) => json!({"ops": visigrid_collab::op::ops_to_json(&op.into_iter().collect::<Vec<_>>())}),
+            Err(e) => json!({"error": e.message()}),
+        })
+    }
+
+    /// Whether the first row of `rect` looks like a header for a sort by
+    /// `keys` (the default the sort dialog offers).
+    pub(crate) fn sort_header(&self, sheet: SheetKey, rect: &Value, keys: &Value) -> Result<bool, String> {
+        let rect: visigrid_collab::op::Rect = serde_json::from_value(rect.clone()).map_err(|e| format!("invalid rect: {e}"))?;
+        let keys: Vec<visigrid_collab::sort::SortKey> = serde_json::from_value(keys.clone()).map_err(|e| format!("invalid keys: {e}"))?;
+        Ok(visigrid_collab::sort::looks_like_header(&self.client.wb, sheet, rect, &keys))
+    }
+
     pub(crate) fn checksum(&self) -> String {
         collab_checksum(&self.client.confirmed)
     }
@@ -908,6 +928,16 @@ impl CollabClient {
         to_js(&self.core.duplicate_ops(sheet as SheetKey).map_err(js_err)?)
     }
 
+    /// The op that sorts a range: `{ops}` or `{error}` (see `CollabCore::sort_ops`).
+    pub fn sort_ops(&self, sheet: f64, rect: JsValue, keys: JsValue) -> Result<JsValue, JsValue> {
+        to_js(&self.core.sort_ops(sheet as SheetKey, &from_js(rect)?, &from_js(keys)?).map_err(js_err)?)
+    }
+
+    /// Whether a range's first row looks like a header for a sort.
+    pub fn sort_header(&self, sheet: f64, rect: JsValue, keys: JsValue) -> Result<bool, JsValue> {
+        self.core.sort_header(sheet as SheetKey, &from_js(rect)?, &from_js(keys)?).map_err(js_err)
+    }
+
     /// The optimistic document (visigrid-json v2 with `collab_sheet_ids`).
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         to_js(&self.core.snapshot().map_err(js_err)?)
@@ -1182,6 +1212,32 @@ mod tests {
             checksum(&c.client.wb),
             "the optimistic workbook, formats included, round-trips through the snapshot"
         );
+    }
+
+    #[test]
+    fn sorts_through_the_json_api_and_undoes_in_one_step() {
+        let mut c = CollabCore::new(&doc(), 0).unwrap();
+        for (r, v) in ["Score", "30", "10", "20"].iter().enumerate() {
+            c.local(&set(r, 3, v)).unwrap();
+        }
+        let rect = json!({"r0": 0, "c0": 3, "r1": 3, "c1": 3});
+        let keys = json!([{"col": 3, "ascending": true}]);
+        assert!(c.sort_header(1, &rect, &keys).unwrap(), "text over numbers reads as a header");
+        let body = json!({"r0": 1, "c0": 3, "r1": 3, "c1": 3});
+        let plan = c.sort_ops(1, &body, &keys).unwrap();
+        assert_eq!(plan["ops"], json!([{"SortRange": {"sheet": 1, "rect": body, "order": [1, 2, 0]}}]));
+        let fx = c.local(&plan["ops"]).unwrap();
+        assert_eq!(fx["full"], true);
+        let col: Vec<String> = (1..=3).map(|r| c.client.wb.sheets()[0].get_raw(r, 3)).collect();
+        assert_eq!(col, ["10", "20", "30"]);
+        c.undo();
+        let col: Vec<String> = (1..=3).map(|r| c.client.wb.sheets()[0].get_raw(r, 3)).collect();
+        assert_eq!(col, ["30", "10", "20"]);
+        // Already in order: nothing to send. A merged range: a message.
+        assert_eq!(c.sort_ops(1, &body, &json!([{"col": 3, "ascending": false}])).unwrap()["ops"].as_array().map(Vec::len), Some(1));
+        c.local(&json!([{"Merge": {"sheet": 1, "rect": {"r0": 2, "c0": 3, "r1": 2, "c1": 4}}}])).unwrap();
+        assert!(c.sort_ops(1, &body, &keys).unwrap()["error"].as_str().unwrap().contains("Unmerge"));
+        assert_eq!(c.sort_ops(1, &json!({"r0": 5, "c0": 0, "r1": 6, "c1": 0}), &json!([{"col": 0, "ascending": true}])).unwrap()["ops"], json!([]));
     }
 
     #[test]
