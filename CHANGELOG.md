@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`INDIRECT` of text that isn't a reference is `#REF!` again.** `=INDIRECT("nope")`, or any text that is neither an address nor a defined name, showed `#NAME?` in 0.52.0. It is `#REF!`, as in Excel and 0.51.0. ([#135](https://github.com/VisiGrid/VisiGrid/pull/135))
+
 ## 0.52.0
 
 ### Tables

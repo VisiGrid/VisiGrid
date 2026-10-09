@@ -169,7 +169,9 @@ fn resolve_expr<L: CellLookup>(
             ) {
                 return Err("#REF! INDIRECT did not produce a reference".into());
             }
-            resolve(&indirect)
+            // Text that is neither an address nor a defined name is #REF! in
+            // Excel. Binding reads it as a name, whose own error is #NAME?.
+            resolve(&indirect).map_err(|e| if e.starts_with("#NAME?") { "#REF!".into() } else { e })
         }
         Expr::Function { name, args } if name.eq_ignore_ascii_case("OFFSET") => {
             if !(3..=5).contains(&args.len()) {
