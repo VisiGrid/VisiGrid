@@ -450,6 +450,11 @@ mod native {
     /// the role can call could write for it: volatile ones it can reach are
     /// refused (Postgres refuses data changes in stable and immutable
     /// functions). Trigger and event-trigger functions can't be called.
+    /// Not seen: a stable SECURITY DEFINER function that calls a volatile
+    /// one, since PL/pgSQL checks read-only per function. Only the owner of
+    /// such functions can make that, and flagging every SECURITY DEFINER
+    /// function would refuse the stable helpers Supabase projects keep in
+    /// public; the guide names the case instead.
     const WRITE_PRIVILEGES: &str = "
 SELECT 'role: ' || x FROM pg_roles r, LATERAL (VALUES
    (CASE WHEN r.rolsuper THEN 'superuser' END), (CASE WHEN r.rolcreaterole THEN 'createrole' END),
