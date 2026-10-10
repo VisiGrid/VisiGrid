@@ -25,14 +25,15 @@ const VALUE_FUNCTIONS: &[&str] = &[
     // text
     "LEN", "LEFT", "RIGHT", "MID", "UPPER", "LOWER", "TRIM", "PROPER", "REPT",
     "SUBSTITUTE", "FIND", "SEARCH", "EXACT", "VALUE", "TEXT", "TEXTBEFORE",
-    "TEXTAFTER", "REPLACE", "REGEXTEST", "REGEXMATCH", "REGEXREPLACE",
+    "TEXTAFTER", "REPLACE", "REGEXTEST", "REGEXMATCH", "REGEXREPLACE", "CHAR", "CODE",
+    "CLEAN", "FIXED", "DOLLAR",
     // math and trig
     "ABS", "INT", "SQRT", "EXP", "LN", "LOG", "LOG10", "POWER", "MOD", "ROUND",
     "ROUNDUP", "ROUNDDOWN", "TRUNC", "CEILING", "FLOOR", "SIN", "COS", "TAN",
     "ASIN", "ACOS", "ATAN", "ATAN2", "DEGREES", "RADIANS",
     // dates
     "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "WEEKDAY", "DATEVALUE",
-    "EDATE", "EOMONTH",
+    "EDATE", "EOMONTH", "ISOWEEKNUM", "YEARFRAC",
     // logical and information
     "NOT", "ISNUMBER", "ISTEXT", "ISBLANK", "ISERROR", "ISNA",
 ];

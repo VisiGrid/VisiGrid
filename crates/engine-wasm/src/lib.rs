@@ -784,6 +784,7 @@ mod check_formulas_tests {
             "=LAMBDA(x,x+1)(2)",
             "=SUM({1,2;3,4})",
             "=TEXTSPLIT(A1,\",\")",
+            "=BYROW(A1:A3,LAMBDA(r,SUM(r)))+MAP(A1:A3,LAMBDA(x,x*2))",
             "plain text",
             "42",
         ] {
@@ -793,9 +794,9 @@ mod check_formulas_tests {
 
     #[test]
     fn unknown_functions_are_named() {
-        let got = check("=BYROW(A1:A3,LAMBDA(r,SUM(r)))+MAP(1,2)");
+        let got = check("=DGET(A1:A3,1,B1:B2)+CUBEVALUE(1,2)");
         assert!(!got.supported);
-        assert_eq!(got.unknown_functions, vec!["BYROW".to_string(), "MAP".to_string()]);
+        assert_eq!(got.unknown_functions, vec!["CUBEVALUE".to_string(), "DGET".to_string()]);
         assert_eq!(got.parse_error, None);
     }
 

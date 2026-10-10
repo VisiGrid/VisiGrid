@@ -816,7 +816,7 @@ fn evaluate_table_reference<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> Eval
 
 /// Evaluate an operator's operand. A reference to more than one cell becomes an
 /// array of its typed values; anything else evaluates as usual.
-fn operand<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
+pub(super) fn operand<L: CellLookup>(expr: &BoundExpr, lookup: &L) -> EvalResult {
     match expr {
         Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
             if matches!(sheet, SheetRef::RefError { .. }) {
@@ -1138,6 +1138,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         .or_else(|| super::eval_trig::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_statistical::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_array::try_evaluate(name, args, lookup))
+        .or_else(|| super::eval_lambda::try_evaluate(name, args, lookup))
         .or_else(|| {
             let eval_args = eval_function_args(args, lookup);
             lookup.try_custom_function(name, &eval_args)

@@ -232,7 +232,7 @@ pub(crate) fn is_reserved_table_word(upper_name: &str) -> bool {
         "CONCAT", "CONCATENATE", "TEXTJOIN",
         "UPPER", "LOWER", "PROPER", "TRIM", "CLEAN",
         "SUBSTITUTE", "REPLACE", "REPT",
-        "TEXT", "VALUE", "FIXED", "DOLLAR",
+        "TEXT", "VALUE", "FIXED", "DOLLAR", "SPLIT",
         "CHAR", "CODE", "UNICODE", "UNICHAR",
         "EXACT", "T", "N",
 
@@ -261,7 +261,7 @@ pub(crate) fn is_reserved_table_word(upper_name: &str) -> bool {
         // Statistical (20+)
         "STDEV", "STDEVA", "STDEVP", "STDEVPA",
         "VAR", "VARA", "VARP", "VARPA",
-        "LARGE", "SMALL", "RANK", "PERCENTILE", "QUARTILE",
+        "LARGE", "SMALL", "RANK", "RANK.AVG", "PERCENTILE", "QUARTILE", "COUNTUNIQUE",
         "NORM.DIST", "NORM.INV", "NORM.S.DIST", "NORM.S.INV",
         "CORREL", "COVAR", "SLOPE", "INTERCEPT", "FORECAST",
         "TREND", "GROWTH", "LINEST",
@@ -284,7 +284,7 @@ pub(crate) fn is_reserved_table_word(upper_name: &str) -> bool {
         "OCT2DEC", "OCT2BIN", "OCT2HEX",
 
         // Array/Dynamic
-        "SEQUENCE", "RANDARRAY", "LET", "LAMBDA",
+        "SEQUENCE", "RANDARRAY", "LET", "LAMBDA", "ARRAYFORMULA",
         "MAP", "REDUCE", "SCAN", "MAKEARRAY", "BYROW", "BYCOL",
         "HSTACK", "VSTACK", "TOROW", "TOCOL", "WRAPROWS", "WRAPCOLS",
         "TAKE", "DROP", "EXPAND", "CHOOSEROWS", "CHOOSECOLS",

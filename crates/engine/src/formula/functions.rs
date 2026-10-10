@@ -5,34 +5,37 @@ use super::eval::EvalResult;
 /// All supported function names, sorted alphabetically.
 /// This is the single source of truth for the function list.
 const FUNCTION_NAMES: &[&str] = &[
-    "ABS", "ACOS", "AND", "ASIN", "ATAN", "ATAN2", "AVERAGE", "AVERAGEIF", "AVERAGEIFS", "AVG",
-    "CEILING", "CHOOSE", "COLUMN", "COLUMNS", "CONCAT", "CONCATENATE", "COS", "COUNT", "COUNTA",
-    "COUNTBLANK", "COUNTIF", "COUNTIFS", "CUMIPMT", "CUMPRINC",
-    "DATE", "DATEDIF", "DATEVALUE", "DAY", "DAYS", "DEGREES",
+    "ABS", "ACOS", "AND", "ARRAYFORMULA", "ASIN", "ATAN", "ATAN2", "AVERAGE", "AVERAGEIF",
+    "AVERAGEIFS", "AVG",
+    "BYCOL", "BYROW",
+    "CEILING", "CHAR", "CHOOSE", "CLEAN", "CODE", "COLUMN", "COLUMNS", "CONCAT", "CONCATENATE",
+    "CORREL", "COS", "COUNT", "COUNTA", "COUNTBLANK", "COUNTIF", "COUNTIFS", "COUNTUNIQUE",
+    "CUMIPMT", "CUMPRINC",
+    "DATE", "DATEDIF", "DATEVALUE", "DAY", "DAYS", "DEGREES", "DOLLAR",
     "EDATE", "EOMONTH", "EXACT", "EXP",
-    "FILTER", "FIND", "FLOOR", "FV",
+    "FILTER", "FIND", "FIXED", "FLOOR", "FV",
     "HLOOKUP", "HOUR", "HYPERLINK",
     "IF", "IFERROR", "IFNA", "IFS", "INDEX", "INDIRECT", "INT", "IPMT", "IRR", "ISBLANK",
-    "ISERROR", "ISNA", "ISNUMBER", "ISTEXT",
+    "ISERROR", "ISNA", "ISNUMBER", "ISOWEEKNUM", "ISTEXT",
     "LAMBDA", "LARGE", "LEFT", "LEN", "LET", "LN", "LOG", "LOG10", "LOOKUP", "LOWER",
-    "MATCH", "MAX", "MAXIFS", "MEDIAN", "MID", "MIN", "MINIFS", "MINUTE", "MOD", "MODE",
+    "MAP", "MATCH", "MAX", "MAXIFS", "MEDIAN", "MID", "MIN", "MINIFS", "MINUTE", "MOD", "MODE",
     "MODE.SNGL", "MONTH",
     "NA", "NETWORKDAYS", "NORM.S.DIST", "NORMSDIST", "NOT", "NOW", "NPER", "NPV",
     "OFFSET", "OR",
     "PERCENTILE", "PERCENTILE.INC", "PI", "PMT", "POWER", "PPMT", "PRODUCT", "PROPER", "PV",
     "QUARTILE", "QUARTILE.INC",
-    "RADIANS", "RAND", "RANDBETWEEN", "RANK", "RANK.EQ", "RATE", "REGEXEXTRACT", "REGEXMATCH",
-    "REGEXREPLACE", "REGEXTEST", "REPLACE", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP",
-    "ROW", "ROWS",
-    "SEARCH", "SECOND", "SEQUENCE", "SIN", "SMALL", "SORT", "SORTBY", "SPARKLINE", "SQRT", "STDEV",
-    "STDEV.P", "STDEV.S", "STDEVP", "SUBSTITUTE", "SUBTOTAL", "SUM", "SUMIF", "SUMIFS", "SUMPRODUCT", "SWITCH",
+    "RADIANS", "RAND", "RANDBETWEEN", "RANK", "RANK.AVG", "RANK.EQ", "RATE", "REDUCE",
+    "REGEXEXTRACT", "REGEXMATCH", "REGEXREPLACE", "REGEXTEST", "REPLACE", "REPT", "RIGHT", "ROUND",
+    "ROUNDDOWN", "ROUNDUP", "ROW", "ROWS",
+    "SCAN", "SEARCH", "SECOND", "SEQUENCE", "SIN", "SMALL", "SORT", "SORTBY", "SPARKLINE", "SPLIT",
+    "SQRT", "STDEV", "STDEV.P", "STDEV.S", "STDEVP", "SUBSTITUTE", "SUBTOTAL", "SUM", "SUMIF", "SUMIFS", "SUMPRODUCT", "SWITCH",
     "TAN", "TEXT", "TEXTAFTER", "TEXTBEFORE", "TEXTJOIN", "TEXTSPLIT", "TIME", "TODAY",
     "TRANSPOSE", "TRIM", "TRUNC",
     "UNIQUE", "UPPER",
     "VALUE", "VAR", "VAR.P", "VAR.S", "VARP", "VLOOKUP",
     "WEEKDAY", "WEEKNUM", "WORKDAY",
     "XIRR", "XLOOKUP", "XMATCH", "XNPV", "XOR",
-    "YEAR",
+    "YEAR", "YEARFRAC",
 ];
 
 /// Returns all supported function names, sorted alphabetically.
@@ -136,7 +139,7 @@ mod tests {
 
     /// Every function the evaluator dispatches must be in FUNCTION_NAMES.
     ///
-    /// The list is maintained by hand beside a dispatch spread over ten files, and it has
+    /// The list is maintained by hand beside a dispatch spread over a dozen files, and it has
     /// drifted twice: seven names in one release, then eleven more (DAYS, EXACT, XMATCH
     /// and the rest of 0.24.0's additions) that worked in cells while autocomplete,
     /// validation and `vgrid list-functions` said they did not exist. Read the dispatch
@@ -156,6 +159,7 @@ mod tests {
             include_str!("eval_trig.rs"),
             include_str!("eval_statistical.rs"),
             include_str!("eval_array.rs"),
+            include_str!("eval_lambda.rs"),
         ];
         let mut dispatched = Vec::new();
         for src in sources {
