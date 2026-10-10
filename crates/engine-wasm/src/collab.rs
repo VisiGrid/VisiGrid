@@ -337,6 +337,30 @@ impl CollabCore {
         Ok(self.effects())
     }
 
+    /// The content-protection check `new_with(.., verified: true)` skipped,
+    /// run after the first paint against `text`, the bytes this client was
+    /// built from. Call it before any edit or welcome reaches the client. On
+    /// a loss every sheet turns read-only with its stored formula values,
+    /// as a full load would have left it, and the Effects ask for a full
+    /// repaint. `{complete, effects}`.
+    pub(crate) fn protect(&mut self, text: &str) -> Result<Value, String> {
+        let checked = visigrid_io::json::loaded_complete(&self.client.wb);
+        // The layouts as loaded, in sheet order: what `import_any` compared.
+        let layouts: Vec<SheetLayout> = self.client.wb.sheets().iter()
+            .map(|s| self.layouts.get(&s.id.0).cloned().unwrap_or_default())
+            .collect();
+        let complete = visigrid_io::json::protect_loaded(&mut self.client.wb, &layouts, self.active, text)?;
+        if checked && !complete {
+            if self.confirmed_copy {
+                self.client.confirmed = self.client.wb.clone();
+            }
+            if let Some(ch) = self.client.changes.as_mut() {
+                ch.full = true;
+            }
+        }
+        Ok(json!({"complete": complete, "effects": self.effects()}))
+    }
+
     /// `load_snapshot` from a workbook assembled elsewhere (a banded
     /// snapshot loaded into a scratch client), so pending edits rebase onto
     /// the whole sheet, never a half-loaded one.
@@ -866,6 +890,15 @@ impl CollabClient {
         Ok(CollabClient { core: CollabCore::new_with(&doc, seq as u64, true).map_err(js_err)? })
     }
 
+    /// After `from_json_verified(json, ..)` used only to paint early (the
+    /// snapshot was not verified for this engine): run the skipped
+    /// content-protection check on the client as loaded, before any edit or
+    /// welcome. `{complete, effects}`; on a loss every sheet is read-only and
+    /// `effects` repaints everything.
+    pub fn protect(&mut self, json: &str) -> Result<JsValue, JsValue> {
+        to_js(&self.core.protect(json).map_err(js_err)?)
+    }
+
     /// A user edit: a CollabOp list (or one op). Applied optimistically and
     /// queued for `poll_send`.
     pub fn local(&mut self, ops: JsValue) -> Result<JsValue, JsValue> {
@@ -1072,6 +1105,31 @@ fn cell_json(idx: usize, sheet: &visigrid_engine::sheet::Sheet, row: usize, col:
 
 #[cfg(test)]
 mod tests {
+    /// A client built verified to paint early, then checked, ends where a
+    /// full load does: the same read-only state and the same confirmed copy
+    /// (what the server's checksum frames compare), with a full repaint only
+    /// when the check is what locked it.
+    #[test]
+    fn protect_after_a_verified_build_matches_a_full_load() {
+        let complete = json!({"format": "visigrid-json", "version": 2, "collab_sheet_ids": [1], "sheets": [{"name": "Sheet1", "cells": [
+            {"row": 0, "col": 0, "value": 2}, {"row": 1, "col": 0, "formula": "=A1*3", "value": 6}]}]});
+        let mut lossy = complete.clone();
+        lossy["future_feature"] = json!({"keep": true});
+        for (doc, expect) in [(complete, true), (lossy, false)] {
+            let text = doc.to_string();
+            let full = CollabCore::new(&doc, 3).unwrap();
+            let mut later = CollabCore::new_with(&doc, 3, true).unwrap();
+            let out = later.protect(&text).unwrap();
+            assert_eq!(out["complete"], json!(expect));
+            assert_eq!(out["effects"]["full"], json!(!expect), "repaint only when newly locked");
+            let reason = |c: &CollabCore| c.client.wb.sheets().iter().map(|s| s.read_only_reason.clone()).collect::<Vec<_>>();
+            assert_eq!(reason(&later), reason(&full));
+            assert_eq!(later.checksum(), full.checksum());
+            // A second check finds it already settled.
+            assert_eq!(later.protect(&text).unwrap()["effects"]["full"], json!(false));
+        }
+    }
+
     #[test]
     fn a_banded_document_loads_band_by_band_to_the_same_workbook() {
         use visigrid_engine::sheet::{Sheet, SheetId, NUM_COLS, NUM_ROWS};
@@ -1597,4 +1655,3 @@ mod tests {
     }
 
 }
-

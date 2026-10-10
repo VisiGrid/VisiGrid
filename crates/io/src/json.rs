@@ -1130,6 +1130,43 @@ pub fn import_any_verified(content: &str) -> Result<(visigrid_engine::workbook::
     import_any_impl(content, false, false)
 }
 
+/// The content-protection step `import_any_verified` skipped, run later on
+/// the workbook it returned, so a browser can draw first and check after:
+/// export, re-parse, `first_loss` against `content` (the same bytes it was
+/// loaded from, before any edit). On a loss the workbook ends exactly as
+/// `import_any` leaves it: every sheet read-only with the stored formula
+/// values kept and the original source retained. Returns whether the
+/// workbook is complete (`loaded_complete`); one that already opened
+/// read-only or still has bands to load is left as it is.
+pub fn protect_loaded(
+    wb: &mut visigrid_engine::workbook::Workbook,
+    layouts: &[SheetLayout],
+    active: usize,
+    content: &str,
+) -> Result<bool, String> {
+    if !loaded_complete(wb) {
+        return Ok(false);
+    }
+    let source: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    // An absent or empty `sheets` is the v1 single-body shape (see `import_any_impl`).
+    let single = source.get("sheets").and_then(serde_json::Value::as_array).is_none_or(|s| s.is_empty());
+    let projected = if single {
+        export_full_with_layout(wb.active_sheet(), layouts.first().ok_or("no sheet layout")?)?
+    } else {
+        export_workbook(wb, layouts, active)?
+    };
+    let projected: serde_json::Value = serde_json::from_str(&projected).map_err(|e| e.to_string())?;
+    let Some(path) = crate::content_protection::first_loss(&source, &projected) else {
+        return Ok(true);
+    };
+    let (doc, _) = decode_document_for_preview(content)?;
+    let cached = cached_formula_values(&doc, wb);
+    let reason = format!("This VisiGrid cannot preserve content at {path}. Opened read-only; original content is retained. Upgrade VisiGrid to edit.");
+    crate::table_recovery::finish_read_only(wb, &reason, &cached);
+    retain_protected_source(wb, content, layouts)?;
+    Ok(false)
+}
+
 /// Whether a workbook `import_any` returned is complete and editable: no
 /// sheet opened read-only (content protection, recovery, newer format) and
 /// no bands still to load. Bands decide their read-only state when they
@@ -1280,20 +1317,8 @@ fn import_any_impl(content: &str, recovery: bool, protect: bool) -> Result<(visi
     wb.recompute_full_ordered();
     let cached = cached_formula_values(&doc, &wb);
     crate::keep_uncomputable_values(&mut wb, &cached);
-    if !protect {
-        return Ok((wb, layouts, active));
-    }
-    let projected = if doc.sheets.is_empty() {
-        export_full_with_layout(wb.active_sheet(), &layouts[0])?
-    } else {
-        export_workbook(&wb, &layouts, active)?
-    };
-    let source: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
-    let projected: serde_json::Value = serde_json::from_str(&projected).map_err(|e| e.to_string())?;
-    if let Some(path) = crate::content_protection::first_loss(&source, &projected) {
-        let reason = format!("This VisiGrid cannot preserve content at {path}. Opened read-only; original content is retained. Upgrade VisiGrid to edit.");
-        crate::table_recovery::finish_read_only(&mut wb, &reason, &cached);
-        retain_protected_source(&mut wb, content, &layouts)?;
+    if protect {
+        protect_loaded(&mut wb, &layouts, active, content)?;
     }
     Ok((wb, layouts, active))
 }
