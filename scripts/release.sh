@@ -225,7 +225,7 @@ else
     sleep 10
 
     # Find the workflow run for this tag
-    TIMEOUT=1800  # 30 minutes
+    TIMEOUT=3600  # 60 minutes: Windows release builds now take ~50 min
     INTERVAL=30
     ELAPSED=0
 
