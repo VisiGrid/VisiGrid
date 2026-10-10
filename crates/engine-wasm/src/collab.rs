@@ -345,7 +345,11 @@ impl CollabCore {
     /// repaint. `{complete, effects}`.
     pub(crate) fn protect(&mut self, text: &str) -> Result<Value, String> {
         let checked = visigrid_io::json::loaded_complete(&self.client.wb);
-        let complete = visigrid_io::json::protect_loaded(&mut self.client.wb, &self.layouts, self.active, text)?;
+        // The layouts as loaded, in sheet order: what `import_any` compared.
+        let layouts: Vec<SheetLayout> = self.client.wb.sheets().iter()
+            .map(|s| self.layouts.get(&s.id.0).cloned().unwrap_or_default())
+            .collect();
+        let complete = visigrid_io::json::protect_loaded(&mut self.client.wb, &layouts, self.active, text)?;
         if checked && !complete {
             if self.confirmed_copy {
                 self.client.confirmed = self.client.wb.clone();
@@ -1651,4 +1655,3 @@ mod tests {
     }
 
 }
-
