@@ -1112,15 +1112,33 @@ pub fn import_full_with_layout(content: &str) -> Result<(Sheet, SheetLayout), St
 pub fn import_any(
     content: &str,
 ) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
-    import_any_impl(content, false)
+    import_any_impl(content, false, true)
 }
 
 /// Explicit recovery; callers must display the read-only reason and cached-value warning.
 pub fn import_any_for_recovery(content: &str) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
-    import_any_impl(content, true)
+    import_any_impl(content, true, true)
 }
 
-fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
+/// `import_any` without the final content-protection diff (export the loaded
+/// workbook, re-parse, `first_loss`), which is most of the load's cost after
+/// the recompute. Only for content this engine build already loaded with
+/// `import_any` and found complete (`loaded_complete`): the diff is a pure
+/// function of the content and the engine, so it would find nothing again.
+/// Every other read-only path still runs.
+pub fn import_any_verified(content: &str) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
+    import_any_impl(content, false, false)
+}
+
+/// Whether a workbook `import_any` returned is complete and editable: no
+/// sheet opened read-only (content protection, recovery, newer format) and
+/// no bands still to load. Bands decide their read-only state when they
+/// finish loading, so a banded load is never complete here.
+pub fn loaded_complete(wb: &visigrid_engine::workbook::Workbook) -> bool {
+    wb.pending_bands.is_none() && wb.sheets().iter().all(|s| s.read_only_reason.is_none())
+}
+
+fn import_any_impl(content: &str, recovery: bool, protect: bool) -> Result<(visigrid_engine::workbook::Workbook, Vec<SheetLayout>, usize), String> {
     use visigrid_engine::sheet::SheetId;
     use visigrid_engine::workbook::Workbook;
     use crate::table_recovery::{decode_catalog, TableLoadIssue};
@@ -1262,6 +1280,9 @@ fn import_any_impl(content: &str, recovery: bool) -> Result<(visigrid_engine::wo
     wb.recompute_full_ordered();
     let cached = cached_formula_values(&doc, &wb);
     crate::keep_uncomputable_values(&mut wb, &cached);
+    if !protect {
+        return Ok((wb, layouts, active));
+    }
     let projected = if doc.sheets.is_empty() {
         export_full_with_layout(wb.active_sheet(), &layouts[0])?
     } else {

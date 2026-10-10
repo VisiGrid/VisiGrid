@@ -187,7 +187,11 @@ impl Host {
         self.seq = seq;
         self.barrier = seq;
         self.poisoned = false;
-        Ok(fields(json!({"checksum": collab_checksum(self.wb()?)})))
+        // `complete`: loaded editable with nothing withheld, so the content
+        // protection diff found no loss. The server records it per snapshot,
+        // and browsers on this engine commit skip repeating the diff.
+        let complete = visigrid_io::json::loaded_complete(self.wb()?);
+        Ok(fields(json!({"checksum": collab_checksum(self.wb()?), "complete": complete})))
     }
 
     fn replay(&mut self, req: &Map<String, Value>) -> Reply {
@@ -372,7 +376,8 @@ impl Host {
             self.seq = s;
         }
         self.barrier = self.seq;
-        Ok(fields(json!({"seq": self.seq, "checksum": collab_checksum(self.wb()?)})))
+        let complete = visigrid_io::json::loaded_complete(self.wb()?);
+        Ok(fields(json!({"seq": self.seq, "checksum": collab_checksum(self.wb()?), "complete": complete})))
     }
 
     fn set_clock(&mut self, req: &Map<String, Value>) -> Reply {

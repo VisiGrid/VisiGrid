@@ -437,3 +437,22 @@ fn a_sort_is_sequenced_and_a_concurrent_write_follows_its_row() {
     let values: Vec<Value> = read["cells"].as_array().unwrap().iter().map(|c| c["value"].clone()).collect();
     assert_eq!(values, [json!(10.0), json!(20.0), json!(30.0), json!("was beside 30")], "{read}");
 }
+
+#[test]
+fn load_reports_whether_the_document_loaded_complete() {
+    let mut h = Host::spawn();
+    let loaded = h.ok(json!({"cmd": "load", "document": blank(), "seq": 0}));
+    assert_eq!(loaded["complete"], json!(true));
+
+    // Content this engine cannot keep opens read-only: never complete, so
+    // the server never lets a browser skip its own content-protection diff.
+    let mut lossy = blank();
+    lossy["future_feature"] = json!([1]);
+    let replaced = h.ok(json!({"cmd": "replace_document", "document": lossy}));
+    assert_eq!(replaced["complete"], json!(false));
+
+    let mut h = Host::spawn();
+    let mut newer = blank();
+    newer["version"] = json!(999);
+    assert_eq!(h.ok(json!({"cmd": "load", "document": newer, "seq": 0}))["complete"], json!(false));
+}
