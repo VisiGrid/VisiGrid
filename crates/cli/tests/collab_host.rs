@@ -456,3 +456,29 @@ fn load_reports_whether_the_document_loaded_complete() {
     newer["version"] = json!(999);
     assert_eq!(h.ok(json!({"cmd": "load", "document": newer, "seq": 0}))["complete"], json!(false));
 }
+
+#[test]
+fn first_screen_is_what_the_grid_draws_from_a1_of_the_first_tab() {
+    let mut h = Host::spawn();
+    assert_eq!(h.call(json!({"cmd": "first_screen"}))["ok"], json!(false), "nothing loaded yet");
+    let document = json!({"format": "visigrid-json", "version": 2, "collab_sheet_ids": [7, 9], "sheets": [
+        {"name": "Data", "col_widths": {"1": 140}, "cells": [
+            {"row": 0, "col": 0, "value": "Region"},
+            {"row": 1, "col": 1, "value": 1234.5, "fmt": {"number_format": {"Number": {"decimals": 2}}}},
+            {"row": 2, "col": 1, "formula": "=B2*2"},
+            {"row": 100, "col": 0, "value": "below the first screen"}]},
+        {"name": "Other", "cells": [{"row": 0, "col": 0, "value": "not shown"}]}]});
+    h.ok(json!({"cmd": "load", "document": document, "seq": 0}));
+    let screen = h.ok(json!({"cmd": "first_screen", "rows": 40, "cols": 10}))["first_screen"].clone();
+    assert_eq!(screen["sheet"], json!(7), "the grid opens on the first tab");
+    assert_eq!(screen["sheets"].as_array().unwrap().len(), 2);
+    assert_eq!((screen["rows"].clone(), screen["cols"].clone()), (json!(40), json!(10)));
+    let vp = &screen["viewport"];
+    let text: Vec<&str> = vp["text"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+    assert!(text.contains(&"Region"));
+    assert!(text.contains(&"2469"), "formulas are computed: {text:?}");
+    assert!(!text.contains(&"below the first screen"), "only the asked rows");
+    assert!(!text.contains(&"not shown"), "only the first tab");
+    assert!(vp["rows"].as_array().unwrap().iter().all(|r| r.as_u64().unwrap() < 40));
+    assert_eq!(screen["layout"]["col_widths"]["1"], json!(140.0));
+}

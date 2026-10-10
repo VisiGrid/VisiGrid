@@ -563,121 +563,19 @@ impl CollabCore {
         Some(wb.sheets()[idx].get_raw(row, col))
     }
 
-    /// The sheets, in tab order: `[{key, name, index}]`.
+    /// The sheets, in tab order: `[{key, name, index}]` (see `visigrid_collab::view`).
     pub(crate) fn sheets(&self) -> Value {
-        let wb = &self.client.wb;
-        Value::Array(
-            wb.sheets().iter().enumerate().map(|(index, s)| json!({"key": s.id.0, "name": s.name, "index": index})).collect(),
-        )
+        visigrid_collab::view::sheets(&self.client.wb)
     }
 
-    /// A sheet's layout for drawing: column widths and row heights that
-    /// differ from the defaults, frozen and hidden rows and columns, and the
-    /// extent of its data (`rows`, `cols`: one past the last used row and
-    /// column).
+    /// A sheet's layout for drawing (see `visigrid_collab::view::layout`).
     pub(crate) fn layout(&self, sheet: SheetKey) -> Option<Value> {
-        let wb = &self.client.wb;
-        let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
-        let s = &wb.sheets()[idx];
-        let (max_row, max_col) = s.data_extent();
-        let used = !s.get_raw(max_row, max_col).is_empty() || max_row > 0 || max_col > 0;
-        let l = &s.layout;
-        let merges: Vec<Value> = s
-            .merged_regions
-            .iter()
-            .map(|m| json!({"r0": m.start.0, "c0": m.start.1, "r1": m.end.0, "c1": m.end.1}))
-            .collect();
-        Some(json!({
-            "col_widths": l.col_widths,
-            "row_heights": l.row_heights,
-            "frozen_rows": l.frozen_rows,
-            "frozen_cols": l.frozen_cols,
-            "hidden_rows": l.hidden_rows,
-            "hidden_cols": l.hidden_cols,
-            "merges": merges,
-            "rows": if used { max_row + 1 } else { 0 },
-            "cols": if used { max_col + 1 } else { 0 },
-        }))
+        visigrid_collab::view::layout(&self.client.wb, sheet)
     }
 
-    /// What the grid draws for the cells of a rectangle (inclusive), read
-    /// straight from the engine: the display string (number formats
-    /// applied), the computed value's kind (`n` number, `t` text, `b`
-    /// boolean, `e` error: general alignment depends on it) and an index
-    /// into `formats` (`-1`: the default format), and `num`, a number's value
-    /// (null otherwise) for selection statistics. Only cells with content
-    /// or a format are listed, as parallel arrays. `row_formats` and
-    /// `col_formats` carry whole-row and whole-column formats in range.
+    /// What the grid draws for the cells of a rectangle (see `visigrid_collab::view::viewport`).
     pub(crate) fn viewport(&self, sheet: SheetKey, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<Value> {
-        use visigrid_engine::cell::CellFormat;
-        use visigrid_engine::formula::eval::Value as V;
-        let wb = &self.client.wb;
-        let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
-        let s = &wb.sheets()[idx];
-        let default = CellFormat::default();
-        let mut formats: Vec<Value> = Vec::new();
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        let mut format_index = |f: &CellFormat| -> i64 {
-            if *f == default {
-                return -1;
-            }
-            let props = serde_json::to_value(visigrid_collab::undo::props_of(f, None)).expect("props serialize");
-            let key = props.to_string();
-            let next = formats.len();
-            let at = *seen.entry(key).or_insert(next);
-            if at == next {
-                formats.push(props);
-            }
-            at as i64
-        };
-        let mut coords = s.cells_in_range(r0, r1, c0, c1);
-        coords.extend(s.spill_receiver_coords().filter(|&(r, c)| r >= r0 && r <= r1 && c >= c0 && c <= c1));
-        coords.sort_unstable();
-        coords.dedup();
-        let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num, mut raw) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for (r, c) in coords {
-            let shown = s.get_formatted_display(r, c);
-            let f = format_index(&s.get_format(r, c));
-            if shown.is_empty() && f < 0 {
-                continue;
-            }
-            let (k, n) = match s.get_computed_value(r, c) {
-                V::Number(n) => ("n", Some(n)),
-                V::Boolean(_) => ("b", None),
-                V::Error(_) => ("e", None),
-                _ => ("t", None),
-            };
-            rows.push(r);
-            cols.push(c);
-            text.push(shown);
-            kind.push(k);
-            fmt.push(f);
-            num.push(n.filter(|n| n.is_finite()));
-            raw.push(s.get_raw(r, c));
-        }
-        let mut row_formats = serde_json::Map::new();
-        for (r, f) in &s.row_formats {
-            if *r >= r0 && *r <= r1 {
-                let i = format_index(f);
-                if i >= 0 {
-                    row_formats.insert(r.to_string(), json!(i));
-                }
-            }
-        }
-        let mut col_formats = serde_json::Map::new();
-        for (c, f) in &s.col_formats {
-            if *c >= c0 && *c <= c1 {
-                let i = format_index(f);
-                if i >= 0 {
-                    col_formats.insert(c.to_string(), json!(i));
-                }
-            }
-        }
-        Some(json!({
-            "rows": rows, "cols": cols, "text": text, "kind": kind, "fmt": fmt, "num": num, "raw": raw,
-            "formats": formats, "row_formats": row_formats, "col_formats": col_formats,
-        }))
+        visigrid_collab::view::viewport(&self.client.wb, sheet, r0, c0, r1, c1)
     }
 
     /// A large generated workbook for the grid benchmark: `rows` × `cols`
