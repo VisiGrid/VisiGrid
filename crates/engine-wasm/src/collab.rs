@@ -42,7 +42,18 @@ struct Loaded {
 /// visigrid-json v2 → workbook, honouring `collab_sheet_ids` (the stable sheet
 /// keys operations name), exactly as `vgrid collab-host` loads it.
 fn load(document: &Value) -> Result<Loaded, String> {
-    let (mut wb, layouts, active) = visigrid_io::json::import_any(&document.to_string())?;
+    load_with(document, false)
+}
+
+/// `verified`: the collaboration host on this engine commit already loaded
+/// these exact bytes complete (`visigrid_io::json::import_any_verified`).
+fn load_with(document: &Value, verified: bool) -> Result<Loaded, String> {
+    let text = document.to_string();
+    let (mut wb, layouts, active) = if verified {
+        visigrid_io::json::import_any_verified(&text)?
+    } else {
+        visigrid_io::json::import_any(&text)?
+    };
     if let Some(ids) = document.get("collab_sheet_ids") {
         let ids: Vec<u64> = serde_json::from_value(ids.clone()).map_err(|_| "bad collab_sheet_ids")?;
         if ids.len() != wb.sheets().len() {
@@ -132,7 +143,11 @@ const LEAN_CELLS: usize = 2_000;
 
 impl CollabCore {
     pub(crate) fn new(document: &Value, seq: u64) -> Result<CollabCore, String> {
-        let loaded = load(document)?;
+        Self::new_with(document, seq, false)
+    }
+
+    pub(crate) fn new_with(document: &Value, seq: u64, verified: bool) -> Result<CollabCore, String> {
+        let loaded = load_with(document, verified)?;
         Ok(Self::from_loaded(loaded, seq, true))
     }
 
@@ -838,6 +853,17 @@ impl CollabClient {
         console_error_panic_hook::set_once();
         let doc: Value = serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(CollabClient { core: CollabCore::new(&doc, seq as u64).map_err(js_err)? })
+    }
+
+    /// `from_json` for a snapshot the server says the collaboration host on
+    /// this same engine commit loaded complete: skips the content-protection
+    /// diff (export, re-parse, compare), which only repeats what the host
+    /// found. Call it only when the snapshot's `verified_engine` equals
+    /// `engine_commit()`; every other read-only check still runs.
+    pub fn from_json_verified(json: &str, seq: f64) -> Result<CollabClient, JsValue> {
+        console_error_panic_hook::set_once();
+        let doc: Value = serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(CollabClient { core: CollabCore::new_with(&doc, seq as u64, true).map_err(js_err)? })
     }
 
     /// A user edit: a CollabOp list (or one op). Applied optimistically and
