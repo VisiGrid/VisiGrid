@@ -14,7 +14,8 @@ enum Kind {
     Close,
     Comma,
     Space,
-    // Strings, quoted sheet names, structured references, array constants,
+    StructuredRef,
+    // Strings, quoted sheet names, array constants,
     // numbers and operators: copied unchanged.
     Other,
 }
@@ -37,15 +38,34 @@ pub(crate) fn excel_function_names(source: &str) -> String {
 }
 
 /// The reverse, for import: drop `_xlfn.`, `_xlws.` and `_xlpm.` from names.
-/// Strings, quoted sheet names and Table fields keep them.
+/// Strings, quoted sheet names and Table fields keep them. Single-column
+/// `[[#This Row],[Column]]` references use the concise `[@Column]` spelling.
 pub(crate) fn from_excel(source: &str) -> String {
-    if !source.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"_xl")) {
+    if !source.contains('[')
+        && !source.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"_xl"))
+    {
         return source.to_owned();
     }
     let tokens = tokenize(source);
     let mut out = String::with_capacity(source.len());
     for (i, token) in tokens.iter().enumerate() {
         let mut text = token.text;
+        if token.kind == Kind::StructuredRef && text[1..].trim_start().starts_with('[') {
+            use visigrid_engine::formula::structured::{escape_header, parse, TableSection};
+            // Parse only the bracket token: any Table qualifier is a separate
+            // token and remains verbatim. Never replace text inside a string,
+            // quoted sheet name, escaped header or unsupported selector.
+            if let Ok(reference) = parse(None, text) {
+                if let (TableSection::ThisRow, Some((first, last))) = (reference.section, reference.columns) {
+                    if first == last && has_single_column_selector(text) {
+                        out.push_str("[@");
+                        out.push_str(&escape_header(&first));
+                        out.push(']');
+                        continue;
+                    }
+                }
+            }
+        }
         if token.kind == Kind::Ident {
             // Function namespaces only wrap calls; a parameter prefix marks
             // every use of a LET or LAMBDA name.
@@ -60,6 +80,17 @@ pub(crate) fn from_excel(source: &str) -> String {
         out.push_str(text);
     }
     out
+}
+
+// A span may have equal endpoints. Keep even [Amount]:[Amount] as a span,
+// while allowing punctuation (including colons) inside a single column name.
+fn has_single_column_selector(text: &str) -> bool {
+    use visigrid_engine::formula::structured::bracket_len;
+    let inner = text[1..text.len() - 1].trim();
+    let Ok(section_len) = bracket_len(inner) else { return false; };
+    let Some(column) = inner[section_len..].trim_start().strip_prefix(',') else { return false; };
+    let column = column.trim();
+    bracket_len(column).ok() == Some(column.len())
 }
 
 /// Prefix the future functions rust_xlsxwriter 0.79.4 would prefix, including
@@ -181,7 +212,7 @@ fn tokenize(source: &str) -> Vec<Token<'_>> {
                         _ => {}
                     }
                 }
-                Kind::Other
+                Kind::StructuredRef
             }
             // Array constants hold no names, and their commas separate items.
             '{' => {
@@ -429,6 +460,42 @@ mod tests {
         }
         for f in ["=xlookup(1,{1},{2})", "=LET(x,x+1,LAMBDA(a,a)(x))", "=LET(N,1,IFERROR(#N/A,N))"] {
             assert_eq!(from_excel(&x(f)).to_ascii_uppercase(), f.to_ascii_uppercase(), "{f}");
+        }
+    }
+
+    #[test]
+    fn import_shortens_only_supported_single_column_this_row_references() {
+        use super::from_excel;
+        use visigrid_engine::formula::structured::{escape_header, parse};
+        for (input, expected) in [
+            ("=[[#This Row],[Amount]]*2", "=[@Amount]*2"),
+            ("=Sales[[#This Row],[Amount]]*2", "=Sales[@Amount]*2"),
+            ("=Sales[ [#This Row], [Amount] ]*2", "=Sales[@Amount]*2"),
+            ("=Été[[#this row],[Montant]]+Other[[#This Row],[Amount]]", "=Été[@Montant]+Other[@Amount]"),
+            ("=_xlfn.LET(_xlpm.n,Sales[[#This Row],[Amount]],_xlpm.n*2)", "=LET(n,Sales[@Amount],n*2)"),
+        ] {
+            assert_eq!(from_excel(input), expected);
+            assert_eq!(from_excel(expected), expected, "normalization is idempotent");
+        }
+        for header in ["Amount USD", "Q1:Q2", "a,b", "é]#'@[_xlpm.x"] {
+            let escaped = escape_header(header);
+            let long = format!("[[#This Row],[{escaped}]]");
+            let short = format!("[@{escaped}]");
+            assert_eq!(from_excel(&format!("={long}")), format!("={short}"));
+            assert_eq!(parse(None, &long).unwrap(), parse(None, &short).unwrap());
+        }
+        for input in [
+            r#"="[[#This Row],[Amount]]"&"say ""[[#This Row],[Amount]]""""#,
+            "='[[#This Row],[Amount]]'!A1",
+            r#"={"[[#This Row],[Amount]]",1}"#,
+            "=Sales[[#This Row],[First]:[Last]]",
+            "=Sales[[#This Row],[Amount]:[Amount]]",
+            "=Sales[#This Row]+Sales[[#Totals],[Amount]]+Sales[[#All],[Amount]]",
+            "=Sales[['#This Row]]+Sales[@Amount]+Sales[@[Amount]]",
+            "=Sales[[#Unknown],[Amount]]+Sales[[#This Row],[Amount]",
+            "=Sales[[#This Row],[A],[B]]",
+        ] {
+            assert_eq!(from_excel(input), input, "{input}");
         }
     }
 

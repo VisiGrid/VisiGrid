@@ -167,7 +167,7 @@ fn roundtrip_preserves_rules_overrides_comments_and_cross_sheet_formulas() {
         assert_eq!(table.range.start_row, 2);
         assert_eq!(
             table.columns[2].formula.as_deref(),
-            Some("=[[#This Row],[Qty]]*C4")
+            Some("=[@Qty]*C4")
         );
         assert_eq!(loaded.sheet(0).unwrap().get_display(3, 3), "20");
         assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
@@ -2046,10 +2046,7 @@ fn headless_fallback_preserves_stored_records_and_reports_unsupported_metadata()
             );
             assert_eq!(
                 loaded.sheet(0).unwrap().get_raw(row, 3),
-                wb.sheet(0)
-                    .unwrap()
-                    .get_raw(row, 3)
-                    .replace("[@Qty]", "[[#This Row],[Qty]]")
+                wb.sheet(0).unwrap().get_raw(row, 3)
             );
             assert_eq!(
                 loaded.sheet(0).unwrap().get_display(row, 3),
@@ -2452,7 +2449,7 @@ fn edited_calculated_rules_with_totals_roundtrip_and_fill_after_append() {
         let (mut loaded, report) = xlsx::import(&path).unwrap();
         assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
         let id = loaded.tables().next().unwrap().1.id;
-        assert_eq!(loaded.table(id).unwrap().1.columns[2].formula.as_deref(), Some("=[[#This Row],[Qty]]*[[#This Row],[Price]]*2"));
+        assert_eq!(loaded.table(id).unwrap().1.columns[2].formula.as_deref(), Some("=[@Qty]*[@Price]*2"));
         assert_eq!(loaded.sheet(0).unwrap().get_raw(4, 3), "777");
         assert_eq!(loaded.sheet(0).unwrap().get_raw(5, 3), "");
         assert_eq!(loaded.sheet(0).unwrap().get_raw(6, 3), "=1+2");
@@ -2968,5 +2965,55 @@ fn moved_footer_rules_survive_native_json_and_stored_excel() {
         check(&loaded, 9);
         loaded.apply_table_commit(&commit, false).unwrap();
         check(&loaded, 10);
+    }
+}
+
+#[test]
+fn this_row_references_import_concisely_and_survive_append_and_reexport() {
+    use visigrid_engine::formula::structured::escape_header;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("this-row.xlsx");
+    let mut wb = Workbook::new();
+    let escaped = escape_header("Tax]#'@");
+    for (col, header) in ["Amount", "Tax]#'@", "Double", "Escaped"].iter().enumerate() {
+        wb.set_cell_value_tracked(0, 0, col, header);
+    }
+    for row in 1..=2 {
+        wb.set_cell_value_tracked(0, row, 0, "10");
+        wb.set_cell_value_tracked(0, row, 1, "3");
+    }
+    let id = wb.create_table(wb.active_sheet_id(), TableRange {
+        start_row: 0, start_col: 0, end_row: 2, end_col: 3,
+    }, "Sales").unwrap().table_id();
+    let local = "=[@Amount]*2";
+    let qualified = format!("=Sales[@{escaped}]*2");
+    wb.set_calculated_column(id, 2, 1, local, true).unwrap();
+    wb.set_calculated_column(id, 3, 1, &qualified, true).unwrap();
+
+    for pass in 0..2 {
+        xlsx::export_with_order(&wb, &path, None, xlsx::ExportOrder::Stored).unwrap();
+        // Export still writes Excel's long form, in cells and Table metadata.
+        for part in ["xl/worksheets/sheet1.xml", "xl/tables/table1.xml"] {
+            let written = xml(&path, part);
+            assert!(written.contains("[[#This Row],[Amount]]*2"), "{written}");
+        }
+        let (loaded, report) = xlsx::import(&path).unwrap();
+        assert_eq!(report.tables_imported, 1, "{:?}", report.warnings);
+        wb = loaded;
+        let id = wb.table_by_name("Sales").unwrap().1.id;
+        let table = wb.table(id).unwrap().1;
+        assert_eq!(table.columns[2].formula.as_deref(), Some(local));
+        assert_eq!(table.columns[3].formula.as_deref(), Some(qualified.as_str()));
+        assert_eq!(wb.sheet(0).unwrap().get_raw(1, 2), local);
+        assert_eq!(wb.sheet(0).unwrap().get_raw(1, 3), qualified);
+        assert_eq!(wb.sheet(0).unwrap().get_display(1, 2), "20");
+        assert_eq!(wb.sheet(0).unwrap().get_display(1, 3), "6");
+        if pass == 0 {
+            wb.append_table_rows(id, 1, &[(3, 0, "5".into()), (3, 1, "4".into())]).unwrap();
+        }
+        assert_eq!(wb.sheet(0).unwrap().get_raw(3, 2), local);
+        assert_eq!(wb.sheet(0).unwrap().get_raw(3, 3), qualified);
+        assert_eq!(wb.sheet(0).unwrap().get_display(3, 2), "10");
+        assert_eq!(wb.sheet(0).unwrap().get_display(3, 3), "8");
     }
 }

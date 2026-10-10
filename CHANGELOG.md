@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Large agent plans keep the window responsive.** MCP `plan_script` prepares and validates its proposal in the background. If the workbook, calculation settings or review state changes while it runs, the result is refused. Host and client allow up to ten minutes for preparation; changes still require approval in Review Mode. (#107)
+- Excel Table formulas import single-column `[[#This Row],[Amount]]` references as `[@Amount]`, retaining explicit Table names and escaped column headers. Calculated-column rules and appended rows use the same concise form. ([#140](https://github.com/VisiGrid/VisiGrid/issues/140))
 
 ## 0.52.1
 
