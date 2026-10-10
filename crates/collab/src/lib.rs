@@ -9,6 +9,7 @@
 //! - [`undo`]: per-user undo as inverse operations.
 //! - [`sort`]: a sort's row order, computed by the writer.
 //! - [`copy`]: a whole sheet as operations (import into a live workbook, duplicate a tab).
+//! - [`view`]: what the grid draws (sheets, layout, viewport, first screen).
 //! - [`sim`]: the headless convergence simulator; [`gen`]: its op generator.
 
 pub mod apply;
@@ -24,6 +25,7 @@ pub mod sim;
 pub mod sort;
 pub mod transform;
 pub mod undo;
+pub mod view;
 
 pub mod wire;
 

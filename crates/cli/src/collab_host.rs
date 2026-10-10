@@ -154,6 +154,7 @@ impl Host {
             "finish_load" => self.finish_load(),
             "replace_document" => self.replace_document(req),
             "set_clock" => self.set_clock(req),
+            "first_screen" => self.first_screen(req),
             "restore_clock" => {
                 let clock = visigrid_collab::clock::parse_clock(req.get("clock").ok_or("restore_clock needs clock")?)?;
                 let wb = self.wb_mut()?;
@@ -164,6 +165,24 @@ impl Host {
             "" => Err("missing cmd".into()),
             other => Err(format!("unknown cmd {other:?}")),
         }
+    }
+
+    /// What the grid shows before the browser's engine loads
+    /// (`visigrid_collab::view::first_screen`): the first tab's layout and
+    /// top-left `rows` × `cols` cells, for the API to serve with the page.
+    /// Refused while a large sheet's bands are still loading.
+    fn first_screen(&mut self, req: &Map<String, Value>) -> Reply {
+        use visigrid_collab::view::{first_screen, FIRST_SCREEN_COLS, FIRST_SCREEN_ROWS};
+        let wb = self.wb()?;
+        if wb.pending_bands.is_some() {
+            return Err("bands are still loading; send finish_load first".into());
+        }
+        let size = |key: &str, default: usize, max: usize| {
+            req.get(key).and_then(Value::as_u64).map_or(default, |n| (n as usize).clamp(1, max))
+        };
+        let screen = first_screen(wb, size("rows", FIRST_SCREEN_ROWS, 200), size("cols", FIRST_SCREEN_COLS, 64))
+            .ok_or("the workbook has no sheet")?;
+        Ok(fields(json!({"first_screen": screen})))
     }
 
     fn wb(&self) -> Result<&Workbook, String> {
