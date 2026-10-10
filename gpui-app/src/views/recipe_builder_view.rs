@@ -130,6 +130,7 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
     for (i, label) in b.source_rows().iter().enumerate() {
         let (value, hint) = b.source_value(i);
         let is_file = b.source_row_is_file(i);
+        let is_text = b.source_row_is_text(i);
         let active = focused && b.source_focus == i;
         let (accent, border, text) = (c.accent, c.border, c.text);
         col = col.child(
@@ -158,8 +159,16 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
                                 .border_color(if active { accent } else { border })
                                 .text_size(px(12.0))
                                 .text_color(text)
-                                .cursor_pointer()
-                                .child(if is_file { format!("{value} …") } else { format!("{value} ›") })
+                                .when(is_text, |d| d.min_w(px(150.0)).cursor_text())
+                                .when(!is_text, |d| d.cursor_pointer())
+                                .child(if is_text {
+                                    // A typed setting: the text, and a caret while focused
+                                    if active { format!("{value}▏") } else { value.clone() }
+                                } else if is_file {
+                                    format!("{value} …")
+                                } else {
+                                    format!("{value} ›")
+                                })
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     if is_file {

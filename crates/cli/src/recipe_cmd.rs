@@ -31,11 +31,17 @@ pub(crate) fn cmd_recipe_run(
         check_paths(&recipe_path, source_path, output.as_deref(), report_path.as_deref())?;
     }
     let snapshot = if recipe.source.is_remote() {
-        // A VisiBooks report: read over the network, with the key from the
-        // keychain (or VISIBOOKS_API_KEY in CI); merged recipes come with it
+        // A VisiBooks report or a PostgreSQL read: over the network, with the
+        // key or password from the keychain (or the environment in CI);
+        // merged recipes come with it
         check_paths(&recipe_path, &recipe.source_path(recipe_dir, None), output.as_deref(), report_path.as_deref())?;
-        recipe.read_snapshot(recipe_dir, None).map_err(|e| {
-            CliError::io(e).with_hint("save the key with `vgrid visibooks key`, or set VISIBOOKS_API_KEY")
+        recipe.read_snapshot(recipe_dir, None).map_err(|e| match &recipe.source {
+            recipe::Source::Visibooks(_) => {
+                CliError::io(e).with_hint("save the key with `vgrid visibooks key`, or set VISIBOOKS_API_KEY")
+            }
+            // PostgreSQL's errors say what to do (save a password, use a
+            // read-only role) themselves
+            _ => CliError::io(e),
         })?
     } else {
         let mut snapshot = Snapshot::read_all(&sources).map_err(|e| {

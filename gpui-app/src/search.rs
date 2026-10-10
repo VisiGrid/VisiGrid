@@ -177,6 +177,7 @@ pub enum CommandId {
     EditRecipe,
     NewRecipe,
     NewVisibooksRecipe,
+    NewPostgresRecipe,
     UnlinkRecipe,
     PrintPreview,
     ExportTsv,
@@ -417,6 +418,7 @@ impl CommandId {
             Self::EditRecipe => "Edit Import Recipe",
             Self::NewRecipe => "New Import Recipe…",
             Self::NewVisibooksRecipe => "New Recipe from VisiBooks…",
+            Self::NewPostgresRecipe => "New Recipe from PostgreSQL…",
             Self::UnlinkRecipe => "Unlink Table from Recipe",
             Self::PrintPreview => "Print",
             Self::ExportTsv => "Export as TSV",
@@ -713,6 +715,7 @@ impl CommandId {
             Self::EditRecipe => "recipe import edit steps toml power query transform",
             Self::NewRecipe => "recipe import new create csv clean shape steps power query transform get data",
             Self::NewVisibooksRecipe => "recipe import visibooks books ledger accounting trial balance general ledger gl aging ar ap receivable payable get data",
+            Self::NewPostgresRecipe => "recipe import postgres postgresql supabase database sql table query read-only connect get data",
             Self::UnlinkRecipe => "recipe unlink detach disconnect table stop refreshing source",
             Self::PrintPreview => "printer print preview copies pages paper",
             Self::ExportTsv => "save tab separated",
@@ -913,6 +916,7 @@ impl CommandId {
             Self::EditRecipe,
             Self::NewRecipe,
             Self::NewVisibooksRecipe,
+            Self::NewPostgresRecipe,
             Self::UnlinkRecipe,
             Self::PrintPreview,
             Self::ExportTsv,
@@ -1037,6 +1041,7 @@ impl CommandId {
             | Self::EditRecipe
             | Self::NewRecipe
             | Self::NewVisibooksRecipe
+            | Self::NewPostgresRecipe
             | Self::UnlinkRecipe
             | Self::ExportCsv
             | Self::ExportTsv

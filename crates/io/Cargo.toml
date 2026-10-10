@@ -19,6 +19,7 @@ native = [
     "dep:quick-xml", "dep:zip", "dep:regex", "dep:blake3", "dep:uuid",
     "dep:chrono", "dep:dirs", "dep:toml", "dep:toml_edit", "dep:tempfile", "dep:parquet", "dep:libduckdb-sys", "dep:bytes",
     "dep:visigrid-config", "dep:reqwest",
+    "dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots",
 ]
 
 [dependencies]
@@ -40,6 +41,12 @@ blake3 = { version = "1", optional = true }
 # has none and reads VISIBOOKS_API_KEY
 visigrid-config = { path = "../config", default-features = false, optional = true }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
+# PostgreSQL recipe sources (native): the sync client over rustls (ring, as
+# reqwest uses), TLS always verified against the web roots plus Supabase's
+postgres = { version = "0.19", optional = true }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 sha2 = { workspace = true }
 # Parquet read from memory (import_bytes).
 bytes = { version = "1", optional = true }
@@ -58,3 +65,7 @@ toml_edit = { version = "0.25", optional = true }
 # error instead of partially loading.
 parquet = { version = "59", default-features = false, features = ["snap", "zstd", "lz4", "flate2-zlib-rs", "brotli", "json"], optional = true }
 libduckdb-sys = { version = "=1.10505.0", default-features = false, features = ["bundled", "parquet"], optional = true }
+
+[dev-dependencies]
+# The PostgreSQL source test sets up its own database and roles
+postgres = "0.19"
