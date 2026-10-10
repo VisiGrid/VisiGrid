@@ -44,3 +44,42 @@ fn other_read_only_paths_still_run_on_a_verified_load() {
     let verified = json::import_any_verified(&doc.to_string()).unwrap();
     assert!(!json::loaded_complete(&verified.0), "a newer format still opens read-only");
 }
+
+fn reasons(wb: &Workbook) -> Vec<Option<String>> {
+    wb.sheets().iter().map(|s| s.read_only_reason.clone()).collect()
+}
+
+/// Draw first, check after: `protect_loaded` on a verified load must end
+/// exactly where `import_any` does, complete or not.
+#[test]
+fn checking_a_verified_load_later_ends_where_a_full_load_does() {
+    let complete = document();
+    let mut lossy: serde_json::Value = serde_json::from_str(&complete).unwrap();
+    lossy["future_feature"] = serde_json::json!([1, 2, 3]);
+    // A stored formula value the recompute disagrees with: read-only keeps it.
+    lossy["sheets"][0]["cells"].as_array_mut().unwrap().iter_mut()
+        .find(|c| c["formula"] == "=A1+A2").unwrap()["value"] = serde_json::json!(999);
+    for (doc, expect_complete) in [(complete, true), (lossy.to_string(), false)] {
+        let full = json::import_any(&doc).unwrap();
+        let mut later = json::import_any_verified(&doc).unwrap();
+        assert!(json::loaded_complete(&later.0), "nothing is checked yet");
+        let (wb, layouts, active) = (&mut later.0, &later.1, later.2);
+        assert_eq!(json::protect_loaded(wb, layouts, active, &doc).unwrap(), expect_complete);
+        assert_eq!(json::loaded_complete(&later.0), expect_complete);
+        assert_eq!(reasons(&later.0), reasons(&full.0));
+        assert_eq!(reexport(&later), reexport(&full));
+        assert_eq!(later.0.sheet(0).unwrap().get_display(2, 0), full.0.sheet(0).unwrap().get_display(2, 0));
+    }
+}
+
+#[test]
+fn checking_a_workbook_that_already_opened_read_only_changes_nothing() {
+    let mut doc: serde_json::Value = serde_json::from_str(&document()).unwrap();
+    doc["version"] = serde_json::json!(999);
+    let doc = doc.to_string();
+    let mut loaded = json::import_any_verified(&doc).unwrap();
+    let before = reasons(&loaded.0);
+    let (wb, layouts, active) = (&mut loaded.0, &loaded.1, loaded.2);
+    assert!(!json::protect_loaded(wb, layouts, active, &doc).unwrap());
+    assert_eq!(reasons(&loaded.0), before);
+}
