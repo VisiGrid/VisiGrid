@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Excel Table formulas import single-column `[[#This Row],[Amount]]` references as `[@Amount]`, retaining explicit Table names and escaped column headers. Calculated-column rules and appended rows use the same concise form. ([#140](https://github.com/VisiGrid/VisiGrid/issues/140))
+
 ## 0.52.1
 
 ### Fixed
