@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.53.0
+
+### Functions
+
+- **17 new functions, most of them from Google Sheets.** `SPLIT`, `COUNTUNIQUE` and `ARRAYFORMULA`; the LAMBDA helpers `MAP`, `REDUCE`, `SCAN`, `BYROW` and `BYCOL`, which also accept a function's name, as in `=BYROW(A1:C3, SUM)`; and `RANK.AVG`, `CORREL`, `CHAR`, `CODE`, `CLEAN`, `FIXED`, `DOLLAR`, `ISOWEEKNUM` and `YEARFRAC`. As in Sheets, `SPLIT` turns a piece that reads as a number into a number, so `"007"` becomes 7. ([#137](https://github.com/VisiGrid/VisiGrid/pull/137))
 
 ### Fixed
 
