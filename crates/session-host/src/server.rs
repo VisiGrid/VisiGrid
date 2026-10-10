@@ -1131,6 +1131,11 @@ fn handle_message(
                 let id = plan.id.clone();
                 match bridge.create_plan(plan, client_name.unwrap_or("MCP client").to_string()) {
                     Ok(outcome) => plan_response(id, outcome, "plan"),
+                    Err(crate::bridge::BridgeError::TimedOut) => ServerMessage::Error(ErrorMessage {
+                        id: Some(id), code: "plan_timeout".into(),
+                        message: "Plan preparation timed out; retry with the same idempotency key to check its state".into(),
+                        retry_after_ms: None,
+                    }),
                     Err(_) => bridge_error(id),
                 }
             }

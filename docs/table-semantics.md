@@ -1122,3 +1122,27 @@ Append remeasured after the transitive SUBTOTAL rebind, 2026-10-06: the same ign
 A later run of the same probe, 2026-10-08, put 100,000 `=SUM(Sales[Amount])` formulas on a second sheet so the closure includes readers of the Table. Three appends on the rebind path took 1,278–1,490 ms. Those formulas read the Table, so they are recalculated either way.
 
 The same probe after the full-path fallback, still 2026-10-08, took that path: the closure was 100,001 of 100,001 formulas. Three warm optimized-debug appends took 811–888 ms. The earlier 569–609 ms full path was the unrelated-formula workbook, which remains on the small-closure rebind.
+
+## Agent plan preparation
+
+MCP `plan_script` captures a copy-on-write workbook snapshot, then creates the
+Lua snapshot, evaluates the sandboxed script, materializes and validates the
+plan, and builds Review Mode indexes on the background executor. The UI remains
+available during preparation. The script runs in an isolated Lua runtime with
+the existing instruction, memory and execution limits.
+
+A plan reserves its idempotency key while `preparing`: a repeated identical
+request returns that plan's state; a different payload using the same key is
+rejected. No live cells change. Before opening Review Mode, the desktop checks
+workbook identity, revision, cell-storage snapshot identity (including formula
+caches), metadata, calculation context, active sheet and desktop layout. It also
+rechecks editing, import, recipe, recovery, live-session and existing-review
+restrictions. Changed inputs invalidate the plan and require a new preview.
+Dismissal while preparing prevents the completed job from opening Review Mode.
+The normal full-fingerprint checks still apply when the user clicks Apply.
+
+The host allows ten minutes for plan preparation, and the CLI/MCP transport waits
+15 seconds longer for that reply before restoring its normal timeout. A job that
+finishes after the preparation deadline cannot open Review Mode. An external MCP
+client may impose its own shorter timeout; retrying with the same idempotency key
+retrieves the retained state rather than creating a duplicate proposal.

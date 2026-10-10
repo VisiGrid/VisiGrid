@@ -1951,6 +1951,32 @@ fn compute_plan_hash(
     })
 }
 
+/// Cheap, conservative publication guard for a plan built on a COW snapshot.
+/// Unlike fingerprinting, this never visits ordinary cells. False positives
+/// (e.g. an edit then undo) require re-preview; false negatives are unsafe.
+/// Full fingerprints remain the authority when a reviewed plan is committed.
+pub fn shares_plan_source(source: &Workbook, current: &Workbook) -> bool {
+    fn metadata(sheet: &Sheet) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        fingerprint_sheet_metadata(&mut hasher, sheet);
+        hasher.finalize().to_vec()
+    }
+    let names = |wb: &Workbook| {
+        let mut names = wb.named_ranges().list();
+        names.sort_by(|a, b| a.name.cmp(&b.name));
+        serde_json::to_value(names).expect("named ranges serialize")
+    };
+    source.revision() == current.revision()
+        && source.active_sheet_id() == current.active_sheet_id()
+        && source.sheets().len() == current.sheets().len()
+        && names(source) == names(current)
+        && source
+            .sheets()
+            .iter()
+            .zip(current.sheets())
+            .all(|(a, b)| a.shares_plan_cells(b) && metadata(a) == metadata(b))
+}
+
 /// Hash all workbook state used by plan materialization. This is deliberately
 /// complete and therefore O(populated cells); long-lived callers such as MCP
 /// should retain prepared plans instead of polling by recomputing this hash.
@@ -1966,31 +1992,7 @@ pub fn workbook_fingerprint(workbook: &Workbook) -> String {
     hasher.update((named_ranges.len() as u64).to_le_bytes());
     hasher.update(named_ranges);
     for sheet in workbook.sheets() {
-        hasher.update(sheet.id.raw().to_le_bytes());
-        hasher.update((sheet.name.len() as u64).to_le_bytes());
-        hasher.update(sheet.name.as_bytes());
-        hasher.update((sheet.rows as u64).to_le_bytes());
-        hasher.update((sheet.cols as u64).to_le_bytes());
-        let hidden = sheet.manual_hidden_rows();
-        if !hidden.is_empty() {
-            hasher.update(b"manual-hidden-rows:");
-            hasher.update(serde_json::to_vec(&hidden).expect("row indices serialize"));
-        }
-        let validation_rules: Vec<_> = sheet.validations.iter().collect();
-        let validation_exclusions: Vec<_> = sheet.validations.exclusions_iter().collect();
-        for encoded in [
-            serde_json::to_vec(&serde_json::json!({
-                "tables": sheet.tables(), "table_view": sheet.table_view_spec(),
-                "frozen": sheet.frozen_panes,
-            })).expect("Table metadata serializes"),
-            serde_json::to_vec(&sheet.merged_regions).expect("merged regions serialize"),
-            serde_json::to_vec(&sheet.cond_formats).expect("conditional formats serialize"),
-            serde_json::to_vec(&(validation_rules, validation_exclusions))
-                .expect("validations serialize"),
-        ] {
-            hasher.update((encoded.len() as u64).to_le_bytes());
-            hasher.update(encoded);
-        }
+        fingerprint_sheet_metadata(&mut hasher, sheet);
         let mut coordinates: Vec<_> = sheet
             .cells_iter()
             .map(|((row, col), _)| (row, col))
@@ -2006,6 +2008,37 @@ pub fn workbook_fingerprint(workbook: &Workbook) -> String {
         }
     }
     format!("v1:{:x}", hasher.finalize())
+}
+
+// Shared by the full fingerprint and the COW publication guard so new plan
+// metadata cannot accidentally be covered by one check but not the other.
+fn fingerprint_sheet_metadata(hasher: &mut Sha256, sheet: &Sheet) {
+    hasher.update(sheet.id.raw().to_le_bytes());
+    hasher.update((sheet.name.len() as u64).to_le_bytes());
+    hasher.update(sheet.name.as_bytes());
+    hasher.update((sheet.rows as u64).to_le_bytes());
+    hasher.update((sheet.cols as u64).to_le_bytes());
+    let hidden = sheet.manual_hidden_rows();
+    if !hidden.is_empty() {
+        hasher.update(b"manual-hidden-rows:");
+        hasher.update(serde_json::to_vec(&hidden).expect("row indices serialize"));
+    }
+    let validation_rules: Vec<_> = sheet.validations.iter().collect();
+    let validation_exclusions: Vec<_> = sheet.validations.exclusions_iter().collect();
+    for encoded in [
+        serde_json::to_vec(&serde_json::json!({
+            "tables": sheet.tables(), "table_view": sheet.table_view_spec(),
+            "frozen": sheet.frozen_panes,
+        }))
+        .expect("Table metadata serializes"),
+        serde_json::to_vec(&sheet.merged_regions).expect("merged regions serialize"),
+        serde_json::to_vec(&sheet.cond_formats).expect("conditional formats serialize"),
+        serde_json::to_vec(&(validation_rules, validation_exclusions))
+            .expect("validations serialize"),
+    ] {
+        hasher.update((encoded.len() as u64).to_le_bytes());
+        hasher.update(encoded);
+    }
 }
 
 fn hash_serializable(value: &impl Serialize) -> String {
@@ -2042,6 +2075,7 @@ mod tests {
 
         let mut workbook = Workbook::new();
         let initial = workbook_fingerprint(&workbook);
+        let initial_source = workbook.clone();
         workbook.active_sheet_mut().cond_formats.add(
             vec![ValidationRange {
                 start_row: 0,
@@ -2053,6 +2087,8 @@ mod tests {
             CondStyle::Named(CellStyle::Warning),
         );
         let with_conditional_format = workbook_fingerprint(&workbook);
+        assert!(!shares_plan_source(&initial_source, &workbook));
+        let cf_source = workbook.clone();
         assert_ne!(with_conditional_format, initial);
 
         workbook.active_sheet_mut().validations.set(
@@ -2065,6 +2101,8 @@ mod tests {
             ValidationRule::new(ValidationType::List(ListSource::Inline(vec!["yes".into()]))),
         );
         let with_validation = workbook_fingerprint(&workbook);
+        assert!(!shares_plan_source(&cf_source, &workbook));
+        let validation_source = workbook.clone();
         assert_ne!(with_validation, with_conditional_format);
 
         workbook
@@ -2077,6 +2115,7 @@ mod tests {
                 end_col: 0,
             });
         assert_ne!(workbook_fingerprint(&workbook), with_validation);
+        assert!(!shares_plan_source(&validation_source, &workbook));
     }
 
     fn request(workbook: &Workbook, operations: Vec<PlannedOp>) -> OperationPlanRequest {
@@ -2873,5 +2912,46 @@ mod tests {
             ),
         );
         assert!(matches!(result, Err(PlanError::MultiSheetUnsupported)));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_publication_tests {
+    use super::*;
+
+    #[test]
+    fn publication_guard_detects_untracked_cells_formats_caches_and_metadata() {
+        let mut live = Workbook::new();
+        live.set_cell_value_tracked(0, 0, 0, "2");
+        live.set_cell_value_tracked(0, 0, 1, "=A1*2");
+        let source = live.clone();
+        assert!(shares_plan_source(&source, &live));
+        // These writes intentionally bypass the workbook revision counter.
+        live.active_sheet_mut().set_value(1, 0, "new");
+        assert!(!shares_plan_source(&source, &live));
+        live = source.clone();
+        live.active_sheet_mut().toggle_bold(0, 0);
+        assert!(!shares_plan_source(&source, &live));
+        live = source.clone();
+        live.active_sheet()
+            .cache_computed(0, 1, crate::formula::eval::Value::Number(9.0));
+        assert!(!shares_plan_source(&source, &live));
+        live = source.clone();
+        live.active_sheet_mut().frozen_panes = (1, 0);
+        assert!(!shares_plan_source(&source, &live));
+        live = source.clone();
+        live.active_sheet_mut()
+            .set_manual_hidden_rows([1].into())
+            .unwrap();
+        assert!(!shares_plan_source(&source, &live));
+        live = source.clone();
+        live.active_sheet_mut().name = "renamed".into();
+        assert!(!shares_plan_source(&source, &live));
+        // A replacement workbook can reuse revision/sheet ids but not storage.
+        let mut replacement = Workbook::new();
+        replacement.set_cell_value_tracked(0, 0, 0, "2");
+        replacement.set_cell_value_tracked(0, 0, 1, "=A1*2");
+        assert_eq!(replacement.revision(), source.revision());
+        assert!(!shares_plan_source(&source, &replacement));
     }
 }

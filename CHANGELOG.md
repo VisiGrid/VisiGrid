@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Large agent plans keep the window responsive.** MCP `plan_script` prepares and validates its proposal in the background. If the workbook, calculation settings or review state changes while it runs, the result is refused. Host and client allow up to ten minutes for preparation; changes still require approval in Review Mode. (#107)
+
 ## 0.52.1
 
 ### Fixed
