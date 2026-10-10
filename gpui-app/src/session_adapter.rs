@@ -58,6 +58,7 @@ fn mutation_blocked_apply_response(
 }
 
 struct SessionPlanGuard {
+    mode: crate::mode::Mode,
     entity_id: gpui::EntityId,
     cells_rev: u64,
     context: crate::scripting::ExecutionContextGenerationKey,
@@ -353,6 +354,7 @@ impl Spreadsheet {
             }
         };
         let guard = SessionPlanGuard {
+            mode: self.mode,
             entity_id: self.workbook.entity_id(),
             cells_rev: self.cells_rev,
             context: crate::scripting::execution_context_generation_key(&job.workbook),
@@ -401,7 +403,8 @@ impl Spreadsheet {
             && crate::scripting::execution_context_generation_key(self.wb(cx)) == guard.context
             && visigrid_engine::operation_plan::shares_plan_source(&job.workbook, self.wb(cx))
             && self.table_review_layout(job.workbook.active_sheet_id()) == job.layout;
-        let available = self.review_mode.is_none()
+        let available = self.mode == guard.mode
+            && self.review_mode.is_none()
             && !self.mode.is_editing()
             && !self.is_previewing()
             && !self.import_in_progress
@@ -1738,7 +1741,7 @@ mod review_block_tests {
 mod background_plan_tests {
     use super::{SessionPlanGuard, Spreadsheet};
     use crate::plan_manager::McpPlanState;
-    use gpui::BorrowAppContext;
+    use gpui::{AppContext, BorrowAppContext};
 
     fn request(revision: u64, key: &str) -> visigrid_protocol::CreatePlanMessage {
         visigrid_protocol::CreatePlanMessage {
@@ -1853,6 +1856,7 @@ mod background_plan_tests {
             "context",
             "import",
             "other_review",
+            "dialog",
         ] {
             view.update(cx, |app, _, cx| {
                 app.mode = crate::mode::Mode::Navigation;
@@ -1862,6 +1866,7 @@ mod background_plan_tests {
                     .ok()
                     .unwrap();
                 let mut guard = SessionPlanGuard {
+                    mode: app.mode,
                     entity_id: app.workbook.entity_id(),
                     cells_rev: app.cells_rev,
                     context: crate::scripting::execution_context_generation_key(app.wb(cx)),
@@ -1899,6 +1904,9 @@ mod background_plan_tests {
                     }
                     "edit" => {
                         app.mode = crate::mode::Mode::Edit;
+                    }
+                    "dialog" => {
+                        app.mode = crate::mode::Mode::GoTo;
                     }
                     "layout" => {
                         app.view_state.frozen_rows += 1;
@@ -1987,6 +1995,7 @@ mod background_plan_tests {
             let job = app.prepare_session_plan(req, "test".into(), cx).ok().unwrap();
             let capture = started.elapsed();
             let guard = SessionPlanGuard {
+                mode: app.mode,
                 entity_id: app.workbook.entity_id(), cells_rev: app.cells_rev,
                 context: crate::scripting::execution_context_generation_key(app.wb(cx)),
                 started: std::time::Instant::now(),
