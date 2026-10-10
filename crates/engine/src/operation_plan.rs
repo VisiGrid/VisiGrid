@@ -4,7 +4,7 @@
 //! applies them to a cloned workbook, materializes the visible differences,
 //! and freezes the hashes required to commit that exact preview later.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -1617,6 +1617,20 @@ fn build_row_lineage(row_count: usize, operations: &[PlannedOperation]) -> Vec<R
         .collect()
 }
 
+// Index stored cells once: scanning cells_iter for every lineage row makes a
+// one-cell plan quadratic on large sheets. Include format-only stored cells,
+// and sort each row so diff ordering is independent of storage iteration order.
+fn occupied_columns_by_row(sheet: &Sheet) -> HashMap<usize, Vec<usize>> {
+    let mut rows: HashMap<usize, Vec<usize>> = HashMap::new();
+    for ((row, col), _) in sheet.cells_iter() {
+        rows.entry(row).or_default().push(col);
+    }
+    for columns in rows.values_mut() {
+        columns.sort_unstable();
+    }
+    rows
+}
+
 fn materialize_changes(
     before: &Workbook,
     after: &Workbook,
@@ -1651,6 +1665,8 @@ fn materialize_changes(
             continue;
         };
         if sheet_id == source_sheet_id {
+            let before_columns = occupied_columns_by_row(before_sheet);
+            let after_columns = occupied_columns_by_row(after_sheet);
             for row in lineage {
                 let before_row = row
                     .before_data_row
@@ -1686,13 +1702,11 @@ fn materialize_changes(
                             sources: metadata.sources.clone(),
                         },
                     )?;
-                    let mut coordinates: Vec<_> = before_sheet
-                        .cells_iter()
-                        .filter(|((cell_row, _), _)| *cell_row == before_row)
-                        .map(|((cell_row, col), _)| CellCoordinate { row: cell_row, col })
-                        .collect();
-                    coordinates.sort_unstable();
-                    for coordinate in coordinates {
+                    for &col in before_columns.get(&before_row).into_iter().flatten() {
+                        let coordinate = CellCoordinate {
+                            row: before_row,
+                            col,
+                        };
                         let old =
                             CellSnapshot::from_sheet(before_sheet, coordinate.row, coordinate.col);
                         if old != CellSnapshot::empty() {
@@ -1719,19 +1733,12 @@ fn materialize_changes(
                 let Some(after_row) = row.after_data_row else {
                     continue;
                 };
-                let mut cols = BTreeSet::new();
-                cols.extend(
-                    before_sheet
-                        .cells_iter()
-                        .filter(|((r, _), _)| *r == before_row)
-                        .map(|((_, c), _)| c),
-                );
-                cols.extend(
-                    after_sheet
-                        .cells_iter()
-                        .filter(|((r, _), _)| *r == after_row)
-                        .map(|((_, c), _)| c),
-                );
+                let mut cols = before_columns.get(&before_row).cloned().unwrap_or_default();
+                if let Some(after_cols) = after_columns.get(&after_row) {
+                    cols.extend_from_slice(after_cols);
+                }
+                cols.sort_unstable();
+                cols.dedup();
                 for col in cols {
                     let before_coordinate = CellCoordinate {
                         row: before_row,
@@ -2445,6 +2452,72 @@ mod tests {
             .changes
             .iter()
             .any(|change| change.kind == ChangeKind::RowDeleted));
+    }
+
+    #[test]
+    fn sparse_plan_diff_preserves_shifted_rows_and_format_only_cells() {
+        let mut workbook = Workbook::new();
+        workbook.set_cell_value_tracked(0, 1, 8, "remove");
+        workbook.set_cell_value_tracked(0, 4, 20, "keep");
+        workbook.set_cell_value_tracked(0, 10, 7, "clear");
+        workbook
+            .sheet_mut(0)
+            .unwrap()
+            .set_cell_style(1, 40, CellStyle::from_int(1));
+        workbook
+            .sheet_mut(0)
+            .unwrap()
+            .set_cell_style(100, 40, CellStyle::from_int(1));
+        let prepared = PreparedOperationPlan::materialize(
+            &workbook,
+            request(
+                &workbook,
+                vec![
+                    PlannedOp::DeleteRows { at: 1, count: 1 },
+                    PlannedOp::SetCellValue {
+                        coordinate: CellCoordinate { row: 2, col: 15 },
+                        value: PlannedCellValue::Number(9.0),
+                    },
+                    PlannedOp::ClearCell {
+                        coordinate: CellCoordinate { row: 10, col: 7 },
+                    },
+                    PlannedOp::SetCellStyle {
+                        range: CellRange::single(50, 30),
+                        style: CellStyle::from_int(1),
+                    },
+                ],
+            ),
+        )
+        .unwrap();
+        let changes = &prepared.plan().changes;
+        // One deletion marker, two cleared cells (including format-only), an
+        // added value, an explicit clear, and a newly formatted empty cell.
+        assert_eq!(changes.len(), 6);
+        for col in [8, 40] {
+            assert!(changes.iter().any(|change| {
+                change.before_coordinate == Some(CellCoordinate { row: 1, col })
+                    && change.after_coordinate.is_none()
+                    && change.kind == ChangeKind::Cleared
+            }));
+        }
+        for (row, col) in [(2, 15), (10, 7), (50, 30)] {
+            assert!(changes.iter().any(|change| {
+                change.before_coordinate == Some(CellCoordinate { row, col })
+                    && change.after_coordinate == Some(CellCoordinate { row: row - 1, col })
+            }));
+        }
+        let preview = prepared.preview_workbook().active_sheet();
+        assert_eq!(preview.get_display(1, 15), "9");
+        assert_eq!(preview.get_display(3, 20), "keep");
+        assert_eq!(preview.get_display(9, 7), "");
+        assert_eq!(
+            preview.get_format(99, 40).cell_style,
+            CellStyle::from_int(1)
+        );
+        assert_eq!(
+            preview.get_format(49, 30).cell_style,
+            CellStyle::from_int(1)
+        );
     }
 
     #[test]
