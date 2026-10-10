@@ -785,6 +785,33 @@ pub(crate) struct ColumnStore {
 }
 
 impl ColumnStore {
+    /// Conservative snapshot identity check, proportional to chunks/pages,
+    /// not cells. A write (including a cached formula result) detaches an Arc.
+    pub(crate) fn shares_snapshot(&self, other: &Self) -> bool {
+        fn pages<T>(a: &Paged<T>, b: &Paged<T>) -> bool {
+            a.len == b.len
+                && a.pages.len() == b.pages.len()
+                && a.pages.iter().zip(&b.pages).all(|(a, b)| Arc::ptr_eq(a, b))
+        }
+        self.len == other.len
+            && self.columns.len() == other.columns.len()
+            && self.columns.iter().zip(&other.columns).all(|(a, b)| {
+                a.chunks.len() == b.chunks.len()
+                    && a.chunks
+                        .iter()
+                        .zip(&b.chunks)
+                        .all(|((ai, a), (bi, b))| ai == bi && Arc::ptr_eq(a, b))
+            })
+            && pages(&self.strings.entries, &other.strings.entries)
+            && pages(&self.formulas.entries, &other.formulas.entries)
+            && pages(
+                &self.formulas.values.borrow(),
+                &other.formulas.values.borrow(),
+            )
+            && Arc::ptr_eq(&self.formats, &other.formats)
+            && Arc::ptr_eq(&self.extras, &other.extras)
+    }
+
     pub fn has_unparsed_formulas(&self) -> bool { self.formulas.unparsed != 0 }
     pub fn frozen_positions(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.extras.iter().filter(|(_, e)| e.frozen_formula.is_some()).map(|(&(r, c), _)| (r as usize, c as usize))

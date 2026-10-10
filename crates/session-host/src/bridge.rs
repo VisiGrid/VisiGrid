@@ -239,9 +239,10 @@ impl SessionBridgeHandle {
         req: CreatePlanMessage,
         client: String,
     ) -> Result<PlanBridgeOutcome, BridgeError> {
+        let timeout = req.host_timeout();
         self.plan_request(
             |reply| SessionRequest::CreatePlan { req, client, reply },
-            std::time::Duration::from_secs(60),
+            timeout,
         )
     }
 
@@ -291,8 +292,9 @@ impl SessionBridgeHandle {
             .map_err(|_| BridgeError::ChannelClosed)?;
         self.wake();
         reply_rx
-            .blocking_recv_timeout(timeout)
-            .map_err(|_| BridgeError::ChannelClosed)
+            .recv_within(timeout)
+            .map_err(|_| BridgeError::ChannelClosed)?
+            .ok_or(BridgeError::TimedOut)
     }
 }
 

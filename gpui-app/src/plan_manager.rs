@@ -11,6 +11,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpPlanState {
+    Preparing,
     Ready,
     Invalid,
     Applied,
@@ -20,6 +21,7 @@ pub enum McpPlanState {
 impl McpPlanState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Preparing => "preparing",
             Self::Ready => "ready",
             Self::Invalid => "invalid",
             Self::Applied => "applied",
@@ -90,6 +92,8 @@ impl McpPlanManager {
         let owner = record.owner.clone();
         if !record.state.is_terminal() {
             self.active_plan_id = Some(plan_id.clone());
+        } else if self.active_plan_id.as_deref() == Some(&plan_id) {
+            self.active_plan_id = None;
         }
         self.create_keys
             .insert((owner, idempotency_key), plan_id.clone());
@@ -163,4 +167,19 @@ mod tests {
         manager.insert(invalid, "bad-key".into());
         assert_eq!(manager.active_plan_id(), None);
     }
+    #[test]
+    fn failed_preparation_releases_slot_without_losing_idempotency() {
+        let mut manager = McpPlanManager::default();
+        let mut preparing = record("payload");
+        preparing.state = McpPlanState::Preparing;
+        manager.insert(preparing.clone(), "key".into());
+        assert_eq!(manager.active_record().unwrap().state, McpPlanState::Preparing);
+        preparing.state = McpPlanState::Invalid;
+        preparing.invalid_message = Some("source changed".into());
+        manager.insert(preparing, "key".into());
+        assert!(manager.active_record().is_none());
+        assert_eq!(manager.existing_for_key("Codex", "key", "payload").unwrap().unwrap().state,
+            McpPlanState::Invalid);
+    }
+
 }
