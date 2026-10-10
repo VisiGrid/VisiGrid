@@ -161,13 +161,15 @@ fn render_source(b: &RecipeBuilder, c: &Colors, cx: &mut Context<Spreadsheet>) -
                                 .text_color(text)
                                 .when(is_text, |d| d.min_w(px(150.0)).cursor_text())
                                 .when(!is_text, |d| d.cursor_pointer())
-                                .child(if is_text {
-                                    // A typed setting: the text, and a caret while focused
-                                    if active { format!("{value}▏") } else { value.clone() }
-                                } else if is_file {
-                                    format!("{value} …")
-                                } else {
-                                    format!("{value} ›")
+                                // A typed setting: the text, and a caret while focused
+                                .when(is_text, |d| {
+                                    d.flex()
+                                        .items_center()
+                                        .child(value.clone())
+                                        .when(active, |d| d.child(div().w(px(1.0)).h(px(13.0)).bg(accent)))
+                                })
+                                .when(!is_text, |d| {
+                                    d.child(if is_file { format!("{value} …") } else { format!("{value} ›") })
                                 })
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
