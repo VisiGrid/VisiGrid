@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Import recipes
+
+- **PostgreSQL and Supabase sources.** A recipe can read a table, a view or a single `SELECT` from PostgreSQL, Supabase included, into a Table, and **Refresh** reads it again. Run **New Recipe from PostgreSQL…**, type the host, user and password, and press **Connect**. The password goes to the system keychain, never the recipe.
+- **Read-only, enforced by the database.** The recipe connects as a role that holds `SELECT` and nothing else. Before every read, VisiGrid checks the role's privileges and tries a write that must be refused. A role that could write is refused, with the privilege named: a write grant, `CREATE`, membership in another role, superuser or `BYPASSRLS`.
+- **Always verified TLS.** Connections are checked against the public web authorities and Supabase's own root certificate, which is built in. Only a server on this computer may go without TLS.
+- **Exact values.** Large `bigint`s and long `numeric`s stay text with every digit, dates are dates, `timestamptz` is shown in UTC, and `NULL` is empty. A table that row-level security hides entirely says so, with the policy to add.
+- **`vgrid postgres password | check | tables`** saves the password, runs the read-only check on its own, and lists what a role can read. In CI, `PGHOST`/`PGUSER`/`PGPASSWORD` work when they match the recipe.
+
 ## 0.52.1
 
 ### Fixed

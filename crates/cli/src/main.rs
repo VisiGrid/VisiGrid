@@ -27,6 +27,7 @@ mod tui;
 mod util;
 mod verify;
 mod visibooks_cmd;
+mod postgres_cmd;
 use convert::*;
 
 use visigrid_cli::diff;
@@ -187,6 +188,11 @@ Examples:
     /// The VisiBooks API key that recipes reading VisiBooks reports use
     #[command(subcommand)]
     Visibooks(VisibooksCommands),
+
+    /// The PostgreSQL password and read-only check that recipes reading a
+    /// database (Supabase included) use
+    #[command(subcommand)]
+    Postgres(PostgresCommands),
 
     /// List all supported functions
     ListFunctions,
@@ -1438,6 +1444,44 @@ Examples:
     },
 }
 
+/// PostgreSQL subcommands: the role's password, the read-only proof, and
+/// the tables the role can read.
+#[derive(Subcommand)]
+enum PostgresCommands {
+    /// Save the role's password in the system keychain (read from stdin)
+    #[command(after_help = "\
+Recipes connect as a role that holds SELECT and nothing else; VisiGrid
+checks that before every read and refuses a role that could write. The
+password is stored in the system keychain for exactly this user, host and
+port, never in a recipe or workbook. For headless runs (CI), set PGHOST,
+PGUSER (and PGPORT) to the recipe's and PGPASSWORD to the password.
+
+Examples:
+  vgrid postgres password --host aws-0-us-east-1.pooler.supabase.com --user visigrid_reader.abcd1234
+  pass show db/reader | vgrid postgres password --host db.example.com --user reader
+  vgrid postgres password --host db.example.com --user reader --delete")]
+    Password {
+        #[command(flatten)]
+        server: postgres_cmd::Server,
+
+        /// Remove the saved password
+        #[arg(long)]
+        delete: bool,
+    },
+
+    /// Check that the role is read-only, the way every recipe read does
+    Check {
+        #[command(flatten)]
+        server: postgres_cmd::Server,
+    },
+
+    /// List the tables and views the role can read
+    Tables {
+        #[command(flatten)]
+        server: postgres_cmd::Server,
+    },
+}
+
 /// VisiBooks subcommands: the API key and the entities it reaches.
 #[derive(Subcommand)]
 enum VisibooksCommands {
@@ -1950,6 +1994,9 @@ fn main() -> ExitCode {
         }
         Some(Commands::Visibooks(VisibooksCommands::Key { server, delete })) => visibooks_cmd::cmd_key(server, delete),
         Some(Commands::Visibooks(VisibooksCommands::Entities { server })) => visibooks_cmd::cmd_entities(server),
+        Some(Commands::Postgres(PostgresCommands::Password { server, delete })) => postgres_cmd::cmd_password(server, delete),
+        Some(Commands::Postgres(PostgresCommands::Check { server })) => postgres_cmd::cmd_check(server),
+        Some(Commands::Postgres(PostgresCommands::Tables { server })) => postgres_cmd::cmd_tables(server),
         Some(Commands::Convert {
             input,
             from,

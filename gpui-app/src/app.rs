@@ -2523,6 +2523,7 @@ impl Spreadsheet {
                 },
             },
             CommandId::NewVisibooksRecipe => self.new_visibooks_recipe(cx),
+            CommandId::NewPostgresRecipe => self.new_postgres_recipe(cx),
             CommandId::EditRecipe => match self.recipe_strip_table(cx) {
                 Some(t) => {
                     let path = self.recipe_link_path(&t.source.as_ref().unwrap().recipe);

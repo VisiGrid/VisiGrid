@@ -40,7 +40,7 @@ pub(crate) fn cmd_entities(server: Option<String>) -> Result<(), CliError> {
     Ok(())
 }
 
-fn read_secret(prompt: &str) -> Result<String, CliError> {
+pub(crate) fn read_secret(prompt: &str) -> Result<String, CliError> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         let mut line = String::new();

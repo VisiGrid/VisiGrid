@@ -23,6 +23,20 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # The PostgreSQL recipe source's read-only proof runs against a real
+    # server (crates/io/tests/recipe_postgres.rs); it makes its own database
+    # and roles. The password is a throwaway for this container only.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only-not-secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      VISIGRID_TEST_POSTGRES: host=127.0.0.1 port=5432 user=postgres password=ci-only-not-secret dbname=postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
