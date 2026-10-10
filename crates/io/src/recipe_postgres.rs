@@ -3,8 +3,10 @@
 //! Read-only is enforced by the database, not by VisiGrid: before every
 //! read the role must pass a proof, and a role that could write is refused
 //! with what let it write. The proof is a catalog check (no write privilege
-//! on any table, no CREATE anywhere, no membership in another role, none of
-//! superuser/createrole/createdb/bypassrls) and a real write that must fail
+//! on any table or column, no USAGE/UPDATE on a sequence, no callable
+//! volatile SECURITY DEFINER function, no CREATE anywhere, no membership in
+//! another role, none of superuser/createrole/createdb/bypassrls) and a real
+//! write that must fail
 //! with "permission denied". The write runs under an explicit READ WRITE
 //! transaction: with the role's `default_transaction_read_only` on, Postgres
 //! reports the read-only error before checking privileges, which would hide
@@ -35,7 +37,8 @@ const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
 #[cfg(feature = "native")]
 const MAX_FINDINGS_SHOWN: usize = 8;
 
-/// Supabase's private root (Supabase Root 2021 CA, valid to 2031-04-26;
+/// Supabase's private root (Supabase Root 2021 CA, trusted for
+/// `*.supabase.com` and `*.supabase.co` hosts only, valid to 2031-04-26;
 /// SHA-256 80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA,
 /// the same as Supabase's published prod-ca-2021.crt). Its pooler and
 /// database certificates chain to it, not to a public root.
@@ -369,12 +372,20 @@ mod native {
         ))
     }
 
-    fn tls_config() -> Result<rustls::ClientConfig, String> {
+    /// Whether a host is Supabase's, the only ones its private root may vouch for.
+    pub fn is_supabase(host: &str) -> bool {
+        let host = host.trim().trim_end_matches('.').to_lowercase();
+        host.ends_with(".supabase.com") || host.ends_with(".supabase.co")
+    }
+
+    fn tls_config(host: &str) -> Result<rustls::ClientConfig, String> {
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let supabase = rustls::pki_types::CertificateDer::from_pem_slice(SUPABASE_ROOT_2021)
-            .map_err(|e| format!("the bundled Supabase root certificate can't be read: {e}"))?;
-        roots.add(supabase).map_err(|e| format!("the bundled Supabase root certificate is invalid: {e}"))?;
+        if is_supabase(host) {
+            let supabase = rustls::pki_types::CertificateDer::from_pem_slice(SUPABASE_ROOT_2021)
+                .map_err(|e| format!("the bundled Supabase root certificate can't be read: {e}"))?;
+            roots.add(supabase).map_err(|e| format!("the bundled Supabase root certificate is invalid: {e}"))?;
+        }
         rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
             .with_safe_default_protocol_versions()
             .map_err(|e| e.to_string())
@@ -400,7 +411,7 @@ mod native {
             .connect_timeout(std::time::Duration::from_secs(10));
         let result = if src.tls {
             cfg.ssl_mode(::postgres::config::SslMode::Require);
-            cfg.connect(tokio_postgres_rustls::MakeRustlsConnect::new(tls_config()?))
+            cfg.connect(tokio_postgres_rustls::MakeRustlsConnect::new(tls_config(host)?))
         } else {
             cfg.ssl_mode(::postgres::config::SslMode::Disable);
             cfg.connect(::postgres::NoTls)
@@ -430,9 +441,15 @@ mod native {
     }
 
     /// The catalog half of the proof (no rows = nothing found). Counts
-    /// membership, so a grant through another role is found too. Role-wide
-    /// findings come first: a superuser is named as one, not by its first
-    /// eight table privileges.
+    /// membership, so a grant through another role is found too, and
+    /// column grants (`GRANT UPDATE (b) ON t`), which table-wide checks miss.
+    /// Role-wide findings come first: a superuser is named as one, not by
+    /// its first eight table privileges.
+    ///
+    /// A SECURITY DEFINER function runs with its owner's privileges, so one
+    /// the role can call could write for it: volatile ones it can reach are
+    /// refused (Postgres refuses data changes in stable and immutable
+    /// functions). Trigger and event-trigger functions can't be called.
     const WRITE_PRIVILEGES: &str = "
 SELECT 'role: ' || x FROM pg_roles r, LATERAL (VALUES
    (CASE WHEN r.rolsuper THEN 'superuser' END), (CASE WHEN r.rolcreaterole THEN 'createrole' END),
@@ -446,12 +463,29 @@ SELECT 'database: CREATE' WHERE has_database_privilege(current_database(), 'CREA
 UNION ALL
 SELECT 'schema ' || quote_ident(n.nspname) || ': CREATE' FROM pg_namespace n WHERE has_schema_privilege(n.oid, 'CREATE')
 UNION ALL
+SELECT 'sequence ' || c.oid::regclass || ': ' || p.priv
+  FROM pg_class c
+  CROSS JOIN (VALUES ('USAGE'), ('UPDATE')) AS p(priv)
+ WHERE c.relkind = 'S'
+   AND c.relnamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+   AND has_sequence_privilege(c.oid, p.priv)
+UNION ALL
+SELECT 'function ' || f.oid::regprocedure || ': SECURITY DEFINER, callable'
+  FROM pg_proc f
+ WHERE f.prosecdef AND f.provolatile = 'v' AND f.prokind IN ('f', 'p')
+   AND f.prorettype NOT IN ('trigger'::regtype, 'event_trigger'::regtype)
+   AND f.pronamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+   AND has_schema_privilege(f.pronamespace, 'USAGE')
+   AND has_function_privilege(f.oid, 'EXECUTE')
+UNION ALL
 SELECT 'table ' || c.oid::regclass || ': ' || p.priv
   FROM pg_class c
-  CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')) AS p(priv)
+  CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('TRIGGER'), ('REFERENCES')) AS p(priv)
  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
    AND c.relnamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
-   AND has_table_privilege(c.oid, p.priv)";
+   AND CASE WHEN p.priv IN ('INSERT', 'UPDATE', 'REFERENCES')
+            THEN has_any_column_privilege(c.oid, p.priv)
+            ELSE has_table_privilege(c.oid, p.priv) END";
 
     /// A table the role can read, with a column a write can name: the
     /// source's own table when it is one, else the first such table.
@@ -542,6 +576,17 @@ SELECT c.oid::regclass::text,
     /// security is on, from `schema.table` or a name unique in the database.
     fn resolve_table(client: &mut Client, name: &str) -> Result<(u32, String, bool), String> {
         let name = name.trim();
+        // A quoted name ("My.Table", "Sales"."Q3") is exact: Postgres parses it
+        if name.contains('"') {
+            let row = client
+                .query_one(
+                    "SELECT c.oid, c.oid::regclass::text, c.relrowsecurity FROM pg_class c
+                      WHERE c.oid = to_regclass($1) AND c.relkind IN ('r', 'p', 'v', 'm', 'f')",
+                    &[&name],
+                )
+                .map_err(|_| format!("the database has no table or view {name}"))?;
+            return Ok((row.get(0), row.get(1), row.get(2)));
+        }
         let (schema, table) = match name.split_once('.') {
             Some((s, t)) => (Some(s.trim().trim_matches('"')), t.trim().trim_matches('"')),
             None => (None, name.trim_matches('"')),

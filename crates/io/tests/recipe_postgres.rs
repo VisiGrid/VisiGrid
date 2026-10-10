@@ -59,7 +59,7 @@ fn the_read_only_proof_accepts_a_reader_and_refuses_every_writer() {
     let scratch = Scratch {
         admin: admin.clone(),
         db: tag.clone(),
-        roles: ["reader", "writer", "member", "super", "creator"].iter().map(|r| role(r)).collect(),
+        roles: ["reader", "writer", "member", "super", "creator", "colwriter", "seq", "definer", "allreader"].iter().map(|r| role(r)).collect(),
     };
 
     let mut a = postgres::Client::connect(&admin, postgres::NoTls).unwrap();
@@ -81,12 +81,24 @@ fn the_read_only_proof_accepts_a_reader_and_refuses_every_writer() {
            (1, 'LL-1001', '2026-09-01 12:00+02', 129.50, 9007199254740993, true, '{{a,b}}', '2026-09-03'),
            (2, 'LL-1002', '2026-09-02 11:30+00', 42.00, 12, false, '{{}}', NULL);
          CREATE VIEW paid AS SELECT id, number FROM orders WHERE total > 50;
+         CREATE TABLE \"Odd.Name\" (x int);
+         INSERT INTO \"Odd.Name\" VALUES (7);
+         CREATE SEQUENCE order_numbers;
+         CREATE SCHEMA tools;
+         -- Runs as its owner: whoever can call it can delete every order
+         CREATE FUNCTION tools.wipe() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'DELETE FROM public.orders';
+         -- Can't change data (stable), so it's no way to write
+         CREATE FUNCTION public.order_count() RETURNS bigint LANGUAGE sql STABLE SECURITY DEFINER AS 'SELECT count(*) FROM public.orders';
          CREATE TABLE secret_notes (id int PRIMARY KEY, body text);
          INSERT INTO secret_notes VALUES (1, 'hidden');
          ALTER TABLE secret_notes ENABLE ROW LEVEL SECURITY;
          ALTER ROLE {reader} SET default_transaction_read_only = on;
-         GRANT USAGE ON SCHEMA public TO {reader}, {writer}, {member}, {creator};
-         GRANT SELECT ON ALL TABLES IN SCHEMA public TO {reader}, {writer}, {member}, {creator};
+         GRANT USAGE ON SCHEMA public TO {reader}, {writer}, {member}, {creator}, {colwriter}, {seq}, {definer}, {allreader};
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO {reader}, {writer}, {member}, {creator}, {colwriter}, {seq}, {definer}, {allreader};
+         GRANT UPDATE (number), INSERT (number) ON orders TO {colwriter};
+         GRANT USAGE ON SEQUENCE order_numbers TO {seq};
+         GRANT USAGE ON SCHEMA tools TO {definer};
+         GRANT pg_read_all_data TO {allreader};
          GRANT UPDATE ON orders TO {writer};
          ALTER ROLE {writer} SET default_transaction_read_only = on;
          GRANT {writer} TO {member};
@@ -98,6 +110,10 @@ fn the_read_only_proof_accepts_a_reader_and_refuses_every_writer() {
         member = role("member"),
         super = role("super"),
         creator = role("creator"),
+        colwriter = role("colwriter"),
+        seq = role("seq"),
+        definer = role("definer"),
+        allreader = role("allreader"),
     ))
     .unwrap();
 
@@ -151,6 +167,10 @@ fn the_read_only_proof_accepts_a_reader_and_refuses_every_writer() {
     let cte = "query = \"with d as (delete from orders returning *) select * from d\"";
     assert!(read(&recipe(&host, port, &scratch.db, &reader, cte), &reader).is_err());
 
+    // A quoted name is exact, dot and all
+    let out = read(&recipe(&host, port, &scratch.db, &reader, "table = '\"Odd.Name\"'"), &reader).unwrap();
+    assert_eq!(out.output.rows, [["7"]]);
+
     // Row-level security hiding every row says so
     let out = read(&recipe(&host, port, &scratch.db, &reader, &table("secret_notes")), &reader).unwrap();
     assert_eq!(out.output.rows.len(), 0);
@@ -166,6 +186,13 @@ fn the_read_only_proof_accepts_a_reader_and_refuses_every_writer() {
     refused("member", &format!("member of {}", role("writer")));
     refused("super", "superuser");
     refused("creator", "schema public: CREATE");
+    // Column grants: the write test names the first column (id) and is
+    // refused, so only the catalog check finds these
+    refused("colwriter", "table orders: INSERT");
+    refused("colwriter", "table orders: UPDATE");
+    refused("seq", "sequence order_numbers: USAGE");
+    refused("definer", "function tools.wipe(): SECURITY DEFINER");
+    refused("allreader", "member of pg_read_all_data");
 
     // A wrong password is named as such
     std::env::set_var("PGUSER", &reader);
