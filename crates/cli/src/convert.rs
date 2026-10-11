@@ -165,6 +165,7 @@ pub(crate) fn cmd_convert(
     csv: &visigrid_io::csv::CsvOptions,
     parquet_plan: bool,
     text_columns: Vec<String>,
+    banded: bool,
 ) -> Result<(), CliError> {
     if (parquet_plan || !text_columns.is_empty()) && !matches!(to, Format::Parquet | Format::Duckdb) {
         return Err(CliError::args("--export-plan and --text-column require -t parquet or -t duckdb"));
@@ -234,6 +235,10 @@ pub(crate) fn cmd_convert(
         input_format,
         Format::JsonFull | Format::Xlsx | Format::Sheet | Format::Duckdb
     );
+
+    if banded {
+        return write_banded(input.as_deref(), input_format, workbook_in, reshaping, to, output.as_deref(), delimiter, csv, quiet);
+    }
 
     if !reshaping && workbook_in && (matches!(to, Format::JsonFull | Format::Xlsx)
         || (matches!(input_format, Format::Duckdb) && matches!(to, Format::Sheet))) {
@@ -638,6 +643,56 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::
             parse_lines(&content, 0, 0)
         }
     }
+}
+
+/// `-t json-full --banded -o DIR`: the workbook as VisiGrid stores it, with
+/// every large sheet's cells in row bands (`visigrid_io::json::bands`):
+/// `DIR/manifest.json` and `DIR/bands/<key>.band`, each band compressed and
+/// named by the SHA-256 of its bytes. A workbook with no large sheet is just
+/// its manifest, the same document json-full writes. Single-table inputs
+/// (csv, tsv, parquet, json) mean exactly what their json-full output means:
+/// it is read back as a workbook before banding.
+#[allow(clippy::too_many_arguments)]
+fn write_banded(
+    input: Option<&std::path::Path>,
+    input_format: Format,
+    workbook_in: bool,
+    reshaping: bool,
+    to: Format,
+    output: Option<&std::path::Path>,
+    delimiter: char,
+    csv: &visigrid_io::csv::CsvOptions,
+    quiet: bool,
+) -> Result<(), CliError> {
+    if !matches!(to, Format::JsonFull) {
+        return Err(CliError::args("--banded requires -t json-full"));
+    }
+    if reshaping {
+        return Err(CliError::args("--banded keeps the whole workbook; it does not combine with --sheet, --where, --select or --rename"));
+    }
+    let dir = output.ok_or_else(|| CliError::args("--banded writes a directory: give it with -o DIR"))?;
+    let (wb, layouts, active) = if workbook_in {
+        read_workbook_full(input, input_format)?
+    } else {
+        let sheet = match input {
+            Some(path) => read_file(&path.to_path_buf(), input_format, csv, None)?,
+            None => read_stdin(input_format, delimiter, csv, 0, 0)?,
+        };
+        let text = visigrid_io::json::export_full(&sheet).map_err(CliError::io)?;
+        visigrid_io::json::import_any(&text).map_err(CliError::io)?
+    };
+    let (manifest, bands) = visigrid_io::json::bands::export_banded(&wb, &layouts, active).map_err(CliError::io)?;
+    let band_dir = dir.join("bands");
+    std::fs::create_dir_all(&band_dir).map_err(|e| CliError::io(e.to_string()))?;
+    for band in &bands {
+        std::fs::write(band_dir.join(format!("{}.band", band.reference.key)), &band.data)
+            .map_err(|e| CliError::io(e.to_string()))?;
+    }
+    std::fs::write(dir.join("manifest.json"), manifest.as_bytes()).map_err(|e| CliError::io(e.to_string()))?;
+    if !quiet {
+        eprintln!("Wrote {} ({} sheets, {} bands)", dir.display(), wb.sheets().len(), bands.len());
+    }
+    Ok(())
 }
 
 /// Read an input as a whole workbook: every sheet, per-sheet layout in pixels,

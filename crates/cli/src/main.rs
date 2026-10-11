@@ -172,6 +172,11 @@ Examples:
         #[arg(long, value_name = "COLUMN")]
         text_column: Vec<String>,
 
+        /// With -t json-full: write the workbook as row bands into the -o directory
+        /// (manifest.json plus bands/<sha256>.band), as VisiGrid stores large sheets
+        #[arg(long)]
+        banded: bool,
+
         /// Suppress stderr notes (e.g. skipped-row counts)
         #[arg(long, short = 'q')]
         quiet: bool,
@@ -1963,11 +1968,12 @@ fn main() -> ExitCode {
             rename,
             parquet_plan,
             text_column,
+            banded,
             quiet,
             csv,
         }) => {
             csv.to_options(delimiter).and_then(|csv| {
-                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv, parquet_plan, text_column)
+                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv, parquet_plan, text_column, banded)
             })
         }
         Some(Commands::Calc {
