@@ -391,6 +391,100 @@ mod iso_date_tests {
     }
 }
 
+/// Cells of one worksheet keyed by absolute (row, col), in row-major order.
+type SparseCells<T> = Vec<((usize, usize), T)>;
+
+fn sort_cells<T>(mut cells: SparseCells<T>) -> SparseCells<T> {
+    cells.sort_by_key(|(pos, _)| *pos);
+    cells
+}
+
+/// The non-empty values of `name`, read cell by cell.
+///
+/// calamine's `worksheet_range` builds a dense `Range` over the used
+/// rectangle, so a sheet touching XFD2 and A1048576 asks for 2^34 cells and
+/// aborts the process. xlsx and xlsb have a streaming cell reader; xls (at
+/// most 65,536 x 256) and ods have no such reader and keep the dense path.
+fn sparse_values<RS: std::io::Read + std::io::Seek>(
+    workbook: &mut Sheets<RS>, name: &str,
+) -> Result<SparseCells<Data>, String> {
+    let fail = |e: &dyn std::fmt::Display| format!("Failed to read sheet '{}': {}", name, e);
+    let mut cells = Vec::new();
+    match workbook {
+        Sheets::Xlsx(xlsx) => {
+            let mut reader = match xlsx.worksheet_cells_reader(name) {
+                Ok(reader) => reader,
+                // A chartsheet has no cells; calamine reads it as empty too.
+                Err(calamine::XlsxError::NotAWorksheet(_)) => return Ok(cells),
+                Err(e) => return Err(fail(&e)),
+            };
+            while let Some(cell) = reader.next_cell().map_err(|e| fail(&e))? {
+                if !matches!(cell.get_value(), calamine::DataRef::Empty) {
+                    let (r, c) = cell.get_position();
+                    cells.push(((r as usize, c as usize), cell.get_value().clone().into()));
+                }
+            }
+        }
+        Sheets::Xlsb(xlsb) => {
+            let mut reader = xlsb.worksheet_cells_reader(name).map_err(|e| fail(&e))?;
+            while let Some(cell) = reader.next_cell().map_err(|e| fail(&e))? {
+                if !matches!(cell.get_value(), calamine::DataRef::Empty) {
+                    let (r, c) = cell.get_position();
+                    cells.push(((r as usize, c as usize), cell.get_value().clone().into()));
+                }
+            }
+        }
+        _ => {
+            let range = workbook.worksheet_range(name).map_err(|e| fail(&e))?;
+            let (r0, c0) = range.start().unwrap_or((0, 0));
+            for (r, c, value) in range.used_cells() {
+                cells.push(((r0 as usize + r, c0 as usize + c), value.clone()));
+            }
+        }
+    }
+    Ok(sort_cells(cells))
+}
+
+/// The formulas of `name`, read cell by cell for the reason
+/// [`sparse_values`] gives.
+fn sparse_formulas<RS: std::io::Read + std::io::Seek>(
+    workbook: &mut Sheets<RS>, name: &str,
+) -> Result<SparseCells<String>, String> {
+    let mut cells = Vec::new();
+    match workbook {
+        Sheets::Xlsx(xlsx) => {
+            let mut reader = match xlsx.worksheet_cells_reader(name) {
+                Ok(reader) => reader,
+                Err(calamine::XlsxError::NotAWorksheet(_)) => return Ok(cells),
+                Err(e) => return Err(e.to_string()),
+            };
+            while let Some(cell) = reader.next_formula().map_err(|e| e.to_string())? {
+                if !cell.get_value().is_empty() {
+                    let (r, c) = cell.get_position();
+                    cells.push(((r as usize, c as usize), cell.get_value().clone()));
+                }
+            }
+        }
+        Sheets::Xlsb(xlsb) => {
+            let mut reader = xlsb.worksheet_cells_reader(name).map_err(|e| e.to_string())?;
+            while let Some(cell) = reader.next_formula().map_err(|e| e.to_string())? {
+                if !cell.get_value().is_empty() {
+                    let (r, c) = cell.get_position();
+                    cells.push(((r as usize, c as usize), cell.get_value().clone()));
+                }
+            }
+        }
+        _ => {
+            let range = workbook.worksheet_formula(name).map_err(|e| e.to_string())?;
+            let (r0, c0) = range.start().unwrap_or((0, 0));
+            for (r, c, formula) in range.used_cells() {
+                cells.push(((r0 as usize + r, c0 as usize + c), formula.clone()));
+            }
+        }
+    }
+    Ok(sort_cells(cells))
+}
+
 /// Import an Excel file (xlsx, xls, xlsb, ods)
 pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
     import_with_options(path, &ImportOptions::default())
@@ -426,10 +520,13 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 
     let mut formula_string_cells = None;
     for (sheet_index, sheet_name) in sheet_names.iter().enumerate() {
-        let range = workbook.worksheet_range(sheet_name)
-            .map_err(|e| format!("Failed to read sheet '{}': {}", sheet_name, e))?;
-
-        let (height, width) = range.get_size();
+        // Sparse, not calamine's Range: a Range is dense over the used
+        // rectangle, so one value in XFD2 and one in A1048576 asked for
+        // 2^34 cells (512 GiB) and aborted the process.
+        let values = sparse_values(&mut workbook, sheet_name)?;
+        // A formula with no cached value has no value cell, so it alone
+        // still makes the sheet non-empty.
+        let formulas = sparse_formulas(&mut workbook, sheet_name).unwrap_or_default();
 
         let mut stats = SheetStats {
             name: sheet_name.clone(),
@@ -437,7 +534,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         };
 
         // Skip empty sheets but still create them
-        if height == 0 || width == 0 {
+        if values.is_empty() && formulas.is_empty() {
             let mut sheet = Sheet::new_with_name(SheetId(next_sheet_id), MAX_ROWS, MAX_COLS, sheet_name);
             next_sheet_id += 1;
 
@@ -453,12 +550,10 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             continue;
         }
 
-        // Calamine dimensions are sizes relative to range.start(), not absolute
-        // sheet coordinates. A Table starting at B3 must not lose its last row
-        // or rightmost header before its definition is installed.
-        let (data_start_row, data_start_col) = range.start().unwrap_or((0, 0));
-        let end_row = data_start_row as usize + height;
-        let end_col = data_start_col as usize + width;
+        // Positions are absolute sheet coordinates, so a Table starting at
+        // B3 keeps its last row and rightmost header.
+        let end_row = values.iter().map(|((r, _), _)| r + 1).max().unwrap_or(0);
+        let end_col = values.iter().map(|((_, c), _)| c + 1).max().unwrap_or(0);
         if end_row > MAX_ROWS || end_col > MAX_COLS {
             stats.truncated_rows = end_row.saturating_sub(MAX_ROWS);
             stats.truncated_cols = end_col.saturating_sub(MAX_COLS);
@@ -473,18 +568,12 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         next_sheet_id += 1;
         cached_snapshots.push(HashMap::new());
 
-        for (row_idx, row) in range.rows().enumerate() {
-            let target_row = data_start_row as usize + row_idx;
-            if target_row >= MAX_ROWS {
-                break;
+        for ((target_row, target_col), cell) in &values {
+            let (target_row, target_col) = (*target_row, *target_col);
+            if target_row >= MAX_ROWS || target_col >= MAX_COLS {
+                continue;
             }
-
-            for (col_idx, cell) in row.iter().enumerate() {
-                let target_col = data_start_col as usize + col_idx;
-                if target_col >= MAX_COLS {
-                    break;
-                }
-
+            {
                 // Check cell limit
                 if total_cells >= MAX_CELLS {
                     if !hit_cell_limit {
@@ -616,29 +705,17 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                     }
                 }
             }
-
-            if hit_cell_limit {
-                break;
-            }
         }
 
         // Try to import formulas if available
         if !hit_cell_limit {
-            if let Ok(formula_range) = workbook.worksheet_formula(sheet_name) {
-                // Formula range may start at a different offset than data range
-                let (formula_start_row, formula_start_col) = formula_range.start().unwrap_or((0, 0));
-
-                for (row_idx, row) in formula_range.rows().enumerate() {
-                    let target_row = formula_start_row as usize + row_idx;
-                    if target_row >= MAX_ROWS {
-                        break;
+            {
+                for ((target_row, target_col), formula) in &formulas {
+                    let (target_row, target_col) = (*target_row, *target_col);
+                    if target_row >= MAX_ROWS || target_col >= MAX_COLS {
+                        continue;
                     }
-
-                    for (col_idx, formula) in row.iter().enumerate() {
-                        let target_col = formula_start_col as usize + col_idx;
-                        if target_col >= MAX_COLS {
-                            break;
-                        }
+                    {
 
                         // Enforce MAX_CELLS for formulas too
                         if total_cells >= MAX_CELLS {
@@ -729,10 +806,6 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                 total_cells += 1;
                             }
                         }
-                    }
-
-                    if hit_cell_limit {
-                        break;
                     }
                 }
             }
