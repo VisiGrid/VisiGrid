@@ -42,6 +42,16 @@ fn describe_own(recipe_path: &Path, recipe: &Recipe) -> Result<(String, String),
         let transport = if origin.starts_with("https://") { "over https" } else { "on this computer" };
         return Ok((src.describe(), format!("read-only, {transport} · {key}")));
     }
+    // A PostgreSQL read: name the server, database, role and table, and
+    // whether a password is saved (it never leaves the keychain)
+    if let visigrid_io::recipe::Source::Postgres(src) = &recipe.source {
+        let password = match visigrid_io::recipe::postgres::password(src) {
+            Ok(_) => "a password for this role is saved",
+            Err(_) => "no password for this role is saved yet; run `vgrid postgres password`",
+        };
+        let transport = if src.tls { "over verified TLS" } else { "on this computer" };
+        return Ok((src.describe(), format!("read-only role, checked before every read, {transport} · {password}")));
+    }
     if recipe.source.combine() && recipe.source_is_pattern() {
         let files = recipe.resolve_sources(dir, None)?;
         let pattern = recipe.source_path(dir, None);

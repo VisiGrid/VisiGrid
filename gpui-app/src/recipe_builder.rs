@@ -38,6 +38,11 @@ const DUCKDB_ROWS: [&str; 3] = ["File", "Each refresh reads", "Table"];
 const XLSX_ROWS: [&str; 4] = ["File", "Each refresh reads", "Sheet", "Header row"];
 const VISIBOOKS_DATE_ROWS: [&str; 5] = ["Report", "Entity", "As of", "Basis", "Server"];
 const VISIBOOKS_PERIOD_ROWS: [&str; 6] = ["Report", "Entity", "From", "To", "Basis", "Server"];
+/// A PostgreSQL source: the server and role are typed, Connect checks the
+/// role is read-only and lists its tables. A query is written in the file.
+const POSTGRES_ROWS: [&str; 7] = ["Host", "Port", "Database", "User", "Password", "Connect", "Table"];
+const POSTGRES_QUERY_ROWS: [&str; 7] = ["Host", "Port", "Database", "User", "Password", "Connect", "Query"];
+const POSTGRES_TEXT_ROWS: [&str; 5] = ["Host", "Port", "Database", "User", "Password"];
 /// Dates a VisiBooks source cycles through: relative words, so one recipe
 /// serves every month. A date typed into the recipe by hand is kept until
 /// changed here.
@@ -156,6 +161,11 @@ pub struct RecipeBuilder {
     pub error: Option<String>,
     pub steps_scroll: ScrollHandle,
     pub editor_scroll: ScrollHandle,
+    /// A PostgreSQL password typed but not yet saved: it goes to the
+    /// keychain once Connect proves the role read-only, never to the recipe.
+    pub pg_password: String,
+    /// What Connect found: the proof's summary, or why it failed.
+    pub pg_status: Option<Result<String, String>>,
 }
 
 /// The CSV settings, when the source is a CSV.
@@ -364,6 +374,16 @@ pub fn default_recipe_name(source_path: &Path) -> String {
         let (report, entity) = (parts.next().unwrap_or("report"), parts.next().unwrap_or(""));
         return format!("visibooks-{entity}-{report}.recipe.toml");
     }
+    // A PostgreSQL source: postgres-public.orders.recipe.toml
+    if let Some(rest) = source_path.to_str().and_then(|p| p.strip_prefix("postgres://")) {
+        let table = rest.split('?').next().and_then(|r| r.rsplit('/').next()).unwrap_or("");
+        let table: String = table.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '-' }).collect();
+        return if rest.contains("?query=") || table.is_empty() {
+            "postgres-query.recipe.toml".to_string()
+        } else {
+            format!("postgres-{table}.recipe.toml")
+        };
+    }
     let stem = source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("import");
     format!("{stem}.recipe.toml")
 }
@@ -401,6 +421,10 @@ fn read_snapshot(recipe: &Recipe, recipe_path: Option<&Path>, source_path: &Path
 impl RecipeBuilder {
     /// Read the source again after a setting changed which files it reads.
     fn reload(&mut self) {
+        // A remote source's "path" is what it reads (its table, say)
+        if self.recipe.source.is_remote() {
+            self.source_path = PathBuf::from(self.recipe.source.identity());
+        }
         self.snapshot = read_snapshot(&self.recipe, self.recipe_path.as_deref(), &self.source_path);
     }
 
@@ -430,8 +454,14 @@ impl RecipeBuilder {
             error: None,
             steps_scroll: ScrollHandle::new(),
             editor_scroll: ScrollHandle::new(),
+            pg_password: String::new(),
+            pg_status: None,
         };
         b.selected = b.recipe.steps.len().checked_sub(1);
+        // An existing PostgreSQL recipe was read just now, so it was proven
+        if let (Source::Postgres(src), Ok(_)) = (&b.recipe.source, &b.snapshot) {
+            b.pg_status = Some(Ok(format!("read-only: verified (role {})", src.user.trim())));
+        }
         b.refresh_tables();
         b.recompute();
         b
@@ -453,6 +483,10 @@ impl RecipeBuilder {
                 .and_then(|o| recipe::visibooks::entities(&o))
                 .map(|list| list.into_iter().map(|(id, name)| format!("{id} · {name}")).collect())
                 .unwrap_or_default(),
+            // The tables and views the role reads, once a password is saved
+            Source::Postgres(src) if recipe::postgres::check_server(src).is_ok() => recipe::postgres::tables(src)
+                .map(|list| list.into_iter().map(|t| t.name).collect())
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
     }
@@ -467,6 +501,8 @@ impl RecipeBuilder {
             Source::Xlsx(_) => &XLSX_ROWS,
             Source::Visibooks(src) if src.report.is_period() => &VISIBOOKS_PERIOD_ROWS,
             Source::Visibooks(_) => &VISIBOOKS_DATE_ROWS,
+            Source::Postgres(src) if !src.query.trim().is_empty() => &POSTGRES_QUERY_ROWS,
+            Source::Postgres(_) => &POSTGRES_ROWS,
         }
     }
 
@@ -1076,6 +1112,105 @@ impl RecipeBuilder {
         row == 0 && !self.recipe.source.is_remote()
     }
 
+    /// Whether a source setting is typed (a PostgreSQL host, user…).
+    pub fn source_row_is_text(&self, row: usize) -> bool {
+        matches!(self.recipe.source, Source::Postgres(_))
+            && self.source_rows().get(row).is_some_and(|r| POSTGRES_TEXT_ROWS.contains(r))
+    }
+
+    /// The text a typed source setting holds.
+    fn source_text(&self, row: &str) -> Option<String> {
+        let Source::Postgres(src) = &self.recipe.source else { return None };
+        Some(match row {
+            "Host" => src.host.clone(),
+            "Port" => if src.port == 0 { String::new() } else { src.port.to_string() },
+            "Database" => src.database.clone(),
+            "User" => src.user.clone(),
+            "Password" => self.pg_password.clone(),
+            _ => return None,
+        })
+    }
+
+    /// Typing into a typed source setting. The server changing means
+    /// whatever was read is from another one: connect again.
+    pub fn type_source_text(&mut self, key: &Keystroke, paste: Option<String>) -> bool {
+        let Some(row) = self.source_rows().get(self.source_focus).copied() else { return false };
+        let Some(mut text) = self.source_text(row) else { return false };
+        let mut selected = self.text_selected;
+        let changed = if let Some(p) = paste {
+            crate::ui::text_input::handle_input_paste(&mut text, &mut selected, &p);
+            true
+        } else {
+            matches!(
+                crate::ui::text_input::handle_input_key(
+                    &mut text,
+                    &mut selected,
+                    key.key.as_str(),
+                    key.key_char.as_deref(),
+                    key.modifiers.control || key.modifiers.platform || key.modifiers.alt,
+                ),
+                crate::ui::text_input::InputAction::Changed
+            )
+        };
+        self.text_selected = selected;
+        if !changed {
+            return false;
+        }
+        let text: String = text.chars().take(200).collect();
+        if row == "Password" {
+            self.pg_password = text;
+            return true;
+        }
+        let Source::Postgres(src) = &mut self.recipe.source else { return false };
+        match row {
+            // A server name never has spaces; keep what was pasted clean
+            "Host" => {
+                src.host = text.trim().to_string();
+                // A server on this computer usually has no TLS; any other is
+                // read over verified TLS only
+                src.tls = !recipe::postgres::is_local(&src.host);
+            }
+            "Port" => src.port = text.chars().filter(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0),
+            "Database" => src.database = text.trim().to_string(),
+            "User" => src.user = text.trim().to_string(),
+            _ => return false,
+        }
+        self.pg_status = None;
+        self.tables.clear();
+        self.dirty = true;
+        true
+    }
+
+    /// Connect: with the typed password (saved to the keychain only once
+    /// the role proves read-only) or the saved one, then list the role's
+    /// tables and read the chosen one.
+    pub fn connect_postgres(&mut self) {
+        let Source::Postgres(src) = &self.recipe.source else { return };
+        let typed = (!self.pg_password.is_empty()).then(|| self.pg_password.clone());
+        match recipe::postgres::verify_and_list(src, typed.as_deref()) {
+            Ok((verified, tables)) => {
+                if let Some(pw) = typed {
+                    if let Err(e) = visigrid_config::secrets::set(&src.keychain_account(), &pw) {
+                        self.pg_status = Some(Err(format!("Connected, but couldn't save the password in the keychain: {e}")));
+                        return;
+                    }
+                    self.pg_password.clear();
+                }
+                self.tables = tables.into_iter().map(|t| t.name).collect();
+                self.pg_status = Some(Ok(verified.summary()));
+                if let Source::Postgres(src) = &mut self.recipe.source {
+                    if src.query.trim().is_empty() && !self.tables.iter().any(|t| t == src.table.trim()) {
+                        src.table = self.tables.first().cloned().unwrap_or_default();
+                        src.columns.clear();
+                    }
+                }
+                self.reload();
+                self.changed();
+            }
+            Err(e) => self.pg_status = Some(Err(e)),
+        }
+    }
+
     /// Whether a column of the other table is brought by the selected Merge.
     pub fn merge_column_checked(&self, name: &str) -> bool {
         match self.step() {
@@ -1133,6 +1268,27 @@ impl RecipeBuilder {
 
     pub fn change_source(&mut self, row: usize, back: bool) {
         let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Postgres(src) = &mut self.recipe.source {
+            match name {
+                "Connect" => self.connect_postgres(),
+                "Table" if !self.tables.is_empty() => {
+                    let i = self.tables.iter().position(|t| t == src.table.trim());
+                    let n = self.tables.len();
+                    src.table = self.tables[match (i, back) {
+                        (None, _) => 0,
+                        (Some(i), false) => (i + 1) % n,
+                        (Some(i), true) => (i + n - 1) % n,
+                    }]
+                    .clone();
+                    // The saved column list was for the other table
+                    src.columns.clear();
+                    self.reload();
+                    self.changed();
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Source::Visibooks(src) = &mut self.recipe.source {
             let step = |list: &[&str], current: &str| -> String {
                 let n = list.len();
@@ -1289,6 +1445,56 @@ impl RecipeBuilder {
     pub fn source_value(&self, row: usize) -> (String, String) {
         let info = self.info.as_ref();
         let name = self.source_rows().get(row).copied().unwrap_or("");
+        if let Source::Postgres(src) = &self.recipe.source {
+            let saved = recipe::postgres::password(src).is_ok();
+            return match name {
+                "Host" => (
+                    src.host.clone(),
+                    if src.host.is_empty() {
+                        "On Supabase: the session pooler host, from Connect.".into()
+                    } else if src.tls {
+                        "Over verified TLS.".into()
+                    } else {
+                        "On this computer, without TLS.".into()
+                    },
+                ),
+                "Port" => (self.source_text("Port").unwrap_or_default(), String::new()),
+                "Database" => (src.database.clone(), String::new()),
+                "User" => (
+                    src.user.clone(),
+                    "A role that holds SELECT and nothing else; one that could write is refused. On Supabase's pooler: role.project_ref.".into(),
+                ),
+                "Password" => {
+                    let shown = "•".repeat(self.pg_password.chars().count().min(32));
+                    let hint = if !self.pg_password.is_empty() {
+                        "Saved to the system keychain when Connect succeeds."
+                    } else if saved {
+                        "Saved in the system keychain. Type to replace it."
+                    } else {
+                        "Kept in the system keychain, never in the recipe."
+                    };
+                    (shown, hint.into())
+                }
+                "Connect" => match &self.pg_status {
+                    Some(Ok(summary)) => ("Connected".into(), format!("{}.", summary[..1].to_uppercase() + &summary[1..])),
+                    Some(Err(e)) => ("Connect".into(), e.clone()),
+                    None => ("Connect".into(), "Checks the role is read-only, then lists its tables.".into()),
+                },
+                "Table" => (
+                    if src.table.is_empty() { "None".into() } else { src.table.clone() },
+                    match self.tables.len() {
+                        0 => "Connect to list the tables this role reads.".to_string(),
+                        1 => "The only table this role reads.".to_string(),
+                        n => format!("{n} tables and views this role reads."),
+                    },
+                ),
+                "Query" => (
+                    src.query.trim().lines().next().unwrap_or("").to_string(),
+                    "A single SELECT, edited in the recipe file.".into(),
+                ),
+                _ => (String::new(), String::new()),
+            };
+        }
         if let Source::Visibooks(src) = &self.recipe.source {
             let today = chrono::Local::now().date_naive();
             let date = |word: &str, default: &str| {
@@ -1628,6 +1834,24 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// "New Recipe from PostgreSQL…": the builder on an empty PostgreSQL
+    /// source, focused on Host. Nothing connects until Connect.
+    pub fn new_postgres_recipe(&mut self, cx: &mut Context<Self>) {
+        let source = Source::Postgres(recipe::postgres::PostgresSource::new(String::new(), String::new()));
+        let identity = PathBuf::from(source.identity());
+        let recipe = Recipe { version: RECIPE_VERSION, source, steps: Vec::new() };
+        let mut b = RecipeBuilder::new(recipe, None, identity, None);
+        b.dirty = true;
+        b.pane = Pane::Source;
+        b.source_focus = 0;
+        // Not an error yet: nothing has been asked of a server
+        b.snapshot = Err("Fill in the server and role, then Connect.".into());
+        b.recompute();
+        self.recipe_builder = Some(b);
+        self.mode = Mode::RecipeBuilder;
+        cx.notify();
+    }
+
     pub fn new_recipe_prompt(&mut self, cx: &mut Context<Self>) {
         let future = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1858,6 +2082,27 @@ impl Spreadsheet {
             return;
         }
 
+        // A typed source setting (a PostgreSQL host): Enter moves on, the
+        // rest is typing
+        if b.pane == Pane::Source && b.source_row_is_text(b.source_focus) {
+            match key.key.as_str() {
+                "up" => b.source_focus = b.source_focus.saturating_sub(1),
+                "down" | "enter" => b.source_focus = (b.source_focus + 1).min(b.source_rows().len() - 1),
+                "a" if command => b.text_selected = true,
+                "v" if command => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                        let text = text.lines().next().unwrap_or("").to_string();
+                        b.type_source_text(key, Some(text));
+                    }
+                }
+                _ => {
+                    b.type_source_text(key, None);
+                }
+            }
+            b.text_selected = b.text_selected && b.source_row_is_text(b.source_focus);
+            cx.notify();
+            return;
+        }
         match b.pane {
             Pane::Source => match key.key.as_str() {
                 "up" => b.source_focus = b.source_focus.saturating_sub(1),
@@ -2259,5 +2504,42 @@ mod tests {
         b.activate_row(there, false);
         assert!(matches!(b.step(), Some(Step::Merge { right_on, .. }) if right_on == &vec!["Region".to_string()]));
         assert_eq!(super::step_kind(b.step().unwrap()), "Merge with a recipe");
+    }
+
+    #[test]
+    fn a_postgres_source_is_typed_and_its_password_stays_out_of_the_recipe() {
+        use visigrid_io::recipe::postgres::PostgresSource;
+        let source = Source::Postgres(PostgresSource::new(String::new(), String::new()));
+        let path = std::path::PathBuf::from(source.identity());
+        let mut b = RecipeBuilder::new(Recipe { version: RECIPE_VERSION, source, steps: vec![] }, None, path, None);
+        assert_eq!(b.source_rows(), ["Host", "Port", "Database", "User", "Password", "Connect", "Table"]);
+        assert!(b.source_row_is_text(0) && b.source_row_is_text(4) && !b.source_row_is_text(5));
+        let typ = |b: &mut RecipeBuilder, row: usize, s: &str| {
+            b.source_focus = row;
+            for ch in s.chars().map(|c| c.to_string()) {
+                b.type_source_text(&Keystroke { key: ch.clone(), key_char: Some(ch), modifiers: Modifiers::default(), ..Default::default() }, None);
+            }
+        };
+        typ(&mut b, 0, "db.example.com");
+        typ(&mut b, 3, "reader");
+        typ(&mut b, 4, "hunter2");
+        let Source::Postgres(src) = &b.recipe.source else { unreachable!() };
+        assert_eq!((src.host.as_str(), src.user.as_str(), src.tls), ("db.example.com", "reader", true));
+        assert_eq!(b.source_value(4).0, "•••••••", "the password shows masked");
+        let toml = b.recipe.to_toml();
+        assert!(!toml.contains("hunter2"), "{toml}");
+        // A server on this computer may go without TLS; any other may not
+        b.source_focus = 0;
+        b.text_selected = true;
+        typ(&mut b, 0, "localhost");
+        let Source::Postgres(src) = &b.recipe.source else { unreachable!() };
+        assert!(!src.tls);
+        // Port takes digits only
+        b.text_selected = true;
+        typ(&mut b, 1, "54x33");
+        let Source::Postgres(src) = &b.recipe.source else { unreachable!() };
+        assert_eq!(src.port, 5433);
+        assert_eq!(super::default_recipe_name(std::path::Path::new("postgres://reader@h:5432/postgres/public.orders")), "postgres-public.orders.recipe.toml");
+        assert_eq!(super::default_recipe_name(std::path::Path::new("postgres://reader@h:5432/postgres?query=abcd")), "postgres-query.recipe.toml");
     }
 }

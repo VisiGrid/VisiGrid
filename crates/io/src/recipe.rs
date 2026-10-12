@@ -92,6 +92,10 @@ pub enum Source {
     /// Records from a JSON file: an array (at a dotted path, or found by
     /// itself) in `.json`, or one per line in `.jsonl` / `.ndjson`.
     Json(json::JsonSource),
+    /// A PostgreSQL table, view or query (Supabase included), read as a
+    /// role that must prove it can't write. Not a file: reads only when a
+    /// run asks.
+    Postgres(postgres::PostgresSource),
 }
 
 #[path = "recipe_json.rs"]
@@ -99,6 +103,9 @@ pub mod json;
 
 #[path = "recipe_visibooks.rs"]
 pub mod visibooks;
+
+#[path = "recipe_postgres.rs"]
+pub mod postgres;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,22 +160,24 @@ impl Source {
             Source::Json(s) => &s.path,
             Source::Duckdb(s) => &s.path,
             Source::Xlsx(s) => &s.path,
-            Source::Visibooks(_) => "",
+            Source::Visibooks(_) | Source::Postgres(_) => "",
         }
     }
 
     /// What the source reads, for approvals and reports: the path, or for
-    /// VisiBooks the server, entity and report.
+    /// VisiBooks the server, entity and report, or for PostgreSQL the role,
+    /// server, database and table (or the query's hash).
     pub fn identity(&self) -> String {
         match self {
             Source::Visibooks(s) => s.identity(),
+            Source::Postgres(s) => s.identity(),
             other => other.path().to_string(),
         }
     }
 
     /// Whether the source is read over the network rather than from a file.
     pub fn is_remote(&self) -> bool {
-        matches!(self, Source::Visibooks(_))
+        matches!(self, Source::Visibooks(_) | Source::Postgres(_))
     }
 
     pub fn set_path(&mut self, path: String) {
@@ -178,7 +187,7 @@ impl Source {
             Source::Json(s) => s.path = path,
             Source::Duckdb(s) => s.path = path,
             Source::Xlsx(s) => s.path = path,
-            Source::Visibooks(_) => {}
+            Source::Visibooks(_) | Source::Postgres(_) => {}
         }
     }
 
@@ -191,6 +200,7 @@ impl Source {
             Source::Duckdb(s) => &s.columns,
             Source::Xlsx(s) => &s.columns,
             Source::Visibooks(s) => &s.columns,
+            Source::Postgres(s) => &s.columns,
         }
     }
 
@@ -202,6 +212,7 @@ impl Source {
             Source::Duckdb(s) => &mut s.columns,
             Source::Xlsx(s) => &mut s.columns,
             Source::Visibooks(s) => &mut s.columns,
+            Source::Postgres(s) => &mut s.columns,
         }
     }
 
@@ -212,7 +223,7 @@ impl Source {
             Source::Parquet(s) => s.combine,
             Source::Json(s) => s.combine,
             Source::Xlsx(s) => s.combine,
-            Source::Duckdb(_) | Source::Visibooks(_) => false,
+            Source::Duckdb(_) | Source::Visibooks(_) | Source::Postgres(_) => false,
         }
     }
 
@@ -223,7 +234,7 @@ impl Source {
             Source::Parquet(s) => s.combine = on,
             Source::Json(s) => s.combine = on,
             Source::Xlsx(s) => s.combine = on,
-            Source::Duckdb(_) | Source::Visibooks(_) => {}
+            Source::Duckdb(_) | Source::Visibooks(_) | Source::Postgres(_) => {}
         }
     }
 
@@ -236,6 +247,7 @@ impl Source {
             Source::Duckdb(_) => "DuckDB",
             Source::Xlsx(_) => "Excel",
             Source::Visibooks(_) => "VisiBooks",
+            Source::Postgres(_) => "PostgreSQL",
         }
     }
 
@@ -1008,7 +1020,8 @@ impl Recipe {
         self.read_snapshot_in(recipe_dir, over, &mut chain)
     }
 
-    /// The source alone (a VisiBooks report, or the file or files), then
+    /// The source alone (a VisiBooks report, a PostgreSQL read, or the file
+    /// or files), then
     /// the recipes its Merge steps name. `chain` is the merged recipes being
     /// read, outermost first, so a loop is refused when it closes.
     fn read_snapshot_in(&self, recipe_dir: &Path, over: Option<&Path>, chain: &mut Vec<PathBuf>) -> Result<Snapshot, String> {
@@ -1020,6 +1033,14 @@ impl Recipe {
             return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
             #[cfg(feature = "native")]
             visibooks::fetch(src, chrono::Local::now().date_naive())?
+        } else if let Source::Postgres(src) = &self.source {
+            if over.is_some() {
+                return Err("a PostgreSQL source can't be replaced by a file".into());
+            }
+            #[cfg(not(feature = "native"))]
+            return Err(format!("{} is read by the desktop app or the CLI", src.identity()));
+            #[cfg(feature = "native")]
+            postgres::fetch(src, crate::parquet::MAX_ROWS - 1, visigrid_engine::sheet::NUM_COLS)?.0
         } else {
             Snapshot::read_all(&self.resolve_sources(recipe_dir, over)?)?
         };
@@ -1695,6 +1716,10 @@ pub fn run(recipe: &Recipe, snapshot: &Snapshot) -> RunResult {
         #[cfg(not(feature = "native"))]
         Source::Duckdb(_) | Source::Xlsx(_) => Err("DuckDB and Excel sources are read by the desktop app or the server import".to_string()),
         Source::Visibooks(src) => visibooks::read_frame(src, snap),
+        Source::Postgres(_) => postgres::read_frame(snap).map(|(frame, warnings)| {
+            read_warnings.extend(warnings);
+            frame
+        }),
     };
     let read = if snapshot.more.is_empty() {
         read_one(snapshot)
