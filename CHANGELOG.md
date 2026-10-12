@@ -10,6 +10,11 @@
 - **Exact values.** Large `bigint`s and long `numeric`s stay text with every digit, dates are dates, `timestamptz` is shown in UTC, and `NULL` is empty. A table that row-level security hides entirely says so, with the policy to add.
 - **`vgrid postgres password | check | tables`** saves the password, runs the read-only check on its own, and lists what a role can read. In CI, `PGHOST`/`PGUSER`/`PGPASSWORD` work when they match the recipe.
 
+### Fixed
+
+- **Opening some .xlsx files no longer crashes VisiGrid.** A workbook with values at far corners of a sheet, such as XFD2 and A1048576, made the import ask for 512 GB of memory and quit. .xlsx and .xlsb sheets are now read cell by cell.
+- **`WORKDAY` and `NETWORKDAYS` no longer hang on huge day counts.** `=WORKDAY(A1, 1E15)` never returned. Dates and results outside 1900–9999 are now `#NUM!`, as in Excel, and a fractional day count rounds down.
+
 ## 0.53.0
 
 ### Functions

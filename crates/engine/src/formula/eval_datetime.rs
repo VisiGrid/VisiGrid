@@ -154,18 +154,36 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             if args.len() < 2 || args.len() > 3 {
                 return Some(EvalResult::Error(format!("{name} requires 2 or 3 arguments")));
             }
+            // Excel's calendar runs from serial 0 to 9999-12-31. Every date
+            // argument and every result must land inside it, which is also
+            // what bounds the day-by-day walks below: without it,
+            // WORKDAY(d, 1E15) stepped a quadrillion times and never returned.
+            const MAX_SERIAL: i64 = 2_958_465; // 9999-12-31
+            let in_calendar = |n: f64| (0.0..(MAX_SERIAL + 1) as f64).contains(&n);
             let start = match evaluate(&args[0], lookup).to_number() {
-                Ok(n) => n.trunc() as i64,
+                Ok(n) if in_calendar(n) => n.trunc() as i64,
+                Ok(_) => return Some(EvalResult::Error("#NUM!".to_string())),
                 Err(e) => return Some(EvalResult::Error(e)),
             };
             let second = match evaluate(&args[1], lookup).to_number() {
-                Ok(n) => n.trunc() as i64,
+                // NETWORKDAYS' end is a date; WORKDAY's day count floors, so
+                // -0.5 steps back one day as it does in Excel.
+                Ok(n) if name == "NETWORKDAYS" && in_calendar(n) => n.trunc() as i64,
+                Ok(_) if name == "NETWORKDAYS" => {
+                    return Some(EvalResult::Error("#NUM!".to_string()))
+                }
+                // Each working day advances at least one calendar day, so a
+                // count wider than the calendar cannot land inside it.
+                Ok(n) if n.abs() <= MAX_SERIAL as f64 => n.floor() as i64,
+                Ok(_) => return Some(EvalResult::Error("#NUM!".to_string())),
                 Err(e) => return Some(EvalResult::Error(e)),
             };
 
             // Holidays are skipped like weekends. Excel accepts a range here;
             // a single date is the common case and both arrive as values.
-            let mut holidays: Vec<i64> = Vec::new();
+            // A set, so a whole-column holiday list does not make each step
+            // of the walk a linear scan.
+            let mut holidays: std::collections::HashSet<i64> = std::collections::HashSet::new();
             if args.len() == 3 {
                 match evaluate(&args[2], lookup) {
                     EvalResult::Array(array) => {
@@ -173,7 +191,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                             for col in 0..array.cols() {
                                 if let Some(value) = array.get(row, col) {
                                     if let Ok(n) = value.to_number() {
-                                        holidays.push(n.trunc() as i64);
+                                        holidays.insert(n.trunc() as i64);
                                     }
                                 }
                             }
@@ -181,7 +199,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     }
                     other => {
                         if let Ok(n) = other.to_number() {
-                            holidays.push(n.trunc() as i64);
+                            holidays.insert(n.trunc() as i64);
                         }
                     }
                 }
@@ -211,6 +229,9 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 let mut cursor = start;
                 while remaining > 0 {
                     cursor += step;
+                    if !(0..=MAX_SERIAL).contains(&cursor) {
+                        return Some(EvalResult::Error("#NUM!".to_string()));
+                    }
                     if is_working(cursor) {
                         remaining -= 1;
                     }
@@ -634,6 +655,35 @@ mod time_tests {
         assert_eq!(number("=WORKDAY(DATE(2026,8,3),0)"), number("=DATE(2026,8,3)"));
         assert_eq!(number("=WORKDAY(DATE(2026,8,10),-1)"), number("=DATE(2026,8,7)"));
         assert_eq!(number("=WORKDAY(DATE(2026,8,7),1,DATE(2026,8,10))"), number("=DATE(2026,8,11)"));
+    }
+
+    fn error(formula: &str) -> String {
+        match evaluate(&bind_expr_same_sheet(&parse(formula).unwrap()), &Empty) {
+            EvalResult::Error(e) => e,
+            other => panic!("{formula} gave {other:?}, expected an error"),
+        }
+    }
+
+    /// Results outside 1900..9999 are #NUM!, as in Excel, and a day count
+    /// no calendar can hold is refused before the walk: WORKDAY(d, 1E15)
+    /// used to step a quadrillion days and never return. Cases from
+    /// IronCalc's WORKDAY_WORKDAY.INTL.xlsx, with Excel's cached results.
+    #[test]
+    fn workday_and_networkdays_stay_inside_the_calendar() {
+        let jan10 = "DATE(2025,1,10)";
+        assert_eq!(error(&format!("=WORKDAY({jan10},1000000000000000)")), "#NUM!");
+        assert_eq!(error(&format!("=WORKDAY({jan10},-1000000000000000)")), "#NUM!");
+        assert_eq!(error("=WORKDAY(DATE(9999,12,31),1)"), "#NUM!");
+        assert_eq!(error("=WORKDAY(DATE(1900,3,1),-65)"), "#NUM!");
+        assert_eq!(error("=WORKDAY(-1,1)"), "#NUM!");
+        assert_eq!(number("=WORKDAY(DATE(9999,12,31),-1)"), number("=DATE(9999,12,30)"));
+        assert_eq!(number("=WORKDAY(DATE(9999,12,25),1)"), number("=DATE(9999,12,27)"));
+        assert_eq!(number("=WORKDAY(DATE(2025,1,1),10000)"), number("=DATE(2063,5,2)"));
+        // The day count floors: just under 1 is no step, just below 0 is one back.
+        assert_eq!(number(&format!("=WORKDAY({jan10},0.9999999)")), number(&format!("={jan10}")));
+        assert_eq!(number(&format!("=WORKDAY({jan10},-0.000000001)")), number("=DATE(2025,1,9)"));
+        assert_eq!(error("=NETWORKDAYS(DATE(2025,1,1),1000000000000000)"), "#NUM!");
+        assert_eq!(error("=NETWORKDAYS(-1,DATE(2025,1,1))"), "#NUM!");
     }
 
     /// TIME is a fraction of a day, which is what makes it addable to a date.
