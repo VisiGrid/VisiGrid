@@ -1694,3 +1694,43 @@ fn inspect_calc_whole_rows_columns_and_literal_text() {
     }
     std::fs::remove_file(csv).ok();
 }
+
+/// What `sheet fingerprint` prints must be what `sheet verify` accepts. Until
+/// 0.54 it printed the replay fingerprint, so the documented
+/// fingerprint-then-verify flow reported "Drifted" on an untouched file.
+#[test]
+fn fingerprint_output_passes_verify() {
+    let csv = csv_fixture("fp_verify", "X,Y\n1,=A2*2\n2,=A3*2\n");
+    let out = sheet_output("fp_verify");
+    let import = vgrid()
+        .args(["sheet", "import", csv.to_str().unwrap(), out.to_str().unwrap()])
+        .output()
+        .expect("import");
+    assert!(import.status.success(), "stderr: {}", String::from_utf8_lossy(&import.stderr));
+
+    let fp = vgrid()
+        .args(["sheet", "fingerprint", out.to_str().unwrap()])
+        .output()
+        .expect("fingerprint");
+    assert!(fp.status.success(), "stderr: {}", String::from_utf8_lossy(&fp.stderr));
+    let fp = String::from_utf8_lossy(&fp.stdout).trim().to_string();
+
+    let verify = vgrid()
+        .args(["sheet", "verify", out.to_str().unwrap(), "--fingerprint", &fp])
+        .output()
+        .expect("verify");
+    assert!(verify.status.success(),
+        "verify rejected the fingerprint `sheet fingerprint` printed ({fp}): {}",
+        String::from_utf8_lossy(&verify.stderr));
+
+    // The replay fingerprint stays available, and is a different value.
+    let replay = vgrid()
+        .args(["sheet", "fingerprint", out.to_str().unwrap(), "--replay", "--json"])
+        .output()
+        .expect("fingerprint --replay");
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).expect("valid JSON");
+    assert_eq!(replay["kind"], "replay");
+    assert_ne!(replay["fingerprint"].as_str().unwrap(), fp);
+
+    std::fs::remove_file(&out).ok();
+}

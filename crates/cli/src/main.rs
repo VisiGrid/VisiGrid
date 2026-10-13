@@ -1166,11 +1166,12 @@ Exit codes:
         fingerprint: Option<String>,
     },
 
-    /// Compute and print a .sheet file's fingerprint
+    /// Compute and print a .sheet file's fingerprint (the one `sheet verify` checks)
     #[command(after_help = "\
 Examples:
   vgrid sheet fingerprint model.sheet
-  vgrid sheet fingerprint model.sheet --json")]
+  vgrid sheet fingerprint model.sheet --json
+  vgrid sheet verify model.sheet --fingerprint $(vgrid sheet fingerprint model.sheet)")]
     Fingerprint {
         /// Path to .sheet file
         file: PathBuf,
@@ -1178,6 +1179,10 @@ Examples:
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Print the replay fingerprint instead (set/meta ops, as `sheet apply --verify` compares)
+        #[arg(long)]
+        replay: bool,
     },
 
     /// Import a foreign spreadsheet into canonical .sheet format
@@ -2185,8 +2190,8 @@ fn main() -> ExitCode {
             SheetCommands::Verify { file, fingerprint } => {
                 cmd_sheet_verify(file, fingerprint)
             }
-            SheetCommands::Fingerprint { file, json } => {
-                cmd_sheet_fingerprint(file, json)
+            SheetCommands::Fingerprint { file, json, replay } => {
+                cmd_sheet_fingerprint(file, json, replay)
             }
             SheetCommands::Import { source, output, sheet, headers, formulas, nulls, stamp, verify, dry_run, json, delimiter } => {
                 cmd_sheet_import(source, output, sheet, headers, formulas, nulls, stamp, verify, dry_run, json, delimiter)
@@ -6113,26 +6118,39 @@ fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<()
 }
 
 /// Compute and print a .sheet file's fingerprint.
-fn cmd_sheet_fingerprint(file: PathBuf, json: bool) -> Result<(), CliError> {
-    use visigrid_io::native::{load_workbook, load_cell_metadata};
+///
+/// By default this is the semantic fingerprint, the same value `sheet verify`
+/// computes and `--stamp` stores, so its output can be passed straight to
+/// `sheet verify --fingerprint`. Before 0.54 it printed the replay fingerprint,
+/// which verify never matched; `--replay` still prints that one.
+fn cmd_sheet_fingerprint(file: PathBuf, json: bool, replay: bool) -> Result<(), CliError> {
+    use visigrid_io::native::{compute_semantic_fingerprint, load_cell_metadata, load_workbook};
 
     let workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
 
-    let metadata = load_cell_metadata(&file)
-        .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
-
-    let fingerprint = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
+    let (fingerprint, count) = if replay {
+        let metadata = load_cell_metadata(&file)
+            .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
+        let fp = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
+        (fp.to_string(), fp.len)
+    } else {
+        let fp = compute_semantic_fingerprint(&workbook);
+        // Format is vN:COUNT:HASH
+        let count = fp.split(':').nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+        (fp, count)
+    };
 
     if json {
         let output = serde_json::json!({
             "file": file.display().to_string(),
-            "fingerprint": fingerprint.to_string(),
-            "ops": fingerprint.len,
+            "fingerprint": fingerprint,
+            "kind": if replay { "replay" } else { "semantic" },
+            "ops": count,
         });
         println!("{}", serde_json::to_string_pretty(&output).unwrap());
     } else {
-        println!("{}", fingerprint.to_string());
+        println!("{}", fingerprint);
     }
 
     Ok(())

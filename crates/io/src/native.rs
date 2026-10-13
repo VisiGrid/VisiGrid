@@ -44,8 +44,8 @@ const FINGERPRINT_VERSION: u32 = 2;
 /// - Cell values/formulas (semantic content)
 /// - Does NOT include style (presentation only)
 ///
-/// Format: `v1:N:HASH` where:
-/// - `v1` = fingerprint version (increment on breaking changes)
+/// Format: `vN:COUNT:HASH` where:
+/// - `vN` = fingerprint version (see FINGERPRINT_VERSION and the variants below)
 /// - `N` = number of non-empty cells hashed (cells with value or formula)
 /// - `HASH` = first 16 hex chars of blake3 hash (64 bits)
 ///
