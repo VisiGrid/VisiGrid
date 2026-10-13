@@ -74,6 +74,13 @@ pub struct CreatePlanMessage {
     pub verification: Vec<PlanVerificationDefinition>,
 }
 
+impl CreatePlanMessage {
+    /// Includes sandbox execution, materialization and verification on large sheets.
+    pub fn host_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(600)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanProducerPayload {

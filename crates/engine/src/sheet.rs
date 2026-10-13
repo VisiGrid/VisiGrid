@@ -1872,6 +1872,13 @@ impl Sheet {
         self.cells.iter().filter_map(|(pos, cell)| cell.comment().map(|comment| (pos, comment)))
     }
 
+    pub(crate) fn shares_plan_cells(&self, other: &Sheet) -> bool {
+        self.cells.shares_snapshot(&other.cells)
+            && self.spill_values == other.spill_values
+            && self.row_formats == other.row_formats
+            && self.col_formats == other.col_formats
+    }
+
     pub(crate) fn share_cell_cow_from(&mut self, other: &Sheet) {
         self.cells.share_cow_from(&other.cells);
     }

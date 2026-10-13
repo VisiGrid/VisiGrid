@@ -57,6 +57,14 @@ fn mutation_blocked_apply_response(
     response
 }
 
+struct SessionPlanGuard {
+    mode: crate::mode::Mode,
+    entity_id: gpui::EntityId,
+    cells_rev: u64,
+    context: crate::scripting::ExecutionContextGenerationKey,
+    started: std::time::Instant,
+}
+
 impl Spreadsheet {
     /// Create a bridge handle for the session server.
     /// The handle can be cloned and passed to the TCP server.
@@ -107,8 +115,7 @@ impl Spreadsheet {
                     let _ = reply.send(outcome);
                 }
                 SessionRequest::CreatePlan { req, client, reply } => {
-                    let outcome = self.handle_session_create_plan(req, client, cx);
-                    let _ = reply.send(outcome);
+                    self.start_session_create_plan(req, client, reply, cx);
                 }
                 SessionRequest::GetPlan { req, reply } => {
                     let outcome = self.handle_session_get_plan(&req.plan_id, cx);
@@ -158,16 +165,13 @@ impl Spreadsheet {
         }
     }
 
-    fn handle_session_create_plan(
+    fn prepare_session_plan(
         &mut self,
         req: visigrid_protocol::CreatePlanMessage,
         client: String,
         cx: &mut Context<Self>,
-    ) -> crate::session_server::PlanBridgeOutcome {
+    ) -> Result<crate::session_plan::PlanJob, crate::session_server::PlanBridgeOutcome> {
         use crate::plan_manager::{McpPlanRecord, McpPlanState};
-        use crate::terminal::state::{LuaPreviewData, PendingResult};
-        use visigrid_engine::operation_plan::{PlanId, PlanProducer};
-
         let producer_source = match &req.producer {
             visigrid_protocol::PlanProducerPayload::LuaScript { source } => source,
         };
@@ -189,223 +193,297 @@ impl Spreadsheet {
         {
             Ok(Some(record)) => {
                 let plan_id = record.plan_id.clone();
-                return self.handle_session_get_plan(&plan_id, cx);
+                return Err(self.handle_session_get_plan(&plan_id, cx));
             }
             Err(()) => {
-                return plan_error(
+                return Err(plan_error(
                     "idempotency_conflict",
                     "this idempotency key was already used with a different plan payload",
                     false,
-                );
+                ));
             }
             Ok(None) => {}
         }
 
         if let Some(active) = self.mcp_plans.active_record() {
-            return plan_error(
+            return Err(plan_error(
                 "plan_in_progress",
                 format!("plan {} is already active in this workbook", active.plan_id),
                 true,
-            );
+            ));
         }
         if self.review_mode.is_some() {
-            return plan_error(
+            return Err(plan_error(
                 "plan_in_progress",
                 "another proposal is already open in Review Mode",
                 true,
-            );
+            ));
         }
         if self.mode.is_editing() || self.is_previewing() {
-            return plan_error(
+            return Err(plan_error(
                 "review_unavailable",
                 "Finish cell editing and return to the live workbook before creating a plan",
                 true,
-            );
+            ));
         }
         if self.import_in_progress || self.hub_activity.is_some() {
-            return plan_error(
+            return Err(plan_error(
                 "review_unavailable",
                 "wait for the active import or Hub operation before creating a plan",
                 true,
-            );
+            ));
         }
         if req.idempotency_key.is_empty() || req.idempotency_key.len() > 128 {
-            return plan_error("bad_request", "idempotency_key must be 1–128 bytes", false);
+            return Err(plan_error(
+                "bad_request",
+                "idempotency_key must be 1–128 bytes",
+                false,
+            ));
         }
         if req.title.trim().is_empty() || req.title.len() > 120 {
-            return plan_error("bad_request", "title must be 1–120 bytes", false);
+            return Err(plan_error(
+                "bad_request",
+                "title must be 1–120 bytes",
+                false,
+            ));
         }
         if req
             .description
             .as_ref()
             .is_some_and(|value| value.len() > 1000)
         {
-            return plan_error(
+            return Err(plan_error(
                 "bad_request",
                 "description must be at most 1000 bytes",
                 false,
-            );
+            ));
         }
         if producer_source.is_empty() {
-            return plan_error("bad_request", "script must not be empty", false);
+            return Err(plan_error("bad_request", "script must not be empty", false));
         }
         if producer_source.len() > 262_144 {
-            return plan_error(
+            return Err(plan_error(
                 "script_too_large",
                 "script exceeds the 256 KiB limit",
                 false,
-            );
+            ));
         }
         if req.verification.len() > visigrid_engine::operation_plan::MAX_VERIFICATION_DEFINITIONS {
-            return plan_error(
+            return Err(plan_error(
                 "verification_limit",
                 "at most 8 verification definitions are allowed",
                 false,
-            );
+            ));
         }
 
-        let (active_sheet, source_fingerprint, snapshot) = {
-            let workbook = self.workbook.read(cx);
-            let actual_revision = workbook.revision();
-            if actual_revision != req.expected_revision {
-                return plan_error(
-                    "revision_mismatch",
-                    format!(
-                        "expected revision {}, but the workbook is at revision {}",
-                        req.expected_revision, actual_revision
-                    ),
-                    true,
-                );
-            }
-            let active_sheet = workbook.active_sheet_index();
-            if req.sheet.is_some_and(|sheet| sheet != active_sheet) {
-                return plan_error(
-                    "single_sheet_active_only",
-                    format!("Review Mode currently targets active sheet {active_sheet}"),
-                    true,
-                );
-            }
-            (
-                active_sheet,
-                crate::app::sheet_fingerprint(workbook.active_sheet()),
-                crate::scripting::SheetSnapshot::from_sheet(workbook.active_sheet()),
-            )
-        };
-        let verification = match plan_verification_definitions(&req.verification) {
-            Ok(value) => value,
-            Err(message) => return plan_error("plan_invalid", message, false),
-        };
-        let plan_id = format!("pv_{}", uuid::Uuid::new_v4().simple());
-        let script_hash = blake3::hash(producer_source.as_bytes())
-            .to_hex()
-            .to_string();
-        let source_sheet_index = active_sheet;
-
-        let result = self
-            .lua_runtime
-            .eval_with_sheet(producer_source, Box::new(snapshot));
-        let invalid = |message: String| McpPlanRecord {
-            plan_id: plan_id.clone(),
-            owner: client.clone(),
+        if self.recipe_run_in_progress
+            || self.recovery_warning.is_some()
+            || self.cloud_live_enabled()
+        {
+            return Err(plan_error(
+                "review_unavailable",
+                "Wait for the recipe or leave live/read-only mode before creating a plan",
+                true,
+            ));
+        }
+        let workbook = self.wb(cx);
+        if workbook.revision() != req.expected_revision {
+            return Err(plan_error(
+                "revision_mismatch",
+                format!(
+                    "expected revision {}, but the workbook is at revision {}",
+                    req.expected_revision,
+                    workbook.revision()
+                ),
+                true,
+            ));
+        }
+        if req
+            .sheet
+            .is_some_and(|index| index != workbook.active_sheet_index())
+        {
+            return Err(plan_error(
+                "single_sheet_active_only",
+                "Review Mode currently targets the active sheet",
+                true,
+            ));
+        }
+        let verification = plan_verification_definitions(&req.verification)
+            .map_err(|message| plan_error("plan_invalid", message, false))?;
+        let record = McpPlanRecord {
+            plan_id: format!("pv_{}", uuid::Uuid::new_v4().simple()),
+            owner: client,
             source_revision: req.expected_revision,
-            request_hash: request_hash.clone(),
-            state: McpPlanState::Invalid,
-            invalid_message: Some(message),
+            request_hash,
+            state: McpPlanState::Preparing,
+            invalid_message: None,
             terminal_result: None,
         };
-        if let Some(message) = result.error {
-            self.mcp_plans.insert(invalid(message), req.idempotency_key);
-            return self.handle_session_get_plan(&plan_id, cx);
-        }
-        if result
-            .ops
-            .iter()
-            .any(|op| matches!(op, crate::scripting::LuaOp::DeleteRows { .. }))
-            && !self.table_view_installed
-            && (self.row_view.is_sorted() || self.filter_state.is_enabled())
-        {
-            self.mcp_plans.insert(
-                invalid(
-                    "unsupported_view_state: clear the active sort/filter before reviewing row deletion"
-                        .into(),
-                ),
-                req.idempotency_key,
-            );
-            return self.handle_session_get_plan(&plan_id, cx);
-        }
-
-        let prepared = crate::ai_actions::prepare_lua_operation_plan_with_metadata(
-            self.workbook.read(cx),
-            self.session_window_id,
-            PlanId(plan_id.clone()),
-            PlanProducer {
-                kind: "mcp_lua".into(),
-                name: client.clone(),
-                source_path: None,
-                source_hash: Some(script_hash.clone()),
-            },
-            req.title.trim().to_string(),
-            req.description.clone(),
-            &script_hash,
-            &result.ops,
+        let job = crate::session_plan::PlanJob {
+            source_layout: self.structure_layout(workbook.active_sheet_id()),
+            source_frozen: (self.view_state.frozen_rows, self.view_state.frozen_cols),
+            context: crate::scripting::execution_context_generation_key(workbook),
+            workbook: workbook.clone(),
+            layout: self.table_review_layout(workbook.active_sheet_id()),
+            session_id: self.session_window_id,
+            blocks_delete: !self.table_view_installed
+                && (self.row_view.is_sorted() || self.filter_state.is_enabled()),
             verification,
-        );
-        let prepared = match prepared
-            .and_then(crate::ai_actions::require_visible_plan_changes)
-            .and_then(|plan| {
-                self.validate_table_review(&plan)?;
-                Ok(plan)
-            }) {
-            Ok(plan) => plan,
-            Err(message) => {
-                self.mcp_plans.insert(invalid(message), req.idempotency_key);
-                return self.handle_session_get_plan(&plan_id, cx);
+            request: req,
+            record,
+        };
+        self.mcp_plans
+            .insert(job.record.clone(), job.request.idempotency_key.clone());
+        Ok(job)
+    }
+
+    fn start_session_create_plan(
+        &mut self,
+        req: visigrid_protocol::CreatePlanMessage,
+        client: String,
+        reply: crate::session_server::bridge::oneshot::Sender<
+            crate::session_server::PlanBridgeOutcome,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        let job = match self.prepare_session_plan(req, client, cx) {
+            Ok(job) => job,
+            Err(outcome) => {
+                let _ = reply.send(outcome);
+                return;
             }
         };
-
-        let cells_written = prepared.plan().summary.total_changes();
-        let cells_overwritten = self
-            .workbook
-            .read(cx)
-            .sheet(source_sheet_index)
-            .map(|sheet| crate::app::count_lua_overwrites(&result.ops, sheet))
-            .unwrap_or(0);
-        self.review_mode = Some(crate::review_mode::ReviewModeState::from_prepared(
-            &prepared,
-            self.workbook.read(cx),
-        ));
-        self.terminal.pending_result = Some(PendingResult::LuaPreview(LuaPreviewData {
-            source_layout: self.structure_layout(self.wb(cx).sheet(source_sheet_index).unwrap().id),
-            source_frozen: if source_sheet_index == self.sheet_index(cx) { (self.view_state.frozen_rows, self.view_state.frozen_cols) } else { self.wb(cx).sheet(source_sheet_index).unwrap().frozen_panes },
-            script_path: std::path::PathBuf::from(format!("mcp/{plan_id}.lua")),
-            script_hash,
-            ops: result.ops,
-            prepared_plan: Some(prepared),
-            cells_written,
-            cells_overwritten,
-            source_sheet_index,
-            source_fingerprint,
-            output: result.output,
-            error: None,
-        }));
-        self.focus_first_review_change(cx);
-        self.mcp_plans.insert(
-            McpPlanRecord {
-                plan_id: plan_id.clone(),
-                owner: client.clone(),
-                source_revision: req.expected_revision,
-                request_hash,
-                state: McpPlanState::Ready,
-                invalid_message: None,
-                terminal_result: None,
-            },
-            req.idempotency_key,
-        );
+        let guard = SessionPlanGuard {
+            mode: self.mode,
+            entity_id: self.workbook.entity_id(),
+            cells_rev: self.cells_rev,
+            context: crate::scripting::execution_context_generation_key(&job.workbook),
+            started: std::time::Instant::now(),
+        };
         self.status_message = Some(format!(
-            "{client} proposed {cells_written} change(s). Review them before applying."
+            "Preparing {} for {}…",
+            job.request.title.trim(),
+            job.record.owner
         ));
         cx.notify();
-        self.handle_session_get_plan(&plan_id, cx)
+        cx.spawn(async move |this, cx| {
+            let (job, result) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = job.build();
+                    (job, result)
+                })
+                .await;
+            let mut result = Some(result);
+            let _ = this.update(cx, |this, cx| {
+                let outcome = this.complete_session_plan(&job, result.take().unwrap(), &guard, cx);
+                let _ = reply.send(outcome);
+            });
+            // Release snapshots off the UI thread even if the window closed
+            // and the update closure never ran.
+            cx.background_executor()
+                .spawn(async move {
+                    drop((job, result));
+                })
+                .detach();
+        })
+        .detach();
+    }
+
+    fn complete_session_plan(
+        &mut self,
+        job: &crate::session_plan::PlanJob,
+        result: Result<crate::session_plan::BuiltPlan, String>,
+        guard: &SessionPlanGuard,
+        cx: &mut Context<Self>,
+    ) -> crate::session_server::PlanBridgeOutcome {
+        let unchanged = self.workbook.entity_id() == guard.entity_id
+            && self.session_window_id == job.session_id
+            && self.cells_rev == guard.cells_rev
+            && crate::scripting::execution_context_generation_key(self.wb(cx)) == guard.context
+            && visigrid_engine::operation_plan::shares_plan_source(&job.workbook, self.wb(cx))
+            && self.table_review_layout(job.workbook.active_sheet_id()) == job.layout;
+        let available = self.mode == guard.mode
+            && self.review_mode.is_none()
+            && !self.mode.is_editing()
+            && !self.is_previewing()
+            && !self.import_in_progress
+            && self.hub_activity.is_none()
+            && !self.recipe_run_in_progress
+            && self.recovery_warning.is_none()
+            && !self.cloud_live_enabled()
+            && job.blocks_delete
+                == (!self.table_view_installed
+                    && (self.row_view.is_sorted() || self.filter_state.is_enabled()));
+        let rejection = if guard.started.elapsed() >= job.request.host_timeout() {
+            Some("plan_timeout: preparation exceeded its deadline; nothing was changed".to_string())
+        } else if !unchanged || !available {
+            Some(
+                "plan_stale: workbook or window changed during preparation; re-preview required"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        let result = if let Some(error) = rejection {
+            cx.background_executor()
+                .spawn(async move {
+                    drop(result);
+                })
+                .detach();
+            Err(error)
+        } else {
+            result
+        };
+        self.finish_session_plan(job, result, cx)
+    }
+
+    fn finish_session_plan(
+        &mut self,
+        job: &crate::session_plan::PlanJob,
+        result: Result<crate::session_plan::BuiltPlan, String>,
+        cx: &mut Context<Self>,
+    ) -> crate::session_server::PlanBridgeOutcome {
+        use crate::plan_manager::McpPlanState;
+        let id = &job.record.plan_id;
+        // A dismissed preparation must never reopen Review Mode.
+        if self
+            .mcp_plans
+            .record(id)
+            .is_none_or(|record| record.state != McpPlanState::Preparing)
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    drop(result);
+                })
+                .detach();
+            return self.handle_session_get_plan(id, cx);
+        }
+        let mut record = job.record.clone();
+        match result {
+            Ok(built) => {
+                let count = built.preview.cells_written;
+                self.review_mode = Some(built.review);
+                self.terminal.pending_result = Some(
+                    crate::terminal::state::PendingResult::LuaPreview(built.preview),
+                );
+                self.focus_first_review_change(cx);
+                record.state = McpPlanState::Ready;
+                self.status_message = Some(format!(
+                    "{} proposed {count} change(s). Review them before applying.",
+                    record.owner
+                ));
+            }
+            Err(message) => {
+                self.status_message = Some(format!("Plan not opened: {message}"));
+                record.state = McpPlanState::Invalid;
+                record.invalid_message = Some(message);
+            }
+        }
+        self.mcp_plans
+            .insert(record, job.request.idempotency_key.clone());
+        cx.notify();
+        self.handle_session_get_plan(id, cx)
     }
 
     fn handle_session_get_plan(
@@ -418,6 +496,9 @@ impl Spreadsheet {
             return plan_error("plan_not_found", "plan is unknown or expired", false);
         };
         match record.state {
+            McpPlanState::Preparing => crate::session_server::PlanBridgeOutcome::success(json!({
+                "plan_id": plan_id, "state": "preparing", "workbook_changed": false,
+            })),
             McpPlanState::Invalid => crate::session_server::PlanBridgeOutcome::success(json!({
                 "plan_id": plan_id,
                 "state": "invalid",
@@ -572,6 +653,9 @@ impl Spreadsheet {
                 result["already_applied"] = json!(true);
                 crate::session_server::PlanBridgeOutcome::success(result)
             }
+            McpPlanState::Preparing => {
+                plan_error("plan_in_progress", "the plan is still being prepared", true)
+            }
             McpPlanState::Dismissed => plan_error("plan_not_found", "plan was dismissed", false),
             McpPlanState::Invalid => plan_error(
                 "plan_invalid",
@@ -630,7 +714,7 @@ impl Spreadsheet {
                 result["already_dismissed"] = json!(true);
                 return crate::session_server::PlanBridgeOutcome::success(result);
             }
-            McpPlanState::Ready | McpPlanState::Invalid => {}
+            McpPlanState::Preparing | McpPlanState::Ready | McpPlanState::Invalid => {}
         }
         let result = json!({
             "plan_id": req.plan_id,
@@ -1650,5 +1734,283 @@ mod review_block_tests {
         let json = super::plan_change_json(0, &change);
         assert_eq!(json["before"]["cell"], "A2");
         assert_eq!(json["after"]["cell"], "A2");
+    }
+}
+
+#[cfg(test)]
+mod background_plan_tests {
+    use super::{SessionPlanGuard, Spreadsheet};
+    use crate::plan_manager::McpPlanState;
+    use gpui::{AppContext, BorrowAppContext};
+
+    fn request(revision: u64, key: &str) -> visigrid_protocol::CreatePlanMessage {
+        visigrid_protocol::CreatePlanMessage {
+            id: "request".into(),
+            idempotency_key: key.into(),
+            expected_revision: revision,
+            sheet: Some(0),
+            title: "Update amount".into(),
+            description: None,
+            producer: visigrid_protocol::PlanProducerPayload::LuaScript {
+                source: "set('A2', 42)".into(),
+            },
+            verification: vec![],
+        }
+    }
+
+    fn init(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+    }
+
+    #[gpui::test]
+    fn background_plan_returns_before_review_and_never_writes_live_cells(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init(cx);
+        let view = cx.add_window(Spreadsheet::new);
+        let (tx, rx) = crate::session_server::bridge::oneshot::channel();
+        view.update(cx, |app, _, cx| {
+            app.wb_mut(cx, |wb| {
+                wb.set_cell_value_tracked(0, 0, 0, "Amount");
+                wb.set_cell_value_tracked(0, 1, 0, "10");
+                wb.set_cell_value_tracked(0, 2, 0, "20");
+                let table = wb
+                    .create_table(
+                        wb.active_sheet_id(),
+                        visigrid_engine::table::TableRange {
+                            start_row: 0,
+                            start_col: 0,
+                            end_row: 2,
+                            end_col: 0,
+                        },
+                        "Sales",
+                    )
+                    .unwrap()
+                    .table_id();
+                wb.set_table_source(
+                    table,
+                    Some(visigrid_engine::table::TableSource {
+                        recipe: "orders.recipe.toml".into(),
+                        refreshed: None,
+                    }),
+                )
+                .unwrap();
+                wb.set_cell_value_tracked(0, 0, 2, "=SUM(Sales[Amount])");
+            });
+            let req = request(app.wb(cx).revision(), "one");
+            app.start_session_create_plan(req.clone(), "test".into(), tx, cx);
+            assert!(
+                app.review_mode.is_none(),
+                "creation must yield to the UI before building"
+            );
+            assert_eq!(
+                app.mcp_plans.active_record().unwrap().state,
+                McpPlanState::Preparing
+            );
+            let retry = app
+                .prepare_session_plan(req, "test".into(), cx)
+                .err()
+                .unwrap();
+            assert_eq!(retry.value.unwrap()["state"], "preparing");
+            assert_eq!(app.wb(cx).active_sheet().get_raw(1, 0), "10");
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let result = rx
+            .recv_within(std::time::Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.value.unwrap()["state"], "ready");
+        view.update(cx, |app, _, cx| {
+            assert!(app.review_mode.is_some());
+            let id = app.mcp_plans.active_plan_id().unwrap();
+            let prepared = app.pending_prepared_plan(id).unwrap();
+            assert_eq!(
+                prepared.preview_workbook().active_sheet().get_display(0, 2),
+                "62"
+            );
+            assert_eq!(app.wb(cx).active_sheet().get_display(0, 2), "30");
+            assert_eq!(app.wb(cx).active_sheet().get_raw(1, 0), "10");
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn background_plan_rechecks_source_window_deadline_and_dismissal(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init(cx);
+        let view = cx.add_window(Spreadsheet::new);
+        for case in [
+            "cell",
+            "replace",
+            "edit",
+            "layout",
+            "timeout",
+            "dismiss",
+            "context",
+            "import",
+            "other_review",
+            "dialog",
+        ] {
+            view.update(cx, |app, _, cx| {
+                app.mode = crate::mode::Mode::Navigation;
+                let req = request(app.wb(cx).revision(), case);
+                let job = app
+                    .prepare_session_plan(req, "test".into(), cx)
+                    .ok()
+                    .unwrap();
+                let mut guard = SessionPlanGuard {
+                    mode: app.mode,
+                    entity_id: app.workbook.entity_id(),
+                    cells_rev: app.cells_rev,
+                    context: crate::scripting::execution_context_generation_key(app.wb(cx)),
+                    started: std::time::Instant::now(),
+                };
+                // Build the exact production job on a separate OS thread.
+                let (job, built) = std::thread::spawn(move || {
+                    let built = job.build();
+                    (job, built)
+                })
+                .join()
+                .unwrap();
+                assert!(built.is_ok(), "{case}: {:?}", built.as_ref().err());
+                match case {
+                    "cell" => {
+                        app.wb_mut(cx, |wb| wb.set_cell_value_tracked(0, 5, 0, "human edit"));
+                    }
+                    "import" => {
+                        app.import_in_progress = true;
+                    }
+                    "other_review" => {
+                        let prepared = built
+                            .as_ref()
+                            .unwrap()
+                            .preview
+                            .prepared_plan
+                            .as_ref()
+                            .unwrap();
+                        app.review_mode = Some(crate::review_mode::ReviewModeState::from_plan(
+                            prepared.plan(),
+                        ));
+                    }
+                    "replace" => {
+                        app.workbook = cx.new(|_| job.workbook.clone());
+                    }
+                    "edit" => {
+                        app.mode = crate::mode::Mode::Edit;
+                    }
+                    "dialog" => {
+                        app.mode = crate::mode::Mode::GoTo;
+                    }
+                    "layout" => {
+                        app.view_state.frozen_rows += 1;
+                    }
+                    "timeout" => {
+                        guard.started -= job.request.host_timeout();
+                    }
+                    "context" => {
+                        app.wb_mut(cx, |wb| wb.set_auto_recalc(!wb.auto_recalc()));
+                    }
+                    "dismiss" => {
+                        app.mcp_plans.mark_dismissed(
+                            &job.record.plan_id,
+                            serde_json::json!({"state": "dismissed"}),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                let result = app.complete_session_plan(&job, built, &guard, cx);
+                let expected = if case == "dismiss" {
+                    "dismissed"
+                } else {
+                    "invalid"
+                };
+                assert_eq!(result.value.unwrap()["state"], expected, "{case}");
+                assert_eq!(app.review_mode.is_some(), case == "other_review", "{case}");
+                app.review_mode = None;
+                app.import_in_progress = false;
+                assert!(app.mcp_plans.active_record().is_none(), "{case}");
+                assert!(app.wb(cx).active_sheet().get_raw(1, 0).is_empty());
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn failed_background_plan_releases_reservation(cx: &mut gpui::TestAppContext) {
+        init(cx);
+        let view = cx.add_window(Spreadsheet::new);
+        let (tx, rx) = crate::session_server::bridge::oneshot::channel();
+        view.update(cx, |app, _, cx| {
+            let mut req = request(app.wb(cx).revision(), "error");
+            req.producer = visigrid_protocol::PlanProducerPayload::LuaScript {
+                source: "set('A2', 42); error('stop')".into(),
+            };
+            app.start_session_create_plan(req, "test".into(), tx, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            rx.recv_within(std::time::Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+                .value
+                .unwrap()["state"],
+            "invalid"
+        );
+        view.update(cx, |app, _, cx| {
+            assert!(app.mcp_plans.active_record().is_none());
+            assert!(app.review_mode.is_none());
+            assert!(app.wb(cx).active_sheet().get_raw(1, 0).is_empty());
+        })
+        .unwrap();
+    }
+    #[gpui::test]
+    #[ignore = "manual large-Table timing; run with --ignored --nocapture"]
+    fn background_plan_large_table_timing(cx: &mut gpui::TestAppContext) {
+        init(cx);
+        let view = cx.add_window(Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            let rows = 300_000;
+            app.wb_mut(cx, |wb| {
+                wb.begin_batch();
+                wb.set_cell_value_tracked(0, 0, 0, "Amount");
+                for row in 1..=rows { wb.set_cell_value_tracked(0, row, 0, "10"); }
+                wb.end_batch();
+                let table = wb.create_table(wb.active_sheet_id(), visigrid_engine::table::TableRange {
+                    start_row: 0, start_col: 0, end_row: rows, end_col: 0,
+                }, "Sales").unwrap().table_id();
+                wb.set_table_source(table, Some(visigrid_engine::table::TableSource {
+                    recipe: "large.recipe.toml".into(), refreshed: None,
+                })).unwrap();
+            });
+            let req = request(app.wb(cx).revision(), "timing");
+            let started = std::time::Instant::now();
+            let job = app.prepare_session_plan(req, "test".into(), cx).ok().unwrap();
+            let capture = started.elapsed();
+            let guard = SessionPlanGuard {
+                mode: app.mode,
+                entity_id: app.workbook.entity_id(), cells_rev: app.cells_rev,
+                context: crate::scripting::execution_context_generation_key(app.wb(cx)),
+                started: std::time::Instant::now(),
+            };
+            let (job, built, background) = std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let built = job.build(); (job, built, started.elapsed())
+            }).join().unwrap();
+            assert!(built.is_ok(), "{:?}", built.as_ref().err());
+            let started = std::time::Instant::now();
+            let result = app.complete_session_plan(&job, built, &guard, cx);
+            let publish = started.elapsed();
+            assert_eq!(result.value.unwrap()["state"], "ready");
+            assert_eq!(app.wb(cx).active_sheet().get_raw(1, 0), "10");
+            eprintln!("300k-row recipe Table: capture={capture:?}, background={background:?}, publish={publish:?}");
+        }).unwrap();
     }
 }

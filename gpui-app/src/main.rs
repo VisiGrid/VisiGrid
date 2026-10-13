@@ -96,6 +96,7 @@ mod selection_differences;
 pub(crate) use visigrid_engine::series_fill;
 mod session;
 mod session_adapter;
+mod session_plan;
 mod session_server;
 mod settings;
 mod structured_results;

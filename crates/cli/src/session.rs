@@ -422,8 +422,20 @@ impl SessionClient {
         mut request: visigrid_protocol::CreatePlanMessage,
     ) -> Result<serde_json::Value, SessionError> {
         request.id = self.next_request_id();
+        let wait = request.host_timeout() + Duration::from_secs(15);
         self.send(&ClientMessage::CreatePlan(request))?;
-        match self.receive()? {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(wait))
+            .map_err(|error| SessionError::IoError(error.to_string()))?;
+        let response = self.receive();
+        let reset = self
+            .reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(30)));
+        let response = response?;
+        reset.map_err(|error| SessionError::IoError(error.to_string()))?;
+        match response {
             ServerMessage::PlanResult(result) => Ok(result.plan),
             ServerMessage::Error(err) => Err(server_error(err)),
             _ => Err(SessionError::ProtocolError("Unexpected response to create_plan".into())),
@@ -815,5 +827,62 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SessionError::ConnectionClosed));
+    }
+}
+
+#[cfg(test)]
+mod plan_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn plan_client_restores_normal_timeout_after_success_and_failure() {
+        for valid in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let writer = BufWriter::new(stream.try_clone().unwrap());
+            let mut client = SessionClient {
+                reader: BufReader::new(stream),
+                writer,
+                session_id: "test".into(),
+                revision: 0,
+                capabilities: vec![],
+                next_id: 0,
+            };
+            let server = std::thread::spawn(move || {
+                let mut reader = BufReader::new(server.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "create_plan");
+                let mut writer = BufWriter::new(server);
+                let response = if valid {
+                    serde_json::json!({ "type": "plan_result", "id": request["id"], "plan": {"state": "ready"} }).to_string()
+                } else {
+                    "bad json".into()
+                };
+                writeln!(writer, "{response}").unwrap();
+                writer.flush().unwrap();
+            });
+            let request = visigrid_protocol::CreatePlanMessage {
+                id: "".into(),
+                idempotency_key: "key".into(),
+                expected_revision: 0,
+                sheet: None,
+                title: "plan".into(),
+                description: None,
+                verification: vec![],
+                producer: visigrid_protocol::PlanProducerPayload::LuaScript {
+                    source: "set('A1', 1)".into(),
+                },
+            };
+            assert!(request.host_timeout() > Duration::from_secs(30));
+            assert_eq!(client.create_plan(request).is_ok(), valid);
+            assert_eq!(
+                client.reader.get_ref().read_timeout().unwrap(),
+                Some(Duration::from_secs(30))
+            );
+            server.join().unwrap();
+        }
     }
 }

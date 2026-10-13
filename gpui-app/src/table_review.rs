@@ -30,11 +30,25 @@ fn frozen_rows_after(mut boundary: usize, steps: &[StructureStep]) -> usize {
     boundary
 }
 
-impl Spreadsheet {
-    pub(crate) fn validate_table_review(
-        &self,
-        prepared: &PreparedOperationPlan,
-    ) -> Result<(), String> {
+/// Desktop-only layout captured before a background plan starts. Both the
+/// validation input and the publication guard use this same immutable value.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TableReviewLayout {
+    active: visigrid_engine::sheet::SheetId,
+    frozen: (usize, usize),
+    heights: std::collections::HashMap<
+        visigrid_engine::sheet::SheetId,
+        std::collections::HashMap<usize, f32>,
+    >,
+    hidden: std::collections::HashMap<
+        visigrid_engine::sheet::SheetId,
+        std::collections::BTreeSet<usize>,
+    >,
+    source: crate::table_structure::StructureLayout,
+}
+
+impl TableReviewLayout {
+    pub(crate) fn validate(&self, prepared: &PreparedOperationPlan) -> Result<(), String> {
         if !prepared.source_workbook().has_table_criteria() {
             return Ok(());
         }
@@ -44,15 +58,54 @@ impl Spreadsheet {
             .sheet_by_id(id)
             .ok_or("Review source sheet no longer exists.")?;
         let steps = review_steps(&prepared.plan().operations);
-        let layout = self.structure_layout(id).shifted(sheet, &steps)?;
-        let mut candidate = prepared.preview_workbook().clone();
-        if !steps.is_empty() && id == self.cached_sheet_id() {
-            candidate.sheet_by_id_mut(id).unwrap().frozen_panes = (
-                frozen_rows_after(self.view_state.frozen_rows, &steps),
-                self.view_state.frozen_cols,
-            );
+        let layout = self.source.shifted(sheet, &steps)?;
+        for sheet in prepared.preview_workbook().sheets() {
+            if let Some(table) = sheet
+                .table_view_spec()
+                .filter(|v| v.has_criteria())
+                .and_then(|s| sheet.tables().iter().find(|t| t.id == s.table))
+            {
+                let (heights, hidden) = if sheet.id == id {
+                    (Some(&layout.heights), Some(&layout.hidden_rows))
+                } else {
+                    (self.heights.get(&sheet.id), self.hidden.get(&sheet.id))
+                };
+                let frozen = if !steps.is_empty() && sheet.id == id && id == self.active {
+                    frozen_rows_after(self.frozen.0, &steps)
+                } else {
+                    sheet.frozen_panes.0
+                };
+                if let Some(error) =
+                    crate::table_filter_ui::desktop_layout_error(table, heights, hidden, frozen)
+                {
+                    return Err(error);
+                }
+            }
         }
-        self.validate_structure_layout(&candidate, id, &layout)
+        Ok(())
+    }
+}
+
+impl Spreadsheet {
+    pub(crate) fn validate_table_review(
+        &self,
+        prepared: &PreparedOperationPlan,
+    ) -> Result<(), String> {
+        self.table_review_layout(prepared.plan().source_sheet_id)
+            .validate(prepared)
+    }
+
+    pub(crate) fn table_review_layout(
+        &self,
+        source: visigrid_engine::sheet::SheetId,
+    ) -> TableReviewLayout {
+        TableReviewLayout {
+            active: self.cached_sheet_id(),
+            frozen: (self.view_state.frozen_rows, self.view_state.frozen_cols),
+            heights: self.row_heights.clone(),
+            hidden: self.hidden_rows.clone(),
+            source: self.structure_layout(source),
+        }
     }
 
     pub(crate) fn publish_table_review(
