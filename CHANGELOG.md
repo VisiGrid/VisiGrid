@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.54.0
 
 ### Import recipes
 
@@ -10,8 +10,18 @@
 - **Exact values.** Large `bigint`s and long `numeric`s stay text with every digit, dates are dates, `timestamptz` is shown in UTC, and `NULL` is empty. A table that row-level security hides entirely says so, with the policy to add.
 - **`vgrid postgres password | check | tables`** saves the password, runs the read-only check on its own, and lists what a role can read. In CI, `PGHOST`/`PGUSER`/`PGPASSWORD` work when they match the recipe.
 
+### Collaboration
+
+- **Conditional formats and data validation sync in live sessions.** Rule changes made by one person reach everyone in the room, undo puts back the previous rules, and copying a sheet into a room keeps its rules. Two people changing the same sheet's rules at once, or rules changing while rows or columns move, is refused and the person is told, never silently overwritten.
+- **Named styles draw on the web.** Error, Warning, Success, Input, Note and Total cells now show their colours in the web grid, the same colours the .xlsx export writes. Cells whose value breaks their data validation are listed so the web grid can mark them.
+
+### CLI
+
+- **`vgrid convert -t json-full --banded -o DIR`** writes a workbook as VisiGrid stores large sheets: `manifest.json` plus row bands in `bands/`, each named by the SHA-256 of its bytes. app.visigrid.app uses it to import files whose inline document would be tens of MB.
+
 ### Fixed
 
+- **A large script plan from an agent no longer freezes the window.** Plans are prepared in the background, and Review Mode opens when the plan is ready.
 - **Opening some .xlsx files no longer crashes VisiGrid.** A workbook with values at far corners of a sheet, such as XFD2 and A1048576, made the import ask for 512 GB of memory and quit. .xlsx and .xlsb sheets are now read cell by cell.
 - **`WORKDAY` and `NETWORKDAYS` no longer hang on huge day counts.** `=WORKDAY(A1, 1E15)` never returned. Dates and results outside 1900–9999 are now `#NUM!`, as in Excel, and a fractional day count rounds down.
 
