@@ -323,6 +323,30 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             }
             Ok(())
         }
+        // A sheet's rules, replaced whole. They change what cells look like
+        // (conditional formats) or flag (validation), never a value.
+        CollabOp::SetCondFormats { sheet, store } => {
+            let idx = index_of(wb, *sheet)?;
+            let parsed = crate::rules::parse_cond_formats(store).map_err(Skipped::Refused)?;
+            if let Some(s) = wb.sheet_mut(idx) {
+                s.cond_formats = parsed;
+            }
+            if let Some(ch) = changes {
+                ch.full = true;
+            }
+            Ok(())
+        }
+        CollabOp::SetValidation { sheet, rules } => {
+            let idx = index_of(wb, *sheet)?;
+            let parsed = crate::rules::parse_validation(rules).map_err(Skipped::Refused)?;
+            if let Some(s) = wb.sheet_mut(idx) {
+                s.validations = parsed;
+            }
+            if let Some(ch) = changes {
+                ch.full = true;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -532,6 +556,13 @@ pub struct SheetPrint {
     /// Line layout as JSON (empty when default) and merges, sorted.
     pub layout: String,
     pub merges: Vec<(usize, usize, usize, usize)>,
+    /// The sheet's conditional formats and validation as their op payloads
+    /// (empty when the sheet has none). Skipped when empty, so a workbook
+    /// without rules keeps the checksum it had before rules were compared.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cond_formats: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub validation: String,
 }
 
 pub fn fingerprint(wb: &Workbook) -> Fingerprint {
@@ -568,6 +599,12 @@ pub fn fingerprint(wb: &Workbook) -> Fingerprint {
                 cells,
                 layout,
                 merges,
+                cond_formats: if s.cond_formats.is_empty() { String::new() } else { crate::rules::cond_formats_of(s).to_string() },
+                validation: if s.validations.is_empty() && s.validations.exclusions_is_empty() {
+                    String::new()
+                } else {
+                    crate::rules::validation_of(s).to_string()
+                },
             }
         })
         .collect();
@@ -635,6 +672,12 @@ pub fn first_difference(a: &Fingerprint, b: &Fingerprint) -> Option<String> {
             return Some(format!(
                 "sheet ({}, {}) vs ({}, {})",
                 sa.id, sa.name, sb.id, sb.name
+            ));
+        }
+        if sa.cond_formats != sb.cond_formats || sa.validation != sb.validation {
+            return Some(format!(
+                "sheet {}: rules {} / {} vs {} / {}",
+                sa.name, sa.cond_formats, sa.validation, sb.cond_formats, sb.validation
             ));
         }
         let mut i = 0;

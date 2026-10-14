@@ -4,8 +4,8 @@
 //! and undo as every other edit.
 //!
 //! The operation vocabulary carries contents, cell formats, row and column
-//! sizes and visibility, frozen panes and merges. Anything else a sheet can
-//! hold (conditional formats, validations, comments, tables, pivots, a tab
+//! sizes and visibility, frozen panes, merges, conditional formats and data
+//! validation. Anything else a sheet can hold (comments, tables, pivots, a tab
 //! colour, formats on whole rows or columns beyond the cells that have them)
 //! has no operation yet: [`sheet_ops`] reports it in `dropped` so the user is
 //! told before it is lost.
@@ -97,6 +97,13 @@ pub fn sheet_ops(s: &Sheet, key: SheetKey, name: &str, index: usize) -> (Vec<Col
     for m in &s.merged_regions {
         ops.push(CollabOp::Merge { sheet: key, rect: Rect::new(m.start.0, m.start.1, m.end.0, m.end.1) });
     }
+    // The new sheet's cells sit where the source's did, so its rules carry as they are.
+    if !s.cond_formats.is_empty() {
+        ops.push(CollabOp::SetCondFormats { sheet: key, store: crate::rules::cond_formats_of(s) });
+    }
+    if !s.validations.is_empty() || !s.validations.exclusions_is_empty() {
+        ops.push(CollabOp::SetValidation { sheet: key, rules: crate::rules::validation_of(s) });
+    }
 
     let mut dropped = Vec::new();
     let mut note = |n: usize, one: &str, many: &str| {
@@ -104,8 +111,6 @@ pub fn sheet_ops(s: &Sheet, key: SheetKey, name: &str, index: usize) -> (Vec<Col
             dropped.push(format!("{}: {}", s.name, if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }));
         }
     };
-    note(s.cond_formats.len(), "conditional format", "conditional formats");
-    note(s.validations.len(), "data validation rule", "data validation rules");
     note(s.comments().count(), "comment", "comments");
     note(s.tables().len(), "table (its cells are kept)", "tables (their cells are kept)");
     note(s.pivots.len(), "pivot table definition (its cells are kept)", "pivot table definitions (their cells are kept)");

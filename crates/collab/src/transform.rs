@@ -512,6 +512,12 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
             Transformed::Dropped("its sheet was deleted")
         }
         (SortRange { .. }, _) => one(a),
+
+        // ---- a sheet's rules (serialized against what would stale them; see `conflict`) ----
+        (SetCondFormats { sheet, .. } | SetValidation { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => {
+            Transformed::Dropped("its sheet was deleted")
+        }
+        (SetCondFormats { .. } | SetValidation { .. }, _) => one(a),
     }
 }
 
@@ -725,6 +731,28 @@ fn conflict(a: &CollabOp, b: &CollabOp) -> Option<String> {
         }
     };
     if let Some(reason) = sort_vs(a, b).or_else(|| sort_vs(b, a)) {
+        return Some(reason);
+    }
+    // A sheet's rules are replaced whole, so two concurrent changes to the
+    // same sheet's rules of one kind are serialized (the later is refused,
+    // never silently overwritten). So is a rules change concurrent with a row
+    // or column edit or a rename on any sheet: the payload was written before
+    // the edit shifted its ranges, or rewrote a reference in a predicate or
+    // a validation list.
+    let rules_vs = |x: &CollabOp, y: &CollabOp| -> Option<String> {
+        if !x.is_rules() {
+            return None;
+        }
+        match y {
+            Structural { .. } => Some("rows or columns changed while rules were edited".into()),
+            RenameSheet { .. } => Some("a sheet was renamed while rules were edited".into()),
+            _ if std::mem::discriminant(x) == std::mem::discriminant(y) && x.sheet() == y.sheet() => {
+                Some("someone else changed these rules at the same time".into())
+            }
+            _ => None,
+        }
+    };
+    if let Some(reason) = rules_vs(a, b).or_else(|| rules_vs(b, a)) {
         return Some(reason);
     }
     let atomic_vs = |atomic: &CollabOp, other: &CollabOp| -> Option<String> {
