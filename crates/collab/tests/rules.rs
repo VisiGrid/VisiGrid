@@ -186,3 +186,32 @@ fn a_cells_dropdown_and_input_check_come_from_its_validation() {
     assert_eq!(bad["valid"], serde_json::json!(false), "{bad}");
     assert!(bad["reason"].as_str().is_some_and(|r| !r.is_empty()));
 }
+
+#[test]
+fn semantic_styles_arrive_as_colours_and_invalid_cells_are_listed() {
+    use visigrid_collab::view::viewport;
+    let mut wb = Workbook::new();
+    let k = key(&wb);
+    let setup = [set(&wb, 0, 0, "9"), set(&wb, 0, 1, "Maybe"), set(&wb, 1, 1, "Yes"), set(&wb, 2, 0, "x")];
+    apply_ops(&mut wb, &setup);
+    // A rule with the Error style (as desktop makes them), a cell styled Total directly, and a Yes/No list.
+    let rule = cond(&wb, CellRange::new(0, 0, 0, 0), "=A1>5");
+    let list = dropdown(&wb, CellRange::new(0, 1, 9, 1));
+    apply_ops(&mut wb, &[rule, list]);
+    if let Some(s) = wb.sheet_mut(0) {
+        let mut f = s.get_format(2, 0);
+        f.cell_style = CellStyle::Total;
+        s.set_format(2, 0, f);
+    }
+    let v = viewport(&wb, k, 0, 0, 5, 3).unwrap();
+    let at = |r: u64, c: u64| v["rows"].as_array().unwrap().iter().zip(v["cols"].as_array().unwrap()).position(|(x, y)| x == r && y == c).unwrap();
+    let format = |i: i64| v["formats"][i as usize].clone();
+    let styled = format(v["cf"][at(0, 0)].as_i64().unwrap());
+    assert_eq!(styled["background"], serde_json::json!("#FEE4E2"), "{styled}");
+    assert_eq!(styled["color"], serde_json::json!("#B42318"), "{styled}");
+    let total = format(v["fmt"][at(2, 0)].as_i64().unwrap());
+    assert_eq!(total["bold"], serde_json::json!(true), "{total}");
+    assert_eq!(total["background"], serde_json::json!("#E2E3E5"), "{total}");
+    let invalid: Vec<usize> = serde_json::from_value(v["invalid"].clone()).unwrap();
+    assert_eq!(invalid, vec![at(0, 1)], "Maybe is not on the list; Yes is");
+}

@@ -58,7 +58,9 @@ pub fn layout(wb: &Workbook, sheet: SheetKey) -> Option<Value> {
 /// `cf`, present only when a conditional-format rule styles a cell here,
 /// is a parallel index into `formats` for what the rule makes the cell look
 /// like (`-1`: no rule changes it); cells a rule covers are listed even when
-/// empty.
+/// empty. `invalid`, present only when there are any, lists the indices of
+/// cells whose value breaks their data validation. Formats are sent as drawn:
+/// a semantic cell style (Error, Warning, …) arrives as its colours.
 pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<Value> {
     use visigrid_engine::cell::CellFormat;
     use visigrid_engine::formula::eval::Value as V;
@@ -71,7 +73,9 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
         if *f == default {
             return -1;
         }
-        let props = serde_json::to_value(crate::undo::props_of(f, None)).expect("props serialize");
+        // As drawn: a semantic style (Error, Warning, …) as its colours, which
+        // the web grid cannot resolve itself.
+        let props = serde_json::to_value(crate::undo::props_of(&f.drawn(), None)).expect("props serialize");
         let key = props.to_string();
         let next = formats.len();
         let at = *seen.entry(key).or_insert(next);
@@ -99,6 +103,8 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
     coords.dedup();
     let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num, mut raw, mut cf) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // Listed cells whose value breaks their data validation (indices into the arrays).
+    let mut invalid: Vec<usize> = Vec::new();
     for (r, c) in coords {
         let shown = s.get_formatted_display(r, c);
         let own = s.get_format(r, c);
@@ -129,6 +135,9 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
         num.push(n.filter(|n| n.is_finite()));
         raw.push(s.get_raw(r, c));
         cf.push(conditional);
+        if s.validations.get(r, c).is_some() && wb.validate_cell(idx, r, c).is_invalid() {
+            invalid.push(rows.len() - 1);
+        }
     }
     let mut row_formats = serde_json::Map::new();
     for (r, f) in &s.row_formats {
@@ -155,6 +164,9 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
     // Only when a rule styles something here, so the common viewport is unchanged.
     if cf.iter().any(|&i| i >= 0) {
         out["cf"] = json!(cf);
+    }
+    if !invalid.is_empty() {
+        out["invalid"] = json!(invalid);
     }
     Some(out)
 }

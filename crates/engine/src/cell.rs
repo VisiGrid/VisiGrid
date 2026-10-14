@@ -48,6 +48,44 @@ pub enum CellStyle {
 }
 
 impl CellStyle {
+    /// The concrete properties this semantic style stands for (the light
+    /// theme's colours), for readers that cannot draw the style itself: the
+    /// xlsx export and the web grid. Explicit properties on a cell win over
+    /// these (see [`CellFormat::drawn`]).
+    pub fn resolved(self) -> CellFormatOverride {
+        fn color(n: u32) -> [u8; 4] {
+            [(n >> 16) as u8, (n >> 8) as u8, n as u8, 255]
+        }
+        let mut result = CellFormatOverride::default();
+        let (bg, fg, border) = match self {
+            CellStyle::None => return result,
+            CellStyle::Error => (0xFEE4E2, 0xB42318, Some(0xD92D20)),
+            CellStyle::Warning => (0xFEF0C7, 0xB54708, Some(0xF79009)),
+            CellStyle::Success => (0xECFDF3, 0x067647, Some(0x12B76A)),
+            CellStyle::Input => (0xEFF8FF, 0x2E90FA, Some(0x2E90FA)),
+            CellStyle::Note => {
+                result.italic = Some(true);
+                (0xF9FAFB, 0x475467, None)
+            }
+            CellStyle::Total => {
+                result.bold = Some(true);
+                result.background_color = Some(Some(color(0xE2E3E5)));
+                result.border_top = Some(CellBorder { style: BorderStyle::Thin, color: Some(color(0x101828)) });
+                return result;
+            }
+        };
+        result.background_color = Some(Some(color(bg)));
+        result.font_color = Some(Some(color(fg)));
+        if let Some(c) = border {
+            let b = Some(CellBorder { style: BorderStyle::Thin, color: Some(color(c)) });
+            result.border_left = b;
+            result.border_right = b;
+            result.border_top = b;
+            result.border_bottom = b;
+        }
+        result
+    }
+
     pub fn from_int(v: i32) -> Self {
         match v {
             1 => Self::Error,
@@ -376,6 +414,39 @@ impl std::hash::Hash for CellFormat {
 }
 
 impl CellFormat {
+    /// This format as a reader without semantic styles should draw it: its
+    /// `cell_style`'s colours, bold, italic and borders ([`CellStyle::resolved`])
+    /// under its own explicit properties, and no `cell_style`.
+    pub fn drawn(&self) -> CellFormat {
+        let mut out = self.clone();
+        if self.cell_style == CellStyle::None {
+            return out;
+        }
+        let named = self.cell_style.resolved();
+        out.cell_style = CellStyle::None;
+        if out.background_color.is_none() {
+            out.background_color = named.background_color.flatten();
+        }
+        if out.font_color.is_none() {
+            out.font_color = named.font_color.flatten();
+        }
+        out.bold |= named.bold.unwrap_or(false);
+        out.italic |= named.italic.unwrap_or(false);
+        for (mine, theirs) in [
+            (&mut out.border_top, named.border_top),
+            (&mut out.border_right, named.border_right),
+            (&mut out.border_bottom, named.border_bottom),
+            (&mut out.border_left, named.border_left),
+        ] {
+            if mine.style == BorderStyle::None {
+                if let Some(b) = theirs {
+                    *mine = b;
+                }
+            }
+        }
+        out
+    }
+
     /// Returns true when every field matches `CellFormat::default()`.
     ///
     /// Used by the native save path to skip persisting cells whose formatting
