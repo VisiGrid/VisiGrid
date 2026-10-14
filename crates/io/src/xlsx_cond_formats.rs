@@ -12,7 +12,7 @@ use std::{
     io::{Cursor, Read, Write},
 };
 use visigrid_engine::{
-    cell::{BorderStyle, CellBorder, CellFormatOverride, CellStyle},
+    cell::{BorderStyle, CellFormatOverride, CellStyle},
     formula::parser,
     sheet::{Sheet, NUM_COLS, NUM_ROWS},
     validation::CellRange,
@@ -44,44 +44,8 @@ fn esc(s: &str) -> String {
 fn rgb(c: [u8; 4]) -> String {
     format!("FF{:02X}{:02X}{:02X}", c[0], c[1], c[2])
 }
-fn color(n: u32) -> [u8; 4] {
-    [(n >> 16) as u8, (n >> 8) as u8, n as u8, 255]
-}
 fn named(style: CellStyle) -> CellFormatOverride {
-    let mut result = CellFormatOverride::default();
-    let (bg, fg, border) = match style {
-        CellStyle::None => return result,
-        CellStyle::Error => (0xFEE4E2, 0xB42318, Some(0xD92D20)),
-        CellStyle::Warning => (0xFEF0C7, 0xB54708, Some(0xF79009)),
-        CellStyle::Success => (0xECFDF3, 0x067647, Some(0x12B76A)),
-        CellStyle::Input => (0xEFF8FF, 0x2E90FA, Some(0x2E90FA)),
-        CellStyle::Note => {
-            result.italic = Some(true);
-            (0xF9FAFB, 0x475467, None)
-        }
-        CellStyle::Total => {
-            result.bold = Some(true);
-            result.background_color = Some(Some(color(0xE2E3E5)));
-            result.border_top = Some(CellBorder {
-                style: BorderStyle::Thin,
-                color: Some(color(0x101828)),
-            });
-            return result;
-        }
-    };
-    result.background_color = Some(Some(color(bg)));
-    result.font_color = Some(Some(color(fg)));
-    if let Some(c) = border {
-        let b = Some(CellBorder {
-            style: BorderStyle::Thin,
-            color: Some(color(c)),
-        });
-        result.border_left = b;
-        result.border_right = b;
-        result.border_top = b;
-        result.border_bottom = b;
-    }
-    result
+    style.resolved()
 }
 fn style_xml(mut style: CellFormatOverride, notes: &mut BTreeSet<String>) -> String {
     if let Some(semantic) = style.cell_style.take() {
