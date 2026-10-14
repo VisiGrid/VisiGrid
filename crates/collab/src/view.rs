@@ -55,6 +55,10 @@ pub fn layout(wb: &Workbook, sheet: SheetKey) -> Option<Value> {
 /// (null otherwise) for selection statistics. Only cells with content
 /// or a format are listed, as parallel arrays. `row_formats` and
 /// `col_formats` carry whole-row and whole-column formats in range.
+/// `cf`, present only when a conditional-format rule styles a cell here,
+/// is a parallel index into `formats` for what the rule makes the cell look
+/// like (`-1`: no rule changes it); cells a rule covers are listed even when
+/// empty.
 pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<Value> {
     use visigrid_engine::cell::CellFormat;
     use visigrid_engine::formula::eval::Value as V;
@@ -78,14 +82,37 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
     };
     let mut coords = s.cells_in_range(r0, r1, c0, c1);
     coords.extend(s.spill_receiver_coords().filter(|&(r, c)| r >= r0 && r <= r1 && c >= c0 && c <= c1));
+    // Cells a conditional-format rule covers, empty or not: a rule can style
+    // an empty cell (`=A1=""`).
+    for rule in s.cond_formats.iter().filter(|r| r.enabled) {
+        for range in &rule.ranges {
+            let (lo_r, hi_r) = (range.start_row.max(r0), range.end_row.min(r1));
+            let (lo_c, hi_c) = (range.start_col.max(c0), range.end_col.min(c1));
+            for r in lo_r..=hi_r {
+                for c in lo_c..=hi_c {
+                    coords.push((r, c));
+                }
+            }
+        }
+    }
     coords.sort_unstable();
     coords.dedup();
-    let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num, mut raw) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut rows, mut cols, mut text, mut kind, mut fmt, mut num, mut raw, mut cf) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (r, c) in coords {
         let shown = s.get_formatted_display(r, c);
-        let f = format_index(&s.get_format(r, c));
-        if shown.is_empty() && f < 0 {
+        let own = s.get_format(r, c);
+        let f = format_index(&own);
+        // What conditional formatting makes the cell look like, when a rule
+        // changes it now (`fmt` stays the cell's own format: the toolbar
+        // shows that, not the rule's).
+        let conditional = if s.cond_formats.any_rule_covers(r, c) {
+            let effective = s.get_effective_format(r, c);
+            if effective != own { format_index(&effective) } else { -1 }
+        } else {
+            -1
+        };
+        if shown.is_empty() && f < 0 && conditional < 0 {
             continue;
         }
         let (k, n) = match s.get_computed_value(r, c) {
@@ -101,6 +128,7 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
         fmt.push(f);
         num.push(n.filter(|n| n.is_finite()));
         raw.push(s.get_raw(r, c));
+        cf.push(conditional);
     }
     let mut row_formats = serde_json::Map::new();
     for (r, f) in &s.row_formats {
@@ -120,10 +148,15 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
             }
         }
     }
-    Some(json!({
+    let mut out = json!({
         "rows": rows, "cols": cols, "text": text, "kind": kind, "fmt": fmt, "num": num, "raw": raw,
         "formats": formats, "row_formats": row_formats, "col_formats": col_formats,
-    }))
+    });
+    // Only when a rule styles something here, so the common viewport is unchanged.
+    if cf.iter().any(|&i| i >= 0) {
+        out["cf"] = json!(cf);
+    }
+    Some(out)
 }
 
 /// Rows and columns a first screen covers from A1: enough for a large

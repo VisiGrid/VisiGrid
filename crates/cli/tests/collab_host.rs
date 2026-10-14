@@ -439,6 +439,31 @@ fn a_sort_is_sequenced_and_a_concurrent_write_follows_its_row() {
 }
 
 #[test]
+fn rules_changes_are_sequenced_saved_and_serialized() {
+    let mut h = Host::spawn();
+    h.ok(json!({"cmd": "load", "document": blank(), "seq": 0}));
+    // seq 1: a conditional format; seq 2: a dropdown.
+    let store = json!({"rules": [{"id": 0, "ranges": [{"start_row": 0, "start_col": 0, "end_row": 9, "end_col": 0}],
+        "predicate": "=A1>5", "style": {"Named": "Error"}, "enabled": true}], "next_id": 1});
+    let cf = CollabOp::SetCondFormats { sheet: 1, store };
+    let a = submit(&mut h, 0, &[cf], &[]);
+    assert_eq!(a["result"], json!("op"), "{a}");
+    let rule = serde_json::to_value(visigrid_engine::validation::ValidationRule::list_inline(vec!["Yes".into(), "No".into()])).unwrap();
+    let dv = CollabOp::SetValidation { sheet: 1, rules: json!({"validations": [{"range": {"start_row": 0, "start_col": 1, "end_row": 9, "end_col": 1}, "rule": rule}]}) };
+    let b = submit(&mut h, 1, &[dv], &[]);
+    assert_eq!(b["result"], json!("op"), "{b}");
+    // The saved document carries both (the room's folds keep them).
+    let doc = &h.ok(json!({"cmd": "snapshot"}))["document"];
+    let sheet = &doc["sheets"][0];
+    assert_eq!(sheet["cond_formats"]["rules"][0]["predicate"], json!("=A1>5"), "{doc}");
+    assert_eq!(sheet["validations"][0]["rule"]["rule_type"], rule["rule_type"], "{doc}");
+    // A second conditional-format change written before seq 1 was seen is refused, not lost.
+    let stale = CollabOp::SetCondFormats { sheet: 1, store: json!({"rules": [], "next_id": 0}) };
+    let r = submit(&mut h, 0, &[stale], &[(1, a["op"].clone()), (2, b["op"].clone())]);
+    assert_eq!(r["result"], json!("refused"), "{r}");
+}
+
+#[test]
 fn load_reports_whether_the_document_loaded_complete() {
     let mut h = Host::spawn();
     let loaded = h.ok(json!({"cmd": "load", "document": blank(), "seq": 0}));

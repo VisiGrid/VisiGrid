@@ -428,6 +428,23 @@ pub enum CollabOp {
         rect: Rect,
         order: Vec<u32>,
     },
+    /// Replace the sheet's conditional formats with `store`: the engine's
+    /// `CondFormatStore` serde form, as visigrid-json's `cond_formats`
+    /// ([`crate::rules`]). The whole store, so a reorder or a removal is the
+    /// same op as an add. V1 serializes it against another change to the
+    /// same sheet's rules and against row/column edits and renames (which
+    /// would leave its ranges or references stale).
+    SetCondFormats {
+        sheet: SheetKey,
+        store: serde_json::Value,
+    },
+    /// Replace the sheet's data validation with `rules`: visigrid-json's list
+    /// form, `{"validations": [{range, rule}], "exclusions": [range]}`
+    /// ([`crate::rules`]). Serialized like `SetCondFormats`.
+    SetValidation {
+        sheet: SheetKey,
+        rules: serde_json::Value,
+    },
 }
 
 /// The most rows one `SortRange` may reorder: its `order` must fit in one
@@ -450,7 +467,9 @@ impl CollabOp {
             | CollabOp::Merge { sheet, .. }
             | CollabOp::Unmerge { sheet, .. }
             | CollabOp::ReplaceRange { sheet, .. }
-            | CollabOp::SortRange { sheet, .. } => *sheet,
+            | CollabOp::SortRange { sheet, .. }
+            | CollabOp::SetCondFormats { sheet, .. }
+            | CollabOp::SetValidation { sheet, .. } => *sheet,
         }
     }
 
@@ -515,8 +534,15 @@ impl CollabOp {
                 }
                 Ok(())
             }
+            CollabOp::SetCondFormats { store, .. } => crate::rules::parse_cond_formats(store).map(|_| ()),
+            CollabOp::SetValidation { rules, .. } => crate::rules::parse_validation(rules).map(|_| ()),
             _ => Ok(()),
         }
+    }
+
+    /// Whether this op replaces a sheet's rules (conditional formats or validation).
+    pub fn is_rules(&self) -> bool {
+        matches!(self, CollabOp::SetCondFormats { .. } | CollabOp::SetValidation { .. })
     }
 
     /// For a `SortRange`: where each row of its rectangle goes, indexed by

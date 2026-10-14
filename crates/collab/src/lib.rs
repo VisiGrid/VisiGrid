@@ -8,6 +8,7 @@
 //! - [`client`]: a replica with optimistic local edits and rebase.
 //! - [`undo`]: per-user undo as inverse operations.
 //! - [`sort`]: a sort's row order, computed by the writer.
+//! - [`rules`]: a sheet's conditional formats and validation as op payloads.
 //! - [`copy`]: a whole sheet as operations (import into a live workbook, duplicate a tab).
 //! - [`view`]: what the grid draws (sheets, layout, viewport, first screen).
 //! - [`sim`]: the headless convergence simulator; [`gen`]: its op generator.
@@ -19,6 +20,7 @@ pub mod copy;
 #[cfg(feature = "sim")]
 pub mod gen;
 pub mod op;
+pub mod rules;
 pub mod server;
 #[cfg(feature = "sim")]
 pub mod sim;

@@ -409,6 +409,17 @@ pub fn apply_recording(
         };
         let mut inv = Vec::new();
         match op {
+            // A sheet's rules are undone by putting back the whole set it replaced.
+            CollabOp::SetCondFormats { sheet, .. } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    inv.push(CollabOp::SetCondFormats { sheet: *sheet, store: crate::rules::cond_formats_of(&scratch.sheets()[idx]) });
+                }
+            }
+            CollabOp::SetValidation { sheet, .. } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    inv.push(CollabOp::SetValidation { sheet: *sheet, rules: crate::rules::validation_of(&scratch.sheets()[idx]) });
+                }
+            }
             CollabOp::SetCell { sheet, sheet_name, row, col, .. } => {
                 if let Some(idx) = index_of(scratch, *sheet) {
                     inv.push(CollabOp::SetCell {

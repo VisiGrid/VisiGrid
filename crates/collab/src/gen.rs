@@ -1,7 +1,8 @@
 //! Random operations, generated from one replica's own view and weighted
 //! toward the conflicts the transform table has to get right: a small hot
 //! region, edits next to concurrent inserts and deletes, overlapping deletes,
-//! cross-sheet formulas, renames, atomic ranges, and sorts.
+//! cross-sheet formulas, renames, atomic ranges, sorts, and rule changes
+//! (conditional formats and validation, some referring to other sheets).
 //!
 //! Formulas avoid NOW/TODAY/RAND/INDIRECT/OFFSET: their determinism is Phase
 //! 0 work (VisiGrid#88), not the transform's.
@@ -154,6 +155,77 @@ fn layout_op(rng: &mut StdRng, sheet: u64) -> CollabOp {
     }
 }
 
+/// A change to one sheet's conditional formats or validation, made the way
+/// the rules panel makes one: the sheet's current rules with one rule added,
+/// removed or reordered, sent whole.
+fn rules_op(rng: &mut StdRng, wb: &Workbook, idx: usize) -> CollabOp {
+    use visigrid_engine::cell::CellStyle;
+    use visigrid_engine::cond_format::CondStyle;
+    use visigrid_engine::validation::{CellRange, ValidationRule};
+    let s = &wb.sheets()[idx];
+    let range = |rng: &mut StdRng| {
+        let (r0, c0) = (rng.gen_range(0..HOT_ROWS), rng.gen_range(0..HOT_COLS));
+        CellRange::new(r0, c0, (r0 + rng.gen_range(0..4)).min(HOT_ROWS), (c0 + rng.gen_range(0..2)).min(HOT_COLS))
+    };
+    if rng.gen_bool(0.55) {
+        let mut store = s.cond_formats.clone();
+        let ids: Vec<u64> = store.iter().map(|r| r.id).collect();
+        match rng.gen_range(0..10) {
+            0..=1 if !ids.is_empty() => {
+                store.remove(ids[rng.gen_range(0..ids.len())]);
+            }
+            2 if ids.len() > 1 => {
+                store.reorder(ids[rng.gen_range(0..ids.len())], rng.gen_range(0..ids.len()));
+            }
+            _ => {
+                // A predicate on the rule's own cell, a neighbour, or another sheet.
+                let predicate = match rng.gen_range(0..4) {
+                    0 => "=A1>5".to_string(),
+                    1 => format!("={}1<>\"\"", col_letter(rng.gen_range(0..HOT_COLS))),
+                    2 => "=SUM($A$1:$B$3)>10".to_string(),
+                    _ => {
+                        let other = &wb.sheets()[rng.gen_range(0..wb.sheets().len())].name;
+                        canonical(&format!("={other}!A1>0"))
+                    }
+                };
+                let style = [CellStyle::Error, CellStyle::Warning, CellStyle::Success][rng.gen_range(0..3)];
+                store.add(vec![range(rng)], predicate, CondStyle::Named(style));
+            }
+        }
+        CollabOp::SetCondFormats { sheet: s.id.0, store: serde_json::to_value(&store).expect("rules serialize") }
+    } else {
+        let mut store = s.validations.clone();
+        let ranges: Vec<CellRange> = store.iter().map(|(r, _)| *r).collect();
+        match rng.gen_range(0..10) {
+            0..=2 if !ranges.is_empty() => {
+                store.remove(&ranges[rng.gen_range(0..ranges.len())]);
+            }
+            3 => store.exclude(range(rng)),
+            _ => {
+                let rule = if rng.gen_bool(0.6) {
+                    ValidationRule::list_inline(vec!["Yes".into(), "No".into()])
+                } else {
+                    // A list from a range, sometimes on another sheet.
+                    let other = &wb.sheets()[rng.gen_range(0..wb.sheets().len())].name;
+                    ValidationRule::list_range(format!("{other}!$A$1:$A$3"))
+                };
+                store.set(range(rng), rule);
+            }
+        }
+        let mut list = serde_json::Map::new();
+        let validations: Vec<serde_json::Value> =
+            store.iter().map(|(r, rule)| serde_json::json!({"range": r, "rule": rule})).collect();
+        if !validations.is_empty() {
+            list.insert("validations".into(), validations.into());
+        }
+        let exclusions: Vec<&CellRange> = store.exclusions_iter().collect();
+        if !exclusions.is_empty() {
+            list.insert("exclusions".into(), serde_json::to_value(exclusions).expect("ranges serialize"));
+        }
+        CollabOp::SetValidation { sheet: s.id.0, rules: list.into() }
+    }
+}
+
 /// One user action against `wb`, as an envelope's op list. `sheet_key`
 /// supplies a new stable id for an added sheet.
 pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<CollabOp> {
@@ -191,8 +263,10 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
         } else {
             CollabOp::SetFormat { sheet, rect, props: format_props(rng) }
         }
-    } else if roll < 63 {
+    } else if roll < 60 {
         layout_op(rng, sheet)
+    } else if roll < 63 {
+        rules_op(rng, wb, idx)
     } else if roll < 80 {
         let axis = if rng.gen_bool(0.75) {
             Axis::Row

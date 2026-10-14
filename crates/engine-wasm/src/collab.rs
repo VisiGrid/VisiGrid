@@ -523,6 +523,18 @@ impl CollabCore {
         Ok(visigrid_collab::sort::looks_like_header(&self.client.wb, sheet, rect, &keys))
     }
 
+    pub(crate) fn rules(&self, sheet: SheetKey) -> Option<Value> {
+        visigrid_collab::rules::rules_view(&self.client.wb, sheet)
+    }
+
+    pub(crate) fn validation_at(&self, sheet: SheetKey, row: usize, col: usize) -> Option<Value> {
+        visigrid_collab::rules::validation_at(&self.client.wb, sheet, row, col)
+    }
+
+    pub(crate) fn check_input(&self, sheet: SheetKey, row: usize, col: usize, input: &str) -> Value {
+        visigrid_collab::rules::check_input(&self.client.wb, sheet, row, col, input)
+    }
+
     pub(crate) fn checksum(&self) -> String {
         collab_checksum(&self.client.confirmed)
     }
@@ -905,6 +917,33 @@ impl CollabClient {
     /// Whether a range's first row looks like a header for a sort.
     pub fn sort_header(&self, sheet: f64, rect: JsValue, keys: JsValue) -> Result<bool, JsValue> {
         self.core.sort_header(sheet as SheetKey, &from_js(rect)?, &from_js(keys)?).map_err(js_err)
+    }
+
+    /// A sheet's rules for the rules panel: `{cond_formats, validation}` in
+    /// the payload forms `SetCondFormats` and `SetValidation` carry (send a
+    /// change as one of those ops through `local`). `undefined` for an
+    /// unknown sheet key.
+    pub fn rules(&self, sheet: f64) -> Result<JsValue, JsValue> {
+        match self.core.rules(sheet as SheetKey) {
+            Some(v) => to_js(&v),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// One cell's validation for its dropdown and input message (`rule`,
+    /// `dropdown`, and for a list `items`, `truncated`, `source_error`), or
+    /// `undefined` when it has none.
+    pub fn validation_at(&self, sheet: f64, row: usize, col: usize) -> Result<JsValue, JsValue> {
+        match self.core.validation_at(sheet as SheetKey, row, col) {
+            Some(v) => to_js(&v),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// Whether typing `input` into a cell passes its validation:
+    /// `{valid: true}` or `{valid: false, reason, alert}`.
+    pub fn check_input(&self, sheet: f64, row: usize, col: usize, input: &str) -> Result<JsValue, JsValue> {
+        to_js(&self.core.check_input(sheet as SheetKey, row, col, input))
     }
 
     /// The optimistic document (visigrid-json v2 with `collab_sheet_ids`).
