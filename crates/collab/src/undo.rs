@@ -360,6 +360,16 @@ fn restore_cells(s: &visigrid_engine::sheet::Sheet, sheet: SheetKey, sheet_name:
     out
 }
 
+/// Ops that put back the notes of `s` at the cells `within` selects.
+fn restore_notes(s: &visigrid_engine::sheet::Sheet, sheet: SheetKey, within: impl Fn(usize, usize) -> bool) -> Vec<CollabOp> {
+    let mut notes: Vec<_> = s.comments().filter(|((r, c), _)| within(*r, *c)).collect();
+    notes.sort_by_key(|(pos, _)| *pos);
+    notes
+        .into_iter()
+        .map(|((row, col), n)| CollabOp::SetComment { sheet, row, col, comment: Some(n.clone()) })
+        .collect()
+}
+
 /// The inverse of a format op against `wb`: clear the touched properties
 /// over the rectangle, then put back each cell whose old value differs.
 fn invert_format(wb: &Workbook, sheet: SheetKey, rect: Rect, props: &FormatProps) -> Vec<CollabOp> {
@@ -420,6 +430,12 @@ pub fn apply_recording(
                     inv.push(CollabOp::SetValidation { sheet: *sheet, rules: crate::rules::validation_of(&scratch.sheets()[idx]) });
                 }
             }
+            CollabOp::SetComment { sheet, row, col, .. } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    let comment = scratch.sheets()[idx].comment(*row, *col).cloned();
+                    inv.push(CollabOp::SetComment { sheet: *sheet, row: *row, col: *col, comment });
+                }
+            }
             CollabOp::SetCell { sheet, sheet_name, row, col, .. } => {
                 if let Some(idx) = index_of(scratch, *sheet) {
                     inv.push(CollabOp::SetCell {
@@ -472,6 +488,11 @@ pub fn apply_recording(
                             crate::op::Axis::Col => s.occupied_cells_in_cols(*at, *count),
                         };
                         inv.extend(restore_cells(s, *sheet, &s.name, cells));
+                        let (lo, hi) = (*at, at + count);
+                        inv.extend(restore_notes(s, *sheet, |r, c| {
+                            let i = if *axis == crate::op::Axis::Row { r } else { c };
+                            i >= lo && i < hi
+                        }));
                     }
                 }
             }
@@ -548,6 +569,7 @@ pub fn apply_recording(
                     let mut cells = cells;
                     cells.sort_by_key(|(r, c, ..)| (*r, *c));
                     inv.extend(restore_cells(s, *sheet, &s.name, cells));
+                    inv.extend(restore_notes(s, *sheet, |_, _| true));
                 }
             }
         }
@@ -563,6 +585,12 @@ pub fn apply_recording(
                         col: *col,
                         content: content_at(&scratch.sheets()[idx], *row, *col),
                     });
+                }
+            }
+            CollabOp::SetComment { sheet, row, col, .. } => {
+                if let Some(idx) = index_of(scratch, *sheet) {
+                    let comment = scratch.sheets()[idx].comment(*row, *col).cloned();
+                    expect.push(CollabOp::SetComment { sheet: *sheet, row: *row, col: *col, comment });
                 }
             }
             CollabOp::ReplaceRange { sheet, row, col, values } => {
@@ -596,8 +624,16 @@ pub fn apply_recording(
 pub fn resolve(entry: &UndoEntry, wb: &Workbook) -> (Vec<CollabOp>, usize) {
     let mut foreign_cells: HashSet<(SheetKey, usize, usize)> = HashSet::new();
     let mut foreign_props: HashSet<(SheetKey, usize, usize, &'static str)> = HashSet::new();
+    let mut foreign_notes: HashSet<(SheetKey, usize, usize)> = HashSet::new();
     for e in &entry.expect {
         match e {
+            CollabOp::SetComment { sheet, row, col, comment } => {
+                if let Some(idx) = index_of(wb, *sheet) {
+                    if wb.sheets()[idx].comment(*row, *col) != comment.as_ref() {
+                        foreign_notes.insert((*sheet, *row, *col));
+                    }
+                }
+            }
             CollabOp::SetCell { sheet, row, col, content, .. } => {
                 if let Some(idx) = index_of(wb, *sheet) {
                     if wb.sheets()[idx].get_raw(*row, *col) != content.raw() {
@@ -630,6 +666,10 @@ pub fn resolve(entry: &UndoEntry, wb: &Workbook) -> (Vec<CollabOp>, usize) {
     for op in &entry.inverse {
         match op {
             CollabOp::SetCell { sheet, row, col, .. } if foreign_cells.contains(&(*sheet, *row, *col)) => {
+                kept.insert((*sheet, *row, *col));
+            }
+            // Someone else changed this note since: theirs stays.
+            CollabOp::SetComment { sheet, row, col, .. } if foreign_notes.contains(&(*sheet, *row, *col)) => {
                 kept.insert((*sheet, *row, *col));
             }
             CollabOp::SetFormat { sheet, rect, props }

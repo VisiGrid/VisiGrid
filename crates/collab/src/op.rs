@@ -445,7 +445,21 @@ pub enum CollabOp {
         sheet: SheetKey,
         rules: serde_json::Value,
     },
+    /// Set one cell's note (`{text, author}`, the engine's `CellComment`), or
+    /// remove it with `null`. Cell-addressed, so it moves exactly as a
+    /// `SetCell` at the same cell does: with row and column edits and with a
+    /// sort of its row. The later of two notes on one cell wins. A note is
+    /// not content: clearing or overwriting the cell keeps it.
+    SetComment {
+        sheet: SheetKey,
+        row: usize,
+        col: usize,
+        comment: Option<visigrid_engine::cell::CellComment>,
+    },
 }
+
+/// The longest note text, in characters (Excel's cell text limit).
+pub const MAX_COMMENT_CHARS: usize = 32_767;
 
 /// The most rows one `SortRange` may reorder: its `order` must fit in one
 /// operation on the wire (the server takes 256 KiB of JSON per op).
@@ -469,7 +483,8 @@ impl CollabOp {
             | CollabOp::ReplaceRange { sheet, .. }
             | CollabOp::SortRange { sheet, .. }
             | CollabOp::SetCondFormats { sheet, .. }
-            | CollabOp::SetValidation { sheet, .. } => *sheet,
+            | CollabOp::SetValidation { sheet, .. }
+            | CollabOp::SetComment { sheet, .. } => *sheet,
         }
     }
 
@@ -536,6 +551,15 @@ impl CollabOp {
             }
             CollabOp::SetCondFormats { store, .. } => crate::rules::parse_cond_formats(store).map(|_| ()),
             CollabOp::SetValidation { rules, .. } => crate::rules::parse_validation(rules).map(|_| ()),
+            CollabOp::SetComment { comment: Some(c), .. } => {
+                if c.text.trim().is_empty() {
+                    return Err("a note needs text (send null to remove it)".into());
+                }
+                if c.text.chars().count() > MAX_COMMENT_CHARS || c.author.chars().count() > 255 {
+                    return Err("note is too long".into());
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

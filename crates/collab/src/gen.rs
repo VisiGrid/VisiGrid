@@ -234,7 +234,14 @@ pub fn random_ops(rng: &mut StdRng, wb: &Workbook, sheet_key: u64) -> Vec<Collab
     let s = &sheets[idx];
     let (sheet, sheet_name) = (s.id.0, s.name.clone());
     let roll = rng.gen_range(0..100);
-    let op = if roll < 45 {
+    let op = if roll < 4 {
+        // A note added, changed or removed.
+        let comment = rng.gen_bool(0.7).then(|| visigrid_engine::cell::CellComment {
+            text: ["Check this", "Q3 estimate", "from the bank"][rng.gen_range(0..3)].to_string(),
+            author: ["ana", "ben"][rng.gen_range(0..2)].to_string(),
+        });
+        CollabOp::SetComment { sheet, row: rng.gen_range(0..HOT_ROWS), col: rng.gen_range(0..HOT_COLS), comment }
+    } else if roll < 45 {
         let row = rng.gen_range(0..HOT_ROWS);
         let content = match rng.gen_range(0..10) {
             0..=3 => CellContent::Value(value(rng)),
