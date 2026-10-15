@@ -164,6 +164,30 @@ pub fn transform(a: &CollabOp, b: &CollabOp, order: Order) -> Transformed {
         }
         (SetCell { .. }, _) => one(a),
 
+        // ---- a is a note: positioned exactly like a cell write ----
+        (SetComment { sheet, row, col, .. }, SetComment { sheet: bs, row: br, col: bc, .. }) => {
+            if sheet == bs && row == br && col == bc && !later {
+                Transformed::Dropped("a later note on the same cell won")
+            } else {
+                one(a)
+            }
+        }
+        (SetComment { sheet, row, col, comment }, Structural { sheet: bs, axis, at, count, delete, .. }) if sheet == bs => {
+            let (mut r, mut c) = (*row, *col);
+            let v = if *axis == Axis::Row { &mut r } else { &mut c };
+            match map_index(*v, *at, *count, *delete) {
+                Some(n) => *v = n,
+                None => return Transformed::Dropped("its row or column was deleted"),
+            }
+            one(&SetComment { sheet: *sheet, row: r, col: c, comment: comment.clone() })
+        }
+        (SetComment { sheet, .. }, DeleteSheet { sheet: bs, .. }) if sheet == bs => Transformed::Dropped("its sheet was deleted"),
+        (SetComment { sheet, row, col, comment }, SortRange { sheet: bs, rect, .. }) if sheet == bs && rect.contains(*row, *col) => {
+            let to = b.sorted_row(*row).expect("row inside the sort");
+            one(&SetComment { sheet: *sheet, row: to, col: *col, comment: comment.clone() })
+        }
+        (SetComment { .. }, _) => one(a),
+
         // ---- a is a format range ----
         (
             SetFormat { sheet, rect, props },

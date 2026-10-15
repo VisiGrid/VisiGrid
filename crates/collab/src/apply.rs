@@ -288,8 +288,8 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             // Transforms move concurrent edits as if the rows moved, so the
             // rows must move on every replica whatever the state: cells move
             // under a merge exactly, like any positional write.
-            // Where each source row goes, then every occupied cell (content
-            // and format) of the rectangle at its new row.
+            // Where each source row goes, then every occupied cell (content,
+            // format and note) of the rectangle at its new row.
             let to = op.sort_destinations().expect("sort op");
             let default = CellFormat::default();
             let mut moved = std::collections::BTreeMap::new();
@@ -304,15 +304,23 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
                 };
                 touched.insert((r, c));
                 touched.insert((dest, c));
-                moved.insert((dest, c), (content, s.get_format(r, c)));
+                moved.insert((dest, c), (content, s.get_format(r, c), s.comment(r, c).cloned()));
             }
             let id = s.id;
             wb.begin_batch();
             for (r, c) in touched {
-                let (content, fmt) = moved.remove(&(r, c)).unwrap_or((crate::op::CellContent::Clear, default.clone()));
+                let (content, fmt, note) = moved.remove(&(r, c)).unwrap_or((crate::op::CellContent::Clear, default.clone(), None));
                 write_content(wb, idx, r, c, &content);
                 if let Some(s) = wb.sheet_mut(idx) {
                     s.set_format(r, c, fmt);
+                    // A note goes with its row, as in Excel and Sheets.
+                    if s.comment(r, c).is_some() || note.is_some() {
+                        let gone = note.is_none();
+                        s.set_comment(r, c, note);
+                        if gone {
+                            s.remove_empty_metadata_cell(r, c);
+                        }
+                    }
                 }
                 wb.note_format_changed(CellId::new(id, r, c));
             }
@@ -344,6 +352,21 @@ pub fn apply_op_tracked(wb: &mut Workbook, op: &CollabOp, mut changes: Option<&m
             }
             if let Some(ch) = changes {
                 ch.full = true;
+            }
+            Ok(())
+        }
+        // A note lands on exactly this cell, like a write, and never touches
+        // what the cell holds.
+        CollabOp::SetComment { sheet, row, col, comment } => {
+            let idx = index_of(wb, *sheet)?;
+            if let Some(s) = wb.sheet_mut(idx) {
+                s.set_comment(*row, *col, comment.clone());
+                if comment.is_none() {
+                    s.remove_empty_metadata_cell(*row, *col);
+                }
+            }
+            if let Some(ch) = changes {
+                ch.cells.push((*sheet, *row, *col));
             }
             Ok(())
         }
@@ -563,6 +586,10 @@ pub struct SheetPrint {
     pub cond_formats: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub validation: String,
+    /// Notes as (row, col, text, author), sorted by position. Skipped when
+    /// the sheet has none, so older checksums stay as they were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<(usize, usize, String, String)>,
 }
 
 pub fn fingerprint(wb: &Workbook) -> Fingerprint {
@@ -604,6 +631,12 @@ pub fn fingerprint(wb: &Workbook) -> Fingerprint {
                     String::new()
                 } else {
                     crate::rules::validation_of(s).to_string()
+                },
+                comments: {
+                    let mut notes: Vec<(usize, usize, String, String)> =
+                        s.comments().map(|((r, c), n)| (r, c, n.text.clone(), n.author.clone())).collect();
+                    notes.sort_unstable();
+                    notes
                 },
             }
         })
@@ -673,6 +706,9 @@ pub fn first_difference(a: &Fingerprint, b: &Fingerprint) -> Option<String> {
                 "sheet ({}, {}) vs ({}, {})",
                 sa.id, sa.name, sb.id, sb.name
             ));
+        }
+        if sa.comments != sb.comments {
+            return Some(format!("sheet {}: notes {:?} vs {:?}", sa.name, sa.comments, sb.comments));
         }
         if sa.cond_formats != sb.cond_formats || sa.validation != sb.validation {
             return Some(format!(

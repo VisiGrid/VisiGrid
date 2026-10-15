@@ -104,6 +104,11 @@ pub fn sheet_ops(s: &Sheet, key: SheetKey, name: &str, index: usize) -> (Vec<Col
     if !s.validations.is_empty() || !s.validations.exclusions_is_empty() {
         ops.push(CollabOp::SetValidation { sheet: key, rules: crate::rules::validation_of(s) });
     }
+    let mut notes: Vec<_> = s.comments().collect();
+    notes.sort_by_key(|(pos, _)| *pos);
+    for ((row, col), n) in notes {
+        ops.push(CollabOp::SetComment { sheet: key, row, col, comment: Some(n.clone()) });
+    }
 
     let mut dropped = Vec::new();
     let mut note = |n: usize, one: &str, many: &str| {
@@ -111,7 +116,6 @@ pub fn sheet_ops(s: &Sheet, key: SheetKey, name: &str, index: usize) -> (Vec<Col
             dropped.push(format!("{}: {}", s.name, if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }));
         }
     };
-    note(s.comments().count(), "comment", "comments");
     note(s.tables().len(), "table (its cells are kept)", "tables (their cells are kept)");
     note(s.pivots.len(), "pivot table definition (its cells are kept)", "pivot table definitions (their cells are kept)");
     note(s.row_formats.len() + s.col_formats.len(), "whole-row or whole-column format (kept on cells with data)", "whole-row or whole-column formats (kept on cells with data)");

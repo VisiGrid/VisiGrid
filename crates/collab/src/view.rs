@@ -59,7 +59,9 @@ pub fn layout(wb: &Workbook, sheet: SheetKey) -> Option<Value> {
 /// is a parallel index into `formats` for what the rule makes the cell look
 /// like (`-1`: no rule changes it); cells a rule covers are listed even when
 /// empty. `invalid`, present only when there are any, lists the indices of
-/// cells whose value breaks their data validation. Formats are sent as drawn:
+/// cells whose value breaks their data validation. `notes`, present only when
+/// there are any, lists the indices of cells with a note (a note-only cell is
+/// listed, empty). Formats are sent as drawn:
 /// a semantic cell style (Error, Warning, …) arrives as its colours.
 pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<Value> {
     use visigrid_engine::cell::CellFormat;
@@ -105,6 +107,7 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     // Listed cells whose value breaks their data validation (indices into the arrays).
     let mut invalid: Vec<usize> = Vec::new();
+    let mut notes: Vec<usize> = Vec::new();
     for (r, c) in coords {
         let shown = s.get_formatted_display(r, c);
         let own = s.get_format(r, c);
@@ -118,7 +121,8 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
         } else {
             -1
         };
-        if shown.is_empty() && f < 0 && conditional < 0 {
+        let noted = s.comment(r, c).is_some();
+        if shown.is_empty() && f < 0 && conditional < 0 && !noted {
             continue;
         }
         let (k, n) = match s.get_computed_value(r, c) {
@@ -137,6 +141,9 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
         cf.push(conditional);
         if s.validations.get(r, c).is_some() && wb.validate_cell(idx, r, c).is_invalid() {
             invalid.push(rows.len() - 1);
+        }
+        if noted {
+            notes.push(rows.len() - 1);
         }
     }
     let mut row_formats = serde_json::Map::new();
@@ -168,7 +175,27 @@ pub fn viewport(wb: &Workbook, sheet: SheetKey, r0: usize, c0: usize, r1: usize,
     if !invalid.is_empty() {
         out["invalid"] = json!(invalid);
     }
+    if !notes.is_empty() {
+        out["notes"] = json!(notes);
+    }
     Some(out)
+}
+
+/// One cell's note, `{text, author}`, or `None` when it has none.
+pub fn comment_at(wb: &Workbook, sheet: SheetKey, row: usize, col: usize) -> Option<Value> {
+    let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
+    wb.sheets()[idx].comment(row, col).map(|n| json!({"text": n.text, "author": n.author}))
+}
+
+/// A sheet's notes in reading order (row, then column), for the notes panel
+/// and next/previous: `[{row, col, text, author}]`.
+pub fn comments(wb: &Workbook, sheet: SheetKey) -> Option<Value> {
+    let idx = wb.idx_for_sheet_id(SheetId(sheet))?;
+    let mut notes: Vec<_> = wb.sheets()[idx].comments().collect();
+    notes.sort_by_key(|(pos, _)| *pos);
+    Some(Value::Array(
+        notes.into_iter().map(|((row, col), n)| json!({"row": row, "col": col, "text": n.text, "author": n.author})).collect(),
+    ))
 }
 
 /// Rows and columns a first screen covers from A1: enough for a large

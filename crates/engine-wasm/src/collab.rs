@@ -535,6 +535,14 @@ impl CollabCore {
         visigrid_collab::rules::check_input(&self.client.wb, sheet, row, col, input)
     }
 
+    pub(crate) fn comment_at(&self, sheet: SheetKey, row: usize, col: usize) -> Option<Value> {
+        visigrid_collab::view::comment_at(&self.client.wb, sheet, row, col)
+    }
+
+    pub(crate) fn comments(&self, sheet: SheetKey) -> Option<Value> {
+        visigrid_collab::view::comments(&self.client.wb, sheet)
+    }
+
     pub(crate) fn checksum(&self) -> String {
         collab_checksum(&self.client.confirmed)
     }
@@ -944,6 +952,24 @@ impl CollabClient {
     /// `{valid: true}` or `{valid: false, reason, alert}`.
     pub fn check_input(&self, sheet: f64, row: usize, col: usize, input: &str) -> Result<JsValue, JsValue> {
         to_js(&self.core.check_input(sheet as SheetKey, row, col, input))
+    }
+
+    /// One cell's note, `{text, author}`, or `undefined` when it has none.
+    /// Change a note with a `SetComment` op through `local`.
+    pub fn comment_at(&self, sheet: f64, row: usize, col: usize) -> Result<JsValue, JsValue> {
+        match self.core.comment_at(sheet as SheetKey, row, col) {
+            Some(v) => to_js(&v),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// A sheet's notes in reading order, `[{row, col, text, author}]`, or
+    /// `undefined` for an unknown sheet key.
+    pub fn comments(&self, sheet: f64) -> Result<JsValue, JsValue> {
+        match self.core.comments(sheet as SheetKey) {
+            Some(v) => to_js(&v),
+            None => Ok(JsValue::UNDEFINED),
+        }
     }
 
     /// The optimistic document (visigrid-json v2 with `collab_sheet_ids`).
