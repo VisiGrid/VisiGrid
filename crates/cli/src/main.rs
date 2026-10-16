@@ -6066,12 +6066,10 @@ fn classify_value_type(raw: &str, value: &visigrid_engine::formula::eval::Value)
 ///   0 - Verified (fingerprint matches)
 ///   1 - Drifted or Unverified
 fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<(), CliError> {
-    use visigrid_io::native::{compute_semantic_fingerprint, load_semantic_verification, load_workbook};
+    use visigrid_io::native::{compute_semantic_fingerprint, load_cell_metadata, load_semantic_verification, load_workbook};
 
     let workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
-
-    let current = compute_semantic_fingerprint(&workbook);
 
     // Get expected fingerprint: from arg or from file metadata
     let (expected, label) = if let Some(fp) = fingerprint_arg {
@@ -6079,6 +6077,26 @@ fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<()
     } else {
         let verification = load_semantic_verification(&file).unwrap_or_default();
         (verification.fingerprint, verification.label)
+    };
+
+    // `sheet fingerprint` and `sheet apply` print the v1 build fingerprint, while
+    // stamps record the v2 semantic one. Compare against whichever the caller gave,
+    // so `verify --fingerprint "$(vgrid sheet fingerprint f.sheet)"` round-trips.
+    // Build fingerprints are compared parsed, so the legacy `len:hash` form and
+    // upper-case hex match the `v1:` string `sheet fingerprint` prints.
+    let expected_build = expected.as_deref()
+        .filter(|fp| !fp.starts_with("v2:"))
+        .and_then(replay::ReplayFingerprint::parse);
+    let (current, matches) = if let Some(expected_build) = &expected_build {
+        let metadata = load_cell_metadata(&file)
+            .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
+        let current = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
+        let matches = &current == expected_build;
+        (current.to_string(), matches)
+    } else {
+        let current = compute_semantic_fingerprint(&workbook);
+        let matches = expected.as_deref() == Some(current.as_str());
+        (current, matches)
     };
 
     match expected {
@@ -6090,7 +6108,7 @@ fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<()
             eprintln!("  Current: {}", current);
             Err(CliError { code: EXIT_ERROR, message: "unverified".to_string(), hint: None })
         }
-        Some(expected_fp) if expected_fp == current => {
+        Some(_) if matches => {
             // Verified
             println!("Status: Verified ✓");
             if let Some(lbl) = label {
