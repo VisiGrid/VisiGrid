@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>VisiGrid engine</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { height: 820px; }
+</style></head>
+<body><div class="card grain">
+  <div class="glow"></div>
+  <div class="copy">
+    <div class="logo">
+      <svg viewBox="0 0 512 512"><path d="M76,0 H228 V172 L172,228 H0 V76 A76,76 0 0 1 76,0 Z"/><path d="M284,0 H436 A76,76 0 0 1 512,76 V228 H340 L284,172 V0 Z"/><path d="M0,284 H172 L228,340 V512 H76 A76,76 0 0 1 0,436 V284 Z"/><path d="M340,284 H512 V436 A76,76 0 0 1 436,512 H284 V340 L340,284 Z"/></svg>
+      <span>VisiGrid</span>
+    </div>
+    <div class="label">CLI and headless</div>
+    <h2>One engine, three ways to run it.</h2>
+    <p>The desktop app, the <code>vgrid</code> CLI and headless mode share the same Rust formula engine. A formula computes the same in all three, with no spreadsheet app in the pipeline.</p>
+  </div>
+  <div class="term"><div class="bar"><i></i><i></i><i></i></div><pre><span class="p">$</span> <span class="hi">cat invoices.csv | vgrid calc "=SUM(D:D)" --from csv --headers</span>
+45900
+
+<span class="p">$</span> <span class="hi">vgrid peek invoices.csv --plain</span>
+       Invoice  Client         Issued     Amount Status
+<span class="c">--------------------------------------------------------</span>
+     2 INV-2041 Halcyon Films  2026-07-03 4850   Paid
+     3 INV-2042 Northbeam Co   2026-07-11 12400  Paid
+     4 INV-2043 Redwood Legal  2026-07-19 3200   Overdue
+     5 INV-2044 Atlas Fitness  2026-08-02 7900   Paid
+
+<span class="p">$</span> <span class="hi">vgrid convert invoices.csv --headers -t parquet -o q3.parquet</span></pre></div>
+</div></body></html>
