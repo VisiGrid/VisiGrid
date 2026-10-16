@@ -271,6 +271,14 @@ fn compatibility_notes(ir: &ImportResult) -> Vec<String> {
             counted(ir.google_formulas_restored, "formula", "formulas")
         ));
     }
+    if !ir.google_formulas_frozen.is_empty() {
+        notes.push(format!(
+            "{} from Google Sheets {} functions VisiGrid doesn't support yet. {} Google's last value, with a note naming the formula.",
+            counted(ir.google_formulas_frozen.len(), "formula", "formulas"),
+            if ir.google_formulas_frozen.len() == 1 { "uses" } else { "use" },
+            if ir.google_formulas_frozen.len() == 1 { "It keeps" } else { "They keep" }
+        ));
+    }
     if ir.formulas_failed > 0 {
         notes.push(format!(
             "{} could not be parsed.",

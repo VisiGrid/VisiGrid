@@ -6,9 +6,13 @@
 //! each other cell of an array result as
 //! `=IFERROR(__xludf.DUMMYFUNCTION("""COMPUTED_VALUE"""),<value>)`. Excel shows
 //! the frozen last value and never recalculates it. The original formula is
-//! intact inside the string, so import restores it: what the engine supports
-//! calculates again, and what it doesn't is counted as an unsupported function
-//! in the import report instead of hiding behind an old value.
+//! intact inside the string, so import restores it and what the engine
+//! supports calculates again. A formula using a function the engine lacks
+//! keeps Google's last value (and its array cells theirs) rather than showing
+//! an error, gets a note naming the formula, and is listed in the import
+//! report: never silently frozen, never a wall of errors.
+
+use std::collections::HashSet;
 
 const DUMMY: &str = "__xludf.DUMMYFUNCTION(";
 const COMPUTED_VALUE: &str = "\"COMPUTED_VALUE\"";
@@ -19,8 +23,8 @@ pub(crate) enum GoogleFormula {
     NotWrapped,
     /// The Sheets formula, with its leading `=`.
     Restored(String),
-    /// A cell an array result spilled into: it imports empty, so the restored
-    /// array formula can spill there again.
+    /// A cell an array result spilled into: it imports empty when its array
+    /// formula is live, so the array spills there again.
     SpillCell,
 }
 
@@ -90,6 +94,60 @@ fn closes_at_end(s: &str) -> bool {
         }
     }
     false
+}
+
+/// The array formula a placeholder belongs to, among `anchors` (every
+/// restored Google formula on the sheet). Google's array results are
+/// rectangles: go up the placeholder's column while the cells are
+/// placeholders, then left along that row; the formula is the cell above (the
+/// placeholder was in the formula's column) or to the left (the top row).
+pub(crate) fn spill_owner(
+    (row, col): (usize, usize),
+    placeholders: &HashSet<(usize, usize)>,
+    anchors: &HashSet<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    let mut r = row;
+    while r > 0 && placeholders.contains(&(r - 1, col)) {
+        r -= 1;
+    }
+    let left_is_placeholder = col > 0 && placeholders.contains(&(r, col - 1));
+    if r > 0 && !left_is_placeholder && anchors.contains(&(r - 1, col)) {
+        return Some((r - 1, col));
+    }
+    let mut c = col;
+    while c > 0 && placeholders.contains(&(r, c - 1)) {
+        c -= 1;
+    }
+    (c > 0 && anchors.contains(&(r, c - 1))).then(|| (r, c - 1))
+}
+
+/// Notes on the cells that kept Google's value, after the file's own comments
+/// are applied (an existing note keeps its text, with ours after it).
+pub(crate) fn note_frozen(
+    frozen: &[(usize, usize, usize, String)],
+    workbook: &mut visigrid_engine::workbook::Workbook,
+) {
+    use visigrid_engine::cell::CellComment;
+    for (sheet, row, col, formula) in frozen {
+        let Some(sheet) = workbook.sheet_mut(*sheet) else {
+            continue;
+        };
+        let note = format!(
+            "Google Sheets formula, not supported in VisiGrid yet: {formula}\nThis cell shows the value Google Sheets last calculated."
+        );
+        let text = match sheet.comment(*row, *col) {
+            Some(existing) if !existing.text.is_empty() => format!("{}\n\n{note}", existing.text),
+            _ => note,
+        };
+        sheet.set_comment(
+            *row,
+            *col,
+            Some(CellComment {
+                text,
+                author: "VisiGrid import".into(),
+            }),
+        );
+    }
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -163,6 +221,24 @@ mod tests {
             unwrap(r#"=IFERROR(__xludf.DUMMYFUNCTION("""COMPUTED_VALUE"""),"c")"#),
             GoogleFormula::SpillCell
         );
+    }
+
+    #[test]
+    fn placeholders_find_their_array_formula() {
+        // A 3x2 array at B2 (B2:C4) beside a 2x1 array at E2 (E2:E3).
+        let anchors: HashSet<_> = [(1, 1), (1, 4)].into();
+        let placeholders: HashSet<_> = [(1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (2, 4)].into();
+        for cell in [(1, 2), (2, 1), (2, 2), (3, 1), (3, 2)] {
+            assert_eq!(
+                spill_owner(cell, &placeholders, &anchors),
+                Some((1, 1)),
+                "{cell:?}"
+            );
+        }
+        assert_eq!(spill_owner((2, 4), &placeholders, &anchors), Some((1, 4)));
+        // A placeholder with no formula to find keeps its value.
+        let stray: HashSet<_> = [(7, 7)].into();
+        assert_eq!(spill_owner((7, 7), &stray, &anchors), None);
     }
 
     #[test]

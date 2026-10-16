@@ -75,6 +75,10 @@ pub struct ImportResult {
     /// Formulas a Google Sheets export had frozen as `__xludf.DUMMYFUNCTION`,
     /// restored to the Sheets formula (see xlsx_google).
     pub google_formulas_restored: usize,
+    /// Formulas from a Google Sheets export that use functions VisiGrid does
+    /// not support yet: the cell keeps Google's last value and gets a note.
+    /// `(sheet index, row, col, formula)`.
+    pub google_formulas_frozen: Vec<(usize, usize, usize, String)>,
     /// Total dates/times imported
     pub dates_imported: usize,
     /// Whether any truncation occurred
@@ -710,6 +714,12 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             }
         }
 
+        // Google Sheets array results: placeholder cells, and the restored
+        // formulas that will spill live (see xlsx_google).
+        let mut google_spill_cells = std::collections::HashSet::new();
+        let mut google_live_anchors = std::collections::HashSet::new();
+        let mut google_anchors = std::collections::HashSet::new();
+
         // Try to import formulas if available
         if !hit_cell_limit {
             {
@@ -748,17 +758,16 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                 format!("={}", formula)
                             };
                             // A Google Sheets export freezes Sheets-only formulas; restore them.
+                            let mut from_google = false;
                             let formula_str = match crate::xlsx_google::unwrap(&formula_str) {
                                 crate::xlsx_google::GoogleFormula::NotWrapped => formula_str,
                                 crate::xlsx_google::GoogleFormula::Restored(original) => {
-                                    result.google_formulas_restored += 1;
+                                    from_google = true;
                                     original
                                 }
                                 crate::xlsx_google::GoogleFormula::SpillCell => {
-                                    // The restored array formula spills here again.
-                                    if !options.values_only {
-                                        sheet.clear_cell(target_row, target_col);
-                                    }
+                                    // Emptied after the loop if its array formula is live.
+                                    google_spill_cells.insert((target_row, target_col));
                                     continue;
                                 }
                             };
@@ -768,6 +777,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                             let formula_str = crate::xlsx_functions::from_excel(&formula_str);
 
                             // Analyze formula for unknown functions
+                            let mut has_unknowns = false;
                             match parse_formula(&formula_str) {
                                 Ok(ast) => {
                                     // Count unknown functions in this formula
@@ -778,6 +788,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                     // If any new unknown functions were found, track the cell
                                     if new_count > prev_count {
                                         stats.formulas_with_unknowns += 1;
+                                        has_unknowns = true;
                                     }
                                 }
                                 Err(_) => {
@@ -792,6 +803,23 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                                         ));
                                     }
                                 }
+                            }
+
+                            if from_google && !options.values_only {
+                                google_anchors.insert((target_row, target_col));
+                                if has_unknowns {
+                                    // Keep Google's last value rather than an error; the
+                                    // cell gets a note and the report lists it.
+                                    result.google_formulas_frozen.push((
+                                        sheets.len(),
+                                        target_row,
+                                        target_col,
+                                        formula_str.clone(),
+                                    ));
+                                    continue;
+                                }
+                                result.google_formulas_restored += 1;
+                                google_live_anchors.insert((target_row, target_col));
                             }
 
                             if options.values_only {
@@ -829,6 +857,18 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             }
         }
 
+        // A placeholder empties when its array formula is live, so the array
+        // spills there again; otherwise it keeps Google's value.
+        if !options.values_only {
+            for &(row, col) in &google_spill_cells {
+                if crate::xlsx_google::spill_owner((row, col), &google_spill_cells, &google_anchors)
+                    .is_some_and(|owner| google_live_anchors.contains(&owner))
+                {
+                    sheet.clear_cell(row, col);
+                }
+            }
+        }
+
         // Update totals
         result.cells_imported += stats.cells_imported;
         result.formulas_imported += stats.formulas_imported;
@@ -860,6 +900,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     import_formatting(path, &sheet_names, &mut workbook, &mut result);
     result.warnings.extend(notes.warnings);
     result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
+    crate::xlsx_google::note_frozen(&result.google_formulas_frozen, &mut workbook);
 
     let mut table_views = Vec::new();
     if options.values_only {

@@ -37,11 +37,19 @@ fn google_export(path: &std::path::Path) {
             .set_result("TRUE"),
     )
     .unwrap();
+    // QUERY isn't supported yet: its result spilled down F1:F2.
     ws.write_formula(
         0,
         5,
         Formula::new(r#"=IFERROR(__xludf.DUMMYFUNCTION("QUERY(A1:B3,""select A"")"),"rent")"#)
             .set_result("rent"),
+    )
+    .unwrap();
+    ws.write_formula(
+        1,
+        5,
+        Formula::new(r#"=IFERROR(__xludf.DUMMYFUNCTION("""COMPUTED_VALUE"""),"food")"#)
+            .set_result("food"),
     )
     .unwrap();
     // An ordinary formula is untouched.
@@ -57,7 +65,7 @@ fn google_sheets_formulas_come_back_live() {
     google_export(&path);
 
     let (mut wb, report) = xlsx::import(&path).unwrap();
-    assert_eq!(report.google_formulas_restored, 3);
+    assert_eq!(report.google_formulas_restored, 2);
     let sheet = wb.active_sheet();
     assert_eq!(sheet.get_raw(0, 3), "=FILTER(A1:A3,B1:B3>100)");
     assert_eq!(sheet.get_display(0, 3), "rent");
@@ -70,9 +78,16 @@ fn google_sheets_formulas_come_back_live() {
     assert_eq!(sheet.get_display(0, 4), "TRUE");
     assert_eq!(sheet.get_display(0, 6), "1580");
 
-    // Not supported yet: kept as the Sheets formula and reported, never
-    // passed off as a value.
-    assert_eq!(sheet.get_raw(0, 5), r#"=QUERY(A1:B3,"select A")"#);
+    // Not supported yet: Google's last values stay (no wall of errors), the
+    // cell's note names the formula, and the report lists it.
+    assert_eq!(sheet.get_display(0, 5), "rent");
+    assert_eq!(sheet.get_display(1, 5), "food");
+    let note = &sheet.comment(0, 5).expect("a note on the frozen cell").text;
+    assert!(note.contains(r#"=QUERY(A1:B3,"select A")"#), "{note}");
+    assert_eq!(
+        report.google_formulas_frozen,
+        vec![(0, 0, 5, r#"=QUERY(A1:B3,"select A")"#.to_string())]
+    );
     assert!(
         report.unsupported_functions.contains_key("QUERY"),
         "{:?}",
