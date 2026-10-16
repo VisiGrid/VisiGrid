@@ -509,6 +509,10 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     let mut result = ImportResult::default();
     let modern_errors = crate::xlsx_rich_errors::read(path, &mut result.warnings);
     let mut sheets: Vec<Sheet> = Vec::new();
+    // Google placeholders emptied on a guess (see xlsx_google::spill_owners):
+    // `(sheet index, row, col, Google's value)`, put back after recalculation
+    // when no live array spilled there.
+    let mut google_unsure_cells: Vec<(usize, usize, usize, String)> = Vec::new();
     let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
 
     if sheet_names.is_empty() {
@@ -861,11 +865,16 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         // spills there again; otherwise it keeps Google's value.
         if !options.values_only {
             for &(row, col) in &google_spill_cells {
-                if crate::xlsx_google::spill_owner((row, col), &google_spill_cells, &google_anchors)
-                    .is_some_and(|owner| google_live_anchors.contains(&owner))
-                {
-                    sheet.clear_cell(row, col);
+                let owners = crate::xlsx_google::spill_owners((row, col), &google_spill_cells, &google_anchors);
+                let live = owners.iter().filter(|o| google_live_anchors.contains(o)).count();
+                if live == 0 {
+                    continue;
                 }
+                if live < owners.len() {
+                    // A live array and a frozen one both border it.
+                    google_unsure_cells.push((sheets.len(), row, col, sheet.get_raw(row, col).to_string()));
+                }
+                sheet.clear_cell(row, col);
             }
         }
 
@@ -1038,6 +1047,21 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         // overwriting a cell purely because it happened to be listed first.
         let mut recalc_report = workbook.recompute_full_ordered();
         if crate::xlsx_arrays::finish(array_caches, &mut workbook, &mut result.warnings)? {
+            workbook.rebuild_dep_graph();
+            recalc_report = workbook.recompute_full_ordered();
+        }
+        // A guessed placeholder no live array spilled into was the frozen
+        // array's: it gets Google's value back.
+        let mut restored_unsure = false;
+        for (sheet_idx, row, col, value) in std::mem::take(&mut google_unsure_cells) {
+            if let Some(sheet) = workbook.sheet_mut(sheet_idx) {
+                if !sheet.is_spill_receiver(row, col) && sheet.get_raw(row, col).is_empty() {
+                    sheet.set_value(row, col, &value);
+                    restored_unsure = true;
+                }
+            }
+        }
+        if restored_unsure {
             workbook.rebuild_dep_graph();
             recalc_report = workbook.recompute_full_ordered();
         }

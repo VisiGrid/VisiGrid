@@ -96,29 +96,36 @@ fn closes_at_end(s: &str) -> bool {
     false
 }
 
-/// The array formula a placeholder belongs to, among `anchors` (every
+/// The array formulas a placeholder may belong to, among `anchors` (every
 /// restored Google formula on the sheet). Google's array results are
 /// rectangles: go up the placeholder's column while the cells are
 /// placeholders, then left along that row; the formula is the cell above (the
 /// placeholder was in the formula's column) or to the left (the top row).
-pub(crate) fn spill_owner(
+/// The file does not say which array filled a cell, so when an array starts
+/// directly above it and another directly to its left (B1 and A2 both border
+/// B2), both are returned and the caller decides after recalculating.
+pub(crate) fn spill_owners(
     (row, col): (usize, usize),
     placeholders: &HashSet<(usize, usize)>,
     anchors: &HashSet<(usize, usize)>,
-) -> Option<(usize, usize)> {
+) -> Vec<(usize, usize)> {
     let mut r = row;
     while r > 0 && placeholders.contains(&(r - 1, col)) {
         r -= 1;
     }
+    let mut owners = Vec::new();
     let left_is_placeholder = col > 0 && placeholders.contains(&(r, col - 1));
     if r > 0 && !left_is_placeholder && anchors.contains(&(r - 1, col)) {
-        return Some((r - 1, col));
+        owners.push((r - 1, col));
     }
     let mut c = col;
     while c > 0 && placeholders.contains(&(r, c - 1)) {
         c -= 1;
     }
-    (c > 0 && anchors.contains(&(r, c - 1))).then(|| (r, c - 1))
+    if c > 0 && anchors.contains(&(r, c - 1)) {
+        owners.push((r, c - 1));
+    }
+    owners
 }
 
 /// Notes on the cells that kept Google's value, after the file's own comments
@@ -230,15 +237,19 @@ mod tests {
         let placeholders: HashSet<_> = [(1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (2, 4)].into();
         for cell in [(1, 2), (2, 1), (2, 2), (3, 1), (3, 2)] {
             assert_eq!(
-                spill_owner(cell, &placeholders, &anchors),
-                Some((1, 1)),
+                spill_owners(cell, &placeholders, &anchors),
+                vec![(1, 1)],
                 "{cell:?}"
             );
         }
-        assert_eq!(spill_owner((2, 4), &placeholders, &anchors), Some((1, 4)));
+        assert_eq!(spill_owners((2, 4), &placeholders, &anchors), vec![(1, 4)]);
         // A placeholder with no formula to find keeps its value.
         let stray: HashSet<_> = [(7, 7)].into();
-        assert_eq!(spill_owner((7, 7), &stray, &anchors), None);
+        assert!(spill_owners((7, 7), &stray, &anchors).is_empty());
+        // B2 under B1's array or beside A2's: the file can't say which.
+        let corner: HashSet<_> = [(0, 1), (1, 0)].into();
+        let b2: HashSet<_> = [(1, 1)].into();
+        assert_eq!(spill_owners((1, 1), &b2, &corner), vec![(0, 1), (1, 0)]);
     }
 
     #[test]
