@@ -36,10 +36,14 @@ const VALUE_FUNCTIONS: &[&str] = &[
     "EDATE", "EOMONTH", "ISOWEEKNUM", "YEARFRAC",
     // logical and information
     "NOT", "ISNUMBER", "ISTEXT", "ISBLANK", "ISERROR", "ISNA",
+    // Google Sheets: operator functions, conversions and tests
+    "ADD", "MINUS", "MULTIPLY", "DIVIDE", "EQ", "NE", "GT", "GTE", "LT", "LTE",
+    "UMINUS", "UPLUS", "UNARY_PERCENT", "TO_TEXT", "TO_DATE", "TO_PERCENT",
+    "TO_DOLLARS", "TO_PURE_NUMBER", "ISBETWEEN", "ISEMAIL", "ISURL", "EPOCHTODATE",
 ];
 
 /// Functions that answer for an error rather than returning it.
-const ERROR_AWARE: &[&str] = &["ISNUMBER", "ISTEXT", "ISBLANK", "ISERROR", "ISNA"];
+const ERROR_AWARE: &[&str] = &["ISNUMBER", "ISTEXT", "ISBLANK", "ISERROR", "ISNA", "ISEMAIL", "ISURL"];
 
 pub(super) enum Lifted {
     /// The function has been evaluated (per element, or to an argument's error).
@@ -88,7 +92,7 @@ pub(super) fn lift(
             _ => None,
         }) {
             return if error_aware {
-                // Only these five take one argument, which is the error.
+                // Each takes one argument, which is the error.
                 EvalResult::Boolean(match name {
                     "ISERROR" => true,
                     "ISNA" => e.starts_with("#N/A"),
