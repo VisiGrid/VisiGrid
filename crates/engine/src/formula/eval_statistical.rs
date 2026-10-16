@@ -349,16 +349,13 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     Err(e) => return Some(EvalResult::Error(excel_error(e))),
                 };
                 for value in got.values {
-                    let key = match value {
-                        Value::Error(e) => return Some(EvalResult::Error(e)),
-                        Value::Empty => continue,
-                        Value::Text(t) if t.is_empty() => continue,
-                        // -0 and 0 are one value.
-                        Value::Number(n) => format!("n{}", if n == 0.0 { 0.0 } else { n }),
-                        Value::Text(t) => format!("t{}", t.to_lowercase()),
-                        Value::Boolean(b) => format!("b{b}"),
-                    };
-                    seen.insert(key);
+                    match super::eval_helpers::unique_key(value) {
+                        Ok(Some(key)) => {
+                            seen.insert(key);
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Some(EvalResult::Error(e)),
+                    }
                 }
             }
             EvalResult::Number(seen.len() as f64)

@@ -1887,6 +1887,18 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "COUNTUNIQUEIFS",
+        signature: "COUNTUNIQUEIFS(range, criteria_range1, criteria1, ...)",
+        description: "Count the distinct values in range whose row meets every criterion, ignoring blanks.",
+        category: FunctionCategory::Statistical,
+        parameters: &[
+            ParameterInfo { name: "range", description: "The values to count.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range1", description: "A range the same size as range.", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria1", description: "What criteria_range1 must match, as in COUNTIFS: 5, \">5\", \"a*\".", optional: false, repeatable: false },
+            ParameterInfo { name: "criteria_range2", description: "More ranges and criteria, in pairs.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
         name: "SPLIT",
         signature: "SPLIT(text, delimiter, [split_by_each], [remove_empty_text])",
         description: "Split text into pieces across a row. The result spills.",

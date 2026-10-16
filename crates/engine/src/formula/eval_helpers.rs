@@ -534,6 +534,22 @@ impl Criterion {
     }
 }
 
+/// How COUNTUNIQUE and COUNTUNIQUEIFS tell values apart: text without case,
+/// as UNIQUE does; a number and the same digits as text differ, as do TRUE
+/// and 1. Blanks and empty text are not values (`None`); an error is the
+/// result (`Err`).
+pub(crate) fn unique_key(value: Value) -> Result<Option<String>, String> {
+    Ok(Some(match value {
+        Value::Error(e) => return Err(e),
+        Value::Empty => return Ok(None),
+        Value::Text(t) if t.is_empty() => return Ok(None),
+        // -0 and 0 are one value.
+        Value::Number(n) => format!("n{}", if n == 0.0 { 0.0 } else { n }),
+        Value::Text(t) => format!("t{}", t.to_lowercase()),
+        Value::Boolean(b) => format!("b{b}"),
+    }))
+}
+
 /// Helper to get text from a cell, handling cross-sheet references
 /// A cell's typed value, honouring a sheet reference.
 ///
