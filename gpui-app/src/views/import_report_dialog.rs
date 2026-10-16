@@ -265,6 +265,20 @@ fn compatibility_notes(ir: &ImportResult) -> Vec<String> {
     if ir.truncated {
         notes.push("Data was truncated to fit the supported sheet dimensions. The imported workbook is incomplete.".into());
     }
+    if ir.google_formulas_restored > 0 {
+        notes.push(format!(
+            "{} restored from Google Sheets' export, which saves them as frozen values.",
+            counted(ir.google_formulas_restored, "formula", "formulas")
+        ));
+    }
+    if !ir.google_formulas_frozen.is_empty() {
+        notes.push(format!(
+            "{} from Google Sheets {} functions VisiGrid doesn't support yet. {} Google's last value, with a note naming the formula.",
+            counted(ir.google_formulas_frozen.len(), "formula", "formulas"),
+            if ir.google_formulas_frozen.len() == 1 { "uses" } else { "use" },
+            if ir.google_formulas_frozen.len() == 1 { "It keeps" } else { "They keep" }
+        ));
+    }
     if ir.formulas_failed > 0 {
         notes.push(format!(
             "{} could not be parsed.",

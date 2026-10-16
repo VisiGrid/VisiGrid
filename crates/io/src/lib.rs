@@ -41,6 +41,7 @@ mod xlsx_arrays;
 mod xlsx_rich_errors;
 #[cfg(feature = "native")]
 mod xlsx_functions;
+mod xlsx_google;
 #[cfg(feature = "native")]
 mod xlsx_tables;
 #[cfg(feature = "native")]
