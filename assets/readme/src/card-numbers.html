@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>VisiGrid numbers</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { height: 820px; }
+  .card .glow { right: auto; left: -400px; top: -500px; }
+  .copy-top { position: absolute; left: 110px; top: 96px; }
+  .copy-top .label { margin-top: 56px; }
+  .copy-top h2 { margin-top: 22px; font-size: 80px; font-weight: 800; line-height: 1.04; letter-spacing: -0.03em; }
+  .stats { position: absolute; left: 110px; right: 110px; bottom: 100px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 60px; }
+  .stat b { display: block; font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 76px; color: var(--accent-bright); letter-spacing: -0.02em; }
+  .stat span { display: block; margin-top: 10px; font-size: 26px; line-height: 1.45; color: var(--muted); }
+</style></head>
+<body><div class="card grain">
+  <div class="glow"></div>
+  <div class="copy-top">
+    <div class="logo">
+      <svg viewBox="0 0 512 512"><path d="M76,0 H228 V172 L172,228 H0 V76 A76,76 0 0 1 76,0 Z"/><path d="M284,0 H436 A76,76 0 0 1 512,76 V228 H340 L284,172 V0 Z"/><path d="M0,284 H172 L228,340 V512 H76 A76,76 0 0 1 0,436 V284 Z"/><path d="M340,284 H512 V436 A76,76 0 0 1 436,512 H284 V340 L340,284 Z"/></svg>
+      <span>VisiGrid</span>
+    </div>
+    <div class="label">What it weighs</div>
+    <h2>Open, and ready, in about<br>the time it takes to blink.</h2>
+  </div>
+  <div class="stats">
+    <div class="stat"><b>~300ms</b><span>from launch to<br>first cell</span></div>
+    <div class="stat"><b>&lt;30 MB</b><span>download, native on<br>macOS, Windows, Linux</span></div>
+    <div class="stat"><b>181</b><span>built-in functions,<br>with autocomplete</span></div>
+    <div class="stat"><b>0</b><span>accounts or cloud<br>services required</span></div>
+  </div>
+</div></body></html>

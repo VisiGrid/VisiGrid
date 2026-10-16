@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>VisiGrid hero</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { height: 1080px; }
+  .stage { position: relative; width: 2000px; height: 1080px; overflow: hidden; }
+  .glow {
+    position: absolute; left: 50%; top: 470px; transform: translateX(-50%);
+    width: 1900px; height: 900px; border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(59,130,246,.85), rgba(37,99,235,.3) 55%, transparent);
+    filter: blur(40px);
+  }
+  .copy { position: absolute; top: 150px; width: 100%; text-align: center; }
+  h1 { font-size: 112px; font-weight: 800; line-height: 1.02; letter-spacing: -0.035em; }
+  h1 em { font-style: normal; color: var(--accent-bright); }
+  .sub { margin-top: 36px; font-size: 30px; color: var(--muted); }
+  .sub b { color: var(--text); font-weight: 600; }
+  .window { position: absolute; left: 50%; top: 580px; width: 1280px; transform: translateX(-50%); }
+  .fade { position: absolute; left: 0; right: 0; bottom: 0; height: 260px;
+          background: linear-gradient(transparent, var(--bg)); }
+</style></head>
+<body><div class="stage grain">
+  <div class="glow"></div>
+  <div class="copy">
+    <h1>The spreadsheet<br>built like a <em>code editor</em>.</h1>
+    <p class="sub">Native and keyboard-first. <b>~300ms</b> to first cell, <b>under 30 MB</b>. macOS, Windows and Linux.</p>
+  </div>
+  <div class="window"><img src="shot-hero.png" alt=""></div>
+  <div class="fade"></div>
+</div></body></html>

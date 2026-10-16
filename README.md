@@ -1,24 +1,29 @@
-# VisiGrid
+<div align="center">
 
-<img width="1897" height="1030" alt="VisiGrid editing a sales spreadsheet, with the formula autocomplete open" src="assets/screenshots/hero.png" />
+<img width="2000" height="1080" alt="The spreadsheet built like a code editor. VisiGrid open on an invoice sheet." src="assets/readme/hero.png" />
 
+[![Release](https://img.shields.io/github/v/release/VisiGrid/VisiGrid)](https://github.com/VisiGrid/VisiGrid/releases)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/VisiGrid/VisiGrid)](https://github.com/VisiGrid/VisiGrid/stargazers)
 
-**The spreadsheet built like a code editor.**
+**[Download](#download)** ·
+[Website](https://visigrid.app) ·
+[Docs](https://docs.visigrid.app) ·
+[Build from source](#build-from-source) ·
+[Report a bug](https://github.com/VisiGrid/VisiGrid/issues)
 
-Native, keyboard-first, and ~300ms from launch to first cell. An under-30 MB download in a category where the incumbent install is 50× bigger. For macOS, Windows, and Linux.
+</div>
 
-**One engine, three ways to run it.** The desktop app, the `vgrid` CLI, and headless mode share the same Rust formula engine, so a formula computes identically in all three. A sheet built by hand can be recalculated, diffed, and verified in CI with no spreadsheet application anywhere in the pipeline.
+VisiGrid is a native, keyboard-first spreadsheet for macOS, Windows and Linux.
+It opens in about 300ms, downloads at under 30 MB, and treats a spreadsheet the
+way a code editor treats code: every action is in a command palette, formulas
+are inspectable, and nothing hides behind ribbons and dialogs.
 
-**Deterministic by design.** Same inputs, same outputs, every time — and you can assert on it rather than trust it:
+Files stay on your disk. There are no accounts and no cloud. Built in Rust on
+[GPUI](https://gpui.rs), the GPU-accelerated UI framework behind
+[Zed](https://zed.dev). AGPLv3.
 
-```bash
-vgrid sheet fingerprint model.sheet --json
-# → {"fingerprint":"v1:42:abc123...","ops":42}
-
-vgrid sheet verify model.sheet --fingerprint v1:42:abc123...
-```
-
-181 built-in functions. Local-only files, no accounts, no cloud. Built in Rust, powered by [GPUI](https://gpui.rs) (the GPU-accelerated UI framework behind [Zed](https://zed.dev)). AGPLv3.
+<img width="2000" height="820" alt="About 300ms from launch to first cell, under 30 MB, 181 built-in functions, no accounts" src="assets/readme/card-numbers.png" />
 
 ## Why VisiGrid
 
@@ -27,6 +32,8 @@ Most spreadsheets feel heavy.
 They take seconds to open. They hide actions behind menus. They bury a formula — the thing a spreadsheet *is* — under ribbons and dialogs.
 
 VisiGrid treats a spreadsheet the way a code editor treats code:
+
+<img width="2000" height="820" alt="Command palette: every action is one keystroke away" src="assets/readme/card-palette.png" />
 
 - **Instant startup** (~300ms cold launch)
 - **Command palette** for every action — type what you want, no menu spelunking
@@ -164,12 +171,18 @@ sudo apt-get install libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## Formats
 
+<img width="2000" height="820" alt="Opens xlsx, xls, xlsb, ods, csv, tsv and json; saves xlsx, csv, tsv, json and .sheet" src="assets/readme/card-formats.png" />
+
 - Import: CSV, TSV, JSON, XLSX, XLS, XLSB, ODS
 - Export: XLSX (File → Export to Excel), CSV, TSV, JSON, .sheet
 - Interchange: `visigrid-json` — a stable, versioned JSON schema carrying values, formulas, formats, and merges (`vgrid convert model.xlsx -t json-full`); built for scripts and services that round-trip sheets through the engine
 - Cross-platform: macOS, Windows, Linux
 
 ## Advanced: Automation, CLI, and Reproducible Workflows
+
+<img width="2000" height="820" alt="One engine, three ways to run it: the vgrid CLI computing a sum, previewing a CSV and converting to Parquet" src="assets/readme/card-engine.png" />
+
+<img width="2000" height="820" alt="Deterministic by design: vgrid sheet verify checks a workbook's semantic fingerprint" src="assets/readme/card-verify.png" />
 
 Preview files in a read-only terminal grid with `vgrid peek data.parquet`.
 DuckDB databases, CSV/TSV, Excel/ODS, and native `.sheet`/`.vgrid` workbooks use the same viewer.
