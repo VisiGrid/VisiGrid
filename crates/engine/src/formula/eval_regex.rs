@@ -129,7 +129,7 @@ fn optional_int<L: CellLookup>(args: &[BoundExpr], i: usize, default: i64, looku
 ///
 /// A column of =REGEXTEST(A2,"...") evaluates the same pattern once per row,
 /// and compiling costs far more than matching a cell's worth of text.
-fn compiled(pattern: &str, insensitive: bool) -> Result<Regex, String> {
+pub(super) fn compiled(pattern: &str, insensitive: bool) -> Result<Regex, String> {
     const LIMIT: usize = 64;
     thread_local! {
         static CACHE: RefCell<HashMap<(String, bool), Regex>> = RefCell::new(HashMap::new());

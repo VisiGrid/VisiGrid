@@ -30,6 +30,7 @@ pub(crate) mod eval_trig;
 pub(crate) mod eval_array;
 mod eval_lambda;
 mod eval_sheets;
+mod eval_query;
 pub(crate) mod lift;
 
 pub(crate) mod eval_subtotal;

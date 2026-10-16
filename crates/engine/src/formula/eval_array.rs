@@ -601,7 +601,7 @@ fn include_flag(v: &Value) -> bool {
 
 /// A function argument as a grid of values: a range's cells, a computed array's
 /// elements, or a single value as a 1x1 grid.
-fn grid_values<L: CellLookup>(
+pub(super) fn grid_values<L: CellLookup>(
     arg: &BoundExpr,
     lookup: &L,
 ) -> Result<(usize, usize, Vec<Vec<Value>>), String> {

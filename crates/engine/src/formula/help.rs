@@ -2263,6 +2263,17 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "QUERY",
+        signature: "QUERY(data, query, [headers])",
+        description: "Runs a Google Visualization query over a range or array (Google Sheets): select, where, group by, pivot, order by, limit, offset and label. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "data", description: "The range or array to query. Name a range's columns by their letters (\"select B\"); an array's as Col1, Col2.", optional: false, repeatable: false },
+            ParameterInfo { name: "query", description: "The query, e.g. \"select A, sum(C) where B > 10 group by A order by sum(C) desc\".", optional: false, repeatable: false },
+            ParameterInfo { name: "headers", description: "How many header rows data has. Omitted: guessed from the first row.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
         name: "FLATTEN",
         signature: "FLATTEN(range1, [range2, ...])",
         description: "Every value of one or more ranges, row by row, as one column (Google Sheets). The result spills.",

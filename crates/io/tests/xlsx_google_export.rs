@@ -37,12 +37,14 @@ fn google_export(path: &std::path::Path) {
             .set_result("TRUE"),
     )
     .unwrap();
-    // QUERY isn't supported yet: its result spilled down F1:F2.
+    // QUERY's result spilled down F1:F2.
     ws.write_formula(
         0,
         5,
-        Formula::new(r#"=IFERROR(__xludf.DUMMYFUNCTION("QUERY(A1:B3,""select A"")"),"rent")"#)
-            .set_result("rent"),
+        Formula::new(
+            r#"=IFERROR(__xludf.DUMMYFUNCTION("QUERY(A1:B3,""select A where B > 100"")"),"rent")"#,
+        )
+        .set_result("rent"),
     )
     .unwrap();
     ws.write_formula(
@@ -50,6 +52,22 @@ fn google_export(path: &std::path::Path) {
         5,
         Formula::new(r#"=IFERROR(__xludf.DUMMYFUNCTION("""COMPUTED_VALUE"""),"food")"#)
             .set_result("food"),
+    )
+    .unwrap();
+    // GOOGLEFINANCE needs the network, which the engine doesn't use: its
+    // result spilled down H1:H2.
+    ws.write_formula(
+        0,
+        7,
+        Formula::new(r#"=IFERROR(__xludf.DUMMYFUNCTION("GOOGLEFINANCE(""GOOG"",""price"")"),172)"#)
+            .set_result("172"),
+    )
+    .unwrap();
+    ws.write_formula(
+        1,
+        7,
+        Formula::new(r#"=IFERROR(__xludf.DUMMYFUNCTION("""COMPUTED_VALUE"""),171)"#)
+            .set_result("171"),
     )
     .unwrap();
     // An ordinary formula is untouched.
@@ -65,7 +83,7 @@ fn google_sheets_formulas_come_back_live() {
     google_export(&path);
 
     let (mut wb, report) = xlsx::import(&path).unwrap();
-    assert_eq!(report.google_formulas_restored, 2);
+    assert_eq!(report.google_formulas_restored, 3);
     let sheet = wb.active_sheet();
     assert_eq!(sheet.get_raw(0, 3), "=FILTER(A1:A3,B1:B3>100)");
     assert_eq!(sheet.get_display(0, 3), "rent");
@@ -78,18 +96,27 @@ fn google_sheets_formulas_come_back_live() {
     assert_eq!(sheet.get_display(0, 4), "TRUE");
     assert_eq!(sheet.get_display(0, 6), "1580");
 
-    // Not supported yet: Google's last values stay (no wall of errors), the
-    // cell's note names the formula, and the report lists it.
+    // QUERY comes back live, its placeholder part of the spill.
+    assert_eq!(
+        sheet.get_raw(0, 5),
+        r#"=QUERY(A1:B3,"select A where B > 100")"#
+    );
     assert_eq!(sheet.get_display(0, 5), "rent");
     assert_eq!(sheet.get_display(1, 5), "food");
-    let note = &sheet.comment(0, 5).expect("a note on the frozen cell").text;
-    assert!(note.contains(r#"=QUERY(A1:B3,"select A")"#), "{note}");
+    assert!(sheet.is_spill_receiver(1, 5));
+
+    // Not supported: Google's last values stay (no wall of errors), the
+    // cell's note names the formula, and the report lists it.
+    assert_eq!(sheet.get_display(0, 7), "172");
+    assert_eq!(sheet.get_display(1, 7), "171");
+    let note = &sheet.comment(0, 7).expect("a note on the frozen cell").text;
+    assert!(note.contains(r#"=GOOGLEFINANCE("GOOG","price")"#), "{note}");
     assert_eq!(
         report.google_formulas_frozen,
-        vec![(0, 0, 5, r#"=QUERY(A1:B3,"select A")"#.to_string())]
+        vec![(0, 0, 7, r#"=GOOGLEFINANCE("GOOG","price")"#.to_string())]
     );
     assert!(
-        report.unsupported_functions.contains_key("QUERY"),
+        report.unsupported_functions.contains_key("GOOGLEFINANCE"),
         "{:?}",
         report.unsupported_functions
     );
@@ -98,6 +125,7 @@ fn google_sheets_formulas_come_back_live() {
     wb.set_cell_value_tracked(0, 2, 1, "500");
     let sheet = wb.active_sheet();
     assert_eq!(sheet.get_display(2, 3), "fun");
+    assert_eq!(sheet.get_display(2, 5), "fun");
     wb.set_cell_value_tracked(0, 0, 0, "mortgage");
     assert_eq!(wb.active_sheet().get_display(0, 3), "mortgage");
     assert_eq!(wb.active_sheet().get_display(0, 4), "FALSE");

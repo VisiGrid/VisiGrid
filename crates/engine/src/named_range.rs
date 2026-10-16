@@ -296,8 +296,8 @@ pub(crate) fn is_reserved_table_word(upper_name: &str) -> bool {
         // Other common
         "AGGREGATE", "SUBTOTAL", "GETPIVOTDATA",
 
-        // Google Sheets. The operator functions (ADD, EQ, MINUS...) and JOIN
-        // are ordinary words a Table may well be named, so they stay allowed.
+        // Google Sheets. The operator functions (ADD, EQ, MINUS...), JOIN and
+        // QUERY are ordinary words a Table may well be named, so they stay allowed.
         "SORTN", "FLATTEN", "ARRAY_CONSTRAIN", "ISBETWEEN", "ISEMAIL", "ISURL",
         "EPOCHTODATE", "TO_TEXT", "TO_DATE", "TO_PERCENT", "TO_DOLLARS", "TO_PURE_NUMBER",
         "UMINUS", "UPLUS", "UNARY_PERCENT",
@@ -547,6 +547,15 @@ impl NamedRangeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_word_sheets_functions_stay_allowed_as_table_names() {
+        // A workbook with a Table named "Query" or "Join" must still load.
+        for word in ["QUERY", "JOIN", "ADD", "EQ", "MINUS"] {
+            assert!(!is_reserved_table_word(word), "{word}");
+        }
+        assert!(is_reserved_table_word("SORTN"));
+    }
 
     #[test]
     fn test_valid_names() {
