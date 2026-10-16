@@ -15,6 +15,7 @@ use super::eval::{evaluate, CellLookup, EvalResult, Value};
 use super::eval_helpers::{date_to_serial, serial_to_date};
 use super::parser::{BoundExpr, Expr, RangeAxis};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 pub(super) fn evaluate_query<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> EvalResult {
     if args.len() < 2 || args.len() > 3 {
@@ -105,10 +106,13 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            out.push(Tok::Num(
-                s.parse()
-                    .map_err(|_| err(&format!("{s} is not a number")))?,
-            ));
+            let n: f64 = s
+                .parse()
+                .map_err(|_| err(&format!("{s} is not a number")))?;
+            if !n.is_finite() {
+                return Err(err(&format!("{s} is too large")));
+            }
+            out.push(Tok::Num(n));
         } else if c.is_alphanumeric() || c == '_' {
             let start = i;
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -516,12 +520,20 @@ impl Parser {
         {
             n.checked_sub(1)
         } else if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic()) {
-            let letters = name
-                .to_ascii_uppercase()
+            // Letters name a range's sheet columns. Data from INDIRECT, OFFSET,
+            // a Table or an array has none, so it takes Col1, Col2..., as in Sheets.
+            let Some(first_col) = self.first_col else {
+                return Err(err(&format!(
+                    "no column {name}: name this data's columns Col1, Col2..."
+                )));
+            };
+            name.to_ascii_uppercase()
                 .bytes()
-                .fold(0usize, |acc, b| acc * 26 + (b - b'A' + 1) as usize)
-                - 1;
-            letters.checked_sub(self.first_col.unwrap_or(0))
+                .try_fold(0usize, |acc, b| {
+                    acc.checked_mul(26)?.checked_add((b - b'A' + 1) as usize)
+                })
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| n.checked_sub(first_col))
         } else {
             None
         };
@@ -559,6 +571,9 @@ fn date_literal(kind: &str, s: &str) -> Result<f64, String> {
             *parts.get(1).unwrap_or(&0.0),
             *parts.get(2).unwrap_or(&0.0),
         );
+        if !(0.0..24.0).contains(&h) || !(0.0..60.0).contains(&m) || !(0.0..60.0).contains(&sec) {
+            return Err(bad());
+        }
         Ok((h * 3600.0 + m * 60.0 + sec) / 86400.0)
     };
     let date = |d: &str| -> Result<f64, String> {
@@ -567,8 +582,14 @@ fn date_literal(kind: &str, s: &str) -> Result<f64, String> {
             .map(|x| x.parse::<i32>().map_err(|_| bad()))
             .collect::<Result<_, _>>()?;
         match p.as_slice() {
-            [y, m, d] if (1..=12).contains(m) && (1..=31).contains(d) => {
-                Ok(date_to_serial(*y, *m, *d))
+            // A real calendar date: '2026-02-30' is an error, not March 2.
+            [y, m, d] if (0..=9999).contains(y) && (1..=12).contains(m) && (1..=31).contains(d) => {
+                let serial = date_to_serial(*y, *m, *d);
+                if serial_to_date(serial) == (*y, *m, *d) {
+                    Ok(serial)
+                } else {
+                    Err(bad())
+                }
             }
             _ => Err(bad()),
         }
@@ -713,30 +734,36 @@ fn run(
             for e in select.iter().chain(q.order_by.iter().map(|(e, _)| e)) {
                 check_grouped(e, &q.group_by, &q.pivot)?;
             }
-            // Groups, sorted by their group-by values.
-            let mut groups: Vec<(Vec<Value>, Vec<&Vec<Value>>)> = Vec::new();
-            for row in &rows {
+            // Groups, sorted by their group-by values. Members are indices into rows.
+            let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+            let mut index: HashMap<Vec<KeyPart>, usize> = HashMap::new();
+            for (i, row) in rows.iter().enumerate() {
                 let key = q
                     .group_by
                     .iter()
                     .map(|g| eval(g, &Ctx::Row(row)))
                     .collect::<Result<Vec<_>, _>>()?;
-                match groups.iter_mut().find(|(k, _)| same_key(k, &key)) {
-                    Some((_, members)) => members.push(row),
-                    None => groups.push((key, vec![row])),
-                }
+                let g = *index.entry(hash_key(&key)).or_insert_with(|| {
+                    groups.push((key, Vec::new()));
+                    groups.len() - 1
+                });
+                groups[g].1.push(i);
             }
             groups.sort_by(|a, b| compare_keys(&a.0, &b.0));
             if groups.is_empty() && q.group_by.is_empty() {
                 groups.push((Vec::new(), Vec::new()));
             }
+            let members =
+                |idx: &[usize]| -> Vec<&Vec<Value>> { idx.iter().map(|&i| rows[i]).collect() };
 
             if q.pivot.is_empty() {
+                super::eval_budget::array(groups.len() + 1, select.len())?;
                 let head = select.iter().map(header_for).collect();
                 let mut out = Vec::new();
                 let mut keys = Vec::new();
-                for (_, members) in &groups {
-                    let ctx = Ctx::Group(members);
+                for (_, idx) in &groups {
+                    let group = members(idx);
+                    let ctx = Ctx::Group(&group);
                     out.push(
                         select
                             .iter()
@@ -752,20 +779,53 @@ fn run(
                 }
                 (head, out, keys)
             } else {
-                // One column per pivot value (and aggregate), sorted by pivot value.
+                // One column per pivot value (and aggregate), sorted by pivot
+                // value. Each row's pivot value is found once.
                 let mut pivots: Vec<Vec<Value>> = Vec::new();
+                let mut pivot_index: HashMap<Vec<KeyPart>, usize> = HashMap::new();
+                let mut row_pivot = Vec::with_capacity(rows.len());
                 for row in &rows {
                     let key = q
                         .pivot
                         .iter()
                         .map(|p| eval(p, &Ctx::Row(row)))
                         .collect::<Result<Vec<_>, _>>()?;
-                    if !pivots.iter().any(|k| same_key(k, &key)) {
+                    let p = *pivot_index.entry(hash_key(&key)).or_insert_with(|| {
                         pivots.push(key);
-                    }
+                        pivots.len() - 1
+                    });
+                    row_pivot.push(p);
                 }
-                pivots.sort_by(|a, b| compare_keys(a, b));
+                let mut sorted: Vec<usize> = (0..pivots.len()).collect();
+                sorted.sort_by(|&a, &b| compare_keys(&pivots[a], &pivots[b]));
+                let mut column_of = vec![0; pivots.len()];
+                for (column, &p) in sorted.iter().enumerate() {
+                    column_of[p] = column;
+                }
+                for p in row_pivot.iter_mut() {
+                    *p = column_of[*p];
+                }
+                let pivots: Vec<Vec<Value>> = sorted
+                    .into_iter()
+                    .map(|p| std::mem::take(&mut pivots[p]))
+                    .collect();
+
                 let (plain, aggs): (Vec<&Q>, Vec<&Q>) = select.iter().partition(|e| !e.has_agg());
+                // A pivot is the one clause that can make more cells than it reads.
+                let out_cols = pivots
+                    .len()
+                    .checked_mul(aggs.len())
+                    .and_then(|n| n.checked_add(plain.len()))
+                    .unwrap_or(usize::MAX);
+                let out_cells = out_cols.saturating_mul(groups.len() + 1);
+                if out_cells > MAX_PIVOT_CELLS {
+                    return Err(format!(
+                        "#NUM! QUERY: this pivot would make {} rows by {out_cols} columns, more than {MAX_PIVOT_CELLS} cells",
+                        groups.len() + 1
+                    ));
+                }
+                super::eval_budget::array(groups.len() + 1, out_cols)?;
+
                 let mut head: Vec<String> = plain.iter().map(|e| header_for(e)).collect();
                 for p in &pivots {
                     let name = p.iter().map(display).collect::<Vec<_>>().join(", ");
@@ -779,29 +839,23 @@ fn run(
                 }
                 let mut out = Vec::new();
                 let mut keys = Vec::new();
-                for (_, members) in &groups {
+                for (_, idx) in &groups {
+                    let group = members(idx);
                     let mut row: Vec<Value> = plain
                         .iter()
-                        .map(|e| eval(e, &Ctx::Group(members)))
+                        .map(|e| eval(e, &Ctx::Group(&group)))
                         .collect::<Result<_, _>>()?;
-                    for p in &pivots {
-                        let mut cell_rows = Vec::new();
-                        for m in members {
-                            let key = q
-                                .pivot
-                                .iter()
-                                .map(|pe| eval(pe, &Ctx::Row(m)))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            if same_key(&key, p) {
-                                cell_rows.push(*m);
-                            }
-                        }
+                    let mut buckets: Vec<Vec<&Vec<Value>>> = vec![Vec::new(); pivots.len()];
+                    for &i in idx {
+                        buckets[row_pivot[i]].push(rows[i]);
+                    }
+                    for bucket in &buckets {
                         for a in &aggs {
                             // A pivot value with no rows in this group is empty, not 0.
-                            row.push(if cell_rows.is_empty() {
+                            row.push(if bucket.is_empty() {
                                 Value::Empty
                             } else {
-                                eval(a, &Ctx::Group(&cell_rows))?
+                                eval(a, &Ctx::Group(bucket))?
                             });
                         }
                     }
@@ -809,13 +863,14 @@ fn run(
                     keys.push(
                         q.order_by
                             .iter()
-                            .map(|(e, _)| eval(e, &Ctx::Group(members)))
+                            .map(|(e, _)| eval(e, &Ctx::Group(&group)))
                             .collect::<Result<Vec<_>, _>>()?,
                     );
                 }
                 (head, out, keys)
             }
         } else {
+            super::eval_budget::array(rows.len() + 1, select.len())?;
             let head = select.iter().map(header_for).collect();
             let mut out = Vec::new();
             let mut keys = Vec::new();
@@ -968,12 +1023,14 @@ fn eval(e: &Q, ctx: &Ctx) -> Result<Value, String> {
                     values.push(v);
                 }
             }
-            aggregate(*a, &values)
+            aggregate(*a, &values)?
         }
         Q::Fn(f, inner) => {
             let v = eval(inner, ctx)?;
             match (f, v) {
-                (Scalar::Year | Scalar::Month | Scalar::Day, Value::Number(n)) => {
+                (Scalar::Year | Scalar::Month | Scalar::Day, Value::Number(n))
+                    if (MIN_SERIAL..=MAX_SERIAL).contains(&n) =>
+                {
                     let (y, m, d) = serial_to_date(n);
                     Value::Number(match f {
                         Scalar::Year => y,
@@ -991,13 +1048,13 @@ fn eval(e: &Q, ctx: &Ctx) -> Result<Value, String> {
             _ => Value::Empty,
         },
         Q::Arith(op, a, b) => match (eval(a, ctx)?, eval(b, ctx)?) {
-            (Value::Number(x), Value::Number(y)) => match op {
-                '+' => Value::Number(x + y),
-                '-' => Value::Number(x - y),
-                '*' => Value::Number(x * y),
-                _ if y == 0.0 => Value::Empty,
-                _ => Value::Number(x / y),
-            },
+            // Division by zero and overflow are null, never inf or NaN.
+            (Value::Number(x), Value::Number(y)) => finite(match op {
+                '+' => x + y,
+                '-' => x - y,
+                '*' => x * y,
+                _ => x / y,
+            }),
             _ => Value::Empty,
         },
         Q::Cmp(op, a, b) => Value::Boolean(compare_op(*op, &eval(a, ctx)?, &eval(b, ctx)?)?),
@@ -1008,9 +1065,14 @@ fn eval(e: &Q, ctx: &Ctx) -> Result<Value, String> {
     })
 }
 
-fn aggregate(a: Agg, values: &[Value]) -> Value {
+/// The serials of 0000-01-01 and 9999-12-31: date literals and year(),
+/// month() and day() stay inside them.
+const MIN_SERIAL: f64 = -693_593.0;
+const MAX_SERIAL: f64 = 2_958_465.0;
+
+fn aggregate(a: Agg, values: &[Value]) -> Result<Value, String> {
     if a == Agg::Count {
-        return Value::Number(values.len() as f64);
+        return Ok(Value::Number(values.len() as f64));
     }
     if matches!(a, Agg::Min | Agg::Max) {
         // min and max work on text too.
@@ -1022,27 +1084,34 @@ fn aggregate(a: Agg, values: &[Value]) -> Value {
                 best
             }
         });
-        return pick.cloned().unwrap_or(Value::Empty);
+        return Ok(pick.cloned().unwrap_or(Value::Empty));
     }
-    let numbers: Vec<f64> = values
-        .iter()
-        .filter_map(|v| {
-            if let Value::Number(n) = v {
-                Some(*n)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // sum and avg take numbers only, as in Sheets (nulls are already gone).
+    let mut numbers = Vec::with_capacity(values.len());
+    for v in values {
+        match v {
+            Value::Number(n) => numbers.push(*n),
+            _ => return Err(err(&format!("{} works on numbers only", a.name()))),
+        }
+    }
     if numbers.is_empty() {
-        return Value::Empty;
+        return Ok(Value::Empty);
     }
     let sum: f64 = numbers.iter().sum();
-    Value::Number(if a == Agg::Sum {
+    Ok(finite(if a == Agg::Sum {
         sum
     } else {
         sum / numbers.len() as f64
-    })
+    }))
+}
+
+/// A number, or null when it isn't finite (an overflow or 0/0).
+fn finite(n: f64) -> Value {
+    if n.is_finite() {
+        Value::Number(n)
+    } else {
+        Value::Empty
+    }
 }
 
 fn truthy(v: &Value) -> bool {
@@ -1086,6 +1155,9 @@ fn compare_op(op: Cmp, a: &Value, b: &Value) -> Result<bool, String> {
                 Cmp::StartsWith => s.starts_with(&p),
                 Cmp::EndsWith => s.ends_with(&p),
                 Cmp::Matches => {
+                    // The pattern must be a regex on its own before it is anchored,
+                    // or one like `x)|(.*` could close the wrapper and match anything.
+                    super::eval_regex::compiled(&p, false)?;
                     super::eval_regex::compiled(&format!("^(?:{p})$"), false)?.is_match(&s)
                 }
                 _ => super::eval_regex::compiled(&like_pattern(&p), false)?.is_match(&s),
@@ -1111,7 +1183,9 @@ fn like_pattern(p: &str) -> String {
 /// Case-sensitive, as the language compares strings.
 fn compare_exact(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        // A total order, so sorting never panics: -0 equals 0, NaN sorts last.
+        (Value::Number(x), Value::Number(y)) if x == y => Ordering::Equal,
+        (Value::Number(x), Value::Number(y)) => x.total_cmp(y),
         (Value::Text(x), Value::Text(y)) => x.cmp(y),
         (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
         _ => Ordering::Equal,
@@ -1138,20 +1212,38 @@ fn compare(a: &Value, b: &Value) -> Ordering {
     })
 }
 
+/// The most cells a pivot may make.
+const MAX_PIVOT_CELLS: usize = 1_000_000;
+
+/// A value as a hashable group or pivot key: equal when the values are the
+/// same type and equal (-0 is 0). Typed data holds no errors, only nulls.
+#[derive(PartialEq, Eq, Hash)]
+enum KeyPart {
+    Null,
+    Number(u64),
+    Text(String),
+    Boolean(bool),
+}
+
+fn hash_key(values: &[Value]) -> Vec<KeyPart> {
+    values
+        .iter()
+        .map(|v| match v {
+            Value::Number(n) if *n == 0.0 => KeyPart::Number(0f64.to_bits()),
+            Value::Number(n) => KeyPart::Number(n.to_bits()),
+            Value::Text(t) => KeyPart::Text(t.clone()),
+            Value::Boolean(b) => KeyPart::Boolean(*b),
+            Value::Empty | Value::Error(_) => KeyPart::Null,
+        })
+        .collect()
+}
+
 fn compare_keys(a: &[Value], b: &[Value]) -> Ordering {
     a.iter()
         .zip(b)
         .map(|(x, y)| compare(x, y))
         .find(|o| *o != Ordering::Equal)
         .unwrap_or(Ordering::Equal)
-}
-
-fn same_key(a: &[Value], b: &[Value]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| {
-            std::mem::discriminant(x) == std::mem::discriminant(y)
-                && compare_exact(x, y) == Ordering::Equal
-        })
 }
 
 fn display(v: &Value) -> String {

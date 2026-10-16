@@ -324,3 +324,192 @@ fn empty_results_and_errors() {
         assert!(e.starts_with("#VALUE!"), "{bad}: {e}");
     }
 }
+
+// ---------------------------------------------------------------- hostile queries
+// Found in review by running hostile queries under catch_unwind with a timeout.
+
+/// 50 rows: A cycles 0, 1, 2; B counts 0..49.
+fn numbered() -> Vec<(String, String)> {
+    (0..50)
+        .flat_map(|i| {
+            [
+                (format!("A{}", i + 1), (i % 3).to_string()),
+                (format!("B{}", i + 1), i.to_string()),
+            ]
+        })
+        .collect()
+}
+
+fn owned(cells: &[(String, String)]) -> Vec<(&str, &str)> {
+    cells
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect()
+}
+
+#[test]
+fn huge_numbers_and_nan_never_reach_a_sort() {
+    let cells = numbered();
+    let cells = owned(&cells);
+    // A 400-digit number would be inf, and (A-1)*inf gives NaN keys.
+    let huge = format!("1{}", "0".repeat(400));
+    let e = error(
+        &cells,
+        &format!("=QUERY(A1:B50,\"select A, B order by (A - 1) * {huge} + B\")"),
+    );
+    assert!(e.starts_with("#VALUE!") && e.contains("too large"), "{e}");
+    // Division by zero is null, so these keys are all null: a stable order, no panic.
+    let out = spill(
+        &cells,
+        r#"=QUERY(A1:B50,"select B order by (A - 1) / 0, B desc")"#,
+        2,
+        1,
+    );
+    assert_eq!(out[0], ["49"]);
+    // Overflow is null too.
+    let big = &[("H1", "=10^200"), ("H2", "=10^200")];
+    assert_eq!(
+        spill(big, r#"=QUERY(H1:H2,"select H * H")"#, 2, 1),
+        rows(&[&[""], &[""]])
+    );
+    // -0 and 0 group together.
+    let zeros = &[("H1", "0"), ("H2", "=-0"), ("I1", "1"), ("I2", "2")];
+    assert_eq!(
+        spill(
+            zeros,
+            r#"=QUERY(H1:I2,"select H, sum(I) group by H")"#,
+            3,
+            2
+        ),
+        rows(&[&["", "sum"], &["0", "3"], &["", ""]])
+    );
+}
+
+/// `n` rows: A from `a(i)`, B from `b(i)`, C = 1.
+fn wide(n: usize, a: impl Fn(usize) -> String, b: impl Fn(usize) -> String) -> Workbook {
+    let mut wb = Workbook::new();
+    for i in 0..n {
+        wb.set_cell_value_tracked(0, i, 0, &a(i));
+        wb.set_cell_value_tracked(0, i, 1, &b(i));
+        wb.set_cell_value_tracked(0, i, 2, "1");
+    }
+    wb
+}
+
+#[test]
+fn a_pivot_over_many_values_stays_fast_or_hits_the_limit() {
+    // 20,000 distinct pivot values: one pass over the rows, not one per value.
+    let mut wb = wide(20_000, |_| "x".into(), |i| format!("p{i}"));
+    let started = std::time::Instant::now();
+    wb.set_cell_value_tracked(0, 0, 19, r#"=QUERY(A1:C20000,"select sum(C) pivot B",0)"#);
+    let _ = wb.active_sheet().get_computed_value(0, 19);
+    assert!(
+        started.elapsed().as_secs() < 20,
+        "took {:?}",
+        started.elapsed()
+    );
+
+    // 1,500 groups by 1,500 pivot values is 2.25M cells: refused, quickly.
+    let mut wb = wide(1_500, |i| format!("a{i}"), |i| format!("b{i}"));
+    let started = std::time::Instant::now();
+    wb.set_cell_value_tracked(
+        0,
+        0,
+        19,
+        r#"=QUERY(A1:C1500,"select A, sum(C) group by A pivot B",0)"#,
+    );
+    match wb.active_sheet().get_computed_value(0, 19) {
+        Value::Error(e) => assert!(e.starts_with("#NUM!") && e.contains("pivot"), "{e}"),
+        other => panic!("expected the pivot limit, got {other:?}"),
+    }
+    assert!(
+        started.elapsed().as_secs() < 20,
+        "took {:?}",
+        started.elapsed()
+    );
+
+    // 20,000 distinct groups: hashed, not a linear search per row.
+    let mut wb = wide(20_000, |i| format!("g{i}"), |_| "x".into());
+    let started = std::time::Instant::now();
+    wb.set_cell_value_tracked(
+        0,
+        0,
+        19,
+        r#"=QUERY(A1:C20000,"select A, count(C) group by A",0)"#,
+    );
+    assert_eq!(wb.active_sheet().get_display(1, 19), "g0");
+    assert!(
+        started.elapsed().as_secs() < 20,
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn long_words_and_out_of_range_dates_are_errors_not_panics() {
+    for bad in [
+        "select abcdefghijklmnopqrstuvwxyz",
+        "select A where D = date '9999999-01-01'",
+        "select A where D = date '2147483647-01-01'",
+        "select A where D = date '2026-02-30'",
+        "select A where D = timeofday '25:00:00'",
+    ] {
+        let e = error(SALES, &format!("=QUERY(A1:D6,\"{bad}\")"));
+        assert!(e.starts_with("#VALUE!"), "{bad}: {e}");
+    }
+    // year() of a serial beyond 9999 is null, not an overflow.
+    assert_eq!(
+        spill(
+            SALES,
+            r#"=QUERY(A1:D6,"select year(C * 10000000000) where A = 'Ann'")"#,
+            2,
+            1
+        ),
+        rows(&[&["year(C*10000000000)"], &[""]])
+    );
+    assert_eq!(
+        spill(
+            SALES,
+            r#"=QUERY(A1:D6,"select A where D = date '2026-02-28'")"#,
+            2,
+            1
+        ),
+        rows(&[&["Name"], &["Eve"]])
+    );
+}
+
+#[test]
+fn letters_name_columns_only_of_a_literal_range() {
+    // INDIRECT's data has no sheet letters: "C" must not mean its third column.
+    let e = error(SALES, r#"=QUERY(INDIRECT("B1:D6"),"select C")"#);
+    assert!(e.starts_with("#VALUE!") && e.contains("Col1"), "{e}");
+    assert_eq!(
+        spill(
+            SALES,
+            r#"=QUERY(INDIRECT("B1:D6"),"select Col2 where Col1 = 'North'")"#,
+            2,
+            1
+        ),
+        rows(&[&["Amount"], &["300"]])
+    );
+}
+
+#[test]
+fn matches_cannot_escape_its_anchors() {
+    let e = error(
+        SALES,
+        r#"=QUERY(A1:D6,"select A where A matches 'Q)|(.*'")"#,
+    );
+    assert!(e.starts_with("#VALUE!"), "{e}");
+}
+
+#[test]
+fn sum_and_avg_take_numbers_only() {
+    for agg in ["sum", "avg"] {
+        let e = error(SALES, &format!("=QUERY(A1:D6,\"select {agg}(A)\")"));
+        assert!(
+            e.starts_with("#VALUE!") && e.contains("numbers"),
+            "{agg}: {e}"
+        );
+    }
+}
