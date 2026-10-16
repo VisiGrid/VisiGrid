@@ -300,7 +300,7 @@ pub(crate) fn is_reserved_table_word(upper_name: &str) -> bool {
         // QUERY are ordinary words a Table may well be named, so they stay allowed.
         "SORTN", "FLATTEN", "ARRAY_CONSTRAIN", "ISBETWEEN", "ISEMAIL", "ISURL",
         "EPOCHTODATE", "TO_TEXT", "TO_DATE", "TO_PERCENT", "TO_DOLLARS", "TO_PURE_NUMBER",
-        "UMINUS", "UPLUS", "UNARY_PERCENT",
+        "UMINUS", "UPLUS", "UNARY_PERCENT", "COUNTUNIQUEIFS",
     ];
 
     FUNCTIONS.contains(&upper_name) || matches!(upper_name, "REF" | "DIV" | "DIV0" | "NA" | "NAME" | "NUM" | "NULL" | "ERROR")

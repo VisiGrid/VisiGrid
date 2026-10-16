@@ -788,6 +788,7 @@ mod check_formulas_tests {
             "=SORTN(A1:B3,2,0,2,FALSE)",
             "=JOIN(\",\",FLATTEN(A1:B2))&TO_TEXT(ADD(1,2))",
             "=QUERY(A1:B3,\"select A, sum(B) where B > 1 group by A\")",
+            "=COUNTUNIQUEIFS(A1:A3,B1:B3,\">1\")",
             "plain text",
             "42",
         ] {

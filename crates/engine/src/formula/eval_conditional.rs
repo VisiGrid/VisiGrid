@@ -1,9 +1,9 @@
 // Conditional aggregate functions: SUMIF, AVERAGEIF, COUNTIF, COUNTBLANK,
-// SUMIFS, AVERAGEIFS, COUNTIFS, MINIFS, MAXIFS
+// SUMIFS, AVERAGEIFS, COUNTIFS, MINIFS, MAXIFS, COUNTUNIQUEIFS
 
 use crate::sheet::SheetRef;
 use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution, Value};
-use super::eval_helpers::{get_typed_for_sheet, Criterion};
+use super::eval_helpers::{get_typed_for_sheet, unique_key, Criterion};
 use super::parser::{BoundExpr, Expr};
 
 /// Extracted range with sheet context.
@@ -490,6 +490,54 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
             }
             EvalResult::Number(best.unwrap_or(0.0))
+        }
+        "COUNTUNIQUEIFS" => {
+            // COUNTUNIQUEIFS(range, criteria_range1, criteria1, ...): Google
+            // Sheets' count of distinct values in range whose row meets every
+            // criterion, with SUMIFS's criteria syntax and COUNTUNIQUE's idea
+            // of distinct. Blanks are not values; an error in a matched cell is
+            // the result. Mismatched sizes are #VALUE!.
+            if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+                return Some(EvalResult::Error("COUNTUNIQUEIFS requires a range and pairs of criteria_range and criteria".to_string()));
+            }
+            let target = match extract_range(&args[0], lookup, "COUNTUNIQUEIFS range") {
+                Ok(r) => r,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let (num_rows, num_cols) = (target.num_rows(), target.num_cols());
+            let mut criteria = Vec::with_capacity((args.len() - 1) / 2);
+            for pair in args[1..].chunks(2) {
+                let range = match extract_range(&pair[0], lookup, "COUNTUNIQUEIFS criteria_range") {
+                    Ok(r) => r,
+                    Err(e) => return Some(EvalResult::Error(e)),
+                };
+                if range.num_rows() != num_rows || range.num_cols() != num_cols {
+                    return Some(EvalResult::Error("#VALUE!".to_string()));
+                }
+                criteria.push((range, Criterion::parse(&evaluate(&pair[1], lookup))));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for row_offset in 0..num_rows {
+                for col_offset in 0..num_cols {
+                    let matched = criteria.iter().all(|(range, criterion)| {
+                        criterion.matches(&range_get_typed(lookup, &range.sheet, range.min_row() + row_offset, range.min_col() + col_offset))
+                    });
+                    if !matched {
+                        continue;
+                    }
+                    let value = range_get_typed(
+                        lookup, &target.sheet, target.min_row() + row_offset, target.min_col() + col_offset,
+                    );
+                    match unique_key(value) {
+                        Ok(Some(key)) => {
+                            seen.insert(key);
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Some(EvalResult::Error(e)),
+                    }
+                }
+            }
+            EvalResult::Number(seen.len() as f64)
         }
         _ => return None,
     };
