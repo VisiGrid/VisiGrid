@@ -2026,6 +2026,272 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         parameters: &[
             ParameterInfo { name: "array_formula", description: "A formula, range or array.", optional: false, repeatable: false },
         ],
+    },    FunctionInfo {
+        name: "ADD",
+        signature: "ADD(value1, value2)",
+        description: "Add two numbers: the + operator as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "MINUS",
+        signature: "MINUS(value1, value2)",
+        description: "Subtract one number from another: the - operator as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "MULTIPLY",
+        signature: "MULTIPLY(value1, value2)",
+        description: "Multiply two numbers: the * operator as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "DIVIDE",
+        signature: "DIVIDE(value1, value2)",
+        description: "Divide one number by another: the / operator as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "EQ",
+        signature: "EQ(value1, value2)",
+        description: "TRUE if two values are equal: the = operator as a function (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "NE",
+        signature: "NE(value1, value2)",
+        description: "TRUE if two values differ: the <> operator as a function (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "GT",
+        signature: "GT(value1, value2)",
+        description: "TRUE if the first value is greater: the > operator as a function (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "GTE",
+        signature: "GTE(value1, value2)",
+        description: "TRUE if the first value is greater or equal: the >= operator as a function (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "LT",
+        signature: "LT(value1, value2)",
+        description: "TRUE if the first value is less: the < operator as a function (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "LTE",
+        signature: "LTE(value1, value2)",
+        description: "TRUE if the first value is less or equal: the <= operator as a function (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value1", description: "The first value.", optional: false, repeatable: false },
+            ParameterInfo { name: "value2", description: "The second value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "UMINUS",
+        signature: "UMINUS(value)",
+        description: "A number with its sign reversed: -value as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The number.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "UPLUS",
+        signature: "UPLUS(value)",
+        description: "The value unchanged: +value as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value", description: "Any value.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "UNARY_PERCENT",
+        signature: "UNARY_PERCENT(percentage)",
+        description: "A number divided by 100: value% as a function (Google Sheets).",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "percentage", description: "The number to read as a percentage.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TO_TEXT",
+        signature: "TO_TEXT(value)",
+        description: "A value as text. Numbers read as they would in General format (Google Sheets).",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The value to convert.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TO_DATE",
+        signature: "TO_DATE(value)",
+        description: "Mark a number as a date (Google Sheets). The value is unchanged; anything that isn't a number comes back as it is.",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The number.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TO_PERCENT",
+        signature: "TO_PERCENT(value)",
+        description: "Mark a number as a percentage (Google Sheets). The value is unchanged; anything that isn't a number comes back as it is.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The number.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TO_DOLLARS",
+        signature: "TO_DOLLARS(value)",
+        description: "Mark a number as a dollar amount (Google Sheets). The value is unchanged; anything that isn't a number comes back as it is.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The number.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "TO_PURE_NUMBER",
+        signature: "TO_PURE_NUMBER(value)",
+        description: "A number without its date, percent or currency meaning (Google Sheets). Anything that isn't a number comes back as it is.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The number.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "ISBETWEEN",
+        signature: "ISBETWEEN(value, lower, upper, [lower_inclusive], [upper_inclusive])",
+        description: "TRUE if a value lies between two others (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The value to test.", optional: false, repeatable: false },
+            ParameterInfo { name: "lower", description: "The lower bound.", optional: false, repeatable: false },
+            ParameterInfo { name: "upper", description: "The upper bound.", optional: false, repeatable: false },
+            ParameterInfo { name: "lower_inclusive", description: "TRUE or omitted includes the lower bound itself; FALSE excludes it.", optional: true, repeatable: false },
+            ParameterInfo { name: "upper_inclusive", description: "TRUE or omitted includes the upper bound itself; FALSE excludes it.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "ISEMAIL",
+        signature: "ISEMAIL(value)",
+        description: "TRUE if a value is text shaped like an email address (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The value to test.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "ISURL",
+        signature: "ISURL(value)",
+        description: "TRUE if a value is text shaped like a web address (Google Sheets).",
+        category: FunctionCategory::Logical,
+        parameters: &[
+            ParameterInfo { name: "value", description: "The value to test.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "EPOCHTODATE",
+        signature: "EPOCHTODATE(timestamp, [unit])",
+        description: "A Unix timestamp as a UTC date and time (Google Sheets).",
+        category: FunctionCategory::DateTime,
+        parameters: &[
+            ParameterInfo { name: "timestamp", description: "Time since 1970-01-01 00:00 UTC.", optional: false, repeatable: false },
+            ParameterInfo { name: "unit", description: "1 or omitted for seconds, 2 for milliseconds, 3 for microseconds.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "JOIN",
+        signature: "JOIN(delimiter, value_or_array1, [value_or_array2, ...])",
+        description: "Join values with a delimiter, blanks included (Google Sheets). Each array must be one row or column.",
+        category: FunctionCategory::Text,
+        parameters: &[
+            ParameterInfo { name: "delimiter", description: "The text between values.", optional: false, repeatable: false },
+            ParameterInfo { name: "value_or_array", description: "A value, or a single row or column of values.", optional: false, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "SORTN",
+        signature: "SORTN(range, [n], [display_ties_mode], [sort_column, is_ascending, ...])",
+        description: "The first n rows of a range after sorting (Google Sheets). The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "range", description: "The rows to sort.", optional: false, repeatable: false },
+            ParameterInfo { name: "n", description: "How many rows. Default 1.", optional: true, repeatable: false },
+            ParameterInfo { name: "display_ties_mode", description: "0 or omitted: exactly n rows. 1: also rows tied with the nth. 2: drop duplicates first. 3: the first n distinct rows with all their duplicates.", optional: true, repeatable: false },
+            ParameterInfo { name: "sort_column", description: "A column number in range, or a column as tall as range. Default: every column, left to right.", optional: true, repeatable: true },
+            ParameterInfo { name: "is_ascending", description: "TRUE or omitted sorts ascending; FALSE descending.", optional: true, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "QUERY",
+        signature: "QUERY(data, query, [headers])",
+        description: "Runs a Google Visualization query over a range or array (Google Sheets): select, where, group by, pivot, order by, limit, offset and label. The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "data", description: "The range or array to query. Name a range's columns by their letters (\"select B\"); an array's as Col1, Col2.", optional: false, repeatable: false },
+            ParameterInfo { name: "query", description: "The query, e.g. \"select A, sum(C) where B > 10 group by A order by sum(C) desc\".", optional: false, repeatable: false },
+            ParameterInfo { name: "headers", description: "How many header rows data has. Omitted: guessed from the first row.", optional: true, repeatable: false },
+        ],
+    },
+    FunctionInfo {
+        name: "FLATTEN",
+        signature: "FLATTEN(range1, [range2, ...])",
+        description: "Every value of one or more ranges, row by row, as one column (Google Sheets). The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "range", description: "A range, array or value.", optional: false, repeatable: true },
+        ],
+    },
+    FunctionInfo {
+        name: "ARRAY_CONSTRAIN",
+        signature: "ARRAY_CONSTRAIN(input_range, num_rows, num_cols)",
+        description: "The top-left part of an array, at most num_rows by num_cols (Google Sheets). The result spills.",
+        category: FunctionCategory::Array,
+        parameters: &[
+            ParameterInfo { name: "input_range", description: "The range or array.", optional: false, repeatable: false },
+            ParameterInfo { name: "num_rows", description: "How many rows to keep.", optional: false, repeatable: false },
+            ParameterInfo { name: "num_cols", description: "How many columns to keep.", optional: false, repeatable: false },
+        ],
     },
 ];
 

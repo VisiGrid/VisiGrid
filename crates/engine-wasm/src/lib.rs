@@ -785,6 +785,9 @@ mod check_formulas_tests {
             "=SUM({1,2;3,4})",
             "=TEXTSPLIT(A1,\",\")",
             "=BYROW(A1:A3,LAMBDA(r,SUM(r)))+MAP(A1:A3,LAMBDA(x,x*2))",
+            "=SORTN(A1:B3,2,0,2,FALSE)",
+            "=JOIN(\",\",FLATTEN(A1:B2))&TO_TEXT(ADD(1,2))",
+            "=QUERY(A1:B3,\"select A, sum(B) where B > 1 group by A\")",
             "plain text",
             "42",
         ] {

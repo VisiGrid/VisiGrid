@@ -23,7 +23,7 @@ Files stay on your disk. There are no accounts and no cloud. Built in Rust on
 [GPUI](https://gpui.rs), the GPU-accelerated UI framework behind
 [Zed](https://zed.dev). AGPLv3.
 
-<img width="2000" height="820" alt="About 300ms from launch to first cell, under 30 MB, 181 built-in functions, no accounts" src="assets/readme/card-numbers.png" />
+<img width="2000" height="820" alt="About 300ms from launch to first cell, under 30 MB, 208 built-in functions, no accounts" src="assets/readme/card-numbers.png" />
 
 ## Why VisiGrid
 
@@ -60,7 +60,7 @@ VisiGrid was influenced by keyboard-first environments such as [Omarchy](https:/
 - Conditional formatting as typed rules with live grid preview and match counts
 - Multi-select editing across non-adjacent cells
 - Format Painter (single-shot and locked mode)
-- 181 formula functions with autocomplete
+- 208 formula functions with autocomplete
 - Instant startup and smooth scrolling
 - 5 built-in themes including System (follows OS dark/light)
 

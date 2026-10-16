@@ -538,6 +538,24 @@ mod tests {
         assert_eq!(super::from_excel("=_xlfn.MAP(A1:A3,_xlfn.LAMBDA(_xlpm.v,_xlpm.v*2))"), "=MAP(A1:A3,LAMBDA(v,v*2))");
     }
 
+    /// The second batch of Google Sheets functions has no Excel equivalent,
+    /// so none takes a prefix: Excel shows #NAME? for them, as it does for a
+    /// Sheets export, and they import unchanged.
+    #[test]
+    fn sheets_only_functions_take_no_prefix() {
+        use super::prefix_future_functions as p;
+        for name in [
+            "SORTN", "FLATTEN", "ARRAY_CONSTRAIN", "JOIN", "ISBETWEEN", "ISEMAIL", "ISURL",
+            "EPOCHTODATE", "TO_TEXT", "TO_DATE", "TO_PERCENT", "TO_DOLLARS", "TO_PURE_NUMBER",
+            "ADD", "MINUS", "MULTIPLY", "DIVIDE", "EQ", "NE", "GT", "GTE", "LT", "LTE",
+            "UMINUS", "UPLUS", "UNARY_PERCENT", "QUERY",
+        ] {
+            let formula = format!("={name}(A1)");
+            assert_eq!(p(&x(&formula)), formula, "{name}");
+            assert_eq!(super::from_excel(&formula), formula, "{name}");
+        }
+    }
+
     #[test]
     fn formulas_without_names_are_unchanged() {
         for f in ["=A1+B1", "=SUM(A1:A3)", "='My Sheet'!A1*2", "=Sales[[#This Row],[Amount]]*2", "=IF(A1,\"a,b\",{1,2})", "=SUM(A1"] {

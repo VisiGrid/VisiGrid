@@ -910,7 +910,7 @@ fn broadcast(op: Op, left: &EvalResult, right: &EvalResult) -> EvalResult {
 }
 
 /// One operator applied to two scalar values.
-fn scalar_binary(op: Op, left_result: EvalResult, right_result: EvalResult) -> EvalResult {
+pub(super) fn scalar_binary(op: Op, left_result: EvalResult, right_result: EvalResult) -> EvalResult {
     // Check for errors first
     if let EvalResult::Error(e) = &left_result {
         return EvalResult::Error(e.clone());
@@ -1139,6 +1139,7 @@ fn evaluate_function<L: CellLookup>(name: &str, args: &[BoundExpr], lookup: &L) 
         .or_else(|| super::eval_statistical::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_array::try_evaluate(name, args, lookup))
         .or_else(|| super::eval_lambda::try_evaluate(name, args, lookup))
+        .or_else(|| super::eval_sheets::try_evaluate(name, args, lookup))
         .or_else(|| {
             let eval_args = eval_function_args(args, lookup);
             lookup.try_custom_function(name, &eval_args)
