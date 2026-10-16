@@ -72,6 +72,9 @@ pub struct ImportResult {
     pub formulas_failed: usize,
     /// Total formulas with unknown functions
     pub formulas_with_unknowns: usize,
+    /// Formulas a Google Sheets export had frozen as `__xludf.DUMMYFUNCTION`,
+    /// restored to the Sheets formula (see xlsx_google).
+    pub google_formulas_restored: usize,
     /// Total dates/times imported
     pub dates_imported: usize,
     /// Whether any truncation occurred
@@ -744,6 +747,21 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                             } else {
                                 format!("={}", formula)
                             };
+                            // A Google Sheets export freezes Sheets-only formulas; restore them.
+                            let formula_str = match crate::xlsx_google::unwrap(&formula_str) {
+                                crate::xlsx_google::GoogleFormula::NotWrapped => formula_str,
+                                crate::xlsx_google::GoogleFormula::Restored(original) => {
+                                    result.google_formulas_restored += 1;
+                                    original
+                                }
+                                crate::xlsx_google::GoogleFormula::SpillCell => {
+                                    // The restored array formula spills here again.
+                                    if !options.values_only {
+                                        sheet.clear_cell(target_row, target_col);
+                                    }
+                                    continue;
+                                }
+                            };
                             // Strip ODS OpenFormula namespace prefix (e.g. "=of:SUM()" → "=SUM()")
                             let formula_str = strip_ods_prefix(&formula_str);
                             // Excel's _xlfn./_xlws./_xlpm. prefixes are file syntax (#89).
@@ -860,11 +878,20 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
                 // Only backfill if the cell is currently empty (calamine didn't import it)
                 if sheet.get_raw(*row, *col).is_empty() {
-                    let formula_str = crate::xlsx_functions::from_excel(&if formula_text.starts_with('=') {
+                    let formula_str = if formula_text.starts_with('=') {
                         formula_text.clone()
                     } else {
                         format!("={}", formula_text)
-                    });
+                    };
+                    let formula_str = match crate::xlsx_google::unwrap(&formula_str) {
+                        crate::xlsx_google::GoogleFormula::NotWrapped => formula_str,
+                        crate::xlsx_google::GoogleFormula::Restored(original) => {
+                            result.google_formulas_restored += 1;
+                            original
+                        }
+                        crate::xlsx_google::GoogleFormula::SpillCell => continue,
+                    };
+                    let formula_str = crate::xlsx_functions::from_excel(&formula_str);
                     eprintln!("[XLSX backfill] {}{}: ={}",
                         col_to_letter(*col), *row + 1, formula_text);
                     sheet.set_value_deferred(*row, *col, &formula_str);

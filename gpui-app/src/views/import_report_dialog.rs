@@ -265,6 +265,12 @@ fn compatibility_notes(ir: &ImportResult) -> Vec<String> {
     if ir.truncated {
         notes.push("Data was truncated to fit the supported sheet dimensions. The imported workbook is incomplete.".into());
     }
+    if ir.google_formulas_restored > 0 {
+        notes.push(format!(
+            "{} restored from Google Sheets' export, which saves them as frozen values.",
+            counted(ir.google_formulas_restored, "formula", "formulas")
+        ));
+    }
     if ir.formulas_failed > 0 {
         notes.push(format!(
             "{} could not be parsed.",
