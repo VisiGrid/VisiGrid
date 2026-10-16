@@ -6066,12 +6066,10 @@ fn classify_value_type(raw: &str, value: &visigrid_engine::formula::eval::Value)
 ///   0 - Verified (fingerprint matches)
 ///   1 - Drifted or Unverified
 fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<(), CliError> {
-    use visigrid_io::native::{compute_semantic_fingerprint, load_semantic_verification, load_workbook};
+    use visigrid_io::native::{compute_semantic_fingerprint, load_cell_metadata, load_semantic_verification, load_workbook};
 
     let workbook = load_workbook(&file)
         .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
-
-    let current = compute_semantic_fingerprint(&workbook);
 
     // Get expected fingerprint: from arg or from file metadata
     let (expected, label) = if let Some(fp) = fingerprint_arg {
@@ -6079,6 +6077,19 @@ fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<()
     } else {
         let verification = load_semantic_verification(&file).unwrap_or_default();
         (verification.fingerprint, verification.label)
+    };
+
+    // `sheet fingerprint` and `sheet apply` print the v1 build fingerprint, while
+    // stamps record the v2 semantic one. Compare against whichever the caller gave,
+    // so `verify --fingerprint "$(vgrid sheet fingerprint f.sheet)"` round-trips.
+    let is_build_fp = expected.as_deref()
+        .is_some_and(|fp| !fp.starts_with("v2:") && replay::ReplayFingerprint::parse(fp).is_some());
+    let current = if is_build_fp {
+        let metadata = load_cell_metadata(&file)
+            .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
+        sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata).to_string()
+    } else {
+        compute_semantic_fingerprint(&workbook)
     };
 
     match expected {

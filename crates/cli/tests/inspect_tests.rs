@@ -1091,6 +1091,42 @@ fn import_stamp_then_verify_passes() {
 }
 
 #[test]
+fn fingerprint_output_round_trips_through_verify() {
+    let csv = csv_fixture("fp_round_trip", "X\n1\n2\n");
+    let out = sheet_output("fp_round_trip");
+    let import = vgrid()
+        .args(["sheet", "import", csv.to_str().unwrap(), out.to_str().unwrap()])
+        .output()
+        .expect("import");
+    assert!(import.status.success(), "stderr: {}", String::from_utf8_lossy(&import.stderr));
+
+    let fp = vgrid()
+        .args(["sheet", "fingerprint", out.to_str().unwrap()])
+        .output()
+        .expect("fingerprint");
+    assert!(fp.status.success());
+    let fp = String::from_utf8_lossy(&fp.stdout).trim().to_string();
+
+    let verify = vgrid()
+        .args(["sheet", "verify", out.to_str().unwrap(), "--fingerprint", &fp])
+        .output()
+        .expect("verify");
+    assert!(verify.status.success(), "verify should accept `sheet fingerprint` output {fp}. stderr: {}",
+        String::from_utf8_lossy(&verify.stderr));
+
+    // A wrong build fingerprint still drifts
+    let wrong = format!("v1:{}", "1:00000000000000000000000000000000");
+    let drift = vgrid()
+        .args(["sheet", "verify", out.to_str().unwrap(), "--fingerprint", &wrong])
+        .output()
+        .expect("verify mismatch");
+    assert_eq!(drift.status.code(), Some(1));
+
+    std::fs::remove_file(&csv).ok();
+    std::fs::remove_file(&out).ok();
+}
+
+#[test]
 fn import_verify_mismatch_exits_1() {
     let csv = csv_fixture("import_verify_fail", "A\n1\n");
     let out = sheet_output("verify_fail");
