@@ -1,5 +1,5 @@
 // Array/spill functions: SEQUENCE, TRANSPOSE, FILTER, UNIQUE, SORT, SORTBY, SPARKLINE,
-// ARRAYFORMULA
+// ARRAYFORMULA, SORTN, FLATTEN, ARRAY_CONSTRAIN
 
 use super::eval::{evaluate, CellLookup, EvalResult, Value, Array2D};
 use super::eval_helpers::{collect_numbers, read_cell_value, value_compare};
@@ -380,6 +380,164 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
             EvalResult::Array(array)
         }
+        "SORTN" => {
+            // SORTN(range, [n], [display_ties_mode], [sort_column1, is_ascending1], ...)
+            // (Google Sheets): the first n rows after sorting. A sort column is
+            // an index into range or a column as tall as it; with none, rows
+            // sort by every column, left to right, ascending. Rows tie when
+            // they are equal in every sort column. Ties modes:
+            //   0 (default) exactly n rows;
+            //   1 n rows, plus any rows tied with the nth;
+            //   2 n rows after dropping all but the first of each tie;
+            //   3 the rows of the first n distinct ties, every duplicate included.
+            if args.is_empty() {
+                return Some(EvalResult::Error("SORTN requires a range".to_string()));
+            }
+            let (rows, cols, data) = match grid_values(&args[0], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let given = |i: usize| args.get(i).filter(|a| !matches!(a, Expr::Empty));
+            let n = match given(1).map(|a| evaluate(a, lookup).to_number()) {
+                None => 1,
+                Some(Ok(n)) if n < 0.0 => return Some(EvalResult::Error("#VALUE! SORTN n must not be negative".to_string())),
+                Some(Ok(n)) => n as usize,
+                Some(Err(e)) => return Some(EvalResult::Error(e)),
+            };
+            let mode = match given(2).map(|a| evaluate(a, lookup).to_number()) {
+                None => 0,
+                Some(Ok(m)) if [0.0, 1.0, 2.0, 3.0].contains(&m.trunc()) => m as u8,
+                Some(Ok(_)) => return Some(EvalResult::Error("#VALUE! SORTN ties mode must be 0, 1, 2 or 3".to_string())),
+                Some(Err(e)) => return Some(EvalResult::Error(e)),
+            };
+            // (key per row, ascending)
+            let mut keys: Vec<(Vec<Value>, bool)> = Vec::new();
+            for pair in args.get(3..).unwrap_or(&[]).chunks(2) {
+                let key: Vec<Value> = match &pair[0] {
+                    Expr::Range { .. } | Expr::Function { .. } => match grid_values(&pair[0], lookup) {
+                        Ok((1, 1, v)) => match index_column(&v[0][0], cols) {
+                            Ok(c) => data.iter().map(|row| row[c].clone()).collect(),
+                            Err(e) => return Some(EvalResult::Error(e)),
+                        },
+                        Ok((kr, 1, v)) if kr == rows => v.into_iter().map(|mut r| r.remove(0)).collect(),
+                        Ok(_) => return Some(EvalResult::Error("#VALUE! SORTN sort column must be as tall as the range".to_string())),
+                        Err(e) => return Some(EvalResult::Error(e)),
+                    },
+                    other => match index_column(&evaluate(other, lookup).to_value(), cols) {
+                        Ok(c) => data.iter().map(|row| row[c].clone()).collect(),
+                        Err(e) => return Some(EvalResult::Error(e)),
+                    },
+                };
+                let ascending = match pair.get(1).filter(|a| !matches!(a, Expr::Empty)).map(|a| evaluate(a, lookup).to_bool()) {
+                    None => true,
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => return Some(EvalResult::Error(e)),
+                };
+                keys.push((key, ascending));
+            }
+            if keys.is_empty() {
+                keys = (0..cols).map(|c| (data.iter().map(|row| row[c].clone()).collect(), true)).collect();
+            }
+            let compare = |a: usize, b: usize| {
+                for (key, ascending) in &keys {
+                    let ord = value_compare(&key[a], &key[b]);
+                    let ord = if *ascending { ord } else { ord.reverse() };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            };
+            let mut order: Vec<usize> = (0..rows).collect();
+            order.sort_by(|&a, &b| compare(a, b));
+            let tied = |a: usize, b: usize| compare(a, b) == std::cmp::Ordering::Equal;
+            let picked: Vec<usize> = match mode {
+                0 => order.iter().copied().take(n).collect(),
+                1 => {
+                    let mut out: Vec<usize> = order.iter().copied().take(n).collect();
+                    if let Some(&last) = out.last() {
+                        out.extend(order[out.len()..].iter().copied().take_while(|&r| tied(r, last)));
+                    }
+                    out
+                }
+                2 => {
+                    let mut out: Vec<usize> = Vec::new();
+                    for &r in &order {
+                        if out.len() == n {
+                            break;
+                        }
+                        if out.last().is_none_or(|&prev| !tied(prev, r)) {
+                            out.push(r);
+                        }
+                    }
+                    out
+                }
+                _ => {
+                    let mut out: Vec<usize> = Vec::new();
+                    let mut groups = 0;
+                    for &r in &order {
+                        let new_group = out.last().is_none_or(|&prev| !tied(prev, r));
+                        if new_group {
+                            if groups == n {
+                                break;
+                            }
+                            groups += 1;
+                        }
+                        out.push(r);
+                    }
+                    out
+                }
+            };
+            if picked.is_empty() {
+                return Some(EvalResult::Error("#N/A SORTN returned no rows".to_string()));
+            }
+            if let Err(error) = super::eval_budget::array(picked.len(), cols) { return Some(EvalResult::Error(error)); }
+            EvalResult::Array(Array2D::from_vec(picked.into_iter().map(|r| data[r].clone()).collect()))
+        }
+        "FLATTEN" => {
+            // FLATTEN(range1, [range2], ...) (Google Sheets): every value, row
+            // by row through each argument in turn, as one column. Blanks stay.
+            if args.is_empty() {
+                return Some(EvalResult::Error("FLATTEN requires at least one argument".to_string()));
+            }
+            let mut column: Vec<Vec<Value>> = Vec::new();
+            for arg in args {
+                match grid_values(arg, lookup) {
+                    Ok((_, _, data)) => column.extend(data.into_iter().flatten().map(|v| vec![v])),
+                    Err(e) => return Some(EvalResult::Error(e)),
+                }
+            }
+            if let Err(error) = super::eval_budget::array(column.len(), 1) { return Some(EvalResult::Error(error)); }
+            EvalResult::Array(Array2D::from_vec(column))
+        }
+        "ARRAY_CONSTRAIN" => {
+            // ARRAY_CONSTRAIN(input_range, num_rows, num_cols) (Google Sheets):
+            // the top-left num_rows x num_cols of an array; asking for more
+            // than it has returns all of it.
+            if args.len() != 3 {
+                return Some(EvalResult::Error("ARRAY_CONSTRAIN requires exactly 3 arguments".to_string()));
+            }
+            let size = |a: &BoundExpr| -> Result<usize, String> {
+                match evaluate(a, lookup).to_number()? {
+                    n if n < 1.0 => Err("#VALUE! ARRAY_CONSTRAIN needs at least one row and column".to_string()),
+                    n => Ok(n as usize),
+                }
+            };
+            let (max_rows, max_cols) = match (size(&args[1]), size(&args[2])) {
+                (Ok(r), Ok(c)) => (r, c),
+                (Err(e), _) | (_, Err(e)) => return Some(EvalResult::Error(e)),
+            };
+            let (_, _, data) = match grid_values(&args[0], lookup) {
+                Ok(v) => v,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let kept: Vec<Vec<Value>> = data
+                .into_iter()
+                .take(max_rows)
+                .map(|row| row.into_iter().take(max_cols).collect())
+                .collect();
+            EvalResult::Array(Array2D::from_vec(kept))
+        }
         "ARRAYFORMULA" => {
             // ARRAYFORMULA(array_formula): Google Sheets' switch into array
             // mode. Here every formula is already in array mode — operators
@@ -419,6 +577,15 @@ fn range_values<L: CellLookup>(
         .map(|r| (c0..=c1).map(|c| read_cell_value(lookup, sheet, r, c)).collect())
         .collect();
     Some(Ok((r1 - r0 + 1, c1 - c0 + 1, rows)))
+}
+
+/// A 1-based column number as an index into a range `cols` wide.
+fn index_column(v: &Value, cols: usize) -> Result<usize, String> {
+    match v.to_number() {
+        Ok(n) if n >= 1.0 && (n as usize) <= cols => Ok(n as usize - 1),
+        Ok(_) => Err(format!("#VALUE! Sort column must be between 1 and {cols}")),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether one cell of FILTER's include column selects its row.
