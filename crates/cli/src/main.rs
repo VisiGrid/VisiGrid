@@ -6082,14 +6082,21 @@ fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<()
     // `sheet fingerprint` and `sheet apply` print the v1 build fingerprint, while
     // stamps record the v2 semantic one. Compare against whichever the caller gave,
     // so `verify --fingerprint "$(vgrid sheet fingerprint f.sheet)"` round-trips.
-    let is_build_fp = expected.as_deref()
-        .is_some_and(|fp| !fp.starts_with("v2:") && replay::ReplayFingerprint::parse(fp).is_some());
-    let current = if is_build_fp {
+    // Build fingerprints are compared parsed, so the legacy `len:hash` form and
+    // upper-case hex match the `v1:` string `sheet fingerprint` prints.
+    let expected_build = expected.as_deref()
+        .filter(|fp| !fp.starts_with("v2:"))
+        .and_then(replay::ReplayFingerprint::parse);
+    let (current, matches) = if let Some(expected_build) = &expected_build {
         let metadata = load_cell_metadata(&file)
             .map_err(|e| CliError::io(format!("failed to load metadata: {}", e)))?;
-        sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata).to_string()
+        let current = sheet_ops::compute_sheet_fingerprint_with_meta(&workbook, &metadata);
+        let matches = &current == expected_build;
+        (current.to_string(), matches)
     } else {
-        compute_semantic_fingerprint(&workbook)
+        let current = compute_semantic_fingerprint(&workbook);
+        let matches = expected.as_deref() == Some(current.as_str());
+        (current, matches)
     };
 
     match expected {
@@ -6101,7 +6108,7 @@ fn cmd_sheet_verify(file: PathBuf, fingerprint_arg: Option<String>) -> Result<()
             eprintln!("  Current: {}", current);
             Err(CliError { code: EXIT_ERROR, message: "unverified".to_string(), hint: None })
         }
-        Some(expected_fp) if expected_fp == current => {
+        Some(_) if matches => {
             // Verified
             println!("Status: Verified ✓");
             if let Some(lbl) = label {

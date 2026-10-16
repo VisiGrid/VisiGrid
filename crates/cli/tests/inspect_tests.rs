@@ -1114,6 +1114,17 @@ fn fingerprint_output_round_trips_through_verify() {
     assert!(verify.status.success(), "verify should accept `sheet fingerprint` output {fp}. stderr: {}",
         String::from_utf8_lossy(&verify.stderr));
 
+    // The legacy `len:hash` form and upper-case hex name the same fingerprint
+    let bare = fp.strip_prefix("v1:").expect("v1 fingerprint").to_string();
+    for alt in [bare, fp.to_uppercase().replacen("V1:", "v1:", 1)] {
+        let verify = vgrid()
+            .args(["sheet", "verify", out.to_str().unwrap(), "--fingerprint", &alt])
+            .output()
+            .expect("verify alt");
+        assert!(verify.status.success(), "verify should accept {alt}. stderr: {}",
+            String::from_utf8_lossy(&verify.stderr));
+    }
+
     // A wrong build fingerprint still drifts
     let wrong = format!("v1:{}", "1:00000000000000000000000000000000");
     let drift = vgrid()
