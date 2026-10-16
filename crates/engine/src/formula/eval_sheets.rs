@@ -1,7 +1,7 @@
 // Google Sheets functions with no Excel equivalent: the operator functions
 // (ADD, MINUS, MULTIPLY, DIVIDE, EQ, NE, GT, GTE, LT, LTE, UMINUS, UPLUS,
 // UNARY_PERCENT), the TO_* conversions, ISBETWEEN, ISEMAIL, ISURL, EPOCHTODATE
-// and JOIN. They exist so formulas written in Sheets (and the ones a Sheets
+// JOIN and QUERY (eval_query.rs). They exist so formulas written in Sheets (and the ones a Sheets
 // .xlsx export carries) keep working.
 //
 // All but JOIN take plain values and are lifted (lift.rs), so over a range they
@@ -224,6 +224,8 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
             EvalResult::Text(parts.join(&delimiter))
         }
+        // The query language lives in its own module.
+        "QUERY" => super::eval_query::evaluate_query(args, lookup),
         _ => return None,
     };
     Some(result)

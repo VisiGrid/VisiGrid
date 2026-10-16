@@ -548,7 +548,7 @@ mod tests {
             "SORTN", "FLATTEN", "ARRAY_CONSTRAIN", "JOIN", "ISBETWEEN", "ISEMAIL", "ISURL",
             "EPOCHTODATE", "TO_TEXT", "TO_DATE", "TO_PERCENT", "TO_DOLLARS", "TO_PURE_NUMBER",
             "ADD", "MINUS", "MULTIPLY", "DIVIDE", "EQ", "NE", "GT", "GTE", "LT", "LTE",
-            "UMINUS", "UPLUS", "UNARY_PERCENT",
+            "UMINUS", "UPLUS", "UNARY_PERCENT", "QUERY",
         ] {
             let formula = format!("={name}(A1)");
             assert_eq!(p(&x(&formula)), formula, "{name}");
