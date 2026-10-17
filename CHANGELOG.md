@@ -24,6 +24,7 @@
 - **A large script plan from an agent no longer freezes the window.** Plans are prepared in the background, and Review Mode opens when the plan is ready.
 - **Opening some .xlsx files no longer crashes VisiGrid.** A workbook with values at far corners of a sheet, such as XFD2 and A1048576, made the import ask for 512 GB of memory and quit. .xlsx and .xlsb sheets are now read cell by cell.
 - **`WORKDAY` and `NETWORKDAYS` no longer hang on huge day counts.** `=WORKDAY(A1, 1E15)` never returned. Dates and results outside 1900–9999 are now `#NUM!`, as in Excel, and a fractional day count rounds down.
+- **`vgrid sheet fingerprint` now prints what `vgrid sheet verify` checks.** It printed a different (replay) fingerprint, so passing its output to `sheet verify --fingerprint` reported Drifted on an untouched file. `--replay` still prints the old value, for comparing with `sheet apply --verify`, and `--json` gains a `kind` field.
 
 ## 0.53.0
 
