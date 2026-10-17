@@ -359,50 +359,179 @@ pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
     pi == toks.len()
 }
 
-/// Check if a cell value matches criteria (for SUMIF, COUNTIF, etc.)
-pub(crate) fn matches_criteria(value: &EvalResult, criteria: &EvalResult) -> bool {
-    let criteria_str = criteria.to_text();
+/// A parsed SUMIF/COUNTIF-family criterion: an operator and a typed operand.
+///
+/// Criteria are their own small language (">5", "<>x", "a*"), not a lookup
+/// key, so they deliberately do not follow the lookup rule that types must
+/// agree: a numeric-looking criterion compares numerically, and an equality
+/// criterion such as 23 or "=23" also matches a text cell holding "23", as in
+/// Excel. Everything else follows Excel's split by the cell's real type:
+///
+/// - `<`, `<=`, `>`, `>=` with a number see only number cells; with text they
+///   compare text cells case-insensitively. Blanks, logicals and errors never
+///   satisfy an ordering.
+/// - `<>` is the complement of equality *against number/text/logical/error
+///   cells of the operand's type* — so "<>23" counts the text "23", blanks
+///   and errors, and only excludes the number 23.
+/// - Wildcards (`*`, `?`, `~`) apply to text cells only; "1*" never matches
+///   the number 12.
+/// - "TRUE"/"FALSE" and error literals ("#N/A") written as text are logical
+///   and error operands, matching only logical and error cells (and, for
+///   logicals, cells typed TRUE/FALSE, which are stored as text).
+/// - A criterion read from an empty cell is 0, so it never matches a blank.
+///   An empty criterion ("" or "=") matches blank cells; "" also matches
+///   empty text. "<>" matches every cell that is not blank.
+///
+/// The cell side must be the cell's typed value (`get_typed`): reading it as
+/// text and parsing it back cannot tell the number 23 from the text "23".
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Criterion {
+    op: CriterionOp,
+    operand: CriterionOperand,
+}
 
-    // Check for comparison operators in criteria
-    if let Some(rest) = criteria_str.strip_prefix(">=") {
-        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
-            return v >= c;
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CriterionOp { Eq, Ne, Lt, Le, Gt, Ge }
+
+#[derive(Debug, Clone, PartialEq)]
+enum CriterionOperand {
+    Number(f64),
+    Text(String),
+    Boolean(bool),
+    Error(String),
+    /// "" (blank or empty text) when `strict` is false; "=" (blank only) when true.
+    Empty { strict: bool },
+}
+
+/// The error code an error value starts with ("#DIV/0! detail" → "#DIV/0!").
+fn error_code(e: &str) -> &str {
+    e.split_whitespace().next().unwrap_or(e)
+}
+
+/// The logical a cell typed as TRUE/FALSE stands for (stored as text).
+fn text_logical(s: &str) -> Option<bool> {
+    if s.eq_ignore_ascii_case("TRUE") {
+        Some(true)
+    } else if s.eq_ignore_ascii_case("FALSE") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn parse_error_literal(s: &str) -> Option<String> {
+    const CODES: [&str; 10] = [
+        "#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#SPILL!", "#CALC!", "#GETTING_DATA",
+    ];
+    CODES.iter().find(|c| c.eq_ignore_ascii_case(s)).map(|c| c.to_string())
+}
+
+impl Criterion {
+    pub(crate) fn parse(criteria: &EvalResult) -> Criterion {
+        let eq = |operand| Criterion { op: CriterionOp::Eq, operand };
+        match criteria {
+            EvalResult::Number(n) => eq(CriterionOperand::Number(*n)),
+            EvalResult::Boolean(b) => eq(CriterionOperand::Boolean(*b)),
+            EvalResult::Error(e) => eq(CriterionOperand::Error(error_code(e).to_string())),
+            // A reference to an empty cell is the number 0, as in Excel.
+            EvalResult::Empty => eq(CriterionOperand::Number(0.0)),
+            EvalResult::Text(s) => Self::parse_text(s),
+            other => Self::parse_text(&other.to_text()),
         }
-    } else if let Some(rest) = criteria_str.strip_prefix("<=") {
-        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
-            return v <= c;
-        }
-    } else if let Some(rest) = criteria_str.strip_prefix("<>") {
-        let c = rest.trim();
-        if let Ok(n) = c.parse::<f64>() {
-            if let Ok(v) = value.to_number() {
-                return !approx_eq(v, n);
-            }
-        }
-        return !wildcard_match(c, &value.to_text());
-    } else if let Some(rest) = criteria_str.strip_prefix('>') {
-        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
-            return v > c;
-        }
-    } else if let Some(rest) = criteria_str.strip_prefix('<') {
-        if let (Ok(v), Ok(c)) = (value.to_number(), rest.trim().parse::<f64>()) {
-            return v < c;
-        }
-    } else if let Some(rest) = criteria_str.strip_prefix('=') {
-        let c = rest.trim();
-        if let Ok(n) = c.parse::<f64>() {
-            if let Ok(v) = value.to_number() {
-                return approx_eq(v, n);
-            }
-        }
-        return wildcard_match(c, &value.to_text());
     }
 
-    // No operator: numeric equality when both sides are numeric, else wildcard-aware text.
-    if let (Ok(v), Ok(c)) = (value.to_number(), criteria_str.parse::<f64>()) {
-        return approx_eq(v, c);
+    fn parse_text(s: &str) -> Criterion {
+        let (op, rest) = if let Some(r) = s.strip_prefix(">=") {
+            (CriterionOp::Ge, r)
+        } else if let Some(r) = s.strip_prefix("<=") {
+            (CriterionOp::Le, r)
+        } else if let Some(r) = s.strip_prefix("<>") {
+            (CriterionOp::Ne, r)
+        } else if let Some(r) = s.strip_prefix('>') {
+            (CriterionOp::Gt, r)
+        } else if let Some(r) = s.strip_prefix('<') {
+            (CriterionOp::Lt, r)
+        } else if let Some(r) = s.strip_prefix('=') {
+            (CriterionOp::Eq, r)
+        } else {
+            (CriterionOp::Eq, s)
+        };
+        let explicit_op = rest.len() != s.len();
+        let trimmed = rest.trim();
+        // After an operator, spaces are dropped (">= 5"); without one the
+        // criterion is read as written, so " 5" is text, as before and in Excel.
+        let operand_text = if explicit_op { trimmed } else { rest };
+        let operand = if rest.is_empty() {
+            CriterionOperand::Empty { strict: explicit_op && op == CriterionOp::Eq }
+        } else if let Some(n) = crate::cell::parse_finite(operand_text) {
+            // parse_finite, not str::parse: "inf", "nan" and "1e400" are text.
+            CriterionOperand::Number(n)
+        } else if let Some(serial) = (operand_text.trim() == operand_text)
+            .then(|| try_parse_date_string(operand_text))
+            .flatten()
+        {
+            // ">1/1/2024" compares date serials, so it sees date cells
+            // (numbers), never text that happens to spell a date.
+            CriterionOperand::Number(serial)
+        } else if let Some(b) = text_logical(operand_text) {
+            CriterionOperand::Boolean(b)
+        } else if let Some(code) = parse_error_literal(operand_text) {
+            CriterionOperand::Error(code)
+        } else {
+            CriterionOperand::Text(operand_text.to_string())
+        };
+        Criterion { op, operand }
     }
-    wildcard_match(&criteria_str, &value.to_text())
+
+    /// Does the cell holding `value` satisfy this criterion?
+    pub(crate) fn matches(&self, value: &Value) -> bool {
+        use std::cmp::Ordering;
+        use CriterionOperand as O;
+        let ordering = |ord: Ordering| match self.op {
+            CriterionOp::Lt => ord == Ordering::Less,
+            CriterionOp::Le => ord != Ordering::Greater,
+            CriterionOp::Gt => ord == Ordering::Greater,
+            CriterionOp::Ge => ord != Ordering::Less,
+            CriterionOp::Eq | CriterionOp::Ne => unreachable!(),
+        };
+        match self.op {
+            CriterionOp::Eq => self.equals(value),
+            CriterionOp::Ne => match &self.operand {
+                O::Empty { .. } => !matches!(value, Value::Empty),
+                // Only a number cell equal to the operand is excluded; the
+                // text "23" is not 23 for "<>", though it is for "=".
+                O::Number(n) => !matches!(value, Value::Number(v) if approx_eq(*v, *n)),
+                _ => !self.equals(value),
+            },
+            _ => match (&self.operand, value) {
+                (O::Number(n), Value::Number(v)) => v.partial_cmp(n).is_some_and(ordering),
+                (O::Text(t), Value::Text(s)) => ordering(s.to_lowercase().cmp(&t.to_lowercase())),
+                (O::Boolean(b), Value::Boolean(v)) => ordering(v.cmp(b)),
+                // Typed TRUE/FALSE is stored as text; order it as the logical,
+                // consistent with equality below.
+                (O::Boolean(b), Value::Text(s)) => text_logical(s).is_some_and(|v| ordering(v.cmp(b))),
+                _ => false,
+            },
+        }
+    }
+
+    fn equals(&self, value: &Value) -> bool {
+        use CriterionOperand as O;
+        match (&self.operand, value) {
+            (O::Number(n), Value::Number(v)) => approx_eq(*v, *n),
+            (O::Number(n), Value::Text(s)) => crate::cell::parse_finite(s.trim()).is_some_and(|v| approx_eq(v, *n)),
+            (O::Text(t), Value::Text(s)) => wildcard_match(t, s),
+            (O::Boolean(b), Value::Boolean(v)) => b == v,
+            // A typed TRUE/FALSE is stored as text (cells hold no logical
+            // literal), so that spelling is the logical here. Excel would not
+            // match the text "TRUE"; this engine cannot tell the two apart.
+            (O::Boolean(b), Value::Text(s)) => text_logical(s) == Some(*b),
+            (O::Error(code), Value::Error(e)) => error_code(e).eq_ignore_ascii_case(code),
+            (O::Empty { .. }, Value::Empty) => true,
+            (O::Empty { strict }, Value::Text(s)) => !strict && s.is_empty(),
+            _ => false,
+        }
+    }
 }
 
 /// Helper to get text from a cell, handling cross-sheet references
@@ -656,8 +785,11 @@ mod tests {
 
     #[test]
     fn matches_criteria_numeric_and_wildcards() {
-        let num = |n: f64| EvalResult::Number(n);
-        let txt = |s: &str| EvalResult::Text(s.to_string());
+        let num = |n: f64| Value::Number(n);
+        let txt = |s: &str| Value::Text(s.to_string());
+        let matches_criteria = |v: &Value, c: &Value| {
+            Criterion::parse(&EvalResult::from_value(c)).matches(v)
+        };
 
         // Numeric operators
         assert!(matches_criteria(&num(5.0), &txt(">=5")));

@@ -2,8 +2,8 @@
 // SUMIFS, AVERAGEIFS, COUNTIFS, MINIFS, MAXIFS
 
 use crate::sheet::SheetRef;
-use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution};
-use super::eval_helpers::matches_criteria;
+use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution, Value};
+use super::eval_helpers::{get_typed_for_sheet, Criterion};
 use super::parser::{BoundExpr, Expr};
 
 /// Extracted range with sheet context.
@@ -85,35 +85,19 @@ fn range_get_text<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: 
     }
 }
 
-/// Get cell numeric value from the correct sheet.
-fn range_get_value<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> f64 {
-    match sheet {
-        SheetRef::Current => lookup.get_value(row, col),
-        SheetRef::Id(sid) => {
-            use super::eval::Value;
-            match lookup.get_value_sheet(*sid, row, col) {
-                Value::Number(n) => n,
-                Value::Boolean(true) => 1.0,
-                Value::Boolean(false) => 0.0,
-                _ => 0.0,
-            }
-        }
-        SheetRef::RefError { .. } => 0.0,
-    }
+/// A cell's value with its real type: criteria and the summed/averaged cells
+/// must tell the number 23 from the text "23", a blank from a zero.
+fn range_get_typed<L: CellLookup>(lookup: &L, sheet: &SheetRef, row: usize, col: usize) -> Value {
+    get_typed_for_sheet(lookup, sheet, row, col).unwrap_or_else(Value::Error)
 }
 
-/// Parse cell text into an EvalResult for criteria matching.
-fn text_to_eval_result(text: &str, empty_as_number: bool) -> EvalResult {
-    if text.is_empty() {
-        if empty_as_number {
-            EvalResult::Number(0.0)
-        } else {
-            EvalResult::Text(String::new())
-        }
-    } else if let Ok(n) = text.parse::<f64>() {
-        EvalResult::Number(n)
-    } else {
-        EvalResult::Text(text.to_string())
+/// What a matched cell contributes to SUMIF/AVERAGEIF and their -S forms:
+/// numbers count, text/logicals/blanks are skipped, and an error is the result.
+fn aggregate_cell(value: Value) -> Result<Option<f64>, String> {
+    match value {
+        Value::Number(n) => Ok(Some(n)),
+        Value::Error(e) => Err(e),
+        _ => Ok(None),
     }
 }
 
@@ -129,7 +113,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Ok(r) => r,
                 Err(e) => return Some(EvalResult::Error(e)),
             };
-            let criteria = evaluate(&args[1], lookup);
+            let criteria = Criterion::parse(&evaluate(&args[1], lookup));
             let sum_range = if args.len() == 3 {
                 match extract_range(&args[2], lookup, "SUMIF sum_range") {
                     Ok(r) => Some(r),
@@ -149,16 +133,15 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 for col_offset in 0..range.num_cols() {
                     let r = min_row + row_offset;
                     let c = min_col + col_offset;
-                    let cell_text = range_get_text(lookup, &range.sheet, r, c);
-                    let cell_value = text_to_eval_result(&cell_text, true);
-
-                    if matches_criteria(&cell_value, &criteria) {
-                        if let Some(ref sr) = sum_range {
-                            let sum_r = sr.min_row() + row_offset;
-                            let sum_c = sr.min_col() + col_offset;
-                            sum += range_get_value(lookup, &sr.sheet, sum_r, sum_c);
-                        } else {
-                            sum += range_get_value(lookup, &range.sheet, r, c);
+                    if criteria.matches(&range_get_typed(lookup, &range.sheet, r, c)) {
+                        let value = match sum_range {
+                            Some(ref sr) => range_get_typed(lookup, &sr.sheet, sr.min_row() + row_offset, sr.min_col() + col_offset),
+                            None => range_get_typed(lookup, &range.sheet, r, c),
+                        };
+                        match aggregate_cell(value) {
+                            Ok(Some(n)) => sum += n,
+                            Ok(None) => {}
+                            Err(e) => return Some(EvalResult::Error(e)),
                         }
                     }
                 }
@@ -174,7 +157,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Ok(r) => r,
                 Err(e) => return Some(EvalResult::Error(e)),
             };
-            let criteria = evaluate(&args[1], lookup);
+            let criteria = Criterion::parse(&evaluate(&args[1], lookup));
             let avg_range = if args.len() == 3 {
                 match extract_range(&args[2], lookup, "AVERAGEIF average_range") {
                     Ok(r) => Some(r),
@@ -195,19 +178,19 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 for col_offset in 0..range.num_cols() {
                     let r = min_row + row_offset;
                     let c = min_col + col_offset;
-                    let cell_text = range_get_text(lookup, &range.sheet, r, c);
-                    let cell_value = text_to_eval_result(&cell_text, true);
-
-                    if matches_criteria(&cell_value, &criteria) {
+                    if criteria.matches(&range_get_typed(lookup, &range.sheet, r, c)) {
                         let (avg_r, avg_c, avg_sheet) = if let Some(ref ar) = avg_range {
                             (ar.min_row() + row_offset, ar.min_col() + col_offset, &ar.sheet)
                         } else {
                             (r, c, &range.sheet)
                         };
-                        let val = range_get_value(lookup, avg_sheet, avg_r, avg_c);
-                        if val.is_finite() {
-                            sum += val;
-                            count += 1;
+                        match aggregate_cell(range_get_typed(lookup, avg_sheet, avg_r, avg_c)) {
+                            Ok(Some(val)) if val.is_finite() => {
+                                sum += val;
+                                count += 1;
+                            }
+                            Ok(_) => {}
+                            Err(e) => return Some(EvalResult::Error(e)),
                         }
                     }
                 }
@@ -226,17 +209,14 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 Ok(r) => r,
                 Err(e) => return Some(EvalResult::Error(e)),
             };
-            let criteria = evaluate(&args[1], lookup);
+            let criteria = Criterion::parse(&evaluate(&args[1], lookup));
 
             let mut count = 0;
             let (min_row, min_col) = (range.min_row(), range.min_col());
 
             for r in min_row..min_row + range.num_rows() {
                 for c in min_col..min_col + range.num_cols() {
-                    let cell_text = range_get_text(lookup, &range.sheet, r, c);
-                    let cell_value = text_to_eval_result(&cell_text, false);
-
-                    if matches_criteria(&cell_value, &criteria) {
+                    if criteria.matches(&range_get_typed(lookup, &range.sheet, r, c)) {
                         count += 1;
                     }
                 }
@@ -297,7 +277,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
 
                 criteria_ranges.push(crit_range);
-                criteria_values.push(evaluate(criteria_arg, lookup));
+                criteria_values.push(Criterion::parse(&evaluate(criteria_arg, lookup)));
             }
 
             let mut sum = crate::numeric::Sum::default();
@@ -307,21 +287,23 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     for (idx, cr) in criteria_ranges.iter().enumerate() {
                         let r = cr.min_row() + row_offset;
                         let c = cr.min_col() + col_offset;
-                        let cell_text = range_get_text(lookup, &cr.sheet, r, c);
-                        let cell_value = text_to_eval_result(&cell_text, true);
-
-                        if !matches_criteria(&cell_value, &criteria_values[idx]) {
+                        if !criteria_values[idx].matches(&range_get_typed(lookup, &cr.sheet, r, c)) {
                             all_match = false;
                             break;
                         }
                     }
 
                     if all_match {
-                        sum += range_get_value(
+                        let value = range_get_typed(
                             lookup, &sum_range.sheet,
                             sum_range.min_row() + row_offset,
                             sum_range.min_col() + col_offset,
                         );
+                        match aggregate_cell(value) {
+                            Ok(Some(n)) => sum += n,
+                            Ok(None) => {}
+                            Err(e) => return Some(EvalResult::Error(e)),
+                        }
                     }
                 }
             }
@@ -360,7 +342,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
 
                 criteria_ranges.push(crit_range);
-                criteria_values.push(evaluate(criteria_arg, lookup));
+                criteria_values.push(Criterion::parse(&evaluate(criteria_arg, lookup)));
             }
 
             let mut sum = crate::numeric::Sum::default();
@@ -371,24 +353,25 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     for (idx, cr) in criteria_ranges.iter().enumerate() {
                         let r = cr.min_row() + row_offset;
                         let c = cr.min_col() + col_offset;
-                        let cell_text = range_get_text(lookup, &cr.sheet, r, c);
-                        let cell_value = text_to_eval_result(&cell_text, true);
-
-                        if !matches_criteria(&cell_value, &criteria_values[idx]) {
+                        if !criteria_values[idx].matches(&range_get_typed(lookup, &cr.sheet, r, c)) {
                             all_match = false;
                             break;
                         }
                     }
 
                     if all_match {
-                        let val = range_get_value(
+                        let value = range_get_typed(
                             lookup, &avg_range.sheet,
                             avg_range.min_row() + row_offset,
                             avg_range.min_col() + col_offset,
                         );
-                        if val.is_finite() {
-                            sum += val;
-                            count += 1;
+                        match aggregate_cell(value) {
+                            Ok(Some(val)) if val.is_finite() => {
+                                sum += val;
+                                count += 1;
+                            }
+                            Ok(_) => {}
+                            Err(e) => return Some(EvalResult::Error(e)),
                         }
                     }
                 }
@@ -433,7 +416,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 }
 
                 criteria_ranges.push(crit_range);
-                criteria_values.push(evaluate(criteria_arg, lookup));
+                criteria_values.push(Criterion::parse(&evaluate(criteria_arg, lookup)));
             }
 
             let mut count = 0;
@@ -443,10 +426,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                     for (idx, cr) in criteria_ranges.iter().enumerate() {
                         let r = cr.min_row() + row_offset;
                         let c = cr.min_col() + col_offset;
-                        let cell_text = range_get_text(lookup, &cr.sheet, r, c);
-                        let cell_value = text_to_eval_result(&cell_text, false);
-
-                        if !matches_criteria(&cell_value, &criteria_values[idx]) {
+                        if !criteria_values[idx].matches(&range_get_typed(lookup, &cr.sheet, r, c)) {
                             all_match = false;
                             break;
                         }
@@ -482,30 +462,29 @@ pub(crate) fn try_evaluate<L: CellLookup>(
                 if range.num_rows() != num_rows || range.num_cols() != num_cols {
                     return Some(EvalResult::Error("#VALUE!".to_string()));
                 }
-                criteria.push((range, evaluate(&pair[1], lookup)));
+                criteria.push((range, Criterion::parse(&evaluate(&pair[1], lookup))));
             }
             let mut best: Option<f64> = None;
             for row_offset in 0..num_rows {
                 for col_offset in 0..num_cols {
                     let matched = criteria.iter().all(|(range, criterion)| {
-                        let text = range_get_text(lookup, &range.sheet, range.min_row() + row_offset, range.min_col() + col_offset);
-                        matches_criteria(&text_to_eval_result(&text, true), criterion)
+                        criterion.matches(&range_get_typed(lookup, &range.sheet, range.min_row() + row_offset, range.min_col() + col_offset))
                     });
                     if !matched {
                         continue;
                     }
-                    let value = super::eval_helpers::read_cell_value(
+                    let value = range_get_typed(
                         lookup, &target.sheet, target.min_row() + row_offset, target.min_col() + col_offset,
                     );
                     match value {
-                        super::eval::Value::Number(n) => {
+                        Value::Number(n) => {
                             best = Some(match best {
                                 None => n,
                                 Some(b) if name == "MINIFS" => b.min(n),
                                 Some(b) => b.max(n),
                             });
                         }
-                        super::eval::Value::Error(e) => return Some(EvalResult::Error(e)),
+                        Value::Error(e) => return Some(EvalResult::Error(e)),
                         _ => {}
                     }
                 }
