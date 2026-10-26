@@ -3,6 +3,7 @@
 // Provides cloud-backed sheet sync with VisiHub Sheets API.
 // Cloud sync is automatic (post-save), while hub sync is manual (publish/pull).
 
+pub mod grid;
 pub mod identity;
 pub mod sheets_client;
 pub mod sync;

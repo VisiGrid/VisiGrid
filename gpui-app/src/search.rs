@@ -283,6 +283,8 @@ pub enum CommandId {
     HubDiagnostics,
     HubSignIn,
     HubSignOut,
+    GridSignIn,
+    GridSignOut,
     CloudOverwrite,
     HubLinkDialog,
 
@@ -493,6 +495,8 @@ impl CommandId {
             Self::HubDiagnostics => "Hub: Show Diagnostics",
             Self::HubSignIn => "Hub: Sign In",
             Self::HubSignOut => "Hub: Sign Out",
+            Self::GridSignIn => "Grid: Sign In",
+            Self::GridSignOut => "Grid: Sign Out",
             Self::CloudOverwrite => "Cloud: Overwrite Cloud Copy",
             Self::HubLinkDialog => "Hub: Link to Dataset...",
             Self::ImportTerminalOutput => "Import Terminal Output",
@@ -777,6 +781,8 @@ impl CommandId {
             Self::HubDiagnostics => "visihub cloud sync diagnostics debug state error",
             Self::HubSignIn => "visihub cloud sync sign in login authenticate token",
             Self::HubSignOut => "visihub cloud sync sign out logout disconnect",
+            Self::GridSignIn => "grid loco cloud sheets sync sign in login authorize device",
+            Self::GridSignOut => "grid loco cloud sheets sync sign out logout revoke device",
             Self::CloudOverwrite => "cloud sync conflict overwrite replace upload force keep mine local",
             Self::HubLinkDialog => "visihub cloud sync link connect dataset repository",
             Self::ImportTerminalOutput => "import terminal output json structured result parse extract",
@@ -994,6 +1000,8 @@ impl CommandId {
             Self::HubDiagnostics,
             Self::HubSignIn,
             Self::HubSignOut,
+            Self::GridSignIn,
+            Self::GridSignOut,
             Self::CloudOverwrite,
             Self::HubLinkDialog,
             Self::ImportTerminalOutput,
@@ -1054,6 +1062,8 @@ impl CommandId {
             | Self::HubDiagnostics
             | Self::HubSignIn
             | Self::HubSignOut
+            | Self::GridSignIn
+            | Self::GridSignOut
             | Self::CloudOverwrite
             | Self::HubLinkDialog => Some(MenuCategory::File),
 

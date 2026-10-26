@@ -8408,6 +8408,7 @@ dependencies = [
  "visigrid-config",
  "visigrid-core",
  "visigrid-engine",
+ "visigrid-hub-client",
  "visigrid-io",
  "visigrid-license",
  "visigrid-print",
@@ -8425,9 +8426,11 @@ version = "0.54.0"
 dependencies = [
  "blake3",
  "dirs 6.0.0",
+ "httpmock",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

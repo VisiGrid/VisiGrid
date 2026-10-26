@@ -28,6 +28,7 @@ copyright = "Copyright © 2024-2026 RegAtlas, LLC"
 osx_minimum_system_version = "12.0"
 
 [dependencies]
+visigrid-hub-client = { path = "../crates/hub_client" }
 # Workspace crates
 visigrid-engine = { workspace = true }
 visigrid-protocol = { path = "../crates/protocol" }
