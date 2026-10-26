@@ -380,25 +380,6 @@ fn render_create_dataset(
                         .text_color(text_primary)
                         .text_size(px(13.0))
                         .cursor_text()
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            let key = event.keystroke.key.as_str();
-                            if key == "backspace" {
-                                this.hub_dataset_backspace(cx);
-                            } else if key == "enter" && !this.hub_new_dataset_name.trim().is_empty() {
-                                this.hub_create_and_link(cx);
-                            } else if let Some(key_char) = &event.keystroke.key_char {
-                                // Only insert if no modifiers (except shift for uppercase)
-                                if !event.keystroke.modifiers.control
-                                    && !event.keystroke.modifiers.alt
-                                    && !event.keystroke.modifiers.platform
-                                {
-                                    for c in key_char.chars() {
-                                        this.hub_dataset_insert_char(c, cx);
-                                    }
-                                }
-                            }
-                        }))
                         .child(if name.is_empty() {
                             div().text_color(text_muted).child("Dataset name...")
                         } else {
