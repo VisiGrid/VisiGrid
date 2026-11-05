@@ -922,13 +922,15 @@ pub(super) fn scalar_binary(op: Op, left_result: EvalResult, right_result: EvalR
     match op {
         // Arithmetic operators - require numbers
         Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => {
+            // Text that is not a number or date is #VALUE!, as in Excel. The bare
+            // conversion message used to become the cell's value and show as text.
             let left_val = match left_result.to_number() {
                 Ok(n) => n,
-                Err(e) => return EvalResult::Error(e),
+                Err(e) => return EvalResult::Error(super::eval_helpers::excel_error(e)),
             };
             let right_val = match right_result.to_number() {
                 Ok(n) => n,
-                Err(e) => return EvalResult::Error(e),
+                Err(e) => return EvalResult::Error(super::eval_helpers::excel_error(e)),
             };
 
             let result = match op {

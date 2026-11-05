@@ -132,7 +132,7 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
     }
 
     // Try ISO format: YYYY-MM-DD or YYYY/MM/DD
-    if s.len() >= 8 && s.len() <= 10 {
+    if s.len() >= 6 && s.len() <= 10 {
         // Check for ISO pattern (starts with 4-digit year)
         if let Some(sep_pos) = s.find(['-', '/']) {
             if sep_pos == 4 {
@@ -152,14 +152,19 @@ pub fn try_parse_date_string(s: &str) -> Option<f64> {
             }
         }
 
-        // Try US format: MM/DD/YYYY or MM-DD-YYYY
+        // Try US format: MM/DD/YYYY or MM-DD-YYYY, or with a two-digit year
+        // (10/8/26), which Excel reads as 1930-2029: 00-29 is 20xx, 30-99 is 19xx.
         if let Some(sep) = s.chars().find(|&c| c == '/' || c == '-') {
             let parts: Vec<&str> = s.split(sep).collect();
-            if parts.len() == 3 && parts[2].len() == 4 {
+            if parts.len() == 3 && (parts[2].len() == 4 || parts[2].len() == 2) {
                 if let (Ok(month), Ok(day), Ok(year)) = (
                     parts[0].parse::<i32>(),
                     parts[1].parse::<i32>(),
-                    parts[2].parse::<i32>(),
+                    parts[2].parse::<i32>().map(|y| match (parts[2].len(), y) {
+                        (2, 0..=29) => 2000 + y,
+                        (2, _) => 1900 + y,
+                        _ => y,
+                    }),
                 ) {
                     if (1..=12).contains(&month) && (1..=31).contains(&day) && (1900..=9999).contains(&year) {
                         return Some(date_to_serial(year, month, day));
@@ -711,6 +716,20 @@ mod tests {
         assert!(try_parse_date_string("123").is_none());
         assert!(try_parse_date_string("").is_none());
         assert!(try_parse_date_string("13/01/2023").is_none()); // Invalid month for US format when year is last
+    }
+
+    #[test]
+    fn test_parse_us_date_two_digit_year() {
+        // Excel's window: 00-29 is 2000s, 30-99 is 1900s.
+        assert_eq!(try_parse_date_string("10/8/26"), try_parse_date_string("10/08/2026"));
+        assert_eq!(try_parse_date_string("1/1/00"), try_parse_date_string("01/01/2000"));
+        assert_eq!(try_parse_date_string("12/31/29"), try_parse_date_string("12/31/2029"));
+        assert_eq!(try_parse_date_string("1/1/30"), try_parse_date_string("01/01/1930"));
+        assert_eq!(try_parse_date_string("8-29-24"), try_parse_date_string("08-29-2024"));
+        // A three-digit year, or a lone number, is not a date.
+        assert!(try_parse_date_string("1/1/202").is_none());
+        assert!(try_parse_date_string("13/1/26").is_none());
+        assert!(try_parse_date_string("1/1").is_none());
     }
 
     #[test]
