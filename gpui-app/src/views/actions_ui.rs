@@ -659,6 +659,12 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &NextSheet, _, cx| {
             this.next_sheet(cx);
         }))
+        .on_action(cx.listener(|this, _: &MoveSheetLeft, _, cx| {
+            this.move_active_sheet_by(-1, cx);
+        }))
+        .on_action(cx.listener(|this, _: &MoveSheetRight, _, cx| {
+            this.move_active_sheet_by(1, cx);
+        }))
         .on_action(cx.listener(|this, _: &PrevSheet, _, cx| {
             this.prev_sheet(cx);
         }))

@@ -2640,6 +2640,8 @@ impl Spreadsheet {
             CommandId::NextSheet => self.next_sheet(cx),
             CommandId::PrevSheet => self.prev_sheet(cx),
             CommandId::AddSheet => self.add_sheet(cx),
+            CommandId::MoveSheetLeft => self.move_active_sheet_by(-1, cx),
+            CommandId::MoveSheetRight => self.move_active_sheet_by(1, cx),
             CommandId::CreateTable => self.create_table_dialog(cx),
             CommandId::InsertPivotTable => self.insert_pivot_table(cx),
             CommandId::RefreshPivot => self.refresh_pivot(cx),

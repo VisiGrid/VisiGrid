@@ -329,6 +329,8 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         "sheet.next" | "sheets.next" => Some(KeyBinding::new(key, NextSheet, context)),
         "sheet.prev" | "sheets.prev" => Some(KeyBinding::new(key, PrevSheet, context)),
         "sheet.add" | "sheets.add" => Some(KeyBinding::new(key, AddSheet, context)),
+        "sheet.move_left" | "sheets.move_left" => Some(KeyBinding::new(key, MoveSheetLeft, context)),
+        "sheet.move_right" | "sheets.move_right" => Some(KeyBinding::new(key, MoveSheetRight, context)),
 
         // Menu accelerators
         "menu.file" => Some(KeyBinding::new(key, OpenFileMenu, context)),

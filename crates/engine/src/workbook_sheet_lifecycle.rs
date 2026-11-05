@@ -73,6 +73,38 @@ impl Workbook {
         Ok((candidate, commit))
     }
 
+    /// Move a sheet to position `to` (0-based, counted after removing it
+    /// from its current place). The active sheet stays active. Formulas are
+    /// untouched because they name sheets; named-range targets follow it.
+    pub fn prepare_sheet_move(
+        &self,
+        id: SheetId,
+        to: usize,
+    ) -> Result<(Workbook, GuardedStructureCommit), String> {
+        self.ensure_writable()?;
+        let from = self
+            .sheet_index_by_id(id)
+            .ok_or("The sheet no longer exists.")?;
+        if to >= self.sheets.len() {
+            return Err("That position is past the last sheet.".into());
+        }
+        let mut candidate = self.clone();
+        if from != to {
+            let active = candidate.active_sheet_id();
+            let sheet = candidate.sheets.remove(from);
+            candidate.sheets.insert(to, sheet);
+            candidate.active_sheet = candidate.sheet_index_by_id(active).unwrap_or(to);
+            candidate.named_ranges.move_sheet(from, to);
+        }
+        candidate.validate_sheet_lifecycle(self)?;
+        let mut commit = self.capture_sheet_move(&candidate, from, to)?;
+        commit.sheet = id;
+        if from != to {
+            candidate.bump_revision_for_structure();
+        }
+        Ok((candidate, commit))
+    }
+
     fn validate_sheet_lifecycle(&mut self, before: &Workbook) -> Result<(), String> {
         self.rebuild_dep_graph();
         let report = self.recompute_full_ordered();
