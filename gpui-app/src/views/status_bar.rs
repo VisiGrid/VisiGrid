@@ -495,6 +495,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
             // Insert option
             div()
                 .id("ctx-insert")
+                .debug_selector(|| "ctx-insert".into())
                 .px_3()
                 .py_1()
                 .cursor_pointer()
@@ -511,6 +512,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
             // Delete option
             div()
                 .id("ctx-delete")
+                .debug_selector(|| "ctx-delete".into())
                 .px_3()
                 .py_1()
                 .cursor_pointer()
@@ -526,6 +528,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
             // Rename option
             div()
                 .id("ctx-rename")
+                .debug_selector(|| "ctx-rename".into())
                 .px_3()
                 .py_1()
                 .cursor_pointer()
@@ -1208,5 +1211,60 @@ mod selection_stats_tests {
         let rows = super::visible_selection_rows(view.rows(),3,6);
         assert_eq!(rows.len(),3);
         assert_eq!(super::selection_numbers(sheet,view.rows(),rows,2,2),vec![20.0,30.0,40.0]);
+    }
+}
+
+/// Issue #162: a click on a sheet-tab menu item must not also reach the
+/// grid or row headers painted behind the menu.
+#[cfg(test)]
+mod sheet_menu_click_through_tests {
+    use crate::app::Spreadsheet;
+    use gpui::{Modifiers, VisualTestContext};
+
+    fn open(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Spreadsheet>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let (view, vcx) = cx.add_window_view(Spreadsheet::new);
+        view.update(vcx, |app, cx| {
+            app.add_sheet(cx);
+            app.add_sheet(cx);
+            app.goto_sheet(0, cx);
+            app.view_state.select_cell(0, 0);
+        });
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    fn click_rename(view: &gpui::Entity<Spreadsheet>, vcx: &mut VisualTestContext, sheet: usize) {
+        view.update(vcx, |app, cx| app.show_sheet_context_menu(sheet, cx));
+        vcx.run_until_parked();
+        let bounds = vcx.debug_bounds("ctx-rename").expect("menu rendered");
+        vcx.simulate_click(bounds.center(), Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn rename_over_the_grid_keeps_the_rename_and_the_selection(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = open(cx);
+        click_rename(&view, vcx, 2);
+        view.read_with(vcx, |app, _| {
+            assert_eq!(app.renaming_sheet, Some(2), "grid click behind the menu confirmed the rename");
+            assert_eq!(app.sheet_context_menu, None);
+        });
+    }
+
+    #[gpui::test]
+    fn rename_over_the_row_headers_does_not_select_a_row(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = open(cx);
+        click_rename(&view, vcx, 0);
+        view.read_with(vcx, |app, _| {
+            assert_eq!(app.renaming_sheet, Some(0));
+            assert_eq!(app.view_state.active_cell(), (0, 0), "row header behind the menu took the click");
+            assert_eq!(app.view_state.selection_end, None);
+        });
     }
 }

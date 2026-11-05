@@ -19,6 +19,7 @@
 //! - Standard styling: bg, border, rounded_md, shadow_lg
 //! - Flex column layout with vertical padding
 //! - Click-outside dismiss via `on_mouse_down_out`
+//! - Occlusion: clicks on the popup never reach the grid behind it
 //!
 //! # What the caller provides
 //!
@@ -52,6 +53,10 @@ where
     div()
         .id(ElementId::Name(id.into()))
         .absolute()
+        // Block hit-testing of everything painted behind the popup. Without
+        // this, a click on a menu item also reaches the grid or headers
+        // underneath (selecting a cell, stealing focus) -- issue #162.
+        .occlude()
         .bg(bg)
         .border_1()
         .border_color(border)

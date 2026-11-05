@@ -920,6 +920,7 @@ pub fn render_autocomplete_popup(
 
     div()
         .absolute()
+        .occlude()
         .top(px(popup_y))
         .left(px(popup_x))
         .w(px(380.0))
