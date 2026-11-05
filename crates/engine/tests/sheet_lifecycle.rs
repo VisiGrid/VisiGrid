@@ -252,3 +252,62 @@ fn existing_cycles_survive_sheet_changes_and_structural_history() {
     wb.set_cell_value_tracked(0, 12, 0, "=Future!A13");
     assert!(wb.prepare_sheet_rename(wb.active_sheet_id(), "Data", "Future").is_err());
 }
+
+fn names(wb: &Workbook) -> Vec<String> {
+    wb.sheets().iter().map(|s| s.name.clone()).collect()
+}
+
+#[test]
+fn sheet_lifecycle_move_keeps_formulas_names_and_active_sheet_with_exact_undo() {
+    let mut wb = filtered();
+    let b = wb.add_sheet_named("B").unwrap();
+    let c = wb.add_sheet_named("C").unwrap();
+    let c_id = wb.sheets()[c].id;
+    wb.set_cell_value_tracked(b, 0, 0, "5");
+    wb.set_cell_value_tracked(c, 0, 0, "=B!A1*2+SUM(Sales[Amount])");
+    wb.define_name_for_cell("InB", b, 0, 0).unwrap();
+    wb.define_name_for_cell("InData", 0, 3, 1).unwrap();
+    wb.set_cell_value_tracked(c, 1, 0, "=InB+InData");
+    wb.set_active_sheet(b);
+    let b_id = wb.sheets()[b].id;
+
+    // Move C to the front: Data, B, C -> C, Data, B.
+    let (mut moved, commit) = wb.prepare_sheet_move(c_id, 0).unwrap();
+    assert!(!commit.is_empty());
+    assert_eq!(names(&moved), ["C", "Data", "B"]);
+    assert_eq!(moved.active_sheet_id(), b_id, "the active sheet stays active");
+    assert_eq!(moved.sheet(0).unwrap().get_raw(0, 0), "=B!A1*2+SUM(Sales[Amount])");
+    assert_eq!(moved.sheet(0).unwrap().get_display(0, 0), "50");
+    assert!(matches!(moved.get_named_range("InB").unwrap().target, NamedRangeTarget::Cell { sheet: 2, .. }));
+    assert!(matches!(moved.get_named_range("InData").unwrap().target, NamedRangeTarget::Cell { sheet: 1, .. }));
+    assert_eq!(moved.sheet(0).unwrap().get_display(1, 0), "35");
+    assert_eq!(moved.sheet(1).unwrap().table_view_spec(), wb.sheet(0).unwrap().table_view_spec());
+
+    commit.replay(&mut moved, true).unwrap();
+    assert_eq!(names(&moved), ["Data", "B", "C"]);
+    assert_eq!(moved.active_sheet_id(), b_id);
+    assert_eq!(moved.get_named_range("InB").unwrap().target, wb.get_named_range("InB").unwrap().target);
+    assert_eq!(moved.sheet(2).unwrap().get_display(1, 0), "35");
+
+    commit.replay(&mut moved, false).unwrap();
+    assert_eq!(names(&moved), ["C", "Data", "B"]);
+    // History refuses to replay over a different order.
+    let (mut other, _) = moved.prepare_sheet_move(b_id, 0).unwrap();
+    assert!(commit.replay(&mut other, true).is_err());
+}
+
+#[test]
+fn sheet_lifecycle_move_rightward_and_no_op() {
+    let mut wb = filtered();
+    wb.add_sheet_named("B").unwrap();
+    wb.add_sheet_named("C").unwrap();
+    wb.define_name_for_cell("InData", 0, 3, 1).unwrap();
+    let (moved, commit) = wb.prepare_sheet_move(SheetId(1), 2).unwrap();
+    assert_eq!(names(&moved), ["B", "C", "Data"]);
+    assert!(!commit.is_empty());
+    assert!(matches!(moved.get_named_range("InData").unwrap().target, NamedRangeTarget::Cell { sheet: 2, .. }));
+    let (same, noop) = wb.prepare_sheet_move(SheetId(1), 0).unwrap();
+    assert!(noop.is_empty());
+    assert_eq!(names(&same), names(&wb));
+    assert!(wb.prepare_sheet_move(SheetId(1), 3).is_err());
+}

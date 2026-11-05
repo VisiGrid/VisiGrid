@@ -481,6 +481,27 @@ impl NamedRangeStore {
         }
     }
 
+    /// Follow a sheet that moved from position `from` to `to`: targets on it
+    /// take its new position, and the sheets in between shift by one.
+    pub(crate) fn move_sheet(&mut self, from: usize, to: usize) {
+        let remap = |i: usize| {
+            if i == from {
+                to
+            } else if from < to && i > from && i <= to {
+                i - 1
+            } else if to < from && i >= to && i < from {
+                i + 1
+            } else {
+                i
+            }
+        };
+        for range in self.ranges.values_mut() {
+            if let NamedRangeTarget::Cell { sheet, .. } | NamedRangeTarget::Range { sheet, .. } = &mut range.target {
+                *sheet = remap(*sheet);
+            }
+        }
+    }
+
     /// Update the description of a named range
     pub fn set_description(&mut self, name: &str, description: Option<String>) -> Result<(), String> {
         let key = name.to_lowercase();

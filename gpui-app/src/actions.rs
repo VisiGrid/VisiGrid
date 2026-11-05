@@ -284,6 +284,8 @@ actions!(sheets, [
     NextSheet,
     PrevSheet,
     AddSheet,
+    MoveSheetLeft,
+    MoveSheetRight,
 ]);
 
 actions!(table, [CreateTable]);

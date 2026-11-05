@@ -131,6 +131,8 @@ pub struct GuardedStructureCommit {
     sheets: Vec<(SheetId, String, usize, usize)>,
     renamed_sheets: Vec<(SheetId, String, String)>,
     sheet_change: Option<SheetChange>,
+    /// A sheet moved from one position to another (`from`, `to`).
+    sheet_move: Option<(usize, usize)>,
     views: Vec<(SheetId, Option<TableViewSpec>)>,
 }
 
@@ -394,22 +396,22 @@ impl Workbook {
         &self,
         candidate: &Workbook,
     ) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false, None, Some(100_000), None)
+        self.capture_guarded_batch_inner(candidate, false, None, None, Some(100_000), None)
     }
 
     pub(super) fn capture_footer_append(&self, candidate: &Workbook, id: crate::table::TableId) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false, None, Some(100_000), Some(id))
+        self.capture_guarded_batch_inner(candidate, false, None, None, Some(100_000), Some(id))
     }
 
     /// Conversion can rewrite every calculated cell in an existing Table.
     /// Its source-only patches are compact; the ordinary edit limit must not
     /// make a previously supported Table impossible to convert.
     pub(super) fn capture_table_conversion(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, false, None, None, None)
+        self.capture_guarded_batch_inner(candidate, false, None, None, None, None)
     }
 
     pub(super) fn capture_sheet_rename(&self, candidate: &Workbook) -> Result<GuardedStructureCommit, String> {
-        self.capture_guarded_batch_inner(candidate, true, None, Some(100_000), None)
+        self.capture_guarded_batch_inner(candidate, true, None, None, Some(100_000), None)
     }
 
     pub(super) fn capture_sheet_change(&self, candidate: &Workbook, index: usize, added: bool) -> Result<GuardedStructureCommit, String> {
@@ -417,10 +419,17 @@ impl Workbook {
         let sheet = source.sheet(index).ok_or("The changed sheet no longer exists.")?;
         self.capture_guarded_batch_inner(candidate, false, Some(SheetChange {
             index, sheet: Box::new(sheet.clone()), added,
-        }), Some(100_000), None)
+        }), None, Some(100_000), None)
     }
 
-    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>, cell_limit: Option<usize>, append_table: Option<crate::table::TableId>) -> Result<GuardedStructureCommit, String> {
+    /// Capture a sheet reorder. Cells and formulas are untouched (formulas
+    /// name sheets, not positions); named-range targets, which hold sheet
+    /// positions, are captured by the usual before/after name patch.
+    pub(super) fn capture_sheet_move(&self, candidate: &Workbook, from: usize, to: usize) -> Result<GuardedStructureCommit, String> {
+        self.capture_guarded_batch_inner(candidate, false, None, (from != to).then_some((from, to)), Some(100_000), None)
+    }
+
+    fn capture_guarded_batch_inner(&self, candidate: &Workbook, allow_rename: bool, sheet_change: Option<SheetChange>, sheet_move: Option<(usize, usize)>, cell_limit: Option<usize>, append_table: Option<crate::table::TableId>) -> Result<GuardedStructureCommit, String> {
         self.ensure_writable()?;
         let mut before = identity(self);
         let mut after = identity(candidate);
@@ -430,6 +439,13 @@ impl Workbook {
             let (identities, specs) = if change.added { (&mut after, &mut after_views) } else { (&mut before, &mut before_views) };
             identities.remove(change.index);
             specs.remove(change.index);
+        }
+        if let Some((from, to)) = sheet_move {
+            // Compare sheets in their new order.
+            let sheet = before.remove(from);
+            before.insert(to, sheet);
+            let view = before_views.remove(from);
+            before_views.insert(to, view);
         }
         let same_shape = before.len() == after.len() && before.iter().zip(&after)
             .all(|(b, a)| b.0 == a.0 && b.2 == a.2 && b.3 == a.3);
@@ -500,6 +516,7 @@ impl Workbook {
             sheets: identity(self),
             renamed_sheets,
             sheet_change,
+            sheet_move,
             views: views(self),
         };
         Ok(commit)
@@ -517,7 +534,7 @@ impl GuardedStructureCommit {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty() && self.metadata.is_empty() && self.names.is_none() && self.renamed_sheets.is_empty() && self.sheet_change.is_none()
+        self.cells.is_empty() && self.metadata.is_empty() && self.names.is_none() && self.renamed_sheets.is_empty() && self.sheet_change.is_none() && self.sheet_move.is_none()
     }
     pub fn changed_cell_count(&self) -> usize {
         self.cells.len()
@@ -541,6 +558,12 @@ impl GuardedStructureCommit {
                     expected_sheets.remove(change.index);
                     expected_views.remove(change.index);
                 }
+            }
+            if let Some((from, to)) = self.sheet_move {
+                let sheet = expected_sheets.remove(from);
+                expected_sheets.insert(to, sheet);
+                let view = expected_views.remove(from);
+                expected_views.insert(to, view);
             }
         }
         if identity(wb) != expected_sheets || views(wb) != expected_views {
@@ -611,6 +634,13 @@ impl GuardedStructureCommit {
             }
             candidate.active_sheet = candidate.sheet_index_by_id(active)
                 .unwrap_or(change.index.min(candidate.sheets.len() - 1));
+        }
+        if let Some((from, to)) = self.sheet_move {
+            let active = candidate.active_sheet_id();
+            let (take, put) = if undo { (to, from) } else { (from, to) };
+            let sheet = candidate.sheets.remove(take);
+            candidate.sheets.insert(put, sheet);
+            candidate.active_sheet = candidate.sheet_index_by_id(active).unwrap_or(put);
         }
         for (id, before, after) in &self.renamed_sheets {
             candidate.sheet_by_id_mut(*id).unwrap().set_name(if undo { before } else { after });
