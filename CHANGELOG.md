@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.55.0
+
+### Sheets
+
+- **Reorder sheets.** Drag a sheet tab onto another tab to move the sheet there; a marker shows where it will land. **Move Left** and **Move Right** are in the tab's right-click menu and the command palette, and `sheet.move_left` / `sheet.move_right` can be bound in `keybindings.json`. Each move is one undo step, the sheet you are on stays active, formulas keep pointing at the same sheets, and named ranges follow their sheet. ([#38](https://github.com/VisiGrid/VisiGrid/issues/38), [#164](https://github.com/VisiGrid/VisiGrid/pull/164))
+
+### Google Sheets compatibility
+
+- **`QUERY`.** Google's query language over a range or array: `select`, `where`, `group by`, `pivot`, `order by`, `limit`, `offset` and `label`, with `sum`, `avg`, `count`, `min` and `max`. The `format` and `options` clauses and functions VisiGrid lacks are refused with a `#VALUE!` message that names them. ([#157](https://github.com/VisiGrid/VisiGrid/pull/157))
+- **26 more Sheets functions:** `SORTN`, `FLATTEN`, `ARRAY_CONSTRAIN`, `JOIN`, `ISBETWEEN`, `ISEMAIL`, `ISURL`, `EPOCHTODATE`, the `TO_TEXT` / `TO_DATE` / `TO_PERCENT` / `TO_DOLLARS` / `TO_PURE_NUMBER` conversions, and the operator functions `ADD`, `MINUS`, `MULTIPLY`, `DIVIDE`, `EQ`, `NE`, `GT`, `GTE`, `LT`, `LTE`, `UMINUS`, `UPLUS` and `UNARY_PERCENT`. ([#155](https://github.com/VisiGrid/VisiGrid/pull/155))
+- **Google Sheets .xlsx exports calculate again.** Sheets writes formulas Excel can't run as frozen `__xludf.DUMMYFUNCTION` values, which showed `#ERR` in 0.54. Import now restores the original formula, so `FILTER`, `QUERY`, `REGEXMATCH`, `SPLIT`, `UNIQUE` and the rest recalculate and spill as they did in Sheets. Formulas VisiGrid can't run, such as `IMPORTRANGE` and `GOOGLEFINANCE`, keep Google's last value and are listed in the import report. ([#154](https://github.com/VisiGrid/VisiGrid/pull/154), [#156](https://github.com/VisiGrid/VisiGrid/pull/156))
+
+### Fixed
+
+- **Clicking a menu no longer also clicks the grid behind it.** Choosing **Rename** from a sheet tab's menu over the grid confirmed the rename straight away, and over the row headers it selected a row too. Every popup, the format bar's dropdowns and formula autocomplete now keep their clicks. ([#162](https://github.com/VisiGrid/VisiGrid/issues/162), [#163](https://github.com/VisiGrid/VisiGrid/pull/163))
+- **Dates with a two-digit year work in formulas.** Arithmetic on a date stored as text, such as `10/8/26`, gave an error; two-digit years now read as Excel reads them (00–29 is 20xx, 30–99 is 19xx). Arithmetic on text that is not a number or a date is `#VALUE!`, as in Excel, instead of a "Cannot convert" message in the cell. ([#166](https://github.com/VisiGrid/VisiGrid/pull/166))
+- **`vgrid sheet verify` accepts what `vgrid sheet fingerprint` prints.** Verifying a file against its own `v1:` fingerprint reported it as drifted. ([#159](https://github.com/VisiGrid/VisiGrid/pull/159))
+
+### Under the hood
+
+- **GPUI updated to Zed v1.27.0.** ([#165](https://github.com/VisiGrid/VisiGrid/pull/165))
+- **Cell notes sync in live sessions** (engine side): adding, editing and removing a note is a collaboration operation that follows its cell through inserts, deletes and sorts, and undo brings notes back. ([#153](https://github.com/VisiGrid/VisiGrid/pull/153))
+
 ## 0.54.0
 
 ### Import recipes
