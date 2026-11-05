@@ -307,7 +307,7 @@ fn render_results(app: &Spreadsheet, c: &Palette, cx: &mut Context<Spreadsheet>)
         .flex()
         .flex_col()
         .py(px(4.0))
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+        .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
             let dy: f32 = event.delta.pixel_delta(px(Spreadsheet::PALETTE_ROW_H)).y.into();
             let rows = wheel_rows(&mut this.palette_wheel_px, dy, Spreadsheet::PALETTE_ROW_H);
             if rows != 0 {

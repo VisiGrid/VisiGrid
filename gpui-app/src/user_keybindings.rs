@@ -209,6 +209,7 @@ pub fn register_user_keybindings(cx: &mut App) {
 
 /// Create a KeyBinding from a key combo and action name
 fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
+    let key = crate::keybindings::static_keys(key);
     let context = Some("Spreadsheet");
 
     // Map action names to actual actions

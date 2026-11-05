@@ -533,7 +533,7 @@ pub fn render_terminal_panel(
             handle_terminal_key(this, event, window, cx);
             cx.stop_propagation();
         }))
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+        .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
             handle_terminal_scroll(this, event, cx);
             cx.stop_propagation();
         }))
@@ -910,7 +910,7 @@ fn handle_terminal_key(
 /// Handle mouse wheel scroll in the terminal panel.
 fn handle_terminal_scroll(
     app: &mut Spreadsheet,
-    event: &ScrollWheelEvent,
+    event: &ScrollEvent,
     cx: &mut Context<Spreadsheet>,
 ) {
     if let Some(ref term_arc) = app.terminal.term {

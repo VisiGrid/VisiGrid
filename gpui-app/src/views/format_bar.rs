@@ -138,7 +138,7 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
     div()
         .id("format-toolbar")
         .overflow_x_scroll()
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .on_scroll(|_, _, cx| cx.stop_propagation())
         .flex()
         .flex_shrink_0()
         .relative()

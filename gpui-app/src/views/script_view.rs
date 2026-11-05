@@ -106,7 +106,7 @@ pub fn render_script_view(
             handle_script_view_key(this, event, window, cx);
             cx.stop_propagation();
         }))
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+        .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
             let delta = event.delta.pixel_delta(px(16.0));
             let dy: f32 = delta.y.into();
             let scroll_lines = (-dy / 16.0).round() as i32;
