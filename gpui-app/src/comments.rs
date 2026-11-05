@@ -665,7 +665,7 @@ impl Render for CommentPreview {
             .cursor_default()
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .px_3()
@@ -1091,7 +1091,7 @@ pub fn render_reader(
         .text_size(px(13.))
         .overflow_hidden()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .on_scroll(|_, _, cx| cx.stop_propagation())
         .child(
             div()
                 .p_3()

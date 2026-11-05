@@ -1885,7 +1885,7 @@ fn test_keybinding_maps_ctrl_n_to_new_window() {
     // Instead, this test validates the source code pattern.
     //
     // The keybinding registration in keybindings.rs should contain:
-    //   KeyBinding::new(&kb(m, "n"), NewWindow, Some("Spreadsheet"))
+    //   KeyBinding::new(kb(m, "n"), NewWindow, Some("Spreadsheet"))
     //
     // This test serves as documentation that:
     // 1. Ctrl+N (or Cmd+N on macOS) is bound to NewWindow

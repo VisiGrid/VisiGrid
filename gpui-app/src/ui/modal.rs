@@ -66,7 +66,7 @@ where
             dismiss(this, cx);
         }))
         // Consume scroll so grid doesn't move
-        .on_scroll_wheel(|_, _, cx| {
+        .on_scroll(|_, _, cx| {
             cx.stop_propagation();
         })
         // Dialog layer: child of backdrop, clicks on dialog don't bubble to backdrop's on_click
@@ -101,7 +101,7 @@ pub fn modal_backdrop<E: IntoElement>(
         .justify_center()
         .bg(hsla(0.0, 0.0, 0.0, 0.5))
         // Consume scroll so grid doesn't move
-        .on_scroll_wheel(|_, _, cx| {
+        .on_scroll(|_, _, cx| {
             cx.stop_propagation();
         })
         // Dialog layer

@@ -8,8 +8,8 @@ description = "Phase 0 spike for VisiGrid scratch mode: PopUp window + global ho
 [workspace]
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0", features = ["wayland", "x11", "font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.27.0", version = "0.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.27.0", features = ["wayland", "x11", "font-kit"] }
 global-hotkey = "0.8"
 
 [target.'cfg(unix)'.dependencies]

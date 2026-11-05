@@ -233,7 +233,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
         }))
         // Mouse wheel scrolling (or zoom with Ctrl/Cmd)
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+        .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
             // Don't scroll the grid when the terminal panel has focus —
             // the terminal's own scroll handler handles it and calls stop_propagation,
             // but this guard is defense-in-depth for edge cases.
