@@ -1741,3 +1741,38 @@ fn inspect_calc_whole_rows_columns_and_literal_text() {
     }
     std::fs::remove_file(csv).ok();
 }
+
+/// Commands that read values must not see the grid's two-decimal display.
+/// 0.062 was inspected as "0.06", exported to JSON as 0.06, `calc =1/8` printed
+/// 0.12, and `diff` called 0.062 and 0.064 a match.
+#[test]
+fn value_reading_commands_keep_full_precision() {
+    let csv = csv_fixture("precision", "id,v\n1,0.062\n");
+    let out = sheet_output("precision");
+    let import = vgrid()
+        .args(["sheet", "import", csv.to_str().unwrap(), out.to_str().unwrap()])
+        .output()
+        .expect("import");
+    assert!(import.status.success(), "stderr: {}", String::from_utf8_lossy(&import.stderr));
+
+    let inspect = vgrid().args(["sheet", "inspect", out.to_str().unwrap(), "B2", "--json"]).output().expect("inspect");
+    let inspect: serde_json::Value = serde_json::from_slice(&inspect.stdout).expect("valid JSON");
+    assert_eq!(inspect["value"], "0.062");
+
+    let value = vgrid().args(["sheet", "inspect", out.to_str().unwrap(), "B2", "--value"]).output().expect("inspect --value");
+    assert_eq!(String::from_utf8_lossy(&value.stdout).trim(), "0.062");
+
+    let json = vgrid().args(["convert", csv.to_str().unwrap(), "-t", "json"]).output().expect("convert");
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid JSON");
+    assert_eq!(json[1][1], serde_json::json!(0.062));
+
+    let calc = vgrid().args(["calc", "--from", "csv", "=1/8"]).stdin(std::fs::File::open(&csv).unwrap()).output().expect("calc");
+    assert_eq!(String::from_utf8_lossy(&calc.stdout).trim(), "0.125");
+
+    let right = csv_fixture("precision_right", "id,v\n1,0.064\n");
+    let diff = vgrid().args(["diff", csv.to_str().unwrap(), right.to_str().unwrap(), "--key", "id"]).output().expect("diff");
+    let diff: serde_json::Value = serde_json::from_slice(&diff.stdout).expect("valid JSON");
+    assert_eq!(diff["summary"]["diff"], 1, "0.062 vs 0.064 must be a difference: {diff}");
+
+    for f in [&csv, &right, &out] { std::fs::remove_file(f).ok(); }
+}

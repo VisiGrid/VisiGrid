@@ -517,7 +517,7 @@ pub(crate) fn materialize_filtered(
     let mut out = Sheet::new(SheetId(1), rows.len().max(1), cols.len().max(1));
     for (out_r, &src_r) in rows.iter().enumerate() {
         for (out_c, &src_c) in cols.iter().enumerate() {
-            let v = sheet.get_display(src_r, src_c);
+            let v = sheet.get_exact_display(src_r, src_c);
             if !v.is_empty() {
                 out.set_value(out_r, out_c, &v);
             }
@@ -1174,7 +1174,7 @@ pub(crate) fn cell_json_value(sheet: &visigrid_engine::sheet::Sheet, row: usize,
         Value::Text(s) if matches!(s.as_str(), "TRUE" | "true") => serde_json::json!(true),
         Value::Text(s) if matches!(s.as_str(), "FALSE" | "false") => serde_json::json!(false),
         Value::Text(s) => serde_json::Value::String(s),
-        _ => string_to_json_value(&sheet.get_display(row, col)),
+        _ => string_to_json_value(&sheet.get_exact_display(row, col)),
     }
 }
 
@@ -1227,7 +1227,7 @@ pub(crate) fn write_lines(
     };
 
     for row in all_rows {
-        let value = sheet.get_display(row, output_col);
+        let value = sheet.get_exact_display(row, output_col);
         output.extend_from_slice(value.as_bytes());
         output.push(b'\n');
     }

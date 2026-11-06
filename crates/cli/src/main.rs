@@ -1875,7 +1875,7 @@ fn row_matches(
     skip_counts: &mut [usize],
 ) -> bool {
     for (i, cond) in conditions.iter().enumerate() {
-        let cell = sheet.get_display(row, cond.col);
+        let cell = sheet.get_exact_display(row, cond.col);
         let matches = match cond.op {
             WhereOp::Contains => cell.to_lowercase().contains(&cond.value.to_lowercase()),
             WhereOp::Lt => {
@@ -2557,7 +2557,7 @@ fn cmd_calc(
     if let visigrid_engine::formula::eval::EvalResult::Array(ref array) = evaluated {
         sheet.place_spill(formula_row, formula_col, array);
     }
-    let result = sheet.get_display(formula_row, formula_col);
+    let result = sheet.get_exact_display(formula_row, formula_col);
 
     // Check for error tokens
     if result.starts_with('#') {
@@ -2679,7 +2679,7 @@ fn detect_spill(sheet: &visigrid_engine::sheet::Sheet, start_row: usize, start_c
     // This is a heuristic - the engine doesn't explicitly mark spill boundaries
 
     // First check if the formula cell itself has a value
-    let first_val = sheet.get_display(start_row, start_col);
+    let first_val = sheet.get_exact_display(start_row, start_col);
     if first_val.is_empty() {
         return None;
     }
@@ -2687,7 +2687,7 @@ fn detect_spill(sheet: &visigrid_engine::sheet::Sheet, start_row: usize, start_c
     // Scan right to find width
     let mut width = 1;
     for col in (start_col + 1)..sheet.cols {
-        let val = sheet.get_display(start_row, col);
+        let val = sheet.get_exact_display(start_row, col);
         if val.is_empty() {
             break;
         }
@@ -2700,7 +2700,7 @@ fn detect_spill(sheet: &visigrid_engine::sheet::Sheet, start_row: usize, start_c
         // Check if this row has values in all columns of the spill
         let mut row_has_values = false;
         for col in start_col..(start_col + width) {
-            if !sheet.get_display(row, col).is_empty() {
+            if !sheet.get_exact_display(row, col).is_empty() {
                 row_has_values = true;
                 break;
             }
@@ -2725,7 +2725,7 @@ fn format_spill_csv(
 
     for r in 0..rows {
         for c in 0..cols {
-            let val = sheet.get_display(start_row + r, start_col + c);
+            let val = sheet.get_exact_display(start_row + r, start_col + c);
             // RFC 4180 quoting
             let needs_quote = val.contains(',') || val.contains('"') || val.contains('\n');
             if needs_quote {
@@ -2757,7 +2757,7 @@ fn format_spill_json(
     for r in 0..rows {
         let mut row_vec: Vec<serde_json::Value> = Vec::new();
         for c in 0..cols {
-            let val = sheet.get_display(start_row + r, start_col + c);
+            let val = sheet.get_exact_display(start_row + r, start_col + c);
             // Try to parse as number, otherwise string
             if let Ok(n) = val.parse::<f64>() {
                 row_vec.push(serde_json::json!(n));
@@ -3333,15 +3333,15 @@ fn extract_data_rows(
             continue;
         }
 
-        let key_raw = diff::build_composite_key(&options.key_cols, |col| sheet.get_display(r, col));
+        let key_raw = diff::build_composite_key(&options.key_cols, |col| sheet.get_exact_display(r, col));
         let key_norm = diff::build_composite_key(&options.key_cols, |col| {
-            diff::apply_key_transform(&sheet.get_display(r, col), options.key_transform)
+            diff::apply_key_transform(&sheet.get_exact_display(r, col), options.key_transform)
         });
 
         let mut values = HashMap::new();
         for (c, header) in headers.iter().enumerate() {
             if c < bounds_cols {
-                values.insert(header.clone(), sheet.get_display(r, c));
+                values.insert(header.clone(), sheet.get_exact_display(r, c));
             }
         }
 
@@ -5791,7 +5791,7 @@ fn cmd_sheet_inspect(
         for ((row, col), cell) in sheet.cells_iter() {
             let raw_str = cell.value().raw_display();
             if raw_str.is_empty() { continue; }
-            let display = sheet.get_display(row, col);
+            let display = sheet.get_exact_display(row, col);
             let value_type = if is_native {
                 classify_value_type(&raw_str, &sheet.get_computed_value(row, col))
             } else {
@@ -5890,7 +5890,7 @@ fn cmd_sheet_inspect(
             for (row, col) in populated {
                 let raw = sheet.get_raw(row, col);
                 if raw.is_empty() { continue; }
-                let display = sheet.get_display(row, col);
+                let display = sheet.get_exact_display(row, col);
                 let value_type = if is_native {
                     classify_value_type(&raw, &sheet.get_computed_value(row, col))
                 } else {
@@ -5939,7 +5939,7 @@ fn cmd_sheet_inspect(
         } else if start_row == end_row && start_col == end_col {
             // Single cell (dense)
             let raw = sheet.get_raw(start_row, start_col);
-            let display = sheet.get_display(start_row, start_col);
+            let display = sheet.get_exact_display(start_row, start_col);
 
             if value_only {
                 println!("{}", display);
@@ -6002,7 +6002,7 @@ fn cmd_sheet_inspect(
             for row in start_row..=end_row {
                 for col in start_col..=end_col {
                     let raw = sheet.get_raw(row, col);
-                    let display = sheet.get_display(row, col);
+                    let display = sheet.get_exact_display(row, col);
 
                     let value_type = if is_native {
                         classify_value_type(&raw, &sheet.get_computed_value(row, col))
