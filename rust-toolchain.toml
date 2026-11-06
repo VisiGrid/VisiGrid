@@ -1,4 +1,4 @@
-# Minimum toolchain for the gpui dependency (Zed v1.22.0), which needs
+# Minimum toolchain for the gpui dependency (Zed v1.27.0), which needs
 # Rust 1.98.1. Keep this equal to the channel in Zed's own
 # rust-toolchain.toml at the tag gpui-app/Cargo.toml pins. rustup-managed
 # machines pick this up automatically; distro-packaged toolchains (no

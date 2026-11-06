@@ -3,6 +3,14 @@ use super::{disabled_reason, item_label, Item};
 use crate::{actions as a, app::Spreadsheet, search::CommandId, theme::TokenKey};
 use gpui::{prelude::FluentBuilder, *};
 
+const HOST_OS: OperatingSystem = if cfg!(target_os = "macos") {
+    OperatingSystem::Mac
+} else if cfg!(target_os = "windows") {
+    OperatingSystem::Windows
+} else {
+    OperatingSystem::Linux
+};
+
 pub(super) fn shortcut(window: &Window, action: &dyn Action) -> Option<SharedString> {
     // Resolve in the sheet context even while the ribbon has keyboard focus.
     // GPUI excludes bindings shadowed by user overrides or explicit unbindings.
@@ -16,7 +24,7 @@ pub(super) fn shortcut(window: &Window, action: &dyn Action) -> Option<SharedStr
                 .keystrokes()
                 .iter()
                 .map(|key| {
-                    key.to_string()
+                    key.unparse(HOST_OS)
                         .replace("ctrl-", "Ctrl+")
                         .replace("alt-", "Alt+")
                         .replace("shift-", "Shift+")

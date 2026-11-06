@@ -752,7 +752,7 @@ pub fn render_preferences_panel(
                 .flex()
                 .flex_col()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .px(px(24.))

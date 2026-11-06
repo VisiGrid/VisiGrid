@@ -1175,7 +1175,7 @@ fn render_body(
         .bg(app.token(TokenKey::PanelBg))
         .border_b_1()
         .border_color(border)
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        .on_scroll(|_, _, cx| cx.stop_propagation());
     for (index, (group, width)) in entries.iter().zip(widths).enumerate() {
         let mut el = div()
             .w(px(width))

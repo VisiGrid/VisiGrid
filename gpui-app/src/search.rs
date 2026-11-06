@@ -241,6 +241,8 @@ pub enum CommandId {
     NextSheet,
     PrevSheet,
     AddSheet,
+    MoveSheetLeft,
+    MoveSheetRight,
 
     // Pivot tables
     CreateTable,
@@ -465,6 +467,8 @@ impl CommandId {
             Self::NextSheet => "Next Sheet",
             Self::PrevSheet => "Previous Sheet",
             Self::AddSheet => "Add Sheet",
+            Self::MoveSheetLeft => "Move Sheet Left",
+            Self::MoveSheetRight => "Move Sheet Right",
             Self::CreateTable => "Create Table",
             Self::InsertPivotTable => "Insert PivotTable",
             Self::RefreshPivot => "Refresh PivotTable",
@@ -749,6 +753,8 @@ impl CommandId {
             Self::NextSheet => "tab worksheet",
             Self::PrevSheet => "tab worksheet",
             Self::AddSheet => "new tab worksheet",
+            Self::MoveSheetLeft => "reorder tab worksheet order",
+            Self::MoveSheetRight => "reorder tab worksheet order",
             Self::CreateTable => "table structured named columns headers banding range",
             Self::InsertPivotTable => "pivot table summarize group aggregate crosstab report sum count distinct",
             Self::RefreshPivot => "pivot table refresh update recalculate",
@@ -966,6 +972,8 @@ impl CommandId {
             Self::NextSheet,
             Self::PrevSheet,
             Self::AddSheet,
+            Self::MoveSheetLeft,
+            Self::MoveSheetRight,
             Self::CreateTable,
             Self::InsertPivotTable,
             Self::RefreshPivot,
@@ -1237,6 +1245,8 @@ impl CommandId {
             | Self::NextSheet
             | Self::PrevSheet
             | Self::AddSheet
+            | Self::MoveSheetLeft
+            | Self::MoveSheetRight
             | Self::ShowAISettings => None,
         }
     }

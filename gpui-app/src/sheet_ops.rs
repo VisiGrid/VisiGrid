@@ -733,6 +733,34 @@ impl Spreadsheet {
         if let Err(error) = result { self.status_message = Some(error); cx.notify(); }
     }
 
+    /// Move the sheet at `from` to position `to` as one undoable step. The
+    /// active sheet stays active; formulas are unaffected (they name sheets).
+    pub fn move_sheet(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to { return; }
+        if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
+        self.commit_pending_edit(cx);
+        if self.mode.is_editing() { return; }
+        self.cancel_sheet_rename(cx);
+        self.sheet_context_menu = None;
+        let Some(sheet) = self.wb(cx).sheet(from) else { return; };
+        let (id, name) = (sheet.id, sheet.name.clone());
+        let result = self.wb(cx).prepare_sheet_move(id, to).and_then(|(candidate, commit)| {
+            if commit.is_empty() { return Ok(()); }
+            self.publish_table_batch(candidate, commit, format!("Move sheet '{name}'"), crate::history::MutationSource::Human, cx)
+        });
+        if let Err(error) = result { self.status_message = Some(error); }
+        cx.notify();
+    }
+
+    /// Move the active sheet one place left (`-1`) or right (`1`).
+    pub fn move_active_sheet_by(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let from = self.wb(cx).active_sheet_index();
+        let count = self.wb(cx).sheet_count();
+        let to = from as isize + delta;
+        if to < 0 || to >= count as isize { return; }
+        self.move_sheet(from, to as usize, cx);
+    }
+
     /// Clear selection state when switching sheets
     pub(crate) fn clear_selection_state(&mut self) {
         self.view_state.selected = (0, 0);

@@ -322,6 +322,38 @@ pub fn render_status_bar(app: &Spreadsheet, editing: bool, cx: &mut Context<Spre
         })
 }
 
+/// Payload carried while a sheet tab is dragged.
+#[derive(Clone)]
+struct SheetTabDrag {
+    index: usize,
+    name: String,
+}
+
+/// The tab drawn under the pointer while dragging.
+struct SheetTabDragPreview {
+    label: String,
+    bg: Hsla,
+    fg: Hsla,
+    border: Hsla,
+}
+
+impl Render for SheetTabDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .h(px(STATUS_BAR_HEIGHT - 1.0))
+            .flex().items_center()
+            .text_size(px(13.0))
+            .bg(self.bg)
+            .text_color(self.fg)
+            .border_1()
+            .border_color(self.border)
+            .rounded_sm()
+            .opacity(0.9)
+            .child(self.label.clone())
+    }
+}
+
 /// Wrapper to return consistent type for sheet tabs
 fn sheet_tab_wrapper(
     app: &Spreadsheet,
@@ -361,6 +393,7 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
 
     div()
         .id(ElementId::Name(format!("sheet-tab-{}", index).into()))
+        .debug_selector(move || format!("sheet-tab-{index}"))
         .px_3()
         .h(px(STATUS_BAR_HEIGHT - 1.0))
         .flex().items_center()
@@ -392,6 +425,24 @@ fn sheet_tab(app: &Spreadsheet, name: String, index: usize, is_active: bool, cx:
         // Right-click for context menu (macOS: also ctrl+click)
         .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
             this.show_sheet_context_menu(index, cx);
+        }))
+        // Drag a tab onto another to move the sheet there. The edge nearest
+        // the dragged tab's old place lights up, as in a browser tab strip.
+        .on_drag(SheetTabDrag { index, name: name.clone() }, move |drag, _, _, cx| {
+            let label = drag.name.clone();
+            cx.new(|_| SheetTabDragPreview { label, bg: header_bg, fg: text_primary, border: accent })
+        })
+        .drag_over::<SheetTabDrag>(move |style, drag, _, _| {
+            if drag.index < index {
+                style.border_r_2().border_color(accent)
+            } else if drag.index > index {
+                style.border_l_2().border_color(accent)
+            } else {
+                style
+            }
+        })
+        .on_drop(cx.listener(move |this, drag: &SheetTabDrag, _, cx| {
+            this.move_sheet(drag.index, index, cx);
         }))
         // Preserve workbook tab colors independently of the active underline.
         .child(
@@ -486,6 +537,8 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
     let panel_border = app.token(TokenKey::PanelBorder);
     let text_primary = app.token(TokenKey::TextPrimary);
     let selection_bg = app.token(TokenKey::SelectionBg);
+    let text_muted = app.token(TokenKey::TextMuted);
+    let sheet_count = app.wb(cx).sheet_count();
 
     popup("sheet-context-menu", panel_bg, panel_border, |this, cx| this.hide_sheet_context_menu(cx), cx)
         .bottom(px(STATUS_BAR_HEIGHT))
@@ -495,6 +548,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
             // Insert option
             div()
                 .id("ctx-insert")
+                .debug_selector(|| "ctx-insert".into())
                 .px_3()
                 .py_1()
                 .cursor_pointer()
@@ -511,6 +565,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
             // Delete option
             div()
                 .id("ctx-delete")
+                .debug_selector(|| "ctx-delete".into())
                 .px_3()
                 .py_1()
                 .cursor_pointer()
@@ -526,6 +581,7 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
             // Rename option
             div()
                 .id("ctx-rename")
+                .debug_selector(|| "ctx-rename".into())
                 .px_3()
                 .py_1()
                 .cursor_pointer()
@@ -538,6 +594,42 @@ fn render_sheet_context_menu(app: &Spreadsheet, sheet_index: usize, cx: &mut Con
                 }))
                 .child("Rename")
         )
+        .child(sheet_move_item("ctx-move-left", "Move Left", sheet_index, -1, sheet_count, text_primary, text_muted, selection_bg, cx))
+        .child(sheet_move_item("ctx-move-right", "Move Right", sheet_index, 1, sheet_count, text_primary, text_muted, selection_bg, cx))
+}
+
+/// "Move Left" / "Move Right" in the sheet-tab menu; greyed out at the ends.
+#[allow(clippy::too_many_arguments)]
+fn sheet_move_item(
+    id: &'static str,
+    label: &'static str,
+    sheet_index: usize,
+    delta: isize,
+    sheet_count: usize,
+    text_primary: Hsla,
+    text_muted: Hsla,
+    selection_bg: Hsla,
+    cx: &mut Context<Spreadsheet>,
+) -> Stateful<Div> {
+    let to = sheet_index as isize + delta;
+    let enabled = to >= 0 && to < sheet_count as isize;
+    let item = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .px_3()
+        .py_1()
+        .text_xs()
+        .child(label);
+    if !enabled {
+        return item.text_color(text_muted);
+    }
+    item.cursor_pointer()
+        .text_color(text_primary)
+        .hover(move |s| s.bg(selection_bg))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+            this.hide_sheet_context_menu(cx);
+            this.move_sheet(sheet_index, to as usize, cx);
+        }))
 }
 
 /// Render the status message, making it clickable if an import report is available
@@ -1208,5 +1300,128 @@ mod selection_stats_tests {
         let rows = super::visible_selection_rows(view.rows(),3,6);
         assert_eq!(rows.len(),3);
         assert_eq!(super::selection_numbers(sheet,view.rows(),rows,2,2),vec![20.0,30.0,40.0]);
+    }
+}
+
+#[cfg(test)]
+mod sheet_move_tests {
+    use crate::app::Spreadsheet;
+    use gpui::{point, px, Modifiers, MouseButton, VisualTestContext};
+
+    fn open(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Spreadsheet>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let (view, vcx) = cx.add_window_view(Spreadsheet::new);
+        view.update(vcx, |app, cx| {
+            app.add_sheet(cx);
+            app.add_sheet(cx);
+            app.goto_sheet(0, cx);
+            app.wb_mut(cx, |wb| { wb.set_cell_value_tracked(2, 0, 0, "=Sheet1!A1+1"); });
+        });
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    fn order(view: &gpui::Entity<Spreadsheet>, vcx: &mut VisualTestContext) -> Vec<String> {
+        view.read_with(vcx, |app, cx| app.wb(cx).sheets().iter().map(|s| s.name.clone()).collect())
+    }
+
+    #[gpui::test]
+    fn dragging_a_tab_onto_another_moves_the_sheet_and_undo_puts_it_back(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = open(cx);
+        let from = vcx.debug_bounds("sheet-tab-2").expect("tab 3").center();
+        let to = vcx.debug_bounds("sheet-tab-0").expect("tab 1").center();
+        vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        // Cross GPUI's drag threshold, then travel to the target tab.
+        vcx.simulate_mouse_move(from - point(px(12.0), px(0.0)), MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(order(&view, vcx), ["Sheet3", "Sheet1", "Sheet2"]);
+        view.read_with(vcx, |app, cx| {
+            let wb = app.wb(cx);
+            assert_eq!(wb.active_sheet().name, "Sheet3", "the dragged tab was clicked first, so it is active");
+            assert_eq!(wb.sheet(0).unwrap().get_raw(0, 0), "=Sheet1!A1+1");
+        });
+        view.update(vcx, |app, cx| app.undo(cx));
+        vcx.run_until_parked();
+        assert_eq!(order(&view, vcx), ["Sheet1", "Sheet2", "Sheet3"]);
+    }
+
+    #[gpui::test]
+    fn move_right_from_the_tab_menu(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = open(cx);
+        view.update(vcx, |app, cx| app.show_sheet_context_menu(0, cx));
+        vcx.run_until_parked();
+        let item = vcx.debug_bounds("ctx-move-right").expect("menu item").center();
+        vcx.simulate_click(item, Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(order(&view, vcx), ["Sheet2", "Sheet1", "Sheet3"]);
+        view.read_with(vcx, |app, cx| {
+            assert_eq!(app.wb(cx).active_sheet().name, "Sheet1", "the active sheet stays active");
+            assert_eq!(app.sheet_context_menu, None);
+        });
+        // At the right-hand end, Move Right does nothing.
+        view.update(vcx, |app, cx| { app.goto_sheet(2, cx); app.move_active_sheet_by(1, cx); });
+        assert_eq!(order(&view, vcx), ["Sheet2", "Sheet1", "Sheet3"]);
+    }
+}
+
+/// Issue #162: a click on a sheet-tab menu item must not also reach the
+/// grid or row headers painted behind the menu.
+#[cfg(test)]
+mod sheet_menu_click_through_tests {
+    use crate::app::Spreadsheet;
+    use gpui::{Modifiers, VisualTestContext};
+
+    fn open(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Spreadsheet>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let (view, vcx) = cx.add_window_view(Spreadsheet::new);
+        view.update(vcx, |app, cx| {
+            app.add_sheet(cx);
+            app.add_sheet(cx);
+            app.goto_sheet(0, cx);
+            app.view_state.select_cell(0, 0);
+        });
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    fn click_rename(view: &gpui::Entity<Spreadsheet>, vcx: &mut VisualTestContext, sheet: usize) {
+        view.update(vcx, |app, cx| app.show_sheet_context_menu(sheet, cx));
+        vcx.run_until_parked();
+        let bounds = vcx.debug_bounds("ctx-rename").expect("menu rendered");
+        vcx.simulate_click(bounds.center(), Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn rename_over_the_grid_keeps_the_rename_and_the_selection(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = open(cx);
+        click_rename(&view, vcx, 2);
+        view.read_with(vcx, |app, _| {
+            assert_eq!(app.renaming_sheet, Some(2), "grid click behind the menu confirmed the rename");
+            assert_eq!(app.sheet_context_menu, None);
+        });
+    }
+
+    #[gpui::test]
+    fn rename_over_the_row_headers_does_not_select_a_row(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = open(cx);
+        click_rename(&view, vcx, 0);
+        view.read_with(vcx, |app, _| {
+            assert_eq!(app.renaming_sheet, Some(0));
+            assert_eq!(app.view_state.active_cell(), (0, 0), "row header behind the menu took the click");
+            assert_eq!(app.view_state.selection_end, None);
+        });
     }
 }
