@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **CLI commands that read values no longer round them to two decimals.** `vgrid diff` reported 0.062 and 0.064 as matching, `vgrid calc '=1/8'` printed `0.12`, and `sheet inspect` and `convert -t json` gave 0.06 for 0.062. The stored values were always exact; these commands read the grid's on-screen text instead. `diff`, `calc` (including `--spill`), `sheet inspect`, `convert -t json` and `-t lines`, and `--where` filters now see every digit, as CSV export has since #65.
+
 ## 0.55.0
 
 ### Sheets

@@ -1520,6 +1520,17 @@ impl Sheet {
         }
     }
 
+    /// Cell text with numbers in full: the display, except that a number is
+    /// written so it parses back to the same f64 (`0.062`, not the `0.06` that
+    /// `get_display` shows). For anything that reads values rather than showing
+    /// them — inspect, JSON, diff, filters, `calc` — where rounding loses data.
+    pub fn get_exact_display(&self, row: usize, col: usize) -> String {
+        match self.get_computed_value(row, col) {
+            Value::Number(n) => crate::cell::interchange_number(n),
+            _ => self.get_display(row, col),
+        }
+    }
+
     /// Cell text for interchange formats (CSV, TSV).
     ///
     /// The raw display, except that a number formatted as a date, time, or
