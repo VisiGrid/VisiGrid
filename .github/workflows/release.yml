@@ -39,8 +39,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Restore only. A tag run's cache is scoped to its tag, so no later tag
+      # could read it, and saving ~2 GB per platform per release would evict
+      # the caches that matter. release-cache.yml saves them from main, where
+      # every tag can restore them; the key prefix must match that workflow.
+      - name: Restore cargo cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -48,11 +52,12 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build release
-        run: |
-          cargo build --release -p visigrid-gpui -p visigrid-cli
+        run: bash scripts/ci/release-build.sh linux
 
       - name: Get version
         id: version
@@ -130,8 +135,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Restore only. A tag run's cache is scoped to its tag, so no later tag
+      # could read it, and saving ~2 GB per platform per release would evict
+      # the caches that matter. release-cache.yml saves them from main, where
+      # every tag can restore them; the key prefix must match that workflow.
+      - name: Restore cargo cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -139,11 +148,12 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-aarch64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build release
-        run: |
-          cargo build --release -p visigrid-gpui -p visigrid-cli
+        run: bash scripts/ci/release-build.sh linux
 
       - name: Create tarball
         run: |
@@ -171,8 +181,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Restore only. A tag run's cache is scoped to its tag, so no later tag
+      # could read it, and saving ~2 GB per platform per release would evict
+      # the caches that matter. release-cache.yml saves them from main, where
+      # every tag can restore them; the key prefix must match that workflow.
+      - name: Restore cargo cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -180,18 +194,16 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-
 
-      # The Windows default shell is pwsh, which does not stop when a native
-      # command fails: only the LAST command's exit code reached the step. In
-      # 0.43.0 the first build failed (vg-session-smoke did not compile on
-      # Windows) and the step still passed because the CLI build after it did.
+      # bash, not the default pwsh: pwsh does not stop when a native command
+      # fails, so in 0.43.0 a failed first build passed because the CLI build
+      # after it did. The script runs under set -e.
       - name: Build release
-        run: |
-          cargo build --release -p visigrid-gpui
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --release -p visigrid-cli
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: bash
+        run: bash scripts/ci/release-build.sh windows
 
       - name: List build artifacts
         shell: pwsh
@@ -315,8 +327,12 @@ jobs:
       - name: Add targets to pinned toolchain
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Restore only. A tag run's cache is scoped to its tag, so no later tag
+      # could read it, and saving ~2 GB per platform per release would evict
+      # the caches that matter. release-cache.yml saves them from main, where
+      # every tag can restore them; the key prefix must match that workflow.
+      - name: Restore cargo cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -324,7 +340,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Import certificate
         env:
@@ -347,12 +365,7 @@ jobs:
 
       - name: Build universal binary
         run: |
-          # Build aarch64 (native) first
-          cargo build --release --target aarch64-apple-darwin -p visigrid-gpui -p visigrid-cli
-
-          # ssh2's vendored-openssl feature builds a static target-architecture
-          # OpenSSL, so the Intel cross-build needs no Homebrew installation.
-          cargo build --release --target x86_64-apple-darwin -p visigrid-gpui -p visigrid-cli
+          bash scripts/ci/release-build.sh macos
 
           mkdir -p dist/universal
           lipo -create \
@@ -445,10 +458,19 @@ jobs:
           cp -R "dist/VisiGrid.app" "dist/dmg-temp/"
           ln -s /Applications "dist/dmg-temp/Applications"
 
-          hdiutil create -volname "VisiGrid" \
-            -srcfolder "dist/dmg-temp" \
-            -ov -format UDBZ \
-            "dist/VisiGrid-macOS-universal.dmg"
+          # hdiutil intermittently fails with "Resource busy" on hosted
+          # runners (seen on the PR #169 dry run); retry before failing.
+          for i in 1 2 3 4 5; do
+            if hdiutil create -volname "VisiGrid" \
+              -srcfolder "dist/dmg-temp" \
+              -ov -format UDBZ \
+              "dist/VisiGrid-macOS-universal.dmg"; then
+              break
+            fi
+            [ "$i" = 5 ] && exit 1
+            echo "hdiutil attempt $i failed; retrying in 15s"
+            sleep 15
+          done
 
       - name: Sign DMG
         env:
@@ -492,7 +514,11 @@ jobs:
           # online on first open.
           for i in 1 2 3 4 5; do
             if xcrun stapler staple "$DMG_PATH"; then
-              xcrun stapler validate "$DMG_PATH"
+              # validate re-fetches from the same CloudKit endpoint and loses the
+              # connection the same way (PR #169 dry run): the staple already
+              # succeeded, so a failed check is only a warning.
+              xcrun stapler validate "$DMG_PATH" \
+                || echo "::warning::stapler validate could not reach Apple; the staple itself succeeded"
               exit 0
             fi
             echo "Staple attempt $i failed; retrying in 30s"
