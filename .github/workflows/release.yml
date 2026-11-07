@@ -458,10 +458,19 @@ jobs:
           cp -R "dist/VisiGrid.app" "dist/dmg-temp/"
           ln -s /Applications "dist/dmg-temp/Applications"
 
-          hdiutil create -volname "VisiGrid" \
-            -srcfolder "dist/dmg-temp" \
-            -ov -format UDBZ \
-            "dist/VisiGrid-macOS-universal.dmg"
+          # hdiutil intermittently fails with "Resource busy" on hosted
+          # runners (seen on the PR #169 dry run); retry before failing.
+          for i in 1 2 3 4 5; do
+            if hdiutil create -volname "VisiGrid" \
+              -srcfolder "dist/dmg-temp" \
+              -ov -format UDBZ \
+              "dist/VisiGrid-macOS-universal.dmg"; then
+              break
+            fi
+            [ "$i" = 5 ] && exit 1
+            echo "hdiutil attempt $i failed; retrying in 15s"
+            sleep 15
+          done
 
       - name: Sign DMG
         env:

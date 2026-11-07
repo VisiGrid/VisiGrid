@@ -18,6 +18,12 @@ case "${1:-}" in
     cargo build --release -p visigrid-gpui -p visigrid-cli
     ;;
   windows)
+    # This runs under Git Bash, whose MSYS perl comes first on PATH. The
+    # vendored OpenSSL build (ssh2) then configures for the wrong platform
+    # (--openssldir=SYS$MANAGER:[OPENSSL]) and fails. Under pwsh it found
+    # Strawberry Perl; name that one explicitly. openssl-src reads this.
+    export OPENSSL_SRC_PERL="${OPENSSL_SRC_PERL:-C:/Strawberry/perl/bin/perl.exe}"
+    [ -x "$OPENSSL_SRC_PERL" ] || { echo "OPENSSL_SRC_PERL not found: $OPENSSL_SRC_PERL" >&2; exit 1; }
     # Two invocations, as before: one build per package.
     cargo build --release -p visigrid-gpui
     cargo build --release -p visigrid-cli
