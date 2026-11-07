@@ -514,7 +514,11 @@ jobs:
           # online on first open.
           for i in 1 2 3 4 5; do
             if xcrun stapler staple "$DMG_PATH"; then
-              xcrun stapler validate "$DMG_PATH"
+              # validate re-fetches from the same CloudKit endpoint and loses the
+              # connection the same way (PR #169 dry run): the staple already
+              # succeeded, so a failed check is only a warning.
+              xcrun stapler validate "$DMG_PATH" \
+                || echo "::warning::stapler validate could not reach Apple; the staple itself succeeded"
               exit 0
             fi
             echo "Staple attempt $i failed; retrying in 30s"
