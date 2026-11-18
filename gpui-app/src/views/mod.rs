@@ -312,16 +312,13 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 && this.block_if_previewing(cx)
             {
                 this.resizing_col = None;
+                this.resize_col_originals.clear();
                 this.resizing_row = None;
                 return;
             }
             // Handle column resize drag
-            if let Some(col) = this.resizing_col {
-                let x: f32 = event.position.x.into();
-                let delta = x - this.resize_start_pos;
-                let new_width = this.resize_start_size + delta;
-                this.set_col_width(col, new_width);
-                cx.notify();
+            if this.resizing_col.is_some() {
+                this.update_col_resize(event.position.x.into(), cx);
             }
             // Handle row resize drag
             if let Some(row) = this.resizing_row {
@@ -371,12 +368,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 cx.notify();
             }
             // End column/row resize and record to history (coalescing)
-            if let Some(col) = this.resizing_col.take() {
-                // Record the sizing change to history (coalesces all drag events into one entry)
-                let old = this.resize_start_original.take();
-                this.record_col_width_change(col, old, cx);
-                cx.notify();
-            }
+            this.finish_col_resize(cx);
             if let Some(row) = this.resizing_row.take() {
                 // Record the sizing change to history (coalesces all drag events into one entry)
                 let old = this.resize_start_original.take();

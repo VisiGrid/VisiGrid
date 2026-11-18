@@ -211,6 +211,16 @@ pub static FUNCTIONS: &[FunctionInfo] = &[
         ],
     },
     FunctionInfo {
+        name: "MROUND",
+        signature: "MROUND(number, multiple)",
+        description: "Rounds to the nearest multiple, with halfway values rounded away from zero. Nonzero arguments must have the same sign.",
+        category: FunctionCategory::Math,
+        parameters: &[
+            ParameterInfo { name: "number", description: "The number to round.", optional: false, repeatable: false },
+            ParameterInfo { name: "multiple", description: "The multiple to round to; zero returns zero.", optional: false, repeatable: false },
+        ],
+    },
+    FunctionInfo {
         name: "ROUND",
         signature: "ROUND(number, num_digits)",
         description: "Rounds a number to a specified number of digits.",

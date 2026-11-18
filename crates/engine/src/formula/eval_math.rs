@@ -3,7 +3,7 @@
 
 use super::eval::{evaluate, CellLookup, EvalResult, NamedRangeResolution, Value};
 use super::eval_helpers::{
-    collect_all_values, collect_numbers, excel_mod, round_to_15_sig, round_to_digits, RoundMode,
+    collect_all_values, collect_count_numbers, collect_numbers, excel_mod, round_to_15_sig, round_to_digits, RoundMode,
 };
 use super::parser::{BoundExpr, Expr};
 
@@ -58,7 +58,7 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             }
         }
         "COUNT" => {
-            let values = collect_numbers(args, lookup);
+            let values = collect_count_numbers(args, lookup);
             match values {
                 Ok(vals) => EvalResult::Number(vals.len() as f64),
                 Err(e) => EvalResult::Error(e),
@@ -77,6 +77,39 @@ pub(crate) fn try_evaluate<L: CellLookup>(
             match evaluate(&args[0], lookup).to_number() {
                 Ok(n) => EvalResult::Number(n.abs()),
                 Err(e) => EvalResult::Error(e),
+            }
+        }
+        "MROUND" => {
+            if args.len() != 2 {
+                return Some(EvalResult::Error("MROUND requires exactly two arguments".to_string()));
+            }
+            let number = match evaluate(&args[0], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            let multiple = match evaluate(&args[1], lookup).to_number() {
+                Ok(n) => n,
+                Err(e) => return Some(EvalResult::Error(e)),
+            };
+            if !number.is_finite() || !multiple.is_finite() {
+                EvalResult::Error("#NUM!".to_string())
+            } else if number == 0.0 || multiple == 0.0 {
+                EvalResult::Number(0.0)
+            } else if number.is_sign_positive() != multiple.is_sign_positive() {
+                EvalResult::Error("#NUM!".to_string())
+            } else {
+                // Match ROUND's decimal precision and halfway-away-from-zero
+                // rule, including monetary multiples such as 0.01.
+                let quotient = number / multiple;
+                let rounded = if quotient.is_finite() {
+                    round_to_15_sig(round_to_15_sig(quotient).round() * multiple)
+                } else {
+                    // The multiple is smaller than the number's representable
+                    // precision; dividing overflowed, but the answer did not.
+                    number
+                };
+                if rounded.is_finite() { EvalResult::Number(rounded) }
+                else { EvalResult::Error("#NUM!".to_string()) }
             }
         }
         "ROUND" => {

@@ -38,7 +38,7 @@ pub trait CellLookup {
     fn get_value(&self, row: usize, col: usize) -> f64;
     fn get_text(&self, row: usize, col: usize) -> String;
 
-    /// The numbers SUM-like functions take from a rectangle, in row-major
+    /// The numbers COUNT takes from a rectangle, in row-major
     /// order: for each cell, its text parsed as a number, skipping cells
     /// whose text does not parse. This default is that loop, one `get_text`
     /// per cell. Real sheets override it to visit only the cells that exist
@@ -61,6 +61,32 @@ pub trait CellLookup {
                 };
                 if let Some(n) = crate::cell::parse_finite(&text) {
                     out.push(n);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Numeric range read for aggregates that must propagate cell errors.
+    /// Real sheets override this to keep whole-column reads sparse.
+    fn checked_numbers_in_range(
+        &self, sheet: &SheetRef, start_row: usize, start_col: usize,
+        end_row: usize, end_col: usize, out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        for r in start_row..=end_row {
+            for c in start_col..=end_col {
+                let value = match sheet {
+                    SheetRef::Current => self.get_cell_value(r, c),
+                    SheetRef::Id(id) => self.get_value_sheet(*id, r, c),
+                    SheetRef::RefError { .. } => return Err("#REF!".to_string()),
+                };
+                match value {
+                    Value::Error(error) => return Err(error),
+                    Value::Number(n) => out.push(n),
+                    Value::Text(text) => {
+                        if let Some(n) = crate::cell::parse_finite(&text) { out.push(n); }
+                    }
+                    Value::Empty | Value::Boolean(_) => {},
                 }
             }
         }
@@ -214,6 +240,13 @@ impl<'a, L: CellLookup, F: Fn(&str) -> Option<NamedRangeResolution>> CellLookup 
         self.inner.get_value(row, col)
     }
 
+    fn checked_numbers_in_range(
+        &self, sheet: &SheetRef, start_row: usize, start_col: usize,
+        end_row: usize, end_col: usize, out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        self.inner.checked_numbers_in_range(sheet, start_row, start_col, end_row, end_col, out)
+    }
+
     fn numbers_in_range(
         &self,
         sheet: &SheetRef,
@@ -312,6 +345,13 @@ impl<'a, L: CellLookup> CellLookup for LookupWithContext<'a, L> {
 
     fn get_value(&self, row: usize, col: usize) -> f64 {
         self.inner.get_value(row, col)
+    }
+
+    fn checked_numbers_in_range(
+        &self, sheet: &SheetRef, start_row: usize, start_col: usize,
+        end_row: usize, end_col: usize, out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        self.inner.checked_numbers_in_range(sheet, start_row, start_col, end_row, end_col, out)
     }
 
     fn numbers_in_range(
@@ -1212,6 +1252,21 @@ mod tests {
 
         fn resolve_named_range(&self, name: &str) -> Option<NamedRangeResolution> {
             self.named_ranges.get(&name.to_lowercase()).cloned()
+        }
+    }
+
+    #[test]
+    fn aggregate_errors_with_default_lookup_and_legacy_names() {
+        let mut lookup = TestLookup::new();
+        lookup.set(0, 0, "10");
+        lookup.set(1, 0, "#DIV/0!");
+        lookup.define_cell("BadFee", 1, 0);
+        lookup.define_range("Fees", 0, 0, 1, 0);
+        for formula in ["=SUM(A1:A2)", "=SUM(Fees)", "=SUM(BadFee)"] {
+            assert_eq!(evaluate(&parse_and_bind(formula), &lookup), EvalResult::Error("#DIV/0!".into()));
+        }
+        for (formula, count) in [("=COUNT(A1:A2)", 1.0), ("=COUNT(Fees)", 1.0), ("=COUNT(BadFee)", 0.0)] {
+            assert_eq!(evaluate(&parse_and_bind(formula), &lookup), EvalResult::Number(count));
         }
     }
 

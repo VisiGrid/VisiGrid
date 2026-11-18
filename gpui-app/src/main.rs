@@ -132,6 +132,8 @@ pub mod workbook_view;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod input_regression_tests;
 
 use std::env;
 use std::sync::{Arc, Mutex};

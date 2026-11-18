@@ -747,7 +747,8 @@ pub(crate) enum Scalar<'a> {
     /// A formula with a parsed AST: its computed result, `None` if not
     /// computed yet.
     Computed(Option<&'a Value>),
-    /// Empty, or a formula that failed to parse.
+    /// A formula that failed to parse, whose typed value is #ERR.
+    InvalidFormula,
     Empty,
 }
 
@@ -977,7 +978,7 @@ impl ColumnStore {
                         Slot::Formula(id) if self.formulas.get(id).ast.is_some() => {
                             Scalar::Computed(values.get(id as usize).and_then(Option::as_ref))
                         }
-                        Slot::Formula(_) => Scalar::Empty,
+                        Slot::Formula(_) => Scalar::InvalidFormula,
                     };
                     f((row, col), scalar);
                 }

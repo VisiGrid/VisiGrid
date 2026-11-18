@@ -554,6 +554,7 @@ pub struct Spreadsheet {
 
     // Resize drag state
     pub resizing_col: Option<usize>,       // Column being resized (by right edge)
+    pub resize_col_originals: Vec<(usize, Option<f32>)>, // Columns captured at drag start
     pub resizing_row: Option<usize>,       // Row being resized (by bottom edge)
     pub resize_start_pos: f32,             // Mouse position at drag start
     pub resize_start_size: f32,            // Original size at drag start
@@ -1349,6 +1350,7 @@ impl Spreadsheet {
             hidden_cols: HashMap::new(),
             cached_sheet_id: initial_sheet_id,
             resizing_col: None,
+            resize_col_originals: Vec::new(),
             resizing_row: None,
             resize_start_pos: 0.0,
             resize_start_size: 0.0,
@@ -3287,33 +3289,6 @@ impl Spreadsheet {
         sheet_heights.insert(row, height);
     }
 
-    /// Record a column width change to history (for undo/redo support).
-    /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
-    pub fn record_col_width_change(&mut self, col: usize, old: Option<f32>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        // Get the current value from the map
-        let new = self.col_widths
-            .get(&self.cached_sheet_id)
-            .and_then(|m| m.get(&col))
-            .copied();
-
-        // Only record if something actually changed
-        if old != new {
-            // Use SheetId (stable across sheet reorder/delete) instead of index
-            let sheet_id = self.cached_sheet_id;
-            self.record_action_with_provenance(cx,
-                crate::history::UndoAction::ColumnWidthSet {
-                    sheet_id,
-                    col,
-                    old,
-                    new,
-                },
-                None,
-            );
-            self.is_modified = true;
-        }
-    }
-
     /// Record a row height change to history (for undo/redo support).
     /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
     pub fn record_row_height_change(&mut self, row: usize, old: Option<f32>, cx: &mut Context<Self>) {
@@ -3693,7 +3668,13 @@ impl Spreadsheet {
         window: Option<&Window>,
         cx: &mut Context<Self>,
     ) {
-        let cols = if self.is_col_header_selected(clicked_col) {
+        let cols = self.header_resize_columns(clicked_col);
+        self.fit_columns(cols, window, cx);
+    }
+
+    /// A header resize uses the same selected columns as header auto-fit.
+    fn header_resize_columns(&self, clicked_col: usize) -> Vec<usize> {
+        if self.is_col_header_selected(clicked_col) {
             let mut cols = Vec::new();
             for ((_, min_col), (_, max_col)) in self.all_selection_ranges() {
                 for col in min_col..=max_col {
@@ -3705,8 +3686,97 @@ impl Spreadsheet {
             cols
         } else {
             vec![clicked_col]
-        };
-        self.fit_columns(cols, window, cx);
+        }
+    }
+
+    pub(crate) fn begin_col_resize(&mut self, col: usize, x: f32, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) {
+            return;
+        }
+        self.resizing_col = Some(col);
+        self.resize_start_pos = x;
+        self.resize_start_size = self.col_width(col);
+        self.resize_col_originals = self
+            .header_resize_columns(col)
+            .into_iter()
+            .map(|col| {
+                (
+                    col,
+                    self.col_widths
+                        .get(&self.cached_sheet_id)
+                        .and_then(|m| m.get(&col))
+                        .copied(),
+                )
+            })
+            .collect();
+        cx.notify();
+    }
+
+    pub(crate) fn update_col_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        if self.resizing_col.is_none() || self.block_if_previewing(cx) {
+            return;
+        }
+        let delta = (x - self.resize_start_pos) / self.metrics.zoom;
+        let originals = self.resize_col_originals.clone();
+        if delta == 0.0 {
+            // A click, or returning to the start, must not change other columns
+            // or turn preference-sized columns into explicit widths.
+            let widths = self.col_widths.entry(self.cached_sheet_id).or_default();
+            for (col, old) in originals {
+                if let Some(width) = old {
+                    widths.insert(col, width);
+                } else {
+                    widths.remove(&col);
+                }
+            }
+        } else {
+            let width = self.resize_start_size + delta;
+            for (col, _) in originals {
+                self.set_col_width(col, width);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn finish_col_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resizing_col.take().is_none() {
+            return;
+        }
+        let originals = std::mem::take(&mut self.resize_col_originals);
+        if self.block_if_previewing(cx) {
+            return;
+        }
+        let sheet_id = self.cached_sheet_id;
+        let mut actions = Vec::new();
+        for (col, old) in originals {
+            let new = self
+                .col_widths
+                .get(&sheet_id)
+                .and_then(|m| m.get(&col))
+                .copied();
+            if old != new {
+                actions.push(crate::history::UndoAction::ColumnWidthSet {
+                    sheet_id,
+                    col,
+                    old,
+                    new,
+                });
+            }
+        }
+        if !actions.is_empty() {
+            let action = if actions.len() == 1 {
+                actions.remove(0)
+            } else {
+                crate::history::UndoAction::Group {
+                    actions,
+                    description: "Resize columns".into(),
+                }
+            };
+            self.record_action_with_provenance(cx, action, None);
+            self.is_modified = true;
+            self.request_title_refresh(cx);
+        }
+        cx.notify();
     }
 
     /// Auto-fit all columns that have content (for agent-built sheets).

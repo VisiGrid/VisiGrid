@@ -149,3 +149,42 @@ fn sum_of_huge_integers_matches_addition() {
     assert_eq!(sheet.get_cached_value(2, 0), sheet.get_cached_value(3, 0));
     assert_eq!(sheet.get_cached_value(2, 0), Some(visigrid_engine::formula::eval::Value::Number(2e20)));
 }
+
+/// Checked aggregation keeps the numeric fast path but returns the first
+/// typed error in row-major order, including errors in spill receivers.
+#[test]
+fn checked_ranges_match_typed_error_oracle() {
+    use visigrid_engine::{formula::eval::Value, sheet::SheetRef, workbook::WorkbookLookup};
+    for seed in 1..=10 {
+        let mut rng = Rng(seed);
+        let mut wb = Workbook::new();
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                wb.set_cell_value_tracked(0, r, c, &content(&mut rng));
+            }
+        }
+        let sheet = wb.active_sheet();
+        let lookup = WorkbookLookup::new(&wb, sheet.id);
+        for _ in 0..100 {
+            let (a, b, c, d) = (rng.below(ROWS + 10), rng.below(ROWS + 10), rng.below(COLS + 2), rng.below(COLS + 2));
+            let (r0, r1, c0, c1) = (a.min(b), a.max(b), c.min(d), c.max(d));
+            let error = (r0..=r1).flat_map(|r| (c0..=c1).map(move |c| (r, c)))
+                .find_map(|(r, c)| match sheet.get_computed_value(r, c) {
+                    Value::Error(e) => Some(e),
+                    _ => None,
+                });
+            let mut direct = Vec::new();
+            let mut cross = Vec::new();
+            let result = sheet.checked_numbers_in_range(&SheetRef::Current, r0, c0, r1, c1, &mut direct);
+            let cross_result = lookup.checked_numbers_in_range(&SheetRef::Id(sheet.id), r0, c0, r1, c1, &mut cross);
+            assert_eq!(cross_result, result);
+            if let Some(error) = error {
+                assert_eq!(result, Err(error));
+            } else {
+                result.unwrap();
+                assert!(same(&direct, &slow(sheet, r0, c0, r1, c1)));
+                assert!(same(&direct, &cross));
+            }
+        }
+    }
+}

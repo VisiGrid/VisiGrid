@@ -443,25 +443,31 @@ pub(crate) fn get_text_for_sheet<L: CellLookup>(lookup: &L, sheet: &SheetRef, ro
 }
 
 pub(crate) fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Result<Vec<f64>, String> {
+    collect_numbers_impl(args, lookup, false)
+}
+
+/// COUNT ignores error-valued cells in ranges and arrays.
+pub(crate) fn collect_count_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Result<Vec<f64>, String> {
+    collect_numbers_impl(args, lookup, true)
+}
+
+fn collect_numbers_impl<L: CellLookup>(args: &[BoundExpr], lookup: &L, ignore_range_errors: bool) -> Result<Vec<f64>, String> {
     let mut values = Vec::new();
 
     for arg in args {
         match arg {
             Expr::Range { sheet, start_col, start_row, end_col, end_row, .. } => {
-                collect_numbers_from_range_sheet(sheet, *start_row, *start_col, *end_row, *end_col, lookup, &mut values)?;
+                collect_numbers_from_range_sheet(sheet, *start_row, *start_col, *end_row, *end_col, lookup, &mut values, ignore_range_errors)?;
             }
             Expr::NamedRange(name) => {
                 // Resolve named range and collect numbers from it
                 match lookup.resolve_named_range(name) {
                     None => return Err(format!("#NAME? '{}'", name)),
                     Some(NamedRangeResolution::Cell { row, col }) => {
-                        let text = lookup.get_text(row, col);
-                        if let Ok(n) = text.parse::<f64>() {
-                            values.push(n);
-                        }
+                        collect_numbers_from_range_sheet(&SheetRef::Current, row, col, row, col, lookup, &mut values, ignore_range_errors)?;
                     }
                     Some(NamedRangeResolution::Range { start_row, start_col, end_row, end_col }) => {
-                        collect_numbers_from_range(start_row, start_col, end_row, end_col, lookup, &mut values);
+                        collect_numbers_from_range_sheet(&SheetRef::Current, start_row, start_col, end_row, end_col, lookup, &mut values, ignore_range_errors)?;
                     }
                 }
             }
@@ -476,7 +482,8 @@ pub(crate) fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> 
                                 match arr.get(r, c) {
                                     // An error inside the array is the result, as with
                                     // an error cell inside a range.
-                                    Some(Value::Error(e)) => return Err(e.clone()),
+                                    Some(Value::Error(e)) if !ignore_range_errors => return Err(e.clone()),
+                                    Some(Value::Empty) if ignore_range_errors => {},
                                     Some(v) => {
                                         if let Ok(n) = EvalResult::from_value(v).to_number() {
                                             values.push(n);
@@ -499,8 +506,8 @@ pub(crate) fn collect_numbers<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> 
     Ok(values)
 }
 
-/// Collect numbers from a range, supporting cross-sheet references
-pub(crate) fn collect_numbers_from_range_sheet<L: CellLookup>(
+/// Collect numbers from a range, supporting cross-sheet references.
+fn collect_numbers_from_range_sheet<L: CellLookup>(
     sheet: &SheetRef,
     start_row: usize,
     start_col: usize,
@@ -508,35 +515,20 @@ pub(crate) fn collect_numbers_from_range_sheet<L: CellLookup>(
     end_col: usize,
     lookup: &L,
     values: &mut Vec<f64>,
+    ignore_errors: bool,
 ) -> Result<(), String> {
-    // Check for RefError early
     if let SheetRef::RefError { .. } = sheet {
         return Err("#REF!".to_string());
     }
-
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
-
-    // Only numeric values, skipping text/empty; see CellLookup::numbers_in_range.
-    lookup.numbers_in_range(sheet, min_row, min_col, max_row, max_col, values)
-}
-
-/// Legacy helper for same-sheet ranges (used by named range resolution)
-fn collect_numbers_from_range<L: CellLookup>(
-    start_row: usize,
-    start_col: usize,
-    end_row: usize,
-    end_col: usize,
-    lookup: &L,
-    values: &mut Vec<f64>,
-) {
-    let _ = collect_numbers_from_range_sheet(
-        &SheetRef::Current,
-        start_row, start_col, end_row, end_col,
-        lookup, values
-    );
+    if ignore_errors {
+        lookup.numbers_in_range(sheet, min_row, min_col, max_row, max_col, values)
+    } else {
+        lookup.checked_numbers_in_range(sheet, min_row, min_col, max_row, max_col, values)
+    }
 }
 
 pub(crate) fn collect_all_values<L: CellLookup>(args: &[BoundExpr], lookup: &L) -> Vec<EvalResult> {

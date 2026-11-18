@@ -21,7 +21,7 @@ const FUNCTION_NAMES: &[&str] = &[
     "JOIN",
     "LAMBDA", "LARGE", "LEFT", "LEN", "LET", "LN", "LOG", "LOG10", "LOOKUP", "LOWER", "LT", "LTE",
     "MAP", "MATCH", "MAX", "MAXIFS", "MEDIAN", "MID", "MIN", "MINIFS", "MINUS", "MINUTE", "MOD",
-    "MODE", "MODE.SNGL", "MONTH", "MULTIPLY",
+    "MODE", "MODE.SNGL", "MONTH", "MROUND", "MULTIPLY",
     "NA", "NE", "NETWORKDAYS", "NORM.S.DIST", "NORMSDIST", "NOT", "NOW", "NPER", "NPV",
     "OFFSET", "OR",
     "PERCENTILE", "PERCENTILE.INC", "PI", "PMT", "POWER", "PPMT", "PRODUCT", "PROPER", "PV",

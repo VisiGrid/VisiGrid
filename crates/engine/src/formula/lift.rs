@@ -28,7 +28,7 @@ const VALUE_FUNCTIONS: &[&str] = &[
     "TEXTAFTER", "REPLACE", "REGEXTEST", "REGEXMATCH", "REGEXREPLACE", "CHAR", "CODE",
     "CLEAN", "FIXED", "DOLLAR",
     // math and trig
-    "ABS", "INT", "SQRT", "EXP", "LN", "LOG", "LOG10", "POWER", "MOD", "ROUND",
+    "ABS", "INT", "SQRT", "EXP", "LN", "LOG", "LOG10", "POWER", "MOD", "ROUND", "MROUND",
     "ROUNDUP", "ROUNDDOWN", "TRUNC", "CEILING", "FLOOR", "SIN", "COS", "TAN",
     "ASIN", "ACOS", "ATAN", "ATAN2", "DEGREES", "RADIANS",
     // dates

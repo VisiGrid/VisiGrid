@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.55.2
+
+### Fixed
+
+- **Totals report formula errors instead of silently omitting failed cells.** `SUM`, `AVERAGE`, `MIN`, `MAX` and related numeric aggregates now propagate errors from referenced cells, including named ranges, other sheets and spilled values. `COUNT` continues to ignore errors in ranges.
+- **`MROUND` is supported.** Formulas such as `=MROUND(tons_over*89.2,0.01)` round fees to the nearest cent and work during workbook conversion.
+- **Reopening a file cannot restore an old partial total over an unsupported-function error.** Saved error messages also remain errors instead of becoming ordinary text. Valid stored custom-function results are still preserved.
+- **Workbook conversion to `.sheet` keeps every sheet, named ranges and supported layout settings** when no sheet-selection or reshaping options are supplied.
+- **Delete removes the character after the cursor while editing**, and clears selected cell contents in navigation mode. ([#173](https://github.com/VisiGrid/VisiGrid/issues/173), partial fix)
+- **Dragging a selected column's boundary resizes the selected columns together.** Width changes account for zoom and undo as one action, restoring each column's original width. ([#173](https://github.com/VisiGrid/VisiGrid/issues/173), partial fix)
+
+If a workbook was converted with missing `MROUND` results or incomplete totals, reconvert the original workbook with this version. Value-only exports cannot recover missing calculations by themselves.
+
+
 ## 0.55.1
 
 ### Fixed

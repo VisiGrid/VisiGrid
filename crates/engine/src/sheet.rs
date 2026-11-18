@@ -541,6 +541,16 @@ impl CellLookup for Sheet {
         }
     }
 
+    fn checked_numbers_in_range(
+        &self, sheet: &SheetRef, start_row: usize, start_col: usize,
+        end_row: usize, end_col: usize, out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        match sheet {
+            SheetRef::Current => self.checked_numbers_in(start_row, start_col, end_row, end_col, out),
+            _ => Err("#REF!".to_string()),
+        }
+    }
+
     fn numbers_in_range(
         &self,
         sheet: &SheetRef,
@@ -1675,8 +1685,8 @@ impl Sheet {
         }
     }
 
-    /// The numbers in a rectangle as SUM-like functions read them, in
-    /// row-major order (#18).
+    /// The numbers in a rectangle, ignoring errors, in row-major order (#18).
+    /// COUNT uses this; other aggregates use `checked_numbers_in`.
     ///
     /// Exactly what `get_text` then `parse::<f64>()` yields for each cell,
     /// without formatting a string per cell or visiting empty ones: a cell
@@ -1688,18 +1698,35 @@ impl Sheet {
     /// back as itself. `get_text` formats integers through `i64`, which
     /// saturated them, so SUM disagreed with `=A1+A2` for those values.
     pub fn numbers_in(&self, start_row: usize, start_col: usize, end_row: usize, end_col: usize, out: &mut Vec<f64>) {
+        let _ = self.numbers_in_impl(start_row, start_col, end_row, end_col, out, false);
+    }
+
+    pub(crate) fn checked_numbers_in(&self, start_row: usize, start_col: usize, end_row: usize, end_col: usize, out: &mut Vec<f64>) -> Result<(), String> {
+        self.numbers_in_impl(start_row, start_col, end_row, end_col, out, true)
+    }
+
+    fn numbers_in_impl(&self, start_row: usize, start_col: usize, end_row: usize, end_col: usize, out: &mut Vec<f64>, propagate_errors: bool) -> Result<(), String> {
         // The old path formatted integers through i64, which also turned
         // -0.0 into "0". Keep that: SUM of a -0 cell is 0, not -0.
         fn unsigned_zero(n: f64) -> f64 {
             if n == 0.0 { 0.0 } else { n }
         }
-        fn number(value: &Value) -> Option<f64> {
+        // Storage and spill iteration need not be row-major. Preserve the
+        // first error in row-major order, just like the numeric values.
+        let mut first_error: Option<((usize, usize), String)> = None;
+        let mut error_at = |r: usize, c: usize, error: &str| {
+            if propagate_errors && first_error.as_ref().is_none_or(|(pos, _)| (r, c) < *pos) {
+                first_error = Some(((r, c), error.to_string()));
+            }
+        };
+        let mut number = |r: usize, c: usize, value: &Value| -> Option<f64> {
             match value {
                 Value::Number(n) => Some(unsigned_zero(*n)),
                 Value::Text(s) => crate::cell::parse_finite(s),
-                Value::Boolean(_) | Value::Error(_) | Value::Empty => None,
+                Value::Error(error) => { error_at(r, c, error); None }
+                Value::Boolean(_) | Value::Empty => None,
             }
-        }
+        };
         let inside = |r: usize, c: usize| (start_row..=end_row).contains(&r) && (start_col..=end_col).contains(&c);
         EVALUATING.with(|evaluating| {
             let evaluating = evaluating.borrow();
@@ -1736,19 +1763,22 @@ impl Sheet {
                     return;
                 }
                 use crate::store::Scalar;
-                let n = match cell {
+                let n = if propagate_errors && self.blocked_spill_extents.contains_key(&(r, c)) {
+                    number(r, c, &Value::Error("#SPILL!".into()))
+                } else { match cell {
                     Scalar::Number(n) => Some(unsigned_zero(n)),
                     Scalar::Text(s) => crate::cell::parse_finite(s),
-                    Scalar::Computed(value) => value.and_then(number),
+                    Scalar::Computed(value) => value.and_then(|v| number(r, c, v)),
+                    Scalar::InvalidFormula => number(r, c, &Value::Error("#ERR".into())),
                     Scalar::Empty => None,
-                };
+                } };
                 if let Some(n) = n {
                     take(r, c, n);
                 }
             });
             for &(r, c) in &spills {
                 if !skip(r, c) {
-                    if let Some(n) = self.spill_values.get(&(r, c)).and_then(number) {
+                    if let Some(n) = self.spill_values.get(&(r, c)).and_then(|v| number(r, c, v)) {
                         take(r, c, n);
                     }
                 }
@@ -1758,6 +1788,10 @@ impl Sheet {
                 out.extend(found.into_iter().map(|(_, _, n)| n));
             }
         });
+        match first_error {
+            Some((_, error)) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Get a reference to a cell (returns default empty cell if not found)

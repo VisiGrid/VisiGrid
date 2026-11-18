@@ -80,6 +80,8 @@ pub enum CachedFormulaValue {
 /// - only "Unknown function" errors. #DIV/0! and #REF! are answers this engine
 ///   can produce, and preserving a stale number over a real error would be
 ///   worse than the bug being fixed.
+/// - only formulas that directly call an unknown function; a dependent SUM
+///   must not restore an old partial total over a newly propagated error.
 /// - only where the formula still matches the one the value was computed for.
 /// - only where a value was actually stored; nothing is invented.
 ///
@@ -97,9 +99,19 @@ pub fn keep_uncomputable_values(
 
     for (sheet_idx, row, col, value) in cached {
         let Some(sheet) = wb.sheets().get(*sheet_idx) else { continue };
-        if !sheet.get_display(*row, *col).starts_with("Unknown function") {
+        let Value::Error(error) = sheet.get_computed_value(*row, *col) else { continue };
+        if !error.starts_with("Unknown function") {
             continue;
         }
+        // Native caches historically stored both errors and text as strings.
+        // An old error message is not a successfully computed custom value.
+        if matches!(value, CachedFormulaValue::Text(t) if t.starts_with("Unknown function")) {
+            continue;
+        }
+        let Ok(ast) = visigrid_engine::formula::parser::parse(&sheet.get_raw(*row, *col)) else { continue };
+        let mut unknown = std::collections::HashMap::new();
+        visigrid_engine::formula::analyze::tally_unknown_functions(&ast, &mut unknown);
+        if unknown.is_empty() { continue; }
         match value {
             CachedFormulaValue::Number(n) => sheet.cache_computed(*row, *col, Value::Number(*n)),
             CachedFormulaValue::Text(t) => sheet.cache_computed(*row, *col, Value::Text(t.clone())),

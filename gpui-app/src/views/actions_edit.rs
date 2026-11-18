@@ -724,8 +724,13 @@ pub(crate) fn bind(
                 cx.notify();
                 return;
             }
-            this.delete_char(cx);
-            this.update_edit_scroll(window, cx);
+            if this.mode == Mode::Navigation {
+                this.delete_selection(cx);
+                this.update_title_if_needed(window, cx);
+            } else if this.mode.is_editing() {
+                this.delete_char(cx);
+                this.update_edit_scroll(window, cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &FillDown, window, cx| {
             this.fill_down(cx);

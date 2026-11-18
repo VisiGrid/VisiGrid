@@ -280,17 +280,7 @@ fn render_column_header(
                         this.auto_fit_selected_col_widths(col, Some(window), cx);
                     } else {
                         // Start resize drag
-                        this.resizing_col = Some(col);
-                        let x: f32 = event.position.x.into();
-                        this.resize_start_pos = x;
-                        this.resize_start_size = this.col_width(col);
-                        // Capture original map value for history (None = was default)
-                        let sheet_id = this.cached_sheet_id();
-                        this.resize_start_original = this.col_widths
-                            .get(&sheet_id)
-                            .and_then(|m| m.get(&col))
-                            .copied();
-                        cx.notify();
+                        this.begin_col_resize(col, event.position.x.into(), cx);
                     }
                 }))
         )

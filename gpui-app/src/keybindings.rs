@@ -101,8 +101,9 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("shift-tab", TabPrev, Some("Spreadsheet")),
         KeyBinding::new("escape", CancelEdit, Some("Spreadsheet")),
         KeyBinding::new("backspace", BackspaceChar, Some("Spreadsheet")),
+        // One binding: the handler chooses forward text deletion or clearing cells.
+        // A second DeleteCell binding in this context shadows editing's DeleteChar.
         KeyBinding::new("delete", DeleteChar, Some("Spreadsheet")),
-        KeyBinding::new("delete", DeleteCell, Some("Spreadsheet")),
         KeyBinding::new(kb(m, "d"), FillDown, Some("Spreadsheet")),
         KeyBinding::new(kb(m, "r"), FillRight, Some("Spreadsheet")),
         // Insert/Delete rows/cols (Ctrl+Plus, Excel-standard)

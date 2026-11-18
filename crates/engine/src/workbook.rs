@@ -3062,6 +3062,18 @@ impl<'a> CellLookup for WorkbookLookup<'a> {
             .unwrap_or(0.0)
     }
 
+    fn checked_numbers_in_range(
+        &self, sheet: &SheetRef, start_row: usize, start_col: usize,
+        end_row: usize, end_col: usize, out: &mut Vec<f64>,
+    ) -> Result<(), String> {
+        let target = match sheet {
+            SheetRef::Current => self.current_sheet(),
+            SheetRef::Id(id) => self.workbook.sheet_by_id(*id),
+            SheetRef::RefError { .. } => None,
+        }.ok_or_else(|| "#REF!".to_string())?;
+        target.checked_numbers_in(start_row, start_col, end_row, end_col, out)
+    }
+
     fn numbers_in_range(
         &self,
         sheet: &SheetRef,

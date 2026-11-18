@@ -240,8 +240,7 @@ pub(crate) fn cmd_convert(
         return write_banded(input.as_deref(), input_format, workbook_in, reshaping, to, output.as_deref(), delimiter, csv, quiet);
     }
 
-    if !reshaping && workbook_in && (matches!(to, Format::JsonFull | Format::Xlsx)
-        || (matches!(input_format, Format::Duckdb) && matches!(to, Format::Sheet))) {
+    if !reshaping && workbook_in && matches!(to, Format::JsonFull | Format::Xlsx | Format::Sheet) {
         let (wb, layouts, active) = read_workbook_full(input.as_deref(), input_format)?;
 
         match to {
@@ -272,6 +271,13 @@ pub(crate) fn cmd_convert(
             Format::Sheet => {
                 let path = output.as_ref().ok_or_else(|| CliError::args("sheet output requires -o FILE"))?;
                 visigrid_io::native::save_workbook(&wb, path).map_err(CliError::io)?;
+                let layout = visigrid_io::native::SheetLayout {
+                    col_widths: layouts.iter().enumerate().map(|(i, l)| (i, l.col_widths.iter().map(|(&c, &w)| (c, w)).collect())).collect(),
+                    row_heights: layouts.iter().enumerate().map(|(i, l)| (i, l.row_heights.iter().map(|(&r, &h)| (r, h)).collect())).collect(),
+                    hidden_rows: layouts.iter().enumerate().map(|(i, l)| (i, l.hidden_rows.iter().copied().collect())).collect(),
+                    hidden_cols: layouts.iter().enumerate().map(|(i, l)| (i, l.hidden_cols.iter().copied().collect())).collect(),
+                };
+                visigrid_io::native::save_layout(path, &layout).map_err(CliError::io)?;
             }
             _ => unreachable!("guarded by the matches! above"),
         }
