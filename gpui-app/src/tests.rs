@@ -3055,7 +3055,9 @@ fn review_mode_workbook_mutators_are_guarded() {
 
     let app = include_str!("app.rs");
     for function in [
-        "record_col_width_change",
+        "begin_col_resize",
+        "update_col_resize",
+        "finish_col_resize",
         "record_row_height_change",
         "fit_selection_columns",
         "auto_fit_row_height",
