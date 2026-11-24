@@ -36,13 +36,17 @@ pub fn render_paste_token_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet
                         .text_size(px(18.0))
                         .font_weight(FontWeight::BOLD)
                         .text_color(text_primary)
-                        .child("Sign in")
+                        .child(if app.grid_sign_in_base.is_some() { "Sign in to Grid" } else { "Sign in" })
                 )
                 .child(
                     div()
                         .text_size(px(13.0))
                         .text_color(text_muted)
-                        .child("A browser window should have opened. Complete sign in there, then paste your token below.")
+                        .child(if app.grid_sign_in_base.is_some() {
+                            "A browser window should have opened. Authorize this computer in Grid, then paste the code below. It signs this computer in for 30 days."
+                        } else {
+                            "A browser window should have opened. Complete sign in there, then paste your token below."
+                        })
                 )
         )
         // Security warning

@@ -25,6 +25,8 @@ pub struct SheetInfo {
     pub byte_size: Option<i64>,
     pub last_edited_at: Option<String>,
     pub revision: Option<i64>,
+    /// Set for sheets listed from Grid (Loco): their pid. Rails sheets: None.
+    pub grid_pid: Option<String>,
 }
 
 /// Response from the save endpoint (presigned upload URL)
@@ -290,6 +292,7 @@ fn parse_sheet_info(v: &serde_json::Value) -> Option<SheetInfo> {
         byte_size: v["byte_size"].as_i64(),
         last_edited_at: v["last_edited_at"].as_str().map(String::from),
         revision: v["revision"].as_i64(),
+        grid_pid: None,
     })
 }
 
