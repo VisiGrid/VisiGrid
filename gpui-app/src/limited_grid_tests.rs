@@ -32,6 +32,29 @@ fn extent(app: &mut Spreadsheet, cx: &gpui::App) -> (usize, usize) {
 }
 
 #[gpui::test]
+fn add_count_accepts_selected_default_and_replacement(cx: &mut TestAppContext) {
+    use visigrid_engine::structural::Axis;
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.show_add_count(Axis::Row, cx);
+        let dialog = app.count_dialog.as_ref().unwrap();
+        assert_eq!(dialog.input, "1");
+        assert!(dialog.input_selected);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "enter");
+    view.update(cx, |app, _, cx| {
+        assert_eq!(extent(app, cx), (21, 11));
+        app.show_add_count(Axis::Col, cx);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "4 enter");
+    view.update(cx, |app, _, cx| {
+        assert_eq!(extent(app, cx), (21, 15));
+        assert_eq!(app.history.undo_count(), 0);
+        assert!(app.count_dialog.is_none());
+    }).unwrap();
+}
+
+#[gpui::test]
 fn default_extent_strips_clicks_and_add_count(cx: &mut TestAppContext) {
     use gpui::Modifiers;
     init(cx);

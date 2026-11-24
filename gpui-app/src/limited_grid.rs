@@ -409,7 +409,8 @@ impl Spreadsheet {
             axis,
             at: 0,
             max,
-            input: String::new(),
+            input: "1".into(),
+            input_selected: true,
             grow_only: true,
             anchor: None,
         });
