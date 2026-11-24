@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.56.0
+
+### Excel files
+
+- **Open password-protected Excel workbooks.** Opening an encrypted `.xlsx`, `.xlsm` or `.xlsb` now asks for the password instead of failing. The file is decrypted in memory; nothing unencrypted is written to disk unless you save or export. Both encryption schemes Excel has used since 2007 are supported, and a wrong password or a damaged file gets its own message. ([#174](https://github.com/VisiGrid/VisiGrid/issues/174))
+- **VisiGrid asks before writing an unencrypted copy.** Save As, export (Excel, CSV, TSV, JSON, PDF) and Print confirm first when the workbook came from a password-protected file. Move to Cloud is unavailable until you save a `.sheet` copy, and the file is left out of session restore.
+- **Command line:** `vgrid` reads the password from the `VISIGRID_XLSX_PASSWORD` environment variable, or prompts for it in a terminal without echoing. There is no `--password` flag, so the password never appears in the process list or shell history. `vgrid serve` does not accept passwords.
+
+Password-protected legacy `.xls` files are not supported; re-save them as `.xlsx`. Saving a workbook with a password is not supported yet. This has been tested most against files encrypted by current tools. If a workbook from Excel 2007 or 2010 does not open with the right password, please report it.
+
+### Grid
+
+- **Limited Grid (optional).** **View → Toggle Limited Grid** shows each sheet as a bounded grid instead of the endless one. A new sheet starts at 20 rows by 11 columns. **+** strips on the bottom and right edges add a row or a column; right-click a strip to add several or to **Shrink to data**. Pressing Enter or Down on a last row that has content adds the next row. Content is never hidden: a paste, fill or spill that runs past the edge grows the grid. This is a view setting only. Formulas, references and exported files are identical with it on or off, and it is off by default. Desktop only for now. ([#175](https://github.com/VisiGrid/VisiGrid/discussions/175))
+- **Insert several rows or columns at once.** The row and column header menus now offer **Insert rows above… / below…** and **Insert columns left… / right…**, which ask how many. The count starts at the number of rows or columns selected, so selecting three and pressing Enter inserts three. **Ctrl+Shift+Enter** (Cmd+Shift+Enter with Mac modifiers) opens the same picker from the keyboard. The whole insert is one undo step.
+
 ## 0.55.2
 
 ### Fixed
