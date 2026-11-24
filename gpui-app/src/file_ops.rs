@@ -373,6 +373,15 @@ impl Spreadsheet {
 
     /// Start background Excel import with delayed overlay
     fn start_excel_import(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        self.start_excel_import_with_password(path, xlsx::ImportOptions::default(), cx);
+    }
+
+    pub(crate) fn start_excel_import_with_password(
+        &mut self,
+        path: &PathBuf,
+        options: xlsx::ImportOptions,
+        cx: &mut Context<Self>,
+    ) {
         if self.block_if_previewing_only(cx) { return; }
         let filename = path.file_name()
             .and_then(|n| n.to_str())
@@ -391,6 +400,8 @@ impl Spreadsheet {
         let path_for_import = path.clone();
         let path_for_recent = path.clone();
         let filename_for_completion = filename.clone();
+        let mut retry_options = options.clone();
+        retry_options.password = None;
 
         cx.notify();
 
@@ -412,7 +423,7 @@ impl Spreadsheet {
             // Do the import on background thread
             let import_result = cx.background_executor()
                 .spawn(async move {
-                    xlsx::import(&path_for_import)
+                    xlsx::import_with_options_typed(&path_for_import, &options)
                 })
                 .await;
 
@@ -447,6 +458,8 @@ impl Spreadsheet {
 
                         // Set up document identity (XLSX is native per spec)
                         this.finalize_load(&path_for_recent);
+                        this.opened_from_encrypted_xlsx = result.was_encrypted;
+                        this.password_prompt = None;
                         this.request_title_refresh(cx);
 
                         // Build status message with timing
@@ -490,7 +503,30 @@ impl Spreadsheet {
                             this.show_import_report(cx);
                         }
                     }
+                    Err(xlsx::ImportError::PasswordRequired) => {
+                        this.status_message = Some(format!("Password required for {}", filename_for_completion));
+                        this.show_password_prompt(
+                            path_for_recent,
+                            filename_for_completion,
+                            retry_options,
+                            None,
+                            None,
+                            cx,
+                        );
+                    }
+                    Err(xlsx::ImportError::IncorrectPassword) => {
+                        this.status_message = Some("Incorrect password".to_string());
+                        this.show_password_prompt(
+                            path_for_recent,
+                            filename_for_completion,
+                            retry_options,
+                            None,
+                            Some("Incorrect password. Please try again.".to_string()),
+                            cx,
+                        );
+                    }
                     Err(e) => {
+                        this.password_prompt = None;
                         this.import_result = None;
                         this.import_filename = None;
                         this.import_source_dir = None;
@@ -761,7 +797,7 @@ impl Spreadsheet {
     }
 
     /// Start background Excel import with options and optional sheet restore
-    fn start_excel_import_with_options(
+    pub(crate) fn start_excel_import_with_options(
         &mut self,
         path: &PathBuf,
         options: xlsx::ImportOptions,
@@ -784,6 +820,8 @@ impl Spreadsheet {
         let path_for_import = path.clone();
         let path_for_recent = path.clone();
         let filename_for_completion = filename.clone();
+        let mut retry_options = options.clone();
+        retry_options.password = None;
 
         cx.notify();
 
@@ -803,7 +841,7 @@ impl Spreadsheet {
         cx.spawn(async move |this, cx| {
             let import_result = cx.background_executor()
                 .spawn(async move {
-                    xlsx::import_with_options(&path_for_import, &options)
+                    xlsx::import_with_options_typed(&path_for_import, &options)
                 })
                 .await;
 
@@ -835,6 +873,8 @@ impl Spreadsheet {
                         this.add_recent_file(&path_for_recent);
 
                         this.finalize_load(&path_for_recent);
+                        this.opened_from_encrypted_xlsx = result.was_encrypted;
+                        this.password_prompt = None;
                         this.request_title_refresh(cx);
 
                         // Restore sheet selection
@@ -881,7 +921,30 @@ impl Spreadsheet {
                             this.show_import_report(cx);
                         }
                     }
+                    Err(xlsx::ImportError::PasswordRequired) => {
+                        this.status_message = Some(format!("Password required for {}", filename_for_completion));
+                        this.show_password_prompt(
+                            path_for_recent,
+                            filename_for_completion,
+                            retry_options,
+                            Some(restore_sheet),
+                            None,
+                            cx,
+                        );
+                    }
+                    Err(xlsx::ImportError::IncorrectPassword) => {
+                        this.status_message = Some("Incorrect password".to_string());
+                        this.show_password_prompt(
+                            path_for_recent,
+                            filename_for_completion,
+                            retry_options,
+                            Some(restore_sheet),
+                            Some("Incorrect password. Please try again.".to_string()),
+                            cx,
+                        );
+                    }
                     Err(e) => {
+                        this.password_prompt = None;
                         this.import_result = None;
                         this.import_filename = None;
                         this.import_source_dir = None;
@@ -1063,11 +1126,42 @@ impl Spreadsheet {
             })
             .unwrap_or_else(|| "untitled.sheet".to_string());
 
+        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
+                if warn_unencrypted {
+                    let prompt_rx = window_handle
+                        .update(cx, |_, window, cx| {
+                            window.prompt(
+                                PromptLevel::Warning,
+                                "Save unencrypted copy?",
+                                Some("This workbook was opened from a password-protected Excel file. Saving will write an unencrypted copy to disk."),
+                                &["Save Unencrypted", "Cancel"],
+                                cx,
+                            )
+                        })
+                        .ok();
+                    let confirmed = match prompt_rx {
+                        Some(rx) => matches!(rx.await, Ok(0)),
+                        None => false,
+                    };
+                    if !confirmed {
+                        let _ = this.update(cx, |this, cx| {
+                            this.close_after_save = false;
+                            this.quit_after_close = false;
+                            this.status_message = Some("Save cancelled".to_string());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
                 let close_result = this.update(cx, |this, cx| {
                     let saved = this.save_to_path(&path, cx);
+                    if saved {
+                        this.opened_from_encrypted_xlsx = false;
+                    }
                     // Check if we should close after save (from save_and_close flow)
                     let should_close = this.close_after_save && saved;
                     this.close_after_save = false;  // Reset flag
@@ -1280,9 +1374,35 @@ impl Spreadsheet {
             .unwrap_or("export");
         let suggested_name = format!("{}.xlsx", base_name);
 
+        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
+                if warn_unencrypted {
+                    let prompt_rx = window_handle
+                        .update(cx, |_, window, cx| {
+                            window.prompt(
+                                PromptLevel::Warning,
+                                "Export unencrypted copy?",
+                                Some("This workbook was opened from a password-protected Excel file. Exporting will write an unencrypted copy to disk."),
+                                &["Export Unencrypted", "Cancel"],
+                                cx,
+                            )
+                        })
+                        .ok();
+                    let confirmed = match prompt_rx {
+                        Some(rx) => matches!(rx.await, Ok(0)),
+                        None => false,
+                    };
+                    if !confirmed {
+                        let _ = this.update(cx, |this, cx| {
+                            this.status_message = Some("Export cancelled".to_string());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
                 let _ = this.update(cx, |this, cx| {
                     if this.block_read_only_recovery(cx) { return; }
                     // Rebuild layouts in case data changed
@@ -1354,9 +1474,35 @@ impl Spreadsheet {
             .and_then(|n| n.to_str())
             .map(|s| s.to_string());
 
+        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
+                if warn_unencrypted {
+                    let prompt_rx = window_handle
+                        .update(cx, |_, window, cx| {
+                            window.prompt(
+                                PromptLevel::Warning,
+                                "Export unencrypted copy?",
+                                Some("This workbook was opened from a password-protected Excel file. Exporting will write an unencrypted copy to disk."),
+                                &["Export Unencrypted", "Cancel"],
+                                cx,
+                            )
+                        })
+                        .ok();
+                    let confirmed = match prompt_rx {
+                        Some(rx) => matches!(rx.await, Ok(0)),
+                        None => false,
+                    };
+                    if !confirmed {
+                        let _ = this.update(cx, |this, cx| {
+                            this.status_message = Some("Export cancelled".to_string());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
                 let _ = this.update(cx, |this, cx| {
                     let options = ExportOptions {
                         include_header: true,
@@ -1463,9 +1609,35 @@ impl Spreadsheet {
             .unwrap_or("export");
         let suggested_name = format!("{}.{}", base_name, ext);
 
+        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = future.await {
+                if warn_unencrypted {
+                    let prompt_rx = window_handle
+                        .update(cx, |_, window, cx| {
+                            window.prompt(
+                                PromptLevel::Warning,
+                                "Export unencrypted copy?",
+                                Some("This workbook was opened from a password-protected Excel file. Exporting will write an unencrypted copy to disk."),
+                                &["Export Unencrypted", "Cancel"],
+                                cx,
+                            )
+                        })
+                        .ok();
+                    let confirmed = match prompt_rx {
+                        Some(rx) => matches!(rx.await, Ok(0)),
+                        None => false,
+                    };
+                    if !confirmed {
+                        let _ = this.update(cx, |this, cx| {
+                            this.status_message = Some("Export cancelled".to_string());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
                 let _ = this.update(cx, |this, cx| {
                     if this.block_read_only_recovery(cx) { return; }
                     if let Some(refusal) = this.csv_overwrite_refusal(&path) {

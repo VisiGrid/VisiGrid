@@ -615,7 +615,7 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::
                 Some(visigrid_io::duckdb::IMPORT_CELL_LIMIT), true).map_err(CliError::parse)?.sheet)
         }
         Format::Xlsx => {
-            let (workbook, _stats) = visigrid_io::xlsx::import(path)
+            let (workbook, _stats) = crate::util::import_xlsx_cli(path, visigrid_io::xlsx::ImportOptions::default())
                 .map_err(CliError::parse)?;
             let (idx, _) = resolve_sheet(&workbook, sheet_arg)?;
             Ok(workbook.into_sheets().swap_remove(idx))
@@ -740,7 +740,8 @@ fn read_workbook_full(
             let path = input.ok_or_else(|| {
                 CliError::args("xlsx and sheet formats require file input")
             })?;
-            let (wb, stats) = visigrid_io::xlsx::import(path).map_err(CliError::parse)?;
+            let (wb, stats) = crate::util::import_xlsx_cli(path, visigrid_io::xlsx::ImportOptions::default())
+                .map_err(CliError::parse)?;
             // Raw Excel units (character widths, points) → pixels.
             let layouts: Vec<_> = stats
                 .imported_layouts

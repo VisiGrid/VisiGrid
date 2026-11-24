@@ -77,7 +77,8 @@ fn load(path: &Path, delimiter: Option<&str>) -> Result<Workbook, CliError> {
             visigrid_io::json::import_any(&content).map_err(CliError::io)?.0
         }
         Some("xlsx") | Some("xlsm") | Some("xls") | Some("xlsb") | Some("ods") => {
-            visigrid_io::xlsx::import(path).map_err(CliError::parse)?.0
+            crate::util::import_xlsx_cli(path, visigrid_io::xlsx::ImportOptions::default())
+                .map_err(CliError::parse)?.0
         }
         Some("parquet") => {
             let imported = visigrid_io::parquet::import(path).map_err(CliError::parse)?;

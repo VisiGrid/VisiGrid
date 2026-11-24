@@ -502,7 +502,7 @@ pub fn load_workbook_peek(
     recompute: bool,
     force: bool,
 ) -> Result<Vec<SheetData>, String> {
-    let (mut workbook, _result) = visigrid_io::xlsx::import(path)
+    let (mut workbook, _result) = crate::util::import_xlsx_cli(path, visigrid_io::xlsx::ImportOptions::default())
         .map_err(|e| format!("failed to import {}: {}", path.display(), e))?;
 
     if recompute {

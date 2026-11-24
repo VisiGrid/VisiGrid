@@ -2021,9 +2021,9 @@ fn frame_from_sheet(sheet: &Sheet, header: Option<usize>, count: usize, width: u
 /// An Excel workbook's sheet names, in order, without importing it.
 #[cfg(feature = "native")]
 pub fn xlsx_sheet_names(path: &Path) -> Result<Vec<String>, String> {
-    use calamine::Reader as _;
-    let workbook = calamine::open_workbook_auto(path).map_err(|e| e.to_string())?;
-    Ok(workbook.sheet_names().to_vec())
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    crate::xlsx::sheet_names_from_bytes(&bytes, crate::xlsx::WorkbookFormat::from_path(path), None)
+        .map_err(|e| e.to_string())
 }
 
 /// The row of `sheet` (counting from 1) that most likely holds the column
@@ -2046,12 +2046,10 @@ pub fn guess_xlsx_header_row(snapshot: &Snapshot, sheet: &str) -> usize {
 
 #[cfg(feature = "native")]
 fn read_xlsx(src: &XlsxSource, snapshot: &Snapshot) -> Result<Frame, String> {
-    // The reader picks the format from the extension
-    let ext = snapshot.path.extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_lowercase();
-    let (_dir, path) = snapshot_file(snapshot, &ext)?;
     // Values only: the results Excel saved, never a recalculation here
     let options = crate::xlsx::ImportOptions { values_only: true, ..Default::default() };
-    let (wb, result) = crate::xlsx::import_with_options(&path, &options)?;
+    let format = crate::xlsx::WorkbookFormat::from_path(&snapshot.path);
+    let (wb, result) = crate::xlsx::import_bytes_with_options(&snapshot.bytes, format, &options)?;
     if result.truncated {
         return Err("the workbook is larger than VisiGrid imports; save the sheet you need on its own".into());
     }

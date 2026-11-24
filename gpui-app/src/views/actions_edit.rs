@@ -152,6 +152,17 @@ pub(crate) fn bind(
                 }
                 return;
             }
+            // Password prompt dialog: paste into masked password input
+            if this.mode == Mode::PasswordPrompt {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                            this.password_prompt_insert_char(c, cx);
+                        }
+                    }
+                }
+                return;
+            }
             // GoTo dialog: paste into input
             if this.mode == Mode::GoTo {
                 if let Some(item) = cx.read_from_clipboard() {
@@ -340,6 +351,7 @@ pub(crate) fn bind(
                 Mode::FontPicker => this.font_picker_execute(cx),
                 Mode::Command => this.palette_execute(window, cx),
                 Mode::GoTo => this.confirm_goto(cx),
+                Mode::PasswordPrompt => this.confirm_password_prompt(cx),
                 Mode::CreateNamedRange => this.confirm_create_named_range(cx),
                 Mode::AddCondFormat => this.confirm_add_cond_format(cx),
                 _ => {
@@ -358,7 +370,7 @@ pub(crate) fn bind(
             }
             // Shift+Enter: confirm and move up (or just move up in nav mode)
             match this.mode {
-                Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo | Mode::CloudOpen => {
+                Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo | Mode::PasswordPrompt | Mode::CloudOpen => {
                     // Shift+Enter does nothing special in these modes
                 }
                 _ => {
@@ -445,6 +457,8 @@ pub(crate) fn bind(
                 this.hide_palette(cx);
             } else if this.mode == Mode::GoTo {
                 this.hide_goto(cx);
+            } else if this.mode == Mode::PasswordPrompt {
+                this.cancel_password_prompt(cx);
             } else if this.mode == Mode::Find {
                 this.hide_find(cx);
             } else if this.mode == Mode::FontPicker {
@@ -671,6 +685,8 @@ pub(crate) fn bind(
                 this.palette_backspace(cx);
             } else if this.mode == Mode::GoTo {
                 this.goto_backspace(cx);
+            } else if this.mode == Mode::PasswordPrompt {
+                this.password_prompt_backspace(cx);
             } else if this.mode == Mode::Find {
                 this.find_backspace(cx);
             } else if this.mode == Mode::ThemePicker {

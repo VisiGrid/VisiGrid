@@ -32,6 +32,15 @@ impl Spreadsheet {
     /// Move the current local file to cloud.
     /// Creates a sheet on the server, attaches a CloudIdentity, and triggers initial upload.
     pub fn cloud_move_to_cloud(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.opened_from_encrypted_xlsx {
+            self.status_message = Some(
+                "This workbook was opened from a password-protected Excel file. Save an unencrypted .sheet copy first before moving to cloud."
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        }
+
         let path = match &self.current_file {
             Some(p) => p.clone(),
             None => {

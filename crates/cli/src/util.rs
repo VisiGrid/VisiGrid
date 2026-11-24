@@ -43,6 +43,105 @@ pub(crate) fn truncate_display(s: &str, width: usize) -> String {
     format!("{}..", &s[..end_byte])
 }
 
+/// Environment variable for supplying an encrypted Excel workbook password
+/// non-interactively without exposing it in process arguments (`ps`) or shell history.
+pub(crate) const XLSX_PASSWORD_ENV: &str = "VISIGRID_XLSX_PASSWORD";
+
+/// Import an Excel workbook for CLI commands, supporting password-protected
+/// OOXML files via `VISIGRID_XLSX_PASSWORD` or an interactive TTY prompt (echo
+/// disabled). Never accepts a `--password` command-line flag.
+pub(crate) fn import_xlsx_cli(
+    path: &std::path::Path,
+    mut options: visigrid_io::xlsx::ImportOptions,
+) -> Result<(visigrid_engine::workbook::Workbook, visigrid_io::xlsx::ImportResult), String> {
+    use std::io::IsTerminal as _;
+    use visigrid_io::xlsx::ImportError;
+    use visigrid_io::xlsx_crypto::Zeroizing;
+
+    if options.password.is_none() {
+        if let Ok(env_pw) = std::env::var(XLSX_PASSWORD_ENV) {
+            options.password = Some(Zeroizing::new(env_pw));
+        }
+    }
+
+    match visigrid_io::xlsx::import_with_options_typed(path, &options) {
+        Ok(ok) => Ok(ok),
+        Err(ImportError::PasswordRequired) => {
+            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workbook");
+                let prompt = format!("Password for {name}: ");
+                let pw = read_password_tty(&prompt)?;
+                options.password = Some(pw);
+                visigrid_io::xlsx::import_with_options_typed(path, &options)
+                    .map_err(|e| e.to_string())
+            } else {
+                Err(format!(
+                    "Workbook is password protected. Set {XLSX_PASSWORD_ENV} or run in an interactive terminal to enter the password."
+                ))
+            }
+        }
+        Err(other) => Err(other.to_string()),
+    }
+}
+
+fn read_password_tty(prompt: &str) -> Result<visigrid_io::xlsx_crypto::Zeroizing<String>, String> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    use std::io::Write as _;
+    use visigrid_io::xlsx_crypto::Zeroizing;
+
+    struct RawModeGuard;
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+        }
+    }
+
+    let mut stderr = std::io::stderr();
+    write!(stderr, "{prompt}").map_err(|e| e.to_string())?;
+    stderr.flush().map_err(|e| e.to_string())?;
+
+    enable_raw_mode().map_err(|e| format!("failed to read password from terminal: {e}"))?;
+    let _guard = RawModeGuard;
+
+    let mut password = Zeroizing::new(String::new());
+    loop {
+        match event::read().map_err(|e| format!("failed reading terminal input: {e}"))? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter => {
+                    let _ = write!(stderr, "\r\n");
+                    let _ = stderr.flush();
+                    return Ok(password);
+                }
+                KeyCode::Esc => {
+                    let _ = write!(stderr, "\r\n");
+                    let _ = stderr.flush();
+                    return Err("Password entry cancelled".to_string());
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let _ = write!(stderr, "\r\n");
+                    let _ = stderr.flush();
+                    return Err("Password entry cancelled".to_string());
+                }
+                KeyCode::Backspace => {
+                    password.pop();
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    password.push(c);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
 /// Pad or truncate a string to exactly `width` display columns.
 /// If shorter, right-pads with spaces. If longer, truncates with "..".
 pub(crate) fn pad_right(s: &str, width: usize) -> String {

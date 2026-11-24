@@ -664,6 +664,26 @@ impl Spreadsheet {
             None => (None, false, false),
         };
 
+        // Never persist file path or sheet names for workbooks opened from an
+        // encrypted Excel file (avoids leaking metadata to session.json and
+        // avoids unexpected password prompts on startup).
+        if self.opened_from_encrypted_xlsx {
+            return WindowSession {
+                window_id: self.session_window_id,
+                file: None,
+                sheets: Vec::new(),
+                active_sheet: 0,
+                bounds,
+                maximized,
+                fullscreen,
+                panels: PanelState {
+                    inspector_visible: self.inspector_visible,
+                    inspector_tab: self.inspector_tab.into(),
+                },
+                zoom_level: self.view_state.zoom_level,
+            };
+        }
+
         WindowSession {
             window_id: self.session_window_id,
             file: self.current_file.clone(),

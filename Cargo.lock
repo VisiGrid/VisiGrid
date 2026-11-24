@@ -994,6 +994,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfb"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fef29b910ef2b9dbecc60168d1568d643c633b0518af970c17e83bd5f6e2c94f"
+dependencies = [
+ "fnv",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7835,13 +7846,18 @@ dependencies = [
 name = "visigrid-io"
 version = "0.55.2"
 dependencies = [
+ "aes",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "calamine",
+ "cbc",
+ "cfb",
  "chrono",
  "csv",
  "dirs 5.0.1",
  "encoding_rs",
+ "hmac 0.12.1",
  "libduckdb-sys",
  "miniz_oxide",
  "parquet",
@@ -7854,7 +7870,9 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "tokio-postgres-rustls",
  "toml 0.8.23",
@@ -7863,6 +7881,7 @@ dependencies = [
  "visigrid-config",
  "visigrid-engine",
  "webpki-roots 1.0.9",
+ "zeroize",
  "zip 4.6.1",
 ]
 

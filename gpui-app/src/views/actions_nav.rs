@@ -192,7 +192,7 @@ pub(crate) fn bind(
                 return;  // No horizontal navigation in vertical lists
             }
             // Text input modals: move cursor left in the input field
-            if matches!(this.mode, Mode::Command | Mode::GoTo | Mode::Find |
+            if matches!(this.mode, Mode::Command | Mode::GoTo | Mode::PasswordPrompt | Mode::Find |
                 Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription |
                 Mode::ExtractNamedRange | Mode::License) {
                 // These modes handle cursor movement in their on_key_down handlers
@@ -255,7 +255,7 @@ pub(crate) fn bind(
                 return;  // No horizontal navigation in vertical lists
             }
             // Text input modals: move cursor right in the input field
-            if matches!(this.mode, Mode::Command | Mode::GoTo | Mode::Find |
+            if matches!(this.mode, Mode::Command | Mode::GoTo | Mode::PasswordPrompt | Mode::Find |
                 Mode::RenameSymbol | Mode::CreateNamedRange | Mode::EditDescription |
                 Mode::ExtractNamedRange | Mode::License) {
                 // These modes handle cursor movement in their on_key_down handlers
