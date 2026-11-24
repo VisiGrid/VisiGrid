@@ -7,9 +7,7 @@ use quick_xml::{
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fs::File,
     io::{BufRead, BufReader, Cursor, Write},
-    path::Path,
 };
 use visigrid_engine::{cell::ValueRef, formula::eval::Value, sheet::Sheet, workbook::Workbook};
 
@@ -270,9 +268,8 @@ pub(crate) fn finish(
 // Calamine decodes SpreadsheetML escapes in shared/inline strings but not in
 // formula and array-receiver <v> strings. Identify that exact storage type before decoding once.
 // Called lazily only when imported text actually contains an escape candidate.
-pub(crate) fn string_cells(path: &Path) -> Result<HashSet<(usize, usize, usize)>, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+pub(crate) fn string_cells(bytes: &[u8]) -> Result<HashSet<(usize, usize, usize)>, String> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return Ok(HashSet::new());
     };
     let Some(workbook) = super::xlsx::read_zip_file_for_shared(&mut zip, "xl/workbook.xml") else {

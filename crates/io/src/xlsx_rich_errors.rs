@@ -8,9 +8,7 @@ use quick_xml::{
 };
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::File,
     io::{BufReader, Cursor, Read, Write},
-    path::Path,
 };
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -383,8 +381,8 @@ fn error_label(code: usize) -> Option<&'static str> {
     })
 }
 
-pub(crate) fn read(path: &Path, warnings: &mut Vec<String>) -> Imported {
-    match read_inner(path) {
+pub(crate) fn read(bytes: &[u8], warnings: &mut Vec<String>) -> Imported {
+    match read_inner(bytes) {
         Ok(cells) => cells,
         Err(error) => {
             warnings.push(format!("Modern Excel error metadata was not restored: {error}. Conventional cached errors were kept."));
@@ -393,8 +391,8 @@ pub(crate) fn read(path: &Path, warnings: &mut Vec<String>) -> Imported {
     }
 }
 
-fn read_inner(path: &Path) -> Result<Imported, String> {
-    let Ok(mut zip) = zip::ZipArchive::new(File::open(path).map_err(|e| e.to_string())?) else {
+fn read_inner(bytes: &[u8]) -> Result<Imported, String> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return Ok(HashMap::new());
     };
     if !zip.file_names().any(|n| n == "xl/_rels/workbook.xml.rels") {

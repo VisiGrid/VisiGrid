@@ -1,6 +1,6 @@
 //! Cached array members are derived values, not spill obstructions.
 use quick_xml::{events::Event, Reader};
-use std::{collections::HashSet, fs::File, io::BufReader, path::Path};
+use std::{collections::HashSet, io::{BufReader, Cursor}};
 use visigrid_engine::{
     cell::{Cell, CellValue},
     formula::eval::Value,
@@ -49,9 +49,8 @@ mod tests {
     }
 }
 
-fn read(path: &Path) -> Result<Vec<Array>, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+fn read(bytes: &[u8]) -> Result<Vec<Array>, String> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return Ok(Vec::new());
     };
     let Some(workbook) = super::xlsx::read_zip_file_for_shared(&mut zip, "xl/workbook.xml") else {
@@ -116,11 +115,11 @@ fn read(path: &Path) -> Result<Vec<Array>, String> {
 }
 
 pub(crate) fn prepare(
-    path: &Path,
+    bytes: &[u8],
     wb: &mut Workbook,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Pending>, String> {
-    let arrays = match read(path) {
+    let arrays = match read(bytes) {
         Ok(a) => a,
         Err(e) => {
             warnings.push(format!("Array caches were kept as cells: {e}"));

@@ -2,9 +2,7 @@
 //! Follow package relationships; part numbers need not match sheet numbers.
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
-    io::{Cursor, Read, Write},
-    path::Path,
+    io::{Cursor, Read, Seek, Write},
 };
 
 use quick_xml::{
@@ -39,7 +37,7 @@ fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn part(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<String, String> {
+fn part<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Result<String, String> {
     let file = zip
         .by_name(name)
         .map_err(|e| format!("Missing comment package part {name}: {e}"))?;
@@ -116,17 +114,16 @@ fn relationships(xml: &str, source: &str) -> Result<Vec<Relationship>, String> {
 
 /// Read every sheet's Notes. Never fails: anything unreadable becomes a
 /// warning, and the workbook imports without those notes.
-pub(crate) fn read(path: &Path) -> ReadNotes {
+pub(crate) fn read(bytes: &[u8]) -> ReadNotes {
     let mut notes = ReadNotes::default();
-    if let Err(e) = read_into(path, &mut notes) {
+    if let Err(e) = read_into(bytes, &mut notes) {
         notes.warnings.push(format!("Excel Notes could not be read and were skipped: {e}"));
     }
     notes
 }
 
-fn read_into(path: &Path, notes: &mut ReadNotes) -> Result<(), String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+fn read_into(bytes: &[u8], notes: &mut ReadNotes) -> Result<(), String> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return Ok(());
     }; // Legacy XLS.
     if !zip.file_names().any(|n| n == "xl/workbook.xml") {
