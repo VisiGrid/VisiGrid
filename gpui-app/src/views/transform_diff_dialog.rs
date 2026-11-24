@@ -171,15 +171,7 @@ pub fn render_transform_diff_dialog(
                 }))
         );
 
-    // Wrap in key handler
     let dialog_content = div()
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-            match event.keystroke.key.as_str() {
-                "escape" => this.cancel_transform_preview(cx),
-                "enter" => this.confirm_transform_preview(cx),
-                _ => {}
-            }
-        }))
         .child(
             DialogFrame::new(body, panel_bg, panel_border)
                 .header(header)
@@ -196,6 +188,18 @@ pub fn render_transform_diff_dialog(
         dialog_content,
         cx,
     )
+}
+
+impl Spreadsheet {
+    /// Keys for the Transform preview, routed from `key_handler` (see
+    /// `convert_picker_key`).
+    pub(crate) fn transform_preview_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.cancel_transform_preview(cx),
+            "enter" => self.confirm_transform_preview(cx),
+            _ => {}
+        }
+    }
 }
 
 // ============================================================================
