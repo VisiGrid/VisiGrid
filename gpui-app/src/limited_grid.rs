@@ -411,6 +411,7 @@ impl Spreadsheet {
             max,
             input: String::new(),
             grow_only: true,
+            anchor: None,
         });
         self.mode = crate::mode::Mode::CountDialog;
         cx.notify();

@@ -99,8 +99,12 @@ fn menu_item(
                 )
             })
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                let anchor = this.context_menu.map(|menu| menu.position);
                 this.hide_context_menu(cx);
                 on_click(this, window, cx);
+                if let Some(picker) = &mut this.count_dialog {
+                    picker.anchor = anchor;
+                }
             }))
             .into_any_element()
     } else {
