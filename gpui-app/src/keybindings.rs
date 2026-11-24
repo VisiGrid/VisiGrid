@@ -97,6 +97,7 @@ pub fn register(cx: &mut App, modifier_style: ModifierStyle) {
         KeyBinding::new("enter", ConfirmEdit, Some("Spreadsheet")),
         KeyBinding::new("shift-enter", ConfirmEditUp, Some("Spreadsheet")),
         KeyBinding::new(kb(m, "enter"), ConfirmEditInPlace, Some("Spreadsheet")),
+        KeyBinding::new(kb_shift(m, "enter"), InsertRowsOrColsWithCount, Some("Spreadsheet")),
         KeyBinding::new("tab", TabNext, Some("Spreadsheet")),
         KeyBinding::new("shift-tab", TabPrev, Some("Spreadsheet")),
         KeyBinding::new("escape", CancelEdit, Some("Spreadsheet")),

@@ -14,6 +14,7 @@ pub(crate) struct CountDialog {
     pub at: usize,
     pub max: usize,
     pub input: String,
+    pub input_selected: bool,
     pub anchor: Option<Point<Pixels>>,
 }
 
@@ -74,7 +75,8 @@ impl Spreadsheet {
             axis,
             at,
             max,
-            input: String::new(),
+            input: "1".into(),
+            input_selected: true,
             anchor: None,
         });
         self.mode = Mode::CountDialog;
@@ -104,17 +106,30 @@ impl Spreadsheet {
         match event.keystroke.key.as_str() {
             "enter" => self.confirm_count_dialog(cx),
             "escape" => self.close_count_dialog(cx),
-            "backspace" => {
-                self.count_dialog.as_mut().unwrap().input.pop();
+            "backspace" | "delete" => {
+                let dialog = self.count_dialog.as_mut().unwrap();
+                if dialog.input_selected {
+                    dialog.input.clear();
+                } else if event.keystroke.key == "backspace" {
+                    dialog.input.pop();
+                }
+                dialog.input_selected = false;
+            }
+            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                self.count_dialog.as_mut().unwrap().input_selected = true;
             }
             _ => {
                 if !event.keystroke.modifiers.modified() {
                     if let Some(text) = &event.keystroke.key_char {
-                        self.count_dialog
-                            .as_mut()
-                            .unwrap()
-                            .input
-                            .extend(text.chars().filter(char::is_ascii_digit));
+                        let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+                        if !digits.is_empty() {
+                            let dialog = self.count_dialog.as_mut().unwrap();
+                            if dialog.input_selected {
+                                dialog.input.clear();
+                            }
+                            dialog.input_selected = false;
+                            dialog.input.push_str(&digits);
+                        }
                     }
                 }
             }
@@ -222,11 +237,26 @@ pub(crate) fn render(
                     } else {
                         app.token(TokenKey::TextPrimary)
                     })
-                    .child(if dialog.input.is_empty() {
-                        "Count".into()
-                    } else {
-                        format!("{}│", dialog.input)
-                    }),
+                    .child(
+                        div()
+                            .when(dialog.input_selected, |text| {
+                                text.bg(app.token(TokenKey::EditorSelectionBg))
+                                    .text_color(app.token(TokenKey::EditorSelectionText))
+                            })
+                            .child(if dialog.input.is_empty() {
+                                "Count".into()
+                            } else if dialog.input_selected {
+                                dialog.input.clone()
+                            } else {
+                                format!("{}│", dialog.input)
+                            }),
+                    )
+                    .on_mouse_down(MouseButton::Left, cx.listener(|app, _, window, cx| {
+                        cx.stop_propagation();
+                        window.focus(&app.focus_handle, cx);
+                        app.count_dialog.as_mut().unwrap().input_selected = true;
+                        cx.notify();
+                    })),
             )
             .child(
                 div()

@@ -98,6 +98,7 @@ fn menu_item(
                 on_click(this, window, cx);
                 if let Some(picker) = &mut this.count_dialog {
                     picker.anchor = anchor;
+                    window.focus(&this.focus_handle, cx);
                 }
             }))
             .into_any_element()
