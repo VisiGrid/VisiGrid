@@ -4,6 +4,7 @@ use crate::{
     mode::Mode,
     theme::TokenKey,
 };
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use visigrid_engine::structural::Axis;
 
@@ -129,6 +130,7 @@ pub(crate) fn render(
 ) -> impl IntoElement {
     let dialog = app.count_dialog.as_ref().unwrap();
     let valid = dialog.count().is_some();
+    let invalid = !dialog.input.is_empty() && !valid;
     let cell = app.active_cell_rect();
     let (origin_x, origin_y) = app.grid_layout.grid_body_origin;
     let anchor = dialog.anchor.unwrap_or_else(|| match dialog.axis {
@@ -139,16 +141,14 @@ pub(crate) fn render(
     let (x, y) = crate::ui::clamp_to_viewport(
         anchor.x.into(),
         anchor.y.into(),
-        248.,
-        112.,
+        208.,
+        if invalid { 96. } else { 72. },
         viewport.width.into(),
         viewport.height.into(),
     );
-    let hint = if !dialog.input.is_empty() && !valid {
-        format!("Enter a count from 1 to {}", dialog.max)
-    } else {
-        "Enter to insert · Esc to cancel".into()
-    };
+    let muted = app.token(TokenKey::TextMuted);
+    let accent = app.token(TokenKey::Accent);
+    let error = app.token(TokenKey::Error);
     crate::ui::popup(
         "count-dialog",
         app.token(TokenKey::PanelBg),
@@ -159,25 +159,36 @@ pub(crate) fn render(
     .debug_selector(|| "count-popover".into())
     .left(px(x))
     .top(px(y))
-    .w(px(248.))
-    .p_3()
-    .gap_2()
+    .w(px(208.))
+    .p_2()
+    .gap(px(6.))
+    .rounded_sm()
+    .shadow_sm()
     .text_size(px(12.))
+    .line_height(px(14.))
     .text_color(app.token(TokenKey::TextPrimary))
     .child(
         div()
             .flex()
             .items_center()
             .justify_between()
-            .child(dialog.title)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(dialog.title),
+            )
             .child(
                 div()
                     .id("count-cancel")
                     .debug_selector(|| "count-cancel".into())
                     .px_1()
+                    .rounded_sm()
                     .cursor_pointer()
-                    .text_color(app.token(TokenKey::TextMuted))
-                    .child("×")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .hover(move |style| style.bg(muted.opacity(0.1)))
+                    .child("Esc")
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|app, _, _, cx| {
@@ -191,43 +202,53 @@ pub(crate) fn render(
         div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(6.))
             .child(
                 div()
                     .id("count-input")
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .h(px(28.))
+                    .h(px(26.))
                     .px_2()
                     .flex()
                     .items_center()
                     .border_1()
                     .rounded_sm()
-                    .border_color(app.token(TokenKey::Accent))
+                    .border_color(if invalid { error } else { accent.opacity(0.6) })
                     .bg(app.token(TokenKey::EditorBg))
-                    .child(format!("{}│", dialog.input)),
+                    .text_color(if dialog.input.is_empty() {
+                        muted
+                    } else {
+                        app.token(TokenKey::TextPrimary)
+                    })
+                    .child(if dialog.input.is_empty() {
+                        "Count".into()
+                    } else {
+                        format!("{}│", dialog.input)
+                    }),
             )
             .child(
                 div()
                     .id("count-confirm")
                     .flex_shrink_0()
                     .debug_selector(|| "count-confirm".into())
-                    .h(px(28.))
-                    .px_3()
+                    .h(px(26.))
+                    .px_2()
                     .flex()
                     .items_center()
+                    .gap(px(6.))
                     .rounded_sm()
                     .cursor_pointer()
-                    .bg(app
-                        .token(TokenKey::Accent)
-                        .opacity(if valid { 0.15 } else { 0.05 }))
+                    .bg(accent.opacity(if valid { 0.1 } else { 0.03 }))
                     .text_color(app.token(if valid {
                         TokenKey::Accent
                     } else {
                         TokenKey::TextDisabled
                     }))
+                    .hover(move |style| style.bg(accent.opacity(if valid { 0.18 } else { 0.03 })))
                     .child("Insert")
+                    .child(div().text_size(px(11.)).opacity(0.6).child("↵"))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|app, _, _, cx| {
@@ -237,10 +258,12 @@ pub(crate) fn render(
                     ),
             ),
     )
-    .child(
-        div()
-            .text_size(px(11.))
-            .text_color(app.token(TokenKey::TextMuted))
-            .child(hint),
-    )
+    .when(invalid, |panel| {
+        panel.child(
+            div()
+                .text_size(px(11.))
+                .text_color(error)
+                .child(format!("Count must be 1–{}", dialog.max)),
+        )
+    })
 }
