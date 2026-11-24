@@ -191,7 +191,7 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
     vcx.run_until_parked();
     let bounds = vcx.debug_bounds("count-popover").unwrap();
     assert_eq!(bounds.origin, point(px(80.), px(200.)));
-    assert!(bounds.size.width <= px(260.) && bounds.size.height <= px(120.));
+    assert!(bounds.size.width <= px(208.) && bounds.size.height <= px(72.));
     view.update(vcx, |app, cx| {
         let dialog = app.count_dialog.as_mut().expect("row insert dialog");
         assert_eq!(dialog.at, 3);
