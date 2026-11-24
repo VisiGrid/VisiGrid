@@ -163,6 +163,43 @@ fn insert_count_starts_selected_and_accepts_default_or_replacement(cx: &mut Test
 }
 
 #[gpui::test]
+fn insert_count_defaults_to_selected_rows_or_columns_and_confirms_once(cx: &mut TestAppContext) {
+    use visigrid_engine::structural::Axis;
+    let view = setup(cx);
+    view.update(cx, |app, window, cx| {
+        window.focus(&app.focus_handle, cx);
+        app.wb_mut(cx, |wb| { wb.set_cell_value_tracked(0, 10, 10, "marker"); });
+    }).unwrap();
+    for (axis, after) in [(Axis::Row, false), (Axis::Row, true), (Axis::Col, false), (Axis::Col, true)] {
+        view.update(cx, |app, _, cx| {
+            match axis {
+                Axis::Row => { app.select_row(2, false, cx); app.select_row(4, true, cx); }
+                Axis::Col => { app.select_col(2, false, cx); app.select_col(4, true, cx); }
+            }
+            app.show_insert_count(axis, after, cx);
+            let dialog = app.count_dialog.as_ref().unwrap();
+            assert_eq!(dialog.input, "3");
+            assert!(dialog.input_selected);
+        }).unwrap();
+        cx.simulate_keystrokes(view.into(), "enter");
+        view.update(cx, |app, _, cx| {
+            let (row, col) = match axis { Axis::Row => (13, 10), Axis::Col => (10, 13) };
+            assert_eq!(app.sheet(cx).get_raw(row, col), "marker");
+            assert!(app.count_dialog.is_none());
+            assert_eq!(app.history.undo_count(), 1);
+            app.undo(cx);
+            assert_eq!(app.sheet(cx).get_raw(10, 10), "marker");
+        }).unwrap();
+    }
+    view.update(cx, |app, _, cx| {
+        app.select_row(crate::app::NUM_ROWS - 4, false, cx);
+        app.select_row(crate::app::NUM_ROWS - 2, true, cx);
+        app.show_insert_count(Axis::Row, true, cx);
+        assert_eq!(app.count_dialog.as_ref().unwrap().count(), Some(1), "default fits remaining capacity");
+    }).unwrap();
+}
+
+#[gpui::test]
 fn insert_count_dialog_validates_keys_and_inserts_in_one_undo_step(cx: &mut TestAppContext) {
     use visigrid_engine::structural::Axis;
     let view = setup(cx);
@@ -208,6 +245,7 @@ fn insert_count_dialog_targets_all_four_sides_and_checks_remaining_capacity(cx: 
             let d = app.count_dialog.as_mut().unwrap();
             assert_eq!(d.at, at);
             assert_eq!(d.max, capacity);
+            assert_eq!(d.input, "3");
             for invalid in [String::new(), "0".into(), "-1".into(), (capacity + 1).to_string(), "9999999999999999999999999".into()] {
                 d.input = invalid;
                 assert!(d.count().is_none());
@@ -233,6 +271,7 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
     let (view, vcx) = cx.add_window_view(Spreadsheet::new);
     view.update(vcx, |app, cx| {
         app.select_row(2, false, cx);
+        app.select_row(4, true, cx);
         app.show_context_menu(crate::app::ContextMenuKind::RowHeader, point(px(80.), px(200.)), cx);
     });
     vcx.run_until_parked();
@@ -244,8 +283,8 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
     assert!(bounds.size.width <= px(208.) && bounds.size.height <= px(72.));
     view.read_with(vcx, |app, _| {
         let dialog = app.count_dialog.as_ref().expect("row insert dialog");
-        assert_eq!(dialog.at, 3);
-        assert_eq!(dialog.input, "1");
+        assert_eq!(dialog.at, 5);
+        assert_eq!(dialog.input, "3");
         assert!(dialog.input_selected);
     });
     vcx.simulate_keystrokes("2");
