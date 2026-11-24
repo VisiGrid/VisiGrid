@@ -82,7 +82,7 @@ impl Spreadsheet {
             axis,
             at,
             max,
-            input: selected_count.min(max).to_string(),
+            input: selected_count.to_string(),
             input_selected: true,
             anchor: None,
         });
