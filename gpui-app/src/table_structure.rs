@@ -270,6 +270,7 @@ impl Spreadsheet {
             cx.notify();
             return false;
         }
+        self.sync_limited_grid(cx);
         let index = self.sheet_index(cx);
         let id = self.sheet(cx).id;
         let before = self.structure_layout(id);
@@ -322,6 +323,7 @@ impl Spreadsheet {
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(&candidate));
         self.install_structure_layout(id, &history.after);
         self.finish_table_structure(index, first.axis, count, cx);
+        self.adjust_grid_structure(index, first.axis, count, first.delete, cx);
         self
             .record_named_range_action(cx, UndoAction::TableStructureChanged {
                 sheet_index: index,
@@ -417,6 +419,7 @@ impl Spreadsheet {
                     self.finish_table_structure(
                         index, first.axis, history.commit.steps.iter().map(|s| s.count).sum(), cx,
                     );
+                    self.adjust_grid_structure(index, first.axis, history.commit.steps.iter().map(|s| s.count).sum(), first.delete != undo, cx);
                 } else {
                     // Visibility changes share guarded workbook/layout history,
                     // but do not insert/delete rows or replace the selection.

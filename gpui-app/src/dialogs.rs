@@ -63,6 +63,11 @@ impl Spreadsheet {
 
         if let Some((row, col)) = Self::parse_cell_ref(&self.goto_input) {
             if row < NUM_ROWS && col < NUM_COLS {
+                if !self.allow_grid_jump(self.sheet_index(cx), row, col, cx) {
+                    self.mode = Mode::Navigation;
+                    self.name_box_editing = false;
+                    return;
+                }
                 // If target is inside a merge, redirect to origin and select full merge
                 let (target_row, target_col, merge_end) =
                     if let Some(merge) = self.sheet(cx).get_merge(row, col) {
@@ -145,6 +150,11 @@ impl Spreadsheet {
     pub fn confirm_name_box(&mut self, cx: &mut Context<Self>) {
         if let Some((row, col)) = Self::parse_cell_ref(&self.name_box_input) {
             if row < NUM_ROWS && col < NUM_COLS {
+                if !self.allow_grid_jump(self.sheet_index(cx), row, col, cx) {
+                    self.mode = Mode::Navigation;
+                    self.name_box_editing = false;
+                    return;
+                }
                 // If target is inside a merge, redirect to origin and select full merge
                 let (target_row, target_col, merge_end) =
                     if let Some(merge) = self.sheet(cx).get_merge(row, col) {

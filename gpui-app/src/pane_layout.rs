@@ -236,14 +236,14 @@ impl Spreadsheet {
                 rows,
                 hidden,
                 view.scroll_row.max(view.frozen_rows),
-                rows.row_count().saturating_sub(1),
+                self.viewport_rows().saturating_sub(1),
             )
             .map(height),
         )
     }
     pub(crate) fn pane_cols(&self, view: &WorkbookViewState) -> AxisLayout {
         layout(
-            crate::app::NUM_COLS,
+            self.grid_cols(),
             view.frozen_cols,
             view.scroll_col,
             self.grid_layout.viewport_size.0,

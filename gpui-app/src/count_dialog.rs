@@ -16,6 +16,7 @@ pub(crate) struct CountDialog {
     pub input: String,
     pub input_selected: bool,
     pub anchor: Option<Point<Pixels>>,
+    pub grow_only: bool,
 }
 
 impl CountDialog {
@@ -85,6 +86,7 @@ impl Spreadsheet {
             input: selected_count.to_string(),
             input_selected: true,
             anchor: None,
+            grow_only: false,
         });
         self.mode = Mode::CountDialog;
         cx.notify();
@@ -102,6 +104,13 @@ impl Spreadsheet {
         };
         let dialog = self.count_dialog.take().unwrap();
         self.mode = Mode::Navigation;
+        if dialog.grow_only {
+            match dialog.axis {
+                Axis::Row => self.grow_grid(count, 0, cx),
+                Axis::Col => self.grow_grid(0, count, cx),
+            }
+            return;
+        }
         match dialog.axis {
             Axis::Row => self.insert_rows(dialog.at, count, cx),
             Axis::Col => self.insert_cols(dialog.at, count, cx),
@@ -284,7 +293,7 @@ pub(crate) fn render(
                         TokenKey::TextDisabled
                     }))
                     .hover(move |style| style.bg(accent.opacity(if valid { 0.18 } else { 0.03 })))
-                    .child("Insert")
+                    .child(if dialog.grow_only { "Add" } else { "Insert" })
                     .child(div().text_size(px(11.)).opacity(0.6).child("↵"))
                     .on_mouse_down(
                         MouseButton::Left,

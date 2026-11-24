@@ -226,6 +226,7 @@ impl Spreadsheet {
             self.ensure_visible(cx);
         }
         self.table_view_sync_key = Some(key);
+        self.limited_grid.invalidate();
     }
 
     pub(crate) fn open_table_filter(

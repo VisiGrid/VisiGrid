@@ -197,6 +197,8 @@ pub enum CommandId {
     ToggleProfiler,
     ProfileNextRecalc,
     ClearProfiler,
+    ToggleLimitedGrid,
+    ShrinkGridToData,
     ToggleMinimap,
     ToggleZenMode,
     ZoomIn,
@@ -431,6 +433,8 @@ impl CommandId {
             Self::ToggleProfiler => "Toggle Profiler",
             Self::ProfileNextRecalc => "Profile Next Recalc",
             Self::ClearProfiler => "Clear Profiler",
+            Self::ToggleLimitedGrid => "Toggle Limited Grid",
+            Self::ShrinkGridToData => "Shrink to data",
             Self::ToggleMinimap => "Toggle Minimap",
             Self::ToggleZenMode => "Toggle Zen Mode",
             Self::ZoomIn => "Zoom In",
@@ -730,6 +734,8 @@ impl CommandId {
             Self::ToggleProfiler => "profiler performance timing hotspot",
             Self::ProfileNextRecalc => "profile recalc run",
             Self::ClearProfiler => "clear profiler reset",
+            Self::ToggleLimitedGrid => "limited grid bounded finite sheet extent",
+            Self::ShrinkGridToData => "limited grid shrink fit data extent",
             Self::ToggleMinimap => "minimap density navigator overview map",
             Self::ToggleZenMode => "distraction free fullscreen focus",
             Self::ZoomIn => "magnify scale enlarge bigger larger",
@@ -937,6 +943,8 @@ impl CommandId {
             Self::ToggleProfiler,
             Self::ProfileNextRecalc,
             Self::ClearProfiler,
+            Self::ToggleLimitedGrid,
+            Self::ShrinkGridToData,
             Self::ToggleMinimap,
             Self::ToggleZenMode,
             Self::ZoomIn,
@@ -1091,6 +1099,8 @@ impl CommandId {
             | Self::PreviousComment
             | Self::ToggleCommentsSidebar
             | Self::ToggleProfiler
+            | Self::ToggleLimitedGrid
+            | Self::ShrinkGridToData
             | Self::ToggleMinimap
             | Self::ToggleZenMode
             | Self::ZoomIn

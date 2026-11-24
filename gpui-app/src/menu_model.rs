@@ -24,6 +24,7 @@ pub enum MenuAction {
     Undo, Redo, Cut, Copy, Paste, PasteValues, Delete, Find, GoTo,
     CommandPalette, Inspector, ZoomIn, ZoomOut, ZoomReset,
     UseCompactToolbar, UseRibbonToolbar, ToggleRibbonCollapsed,
+    ToggleLimitedGrid, ShrinkGridToData,
     ShowFormulas, ShowZeros, FormatBar, Minimap, Profiler, ApproveModel,
     FreezeTopRow, FreezeFirstCol, FreezePanes, UnfreezePanes,
     Bold, Italic, Underline, Font,
@@ -109,6 +110,9 @@ pub fn view_menu_entries() -> Vec<MenuEntry> {
         MenuEntry::Item { label: "Toolbar: Compact", shortcut: None, action: MenuAction::UseCompactToolbar, accel: Some('o') },
         MenuEntry::Item { label: "Toolbar: Ribbon", shortcut: None, action: MenuAction::UseRibbonToolbar, accel: Some('n') },
         MenuEntry::Item { label: "Collapse/Expand Ribbon", shortcut: None, action: MenuAction::ToggleRibbonCollapsed, accel: Some('e') },
+        MenuEntry::Separator,
+        MenuEntry::Item { label: "Toggle Limited Grid", shortcut: None, action: MenuAction::ToggleLimitedGrid, accel: Some('g') },
+        MenuEntry::Item { label: "Shrink to data", shortcut: None, action: MenuAction::ShrinkGridToData, accel: Some('s') },
     ]
 }
 
@@ -304,6 +308,8 @@ fn dispatch_action(app: &mut Spreadsheet, action: MenuAction, window: &mut Windo
         MenuAction::AddCondFormat => app.show_add_cond_format(cx),
         MenuAction::ManageCondFormats => app.toggle_cf_panel(cx),
         MenuAction::ClearCondFormats => app.clear_cond_formats_in_selection(cx),
+        MenuAction::ToggleLimitedGrid => app.toggle_limited_grid(cx),
+        MenuAction::ShrinkGridToData => app.shrink_grid_to_data(cx),
         MenuAction::Minimap => { app.minimap_visible = !app.minimap_visible; cx.notify(); }
         MenuAction::Profiler => {
             app.profiler_visible = !app.profiler_visible;

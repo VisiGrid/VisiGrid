@@ -82,6 +82,8 @@ pub fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Inspector", ToggleInspector),
                 MenuItem::action("Comments", ToggleCommentsSidebar),
                 MenuItem::separator(),
+                MenuItem::action("Toggle Limited Grid", ToggleLimitedGrid),
+                MenuItem::action("Shrink to data", ShrinkGridToData),
                 MenuItem::action("Show Formulas", ToggleFormulaView),
                 MenuItem::action("Show Zeros", ToggleShowZeros),
                 MenuItem::action("Show Toolbar", ToggleFormatBar),

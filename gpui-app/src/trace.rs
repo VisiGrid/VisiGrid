@@ -413,6 +413,8 @@ impl Spreadsheet {
         total: usize,
         cx: &mut Context<Self>,
     ) {
+        let Some(target_index) = self.wb(cx).sheets().iter().position(|s| s.id == target.sheet) else { return; };
+        if !self.allow_grid_jump(target_index, target.row, target.col, cx) { return; }
         let current_sheet = self.sheet(cx).id;
 
         // Switch sheet if needed
@@ -434,6 +436,7 @@ impl Spreadsheet {
         view_state.additional_selections.clear();
 
         // Ensure cell is visible
+        self.sync_limited_grid(cx);
         self.ensure_cell_visible(target.row, target.col);
 
         // Status message
@@ -463,6 +466,8 @@ impl Spreadsheet {
         };
 
         let source = cache.source;
+        let Some(target_index) = self.wb(cx).sheets().iter().position(|s| s.id == source.sheet) else { return; };
+        if !self.allow_grid_jump(target_index, source.row, source.col, cx) { return; }
         let current_sheet = self.sheet(cx).id;
 
         // Switch sheet if needed
@@ -483,6 +488,7 @@ impl Spreadsheet {
         view_state.additional_selections.clear();
 
         // Ensure cell is visible
+        self.sync_limited_grid(cx);
         self.ensure_cell_visible(source.row, source.col);
 
         // Reset cycle indices

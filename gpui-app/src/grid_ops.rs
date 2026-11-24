@@ -151,6 +151,7 @@ impl Spreadsheet {
 
     /// Insert rows at position with undo support
     pub(crate) fn insert_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        self.sync_limited_grid(cx);
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
@@ -236,6 +237,7 @@ impl Spreadsheet {
         });
 
         self.bump_cells_rev();
+        self.adjust_grid_structure(sheet_index, Axis::Row, count, false, cx);
         self.is_modified = true;
         self.status_message = Some(format!("Inserted {} row(s)", count));
         cx.notify();
@@ -243,6 +245,7 @@ impl Spreadsheet {
 
     /// Delete rows at position with undo support
     pub(crate) fn delete_rows(&mut self, at_row: usize, count: usize, cx: &mut Context<Self>) {
+        self.sync_limited_grid(cx);
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
@@ -349,6 +352,7 @@ impl Spreadsheet {
         self.view_state.additional_selections.clear();
 
         self.bump_cells_rev();
+        self.adjust_grid_structure(sheet_index, Axis::Row, count, true, cx);
         self.is_modified = true;
         self.status_message = Some(format!("Deleted {} row(s)", count));
         cx.notify();
@@ -356,6 +360,7 @@ impl Spreadsheet {
 
     /// Insert columns at position with undo support
     pub(crate) fn insert_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        self.sync_limited_grid(cx);
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
@@ -417,6 +422,7 @@ impl Spreadsheet {
         });
 
         self.bump_cells_rev();
+        self.adjust_grid_structure(sheet_index, Axis::Col, count, false, cx);
         self.is_modified = true;
         self.status_message = Some(format!("Inserted {} column(s)", count));
         cx.notify();
@@ -424,6 +430,7 @@ impl Spreadsheet {
 
     /// Delete columns at position with undo support
     pub(crate) fn delete_cols(&mut self, at_col: usize, count: usize, cx: &mut Context<Self>) {
+        self.sync_limited_grid(cx);
         if crate::table_filter_ui::has_table_criteria(self.wb(cx)) || self.wb(cx).tables().any(|(_, t)| t.totals.is_some()) {
             self.apply_table_structure(
                 vec![visigrid_engine::workbook::StructureStep {
@@ -506,6 +513,7 @@ impl Spreadsheet {
         self.view_state.additional_selections.clear();
 
         self.bump_cells_rev();
+        self.adjust_grid_structure(sheet_index, Axis::Col, count, true, cx);
         self.is_modified = true;
         self.status_message = Some(format!("Deleted {} column(s)", count));
         cx.notify();
