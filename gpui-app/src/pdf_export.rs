@@ -637,6 +637,8 @@ impl Spreadsheet {
             .or_else(|| self.import_source_dir.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let name = snapshot.name.replace(['/', '\\', ':'], "-");
+        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&format!("{name}.pdf")));
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -662,6 +664,34 @@ impl Spreadsheet {
             };
             if cancel.load(Ordering::Relaxed) {
                 return;
+            }
+            if warn_unencrypted {
+                let prompt_rx = window_handle
+                    .update(cx, |_, window, cx| {
+                        window.prompt(
+                            gpui::PromptLevel::Warning,
+                            "Export unencrypted PDF?",
+                            Some("This workbook was opened from a password-protected Excel file. Exporting to PDF will write an unencrypted copy to disk."),
+                            &["Export Unencrypted", "Cancel"],
+                            cx,
+                        )
+                    })
+                    .ok();
+                let confirmed = match prompt_rx {
+                    Some(rx) => matches!(rx.await, Ok(0)),
+                    None => false,
+                };
+                if !confirmed || cancel.load(Ordering::Relaxed) {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(state) = this.pdf_export.as_mut() {
+                            state.busy = false;
+                            state.choosing_path = false;
+                        }
+                        this.status_message = Some("PDF export cancelled".to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
             }
             let _ = this.update(cx, |this, cx| {
                 if let Some(state) = this.pdf_export.as_mut() {

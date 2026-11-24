@@ -514,6 +514,8 @@ impl Spreadsheet {
         // A newly loaded document has no truncated CSV behind it (the CSV
         // import sets this again after calling here)
         self.csv_protected_source = None;
+        // Cleared on every load; encrypted XLSX imports set this right after finalize_load.
+        self.opened_from_encrypted_xlsx = false;
         self.view_state.scroll_row = self.view_state.scroll_row.max(self.view_state.frozen_rows);
         self.view_state.scroll_col = self.view_state.scroll_col.max(self.view_state.frozen_cols);
         let ext = ext_lower(path);

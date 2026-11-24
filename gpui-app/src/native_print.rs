@@ -64,17 +64,50 @@ impl Spreadsheet {
         };
         let title = format!("{} — VisiGrid", snapshot.name);
         let settings = state.settings.clone();
+        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let window_handle = self.window_handle;
         state.busy = true;
         state.printing = true;
         state.print_message = None;
         state.error = None;
         // The preview cannot close or change while the system dialog owns this
         // request. Cancellation belongs to that dialog; there are no auto-retries.
-        let task = cx.background_executor().spawn(async move {
-            visigrid_print::native::print_pdf(&output.bytes, &settings, &title).await
-        });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            if warn_unencrypted {
+                let prompt_rx = window_handle
+                    .update(cx, |_, window, cx| {
+                        window.prompt(
+                            gpui::PromptLevel::Warning,
+                            "Print password-protected workbook?",
+                            Some("This workbook was opened from a password-protected Excel file. Printing will send an unencrypted PDF to your system print dialog."),
+                            &["Continue to Print", "Cancel"],
+                            cx,
+                        )
+                    })
+                    .ok();
+                let confirmed = match prompt_rx {
+                    Some(rx) => matches!(rx.await, Ok(0)),
+                    None => false,
+                };
+                if !confirmed {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(state) = this.pdf_export.as_mut() {
+                            state.busy = false;
+                            state.printing = false;
+                            state.print_message = Some("Printing cancelled.".into());
+                        }
+                        this.status_message = Some("Printing cancelled.".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    visigrid_print::native::print_pdf(&output.bytes, &settings, &title).await
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(state) = this.pdf_export.as_mut() else {
                     return;

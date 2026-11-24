@@ -999,6 +999,20 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // Handle PasswordPrompt mode
+    if this.mode == Mode::PasswordPrompt {
+        if event.keystroke.key == "enter" {
+            this.confirm_password_prompt(cx);
+            return;
+        } else if event.keystroke.key == "escape" {
+            this.cancel_password_prompt(cx);
+            return;
+        } else if event.keystroke.key == "backspace" {
+            this.password_prompt_backspace(cx);
+            return;
+        }
+    }
+
     // Handle GoTo mode
     if this.mode == Mode::GoTo {
         if event.keystroke.key == "enter" {
@@ -1070,6 +1084,11 @@ pub(crate) fn handle_key_down(
 
     if !printable_chars.is_empty() {
         match this.mode {
+            Mode::PasswordPrompt => {
+                for c in printable_chars.chars() {
+                    this.password_prompt_insert_char(c, cx);
+                }
+            }
             Mode::GoTo => {
                 for c in printable_chars.chars() {
                     this.goto_insert_char(c, cx);

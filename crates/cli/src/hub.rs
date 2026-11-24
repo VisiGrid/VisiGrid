@@ -942,8 +942,12 @@ pub fn cmd_pipeline_publish(
             format_str = "xlsx";
             let values_only = !matches!(formulas, FormulaPolicy::Recalc);
             let opts = visigrid_io::xlsx::ImportOptions { values_only, ..Default::default() };
-            visigrid_io::xlsx::import_with_options(&source, &opts)
-                .map_err(|e| CliError::io(format!("failed to load {}: {}", source.display(), e)))?
+            let (wb, res) = util::import_xlsx_cli(&source, opts)
+                .map_err(|e| CliError::io(format!("failed to load {}: {}", source.display(), e)))?;
+            if res.was_encrypted && !json_output {
+                eprintln!("\n  Warning: publishing an unencrypted copy of password-protected {}", source.display());
+            }
+            (wb, res)
         }
         "tsv" => {
             format_str = "tsv";

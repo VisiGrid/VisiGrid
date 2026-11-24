@@ -22,6 +22,7 @@ pub(crate) mod format_bar;
 pub(crate) mod ribbon;
 mod formula_bar;
 mod goto_dialog;
+pub mod password_dialog;
 mod grid;
 mod headers;
 pub mod impact_preview;
@@ -101,6 +102,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
 
     let editing = app.mode.is_editing();
     let show_goto = app.mode == Mode::GoTo;
+    let show_password_prompt = app.mode == Mode::PasswordPrompt;
     let show_find = app.mode == Mode::Find;
     let show_command = app.mode == Mode::Command;
     let show_font_picker = app.mode == Mode::FontPicker;
@@ -832,6 +834,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         .when(app.comment_editor.is_some(), |div| div.child(crate::comments::render(app, window, cx)))
         .when(show_goto, |div| {
             div.child(goto_dialog::render_goto_dialog(app, cx))
+        })
+        .when(show_password_prompt, |div| {
+            div.child(password_dialog::render_password_dialog(app, cx))
         })
         .when(show_find, |div| {
             div.child(find_dialog::render_find_dialog(app, cx))

@@ -58,6 +58,7 @@ pub enum Mode {
     CloudOpen,         // Cloud sheet picker dialog (File > Open Cloud)
     DuckdbImport,      // Read-only table picker and preview
     RecipeBuilder,     // Import recipe builder
+    PasswordPrompt,    // Password prompt for encrypted Excel workbooks
 }
 
 /// Which menu dropdown is currently open (Excel 2003 style)
@@ -131,7 +132,7 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::CsvImport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen | Mode::DuckdbImport | Mode::RecipeBuilder)
+        matches!(self, Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::CsvImport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen | Mode::DuckdbImport | Mode::RecipeBuilder | Mode::PasswordPrompt)
     }
 
     /// True if this mode has text input active (typing should work normally).
@@ -160,6 +161,7 @@ impl Mode {
                 | Mode::NumberFormatEditor  // Currency symbol input
                 | Mode::DuckdbImport  // Table search
                 | Mode::RecipeBuilder // Column names, filter values
+                | Mode::PasswordPrompt // Encrypted workbook password
         )
     }
 }

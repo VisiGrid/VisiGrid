@@ -5495,7 +5495,7 @@ fn cmd_sheet_inspect(
         }
         InspectFormat::Xlsx => {
             let opts = visigrid_io::xlsx::ImportOptions { values_only: true, ..Default::default() };
-            let (wb, result) = visigrid_io::xlsx::import_with_options(&file, &opts)
+            let (wb, result) = util::import_xlsx_cli(&file, opts)
                 .map_err(|e| CliError::io(format!("failed to load {}: {}", file.display(), e)))?;
             let mut notes = vec![];
             if result.formulas_imported > 0 {
@@ -6298,7 +6298,7 @@ fn cmd_sheet_import(
             format_str = "xlsx";
             let values_only = !matches!(formulas, FormulaPolicy::Recalc);
             let opts = visigrid_io::xlsx::ImportOptions { values_only, ..Default::default() };
-            visigrid_io::xlsx::import_with_options(&source, &opts)
+            util::import_xlsx_cli(&source, opts)
                 .map_err(|e| CliError::io(format!("failed to load {}: {}", source.display(), e)))?
         }
         InspectFormat::Csv => {

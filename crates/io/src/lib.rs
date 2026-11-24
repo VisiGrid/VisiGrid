@@ -28,6 +28,8 @@ pub mod truth;
 #[cfg(feature = "native")]
 pub mod xlsx;
 #[cfg(feature = "native")]
+pub mod xlsx_crypto;
+#[cfg(feature = "native")]
 mod xlsx_comments;
 #[cfg(feature = "native")]
 mod xlsx_cond_formats;

@@ -86,7 +86,16 @@ pub fn cmd_serve(
                     (wb, layouts, title)
                 }
                 Some("xlsx") | Some("xls") | Some("xlsb") | Some("ods") => {
-                    let (wb, _) = visigrid_io::xlsx::import(path).map_err(CliError::parse)?;
+                    let (wb, _) = visigrid_io::xlsx::import_with_options_typed(
+                        path,
+                        &visigrid_io::xlsx::ImportOptions::default(),
+                    )
+                    .map_err(|e| match e {
+                        visigrid_io::xlsx::ImportError::PasswordRequired => CliError::parse(
+                            "Workbook is password protected. Open it in the VisiGrid desktop app to enter the password interactively.",
+                        ),
+                        other => CliError::parse(other.to_string()),
+                    })?;
                     let n = wb.sheets().len();
                     (wb, vec![SheetLayout::default(); n], title)
                 }

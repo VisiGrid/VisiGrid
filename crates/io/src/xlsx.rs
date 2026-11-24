@@ -139,6 +139,9 @@ pub struct ImportResult {
     /// Key: (sheet_index, row, col), Value: formula string (with leading =).
     /// Empty unless values_only is true.
     pub formula_strings: HashMap<(usize, usize, usize), String>,
+    /// True if the source file was password-protected (MS-OFFCRYPTO encrypted)
+    /// and decrypted in memory during import.
+    pub was_encrypted: bool,
 }
 
 /// Is this the legacy binary .xls format rather than an xlsx?
@@ -316,6 +319,10 @@ pub struct ImportOptions {
     /// Skips dependency graph rebuild and formula recomputation.
     /// Cell values remain as calamine extracted them (strings, numbers, dates as serials).
     pub values_only: bool,
+
+    /// Optional password for opening an MS-OFFCRYPTO encrypted workbook
+    /// (.xlsx, .xlsm, .xlsb). Held in memory only and zeroized on drop.
+    pub password: Option<zeroize::Zeroizing<String>>,
 }
 
 impl Default for ImportOptions {
@@ -326,6 +333,77 @@ impl Default for ImportOptions {
             iterative_max_iters: 100,
             iterative_tolerance: 1e-9,
             values_only: false,
+            password: None,
+        }
+    }
+}
+
+/// Typed error from Excel workbook import, distinguishing password and
+/// integrity failures from generic I/O or format errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportError {
+    /// The workbook is encrypted (MS-OFFCRYPTO) and requires a password.
+    PasswordRequired,
+    /// The supplied password did not match the document's verifier hash.
+    IncorrectPassword,
+    /// Agile `dataIntegrity` HMAC verification failed (tampered or corrupted file).
+    IntegrityCheckFailed,
+    /// Legacy binary `.xls` encryption (BIFF8) is not supported.
+    UnsupportedLegacyXlsEncryption,
+    /// Valid MS-OFFCRYPTO container using an unsupported cipher/hash/encryptor.
+    UnsupportedEncryption(String),
+    /// Any other I/O, format, or parse error.
+    Other(String),
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportError::PasswordRequired => {
+                write!(f, "Failed to open Excel file: Workbook is password protected")
+            }
+            ImportError::IncorrectPassword => write!(f, "Incorrect password"),
+            ImportError::IntegrityCheckFailed => write!(
+                f,
+                "Encrypted workbook failed integrity check (file may be tampered or corrupted)"
+            ),
+            ImportError::UnsupportedLegacyXlsEncryption => write!(
+                f,
+                "Password-protected legacy .xls files are not supported. Re-save as .xlsx in Excel or LibreOffice to open it."
+            ),
+            ImportError::UnsupportedEncryption(msg) => {
+                write!(f, "Unsupported Excel encryption: {msg}")
+            }
+            ImportError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
+
+impl From<String> for ImportError {
+    fn from(msg: String) -> Self {
+        ImportError::Other(msg)
+    }
+}
+
+impl From<crate::xlsx_crypto::CryptoError> for ImportError {
+    fn from(err: crate::xlsx_crypto::CryptoError) -> Self {
+        match err {
+            crate::xlsx_crypto::CryptoError::PasswordRequired => ImportError::PasswordRequired,
+            crate::xlsx_crypto::CryptoError::IncorrectPassword => ImportError::IncorrectPassword,
+            crate::xlsx_crypto::CryptoError::IntegrityCheckFailed => {
+                ImportError::IntegrityCheckFailed
+            }
+            crate::xlsx_crypto::CryptoError::UnsupportedLegacyXlsEncryption => {
+                ImportError::UnsupportedLegacyXlsEncryption
+            }
+            crate::xlsx_crypto::CryptoError::UnsupportedEncryption(m) => {
+                ImportError::UnsupportedEncryption(m)
+            }
+            crate::xlsx_crypto::CryptoError::Malformed(m) => {
+                ImportError::Other(format!("Failed to open Excel file: {m}"))
+            }
         }
     }
 }
@@ -540,11 +618,50 @@ fn open_sheets_from_bytes<'a>(
     }
 }
 
+fn map_calamine_open_error(err: calamine::Error) -> ImportError {
+    match err {
+        calamine::Error::Xlsx(calamine::XlsxError::Password)
+        | calamine::Error::Xlsb(calamine::XlsbError::Password) => ImportError::PasswordRequired,
+        calamine::Error::Xls(calamine::XlsError::Password) => {
+            ImportError::UnsupportedLegacyXlsEncryption
+        }
+        other => ImportError::Other(format!("Failed to open Excel file: {other}")),
+    }
+}
+
+/// Read sheet names from in-memory workbook bytes, decrypting first if encrypted.
+pub fn sheet_names_from_bytes(
+    bytes: &[u8],
+    format: Option<WorkbookFormat>,
+    password: Option<&str>,
+) -> Result<Vec<String>, ImportError> {
+    let decrypted_buf;
+    let bytes = if crate::xlsx_crypto::is_encrypted_ooxml(bytes) {
+        let Some(pw) = password else {
+            return Err(ImportError::PasswordRequired);
+        };
+        decrypted_buf = crate::xlsx_crypto::decrypt_ooxml(bytes, pw)?;
+        decrypted_buf.as_slice()
+    } else {
+        bytes
+    };
+    let workbook = open_sheets_from_bytes(bytes, format).map_err(map_calamine_open_error)?;
+    Ok(workbook.sheet_names().to_vec())
+}
+
 /// Import an Excel file with options (xlsx, xls, xlsb, ods)
 pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Workbook, ImportResult), String> {
+    import_with_options_typed(path, options).map_err(|e| e.to_string())
+}
+
+/// Import an Excel file with options, returning a typed [`ImportError`].
+pub fn import_with_options_typed(
+    path: &Path,
+    options: &ImportOptions,
+) -> Result<(Workbook, ImportResult), ImportError> {
     let bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to open Excel file: {}", e))?;
-    import_bytes_with_options(&bytes, WorkbookFormat::from_path(path), options)
+        .map_err(|e| ImportError::Other(format!("Failed to open Excel file: {e}")))?;
+    import_bytes_with_options_typed(&bytes, WorkbookFormat::from_path(path), options)
 }
 
 /// Import an Excel workbook from in-memory bytes with options (xlsx, xls, xlsb, ods)
@@ -553,15 +670,38 @@ pub fn import_bytes_with_options(
     format: Option<WorkbookFormat>,
     options: &ImportOptions,
 ) -> Result<(Workbook, ImportResult), String> {
+    import_bytes_with_options_typed(bytes, format, options).map_err(|e| e.to_string())
+}
+
+/// Import an Excel workbook from in-memory bytes with options, returning a typed [`ImportError`].
+pub fn import_bytes_with_options_typed(
+    bytes: &[u8],
+    format: Option<WorkbookFormat>,
+    options: &ImportOptions,
+) -> Result<(Workbook, ImportResult), ImportError> {
+    let decrypted_buf;
+    let (bytes, was_encrypted) = if crate::xlsx_crypto::is_encrypted_ooxml(bytes) {
+        let Some(password) = options.password.as_deref() else {
+            return Err(ImportError::PasswordRequired);
+        };
+        decrypted_buf = crate::xlsx_crypto::decrypt_ooxml(bytes, password)?;
+        (decrypted_buf.as_slice(), true)
+    } else {
+        (bytes, false)
+    };
+
     let start_time = Instant::now();
     // Notes never stop an import; what can't be read becomes a warning.
     let notes = crate::xlsx_comments::read(bytes);
 
     let mut workbook: Sheets<_> = open_sheets_from_bytes(bytes, format)
-        .map_err(|e| format!("Failed to open Excel file: {}", e))?;
+        .map_err(map_calamine_open_error)?;
     let is_xlsx = matches!(workbook, Sheets::Xlsx(_));
 
-    let mut result = ImportResult::default();
+    let mut result = ImportResult {
+        was_encrypted,
+        ..Default::default()
+    };
     let modern_errors = crate::xlsx_rich_errors::read(bytes, &mut result.warnings);
     let mut sheets: Vec<Sheet> = Vec::new();
     // Google placeholders emptied on a guess (see xlsx_google::spill_owners):
@@ -571,7 +711,7 @@ pub fn import_bytes_with_options(
     let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
 
     if sheet_names.is_empty() {
-        return Err("Excel file contains no sheets".to_string());
+        return Err(ImportError::Other("Excel file contains no sheets".to_string()));
     }
 
     let mut total_cells = 0;
@@ -951,7 +1091,7 @@ pub fn import_bytes_with_options(
     }
 
     if sheets.is_empty() {
-        return Err("No sheets could be imported".to_string());
+        return Err(ImportError::Other("No sheets could be imported".to_string()));
     }
 
     // Record import duration
