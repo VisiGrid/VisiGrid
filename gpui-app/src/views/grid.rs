@@ -206,7 +206,11 @@ pub fn render_grid(
     let strip_bg = app.token(TokenKey::HeaderBg);
     let text = app.token(TokenKey::TextMuted);
     let strip = |id: &'static str, x: f32, y: f32, w: f32, h: f32, add_rows: usize, add_cols: usize, cx: &mut Context<Spreadsheet>| {
-        div().id(id).debug_selector(move || id.into()).absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h))
+        div().id(id).debug_selector(move || match pane_side {
+            Some(SplitSide::Left) => format!("{id}-left"),
+            Some(SplitSide::Right) => format!("{id}-right"),
+            None => id.into(),
+        }).absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h))
             .bg(strip_bg).text_color(text).flex().items_center().justify_center().cursor_pointer()
             .child("+")
             .on_mouse_down(MouseButton::Left, cx.listener(move |app, _, _, cx| {
@@ -219,7 +223,14 @@ pub fn render_grid(
             }))
     };
     let cells = render_grid_cells(app, window, cx, pane_side);
-    div().flex_1().relative().overflow_hidden().bg(bg)
+    // Split-pane parents use block layout. Absolute grid/strip children do not
+    // contribute intrinsic height, so explicitly fill the pane in that case.
+    div().flex_1().h_full().relative().overflow_hidden().bg(bg)
+        .debug_selector(move || match pane_side {
+            Some(SplitSide::Left) => "limited-grid-left".into(),
+            Some(SplitSide::Right) => "limited-grid-right".into(),
+            None => "limited-grid".into(),
+        })
         .child(div().absolute().left_0().top_0().w(px(width)).h(px(end_y)).flex().flex_col().overflow_hidden().child(cells))
         .when(bottom, |d| d.child(strip("grid-add-row", 0., end_y, width, 22., 1, 0, cx)))
         .when(right, |d| d.child(strip("grid-add-col", width, 0., 22., end_y, 0, 1, cx)))

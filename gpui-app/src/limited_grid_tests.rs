@@ -32,6 +32,40 @@ fn extent(app: &mut Spreadsheet, cx: &gpui::App) -> (usize, usize) {
 }
 
 #[gpui::test]
+fn split_panes_keep_visible_grid_bodies_and_working_strips(cx: &mut TestAppContext) {
+    use gpui::{px, Modifiers};
+    init(cx);
+    let (view, vcx) = cx.add_window_view(Spreadsheet::new);
+    view.update(vcx, |app, cx| {
+        app.doc_settings.display.limited_grid = Setting::Value(true);
+        app.set_zoom(0.5, cx);
+        app.view_state.selected = (1, 1);
+        app.freeze_panes(cx);
+        app.split_right(cx);
+        app.sync_limited_grid(cx);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    for (body_selector, strip_selector) in [
+        ("limited-grid-left", "grid-add-row-left"),
+        ("limited-grid-right", "grid-add-row-right"),
+    ] {
+        let body = vcx.debug_bounds(body_selector).unwrap();
+        let strip = vcx.debug_bounds(strip_selector).unwrap();
+        assert!(body.size.height > px(300.), "split grid must fill its pane");
+        assert!(body.contains(&strip.center()), "bottom strip must be inside the visible pane");
+        vcx.simulate_click(strip.center(), Modifiers::none());
+        vcx.run_until_parked();
+    }
+    view.update(vcx, |app, cx| {
+        assert_eq!(extent(app, cx), (22, 11));
+        assert_eq!(app.view_state.frozen_rows, 1);
+        assert_eq!(app.view_state.frozen_cols, 1);
+        assert_eq!(app.history.undo_count(), 1, "only freezing panes adds an undo step");
+    });
+}
+
+#[gpui::test]
 fn add_count_accepts_selected_default_and_replacement(cx: &mut TestAppContext) {
     use visigrid_engine::structural::Axis;
     let view = setup(cx);
