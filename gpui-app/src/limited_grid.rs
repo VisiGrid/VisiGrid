@@ -66,7 +66,7 @@ impl LimitedGrid {
     }
 }
 
-/// R2: sparse content and metadata only. Formatting is deliberately excluded.
+/// R2: sparse content and metadata only. Formatting and validation are excluded.
 pub(crate) fn content_bounds(sheet: &Sheet) -> GridExtent {
     let (rows, cols) = sheet.data_bounds();
     let mut bounds = GridExtent { rows, cols };
@@ -89,53 +89,7 @@ pub(crate) fn content_bounds(sheet: &Sheet) -> GridExtent {
     for ((row, col), _) in sheet.comments() {
         include(row, col);
     }
-    for range in validation_rectangles(sheet) {
-        include(range.end_row, range.end_col);
-    }
     bounds.bounded()
-}
-
-/// Exclusions remove the rule from those cells. Subtract rectangles rather than
-/// visiting every cell in a whole-column validation range.
-fn validation_rectangles(sheet: &Sheet) -> Vec<visigrid_engine::validation::CellRange> {
-    use visigrid_engine::validation::CellRange;
-    let mut result = Vec::new();
-    for (range, _) in sheet.validations.iter() {
-        let mut parts = vec![*range];
-        for excluded in sheet.validations.exclusions_iter() {
-            let mut remaining = Vec::new();
-            for r in parts {
-                let top = r.start_row.max(excluded.start_row);
-                let bottom = r.end_row.min(excluded.end_row);
-                let left = r.start_col.max(excluded.start_col);
-                let right = r.end_col.min(excluded.end_col);
-                if top > bottom || left > right {
-                    remaining.push(r);
-                    continue;
-                }
-                if r.start_row < top {
-                    remaining.push(CellRange::new(r.start_row, r.start_col, top - 1, r.end_col));
-                }
-                if bottom < r.end_row {
-                    remaining.push(CellRange::new(
-                        bottom + 1,
-                        r.start_col,
-                        r.end_row,
-                        r.end_col,
-                    ));
-                }
-                if r.start_col < left {
-                    remaining.push(CellRange::new(top, r.start_col, bottom, left - 1));
-                }
-                if right < r.end_col {
-                    remaining.push(CellRange::new(top, right + 1, bottom, r.end_col));
-                }
-            }
-            parts = remaining;
-        }
-        result.extend(parts);
-    }
-    result
 }
 
 impl Spreadsheet {
@@ -437,7 +391,4 @@ fn row_has_content(sheet: &Sheet, row: usize) -> bool {
             p.region()
                 .is_some_and(|(r, _, end, _)| r <= row && row <= end)
         })
-        || validation_rectangles(sheet)
-            .iter()
-            .any(|r| r.start_row <= row && row <= r.end_row)
 }

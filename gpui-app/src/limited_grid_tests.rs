@@ -343,15 +343,37 @@ fn bounds_include_metadata_and_ignore_formatting() {
         15,
         ValidationRule::list_inline(vec!["yes".into(), "no".into()]),
     );
-    assert_eq!(content_bounds(sheet), GridExtent { rows: 31, cols: 16 });
-    sheet
-        .validations
-        .exclude(visigrid_engine::validation::CellRange::single(30, 15));
     assert_eq!(
         content_bounds(sheet),
         GridExtent { rows: 26, cols: 13 },
-        "excluded cells have no rule"
+        "validation alone does not extend content bounds"
     );
+    wb.set_cell_value_tracked(0, 30, 15, "yes");
+    assert_eq!(
+        content_bounds(wb.active_sheet()),
+        GridExtent { rows: 31, cols: 16 }
+    );
+}
+
+#[gpui::test]
+fn whole_column_validation_keeps_empty_sheet_at_starting_extent(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.with_active_sheet_mut(cx, |sheet| {
+            sheet.set_validation(
+                0,
+                25,
+                NUM_ROWS - 1,
+                25,
+                visigrid_engine::validation::ValidationRule::list_inline(vec![
+                    "yes".into(),
+                    "no".into(),
+                ]),
+            );
+        });
+        assert_eq!(extent(app, cx), (20, 11));
+    })
+    .unwrap();
 }
 
 #[test]
@@ -447,11 +469,31 @@ fn metadata_changes_invalidate_bounds_and_empty_last_row_never_grows(cx: &mut Te
         assert_eq!(extent(app, cx), (100, 31));
         app.with_active_sheet_mut(cx, |sheet| sheet.set_comment(99, 30, None));
         assert_eq!(extent(app, cx), (20, 11));
+        app.with_active_sheet_mut(cx, |sheet| {
+            sheet.set_cell_validation(
+                19,
+                5,
+                visigrid_engine::validation::ValidationRule::list_inline(vec![
+                    "last row content in another column".into(),
+                ]),
+            );
+        });
         app.view_state.selected = (19, 0);
         for _ in 0..20 {
             app.move_selection(1, 0, cx);
         }
         assert_eq!(extent(app, cx), (20, 11));
+        assert_eq!(app.view_state.selected, (19, 0));
+    })
+    .unwrap();
+    cx.simulate_keystrokes(view.into(), "enter enter");
+    view.update(cx, |app, _, cx| {
+        assert_eq!(
+            extent(app, cx),
+            (20, 11),
+            "validation on an empty last row must not trigger growth"
+        );
+        assert_eq!(app.view_state.selected, (19, 0));
         app.set_cell_value(19, 5, "last row content in another column", cx);
         // Page Down must not grow even when a tiny viewport fits only one row.
         app.grid_layout.viewport_size.1 = 1.;
