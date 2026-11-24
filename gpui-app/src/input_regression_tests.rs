@@ -195,7 +195,14 @@ fn insert_count_defaults_to_selected_rows_or_columns_and_confirms_once(cx: &mut 
         app.select_row(crate::app::NUM_ROWS - 4, false, cx);
         app.select_row(crate::app::NUM_ROWS - 2, true, cx);
         app.show_insert_count(Axis::Row, true, cx);
-        assert_eq!(app.count_dialog.as_ref().unwrap().count(), Some(1), "default fits remaining capacity");
+        let dialog = app.count_dialog.as_ref().unwrap();
+        assert_eq!(dialog.input, "3", "preserve the selection even when capacity is smaller");
+        assert_eq!(dialog.count(), None, "remaining-capacity validation still applies");
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "enter");
+    view.update(cx, |app, _, _| {
+        assert!(app.count_dialog.is_some());
+        assert_eq!(app.history.undo_count(), 0);
     }).unwrap();
 }
 
