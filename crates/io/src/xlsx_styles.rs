@@ -1510,9 +1510,19 @@ pub fn parse_xlsx_formatting(
     path: &Path,
     sheet_names: &[String],
 ) -> Result<(StyleTable, Vec<SheetFormatting>, StyleImportStats), String> {
-    let file = std::fs::File::open(path)
+    let bytes = std::fs::read(path)
         .map_err(|e| format!("Failed to open XLSX file for styles: {}", e))?;
-    let mut archive = ZipArchive::new(file)
+    parse_xlsx_formatting_from_bytes(&bytes, sheet_names)
+}
+
+/// Parse all formatting data from in-memory XLSX bytes.
+/// Returns (style_table, per_sheet_formatting, stats).
+/// `sheet_names` must match the order of sheets in the workbook.
+pub fn parse_xlsx_formatting_from_bytes(
+    bytes: &[u8],
+    sheet_names: &[String],
+) -> Result<(StyleTable, Vec<SheetFormatting>, StyleImportStats), String> {
+    let mut archive = ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("Failed to read XLSX as ZIP for styles: {}", e))?;
 
     let mut stats = StyleImportStats::default();

@@ -7,9 +7,7 @@ use quick_xml::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
-    io::{Cursor, Read, Write},
-    path::Path,
+    io::{Cursor, Read, Seek, Write},
 };
 use visigrid_engine::{
     formula::parser::parse,
@@ -38,7 +36,7 @@ pub(super) fn attr(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, Str
     }
     Ok(None)
 }
-fn part(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<String, String> {
+fn part<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Result<String, String> {
     let file = zip
         .by_name(name)
         .map_err(|e| format!("Missing XLSX part {name}: {e}"))?;
@@ -54,7 +52,7 @@ fn part(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<String, String> {
     }
     Ok(xml)
 }
-fn table_part(zip: &mut zip::ZipArchive<File>, name: &str, budget: &mut TableBudget) -> Result<String, String> {
+fn table_part<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str, budget: &mut TableBudget) -> Result<String, String> {
     let exhausted = "The workbook's 64 MiB Table metadata budget was exceeded";
     if budget.bytes_left == 0 { return Err(exhausted.into()); }
     let file = zip.by_name(name).map_err(|e| format!("Missing XLSX part {name}: {e}"))?;
@@ -416,13 +414,13 @@ fn parse_table(xml: &str) -> Result<ImportedTable, String> {
 /// Tables are installed before dependency binding/recalculation. Invalid or
 /// unsupported definitions leave their cells untouched and produce a warning.
 pub(crate) fn import(
-    path: &Path,
+    bytes: &[u8],
     wb: &mut Workbook,
     result: &mut ImportResult,
     values_only: bool,
 ) -> Vec<super::xlsx_table_filters::PendingView> {
     let mut pending = Vec::new();
-    if let Err(error) = read_tables(path, wb, result, &mut pending) {
+    if let Err(error) = read_tables(bytes, wb, result, &mut pending) {
         result.warnings.push(format!("Excel Table metadata could not be read: {error}. Cells were kept; formulas referencing skipped Tables may show errors."));
     }
     let (definitions, details): (Vec<_>, Vec<_>) = pending.into_iter().map(|pending| {
@@ -457,10 +455,9 @@ fn skip_table(result: &mut ImportResult, sheet: &str, error: &str) {
     result.warnings.push(format!("Excel Table on {sheet} was kept as plain cells: {error}. Formulas referencing it may show errors."));
 }
 fn read_tables(
-    path: &Path, wb: &Workbook, result: &mut ImportResult, pending: &mut Vec<PendingTable>,
+    bytes: &[u8], wb: &Workbook, result: &mut ImportResult, pending: &mut Vec<PendingTable>,
 ) -> Result<(), String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else { return Ok(()); };
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else { return Ok(()); };
     if !zip.file_names().any(|p| p == "xl/workbook.xml") { return Ok(()); }
     let rels = relationships(&part(&mut zip, "xl/_rels/workbook.xml.rels")?, "xl/workbook.xml")?;
     let xml = part(&mut zip, "xl/workbook.xml")?;
@@ -488,8 +485,8 @@ fn read_tables(
     }
     Ok(())
 }
-fn read_sheet_tables(
-    zip: &mut zip::ZipArchive<File>, path: &str, sheet: usize, name: &str,
+fn read_sheet_tables<R: Read + Seek>(
+    zip: &mut zip::ZipArchive<R>, path: &str, sheet: usize, name: &str,
     result: &mut ImportResult, pending: &mut Vec<PendingTable>,
     seen: &mut HashSet<String>, budget: &mut TableBudget,
 ) -> Result<(), String> {
