@@ -164,6 +164,8 @@ actions!(view, [
     UseRibbonToolbar,
     ToggleRibbonCollapsed,
     ToggleFormulaView,
+    ToggleLimitedGrid,
+    ShrinkGridToData,
     ToggleGridlines,  // Alt+W, V, G - Excel ribbon sequence
     ToggleMinimap,
     ToggleShowZeros,

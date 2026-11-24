@@ -68,6 +68,7 @@ impl Spreadsheet {
             NamedRangeTarget::Range { sheet, start_row, start_col, end_row, end_col } =>
                 (sheet, start_row, start_col, end_row, end_col),
         };
+        if !self.allow_grid_jump(sheet_idx, end_row, end_col, cx) { return; }
         // Switch to target sheet if different
         let current_sheet = self.sheet_index(cx);
         if sheet_idx != current_sheet {
@@ -85,6 +86,7 @@ impl Spreadsheet {
         self.view_state.selected = start;
         self.view_state.selection_end = (start != end).then_some(end);
         self.view_state.additional_selections = ranges.into_iter().skip(1).map(|(a,b)| (a, (a != b).then_some(b))).collect();
+        self.sync_limited_grid(cx);
         self.ensure_cell_visible(start.0, start.1);
         self.status_message = Some(format!("'{name}' = {ref_str} (visible cells selected)"));
         cx.notify();

@@ -187,6 +187,51 @@ pub fn render_grid(
     window: &Window,
     cx: &mut Context<Spreadsheet>,
     pane_side: Option<SplitSide>,
+) -> AnyElement {
+    if !app.limited_grid.enabled {
+        return render_grid_cells(app, window, cx, pane_side).into_any_element();
+    }
+    let view = get_pane_view_state(app, pane_side);
+    let rows = app.pane_rows(view);
+    let cols = app.pane_cols(view);
+    let end_y = rows.frozen.iter().chain(&rows.body).map(|s| s.offset + s.size).fold(0.0_f32, f32::max);
+    let end_x = cols.frozen.iter().chain(&cols.body).map(|s| s.offset + s.size).fold(0.0_f32, f32::max);
+    let last_row = rows.body.last().or(rows.frozen.last()).map_or(0, |s| s.index + 1);
+    let last_col = cols.body.last().or(cols.frozen.last()).map_or(0, |s| s.index + 1);
+    let bottom = crate::formatting::plan::visible_rows(&app.row_view, app.display_hidden_rows(), last_row, app.grid_rows() - 1)
+        .next().is_none();
+    let right = (last_col..app.grid_cols()).all(|c| app.is_col_hidden(c));
+    let width = app.metrics.header_w + end_x;
+    let bg = app.token(TokenKey::AppBg);
+    let strip_bg = app.token(TokenKey::HeaderBg);
+    let text = app.token(TokenKey::TextMuted);
+    let strip = |id: &'static str, x: f32, y: f32, w: f32, h: f32, add_rows: usize, add_cols: usize, cx: &mut Context<Spreadsheet>| {
+        div().id(id).debug_selector(move || id.into()).absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h))
+            .bg(strip_bg).text_color(text).flex().items_center().justify_center().cursor_pointer()
+            .child("+")
+            .on_mouse_down(MouseButton::Left, cx.listener(move |app, _, _, cx| {
+                cx.stop_propagation();
+                if app.mode.is_editing() { app.commit_pending_edit(cx); }
+                if !app.mode.is_editing() { app.grow_grid(add_rows, add_cols, cx); }
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|app, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation(); app.show_context_menu(crate::app::ContextMenuKind::GridEdge, event.position, cx);
+            }))
+    };
+    let cells = render_grid_cells(app, window, cx, pane_side);
+    div().flex_1().relative().overflow_hidden().bg(bg)
+        .child(div().absolute().left_0().top_0().w(px(width)).h(px(end_y)).flex().flex_col().overflow_hidden().child(cells))
+        .when(bottom, |d| d.child(strip("grid-add-row", 0., end_y, width, 22., 1, 0, cx)))
+        .when(right, |d| d.child(strip("grid-add-col", width, 0., 22., end_y, 0, 1, cx)))
+        .when(bottom && right, |d| d.child(strip("grid-add-both", width, end_y, 22., 22., 1, 1, cx)))
+        .into_any_element()
+}
+
+fn render_grid_cells(
+    app: &mut Spreadsheet,
+    window: &Window,
+    cx: &mut Context<Spreadsheet>,
+    pane_side: Option<SplitSide>,
 ) -> impl IntoElement {
     // Verify cached_sheet_id is in sync (debug builds only)
     // This catches desync bugs early - if this fires, a code path changed

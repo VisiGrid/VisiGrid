@@ -188,6 +188,7 @@ impl Spreadsheet {
 
         // Apply the sort
         self.row_view.apply_sort(new_order);
+        self.limited_grid.invalidate();
 
         // Update filter_state.sort
         self.filter_state.sort = Some(SortState { column: col, direction });

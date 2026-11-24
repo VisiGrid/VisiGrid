@@ -1,12 +1,22 @@
 use gpui::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use visigrid_engine::workbook::Workbook;
 use visigrid_io::{csv, json, native, parquet, xlsx};
 
 use crate::app::{Spreadsheet, DocumentMeta, ext_lower};
 use crate::settings::{load_doc_settings, save_doc_settings, DocumentSettings};
+
+/// Imports keep their existing calculation/display defaults. Restore only the
+/// new desktop view settings from the source document's sidecar.
+fn load_import_view_settings(path: &Path) -> DocumentSettings {
+    let saved = load_doc_settings(path);
+    let mut settings = DocumentSettings::default();
+    settings.display.limited_grid = saved.display.limited_grid;
+    settings.display.sheet_extents = saved.display.sheet_extents;
+    settings
+}
 
 // Finder-launched apps often have `/` as their working directory. Never use
 // that as the default save/export destination for a new workbook.
@@ -425,7 +435,7 @@ impl Spreadsheet {
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
-                        this.doc_settings = DocumentSettings::default();
+                        this.doc_settings = load_import_view_settings(&path_for_recent);
                         this.view_state.selected = (0, 0);
                         this.view_state.selection_end = None;
                         this.view_state.scroll_row = this.view_state.frozen_rows;
@@ -614,7 +624,7 @@ impl Spreadsheet {
                         this.import_result = None;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = None;
-                        this.doc_settings = DocumentSettings::default();
+                        this.doc_settings = load_import_view_settings(&path_for_recent);
                         this.col_widths.clear();
                         this.row_heights.clear();
                         this.view_state.selected = (0, 0);
@@ -678,7 +688,7 @@ impl Spreadsheet {
         self.import_result = None;
         self.import_filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
         self.import_source_dir = path.parent().map(|p| p.to_owned());
-        self.doc_settings = DocumentSettings::default();
+        self.doc_settings = load_import_view_settings(path);
         self.col_widths.clear();
         self.row_heights.clear();
         self.view_state.selected = (0, 0);
@@ -814,7 +824,7 @@ impl Spreadsheet {
                         this.rewind_preview = crate::app::RewindPreviewState::Off;
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
-                        this.doc_settings = DocumentSettings::default();
+                        this.doc_settings = load_import_view_settings(&path_for_recent);
                         this.view_state.selected = (0, 0);
                         this.view_state.selection_end = None;
                         this.view_state.scroll_row = this.view_state.frozen_rows;
@@ -1625,6 +1635,45 @@ mod row_roundtrip_tests {
             assert_eq!(app.wb(cx).active_sheet().manual_hidden_rows(), [6].into());
             assert_eq!(app.hidden_rows.get(&app.wb(cx).active_sheet_id()), Some(&[6].into()));
             assert_eq!(app.wb(cx).active_sheet().get_raw(6, 0), "hidden record");
+        }).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod limited_grid_roundtrip_tests {
+    use crate::{app::Spreadsheet, settings::Setting};
+    use gpui::BorrowAppContext;
+
+    #[gpui::test]
+    fn limited_grid_first_save_and_reopen_restore_sidecar(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limited.sheet");
+        view.update(cx, |app, _, cx| {
+            app.session_window_id = cx.update_global::<crate::session::SessionManager, _>(|mgr, _| mgr.next_window_id());
+            app.doc_settings.display.limited_grid = Setting::Value(true);
+            app.set_cell_value(6, 2, "saved", cx);
+            app.grow_grid(5, 2, cx);
+            assert!(app.current_file.is_none());
+            assert!(app.save_to_path(&path, cx), "{:?}", app.status_message);
+            app.doc_settings = Default::default();
+            app.load_file(&path, cx);
+            app.sync_limited_grid(cx);
+            assert!(app.limited_grid_enabled(cx));
+            assert_eq!((app.grid_rows(), app.grid_cols()), (25, 13));
+            assert_eq!(app.sheet(cx).get_raw(6, 2), "saved");
+            app.toggle_limited_grid(cx);
+            app.load_file(&path, cx);
+            app.sync_limited_grid(cx);
+            assert!(!app.limited_grid_enabled(cx));
+            assert_eq!((app.grid_rows(), app.grid_cols()), (crate::app::NUM_ROWS, crate::app::NUM_COLS));
+            assert_eq!(app.sheet(cx).get_raw(6, 2), "saved");
         }).unwrap();
     }
 }

@@ -246,6 +246,7 @@ impl Spreadsheet {
                     }
                     self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                     self.bump_cells_rev();
+                    self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Row, count, true, cx);
                     self.status_message = Some(format!("Undo: inserted {} row(s)", count));
                 }
                 UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
@@ -304,6 +305,7 @@ impl Spreadsheet {
                     }
                     self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                     self.bump_cells_rev();
+                    self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Row, count, false, cx);
                     self.status_message = Some(format!("Undo: deleted {} row(s)", count));
                 }
                 UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, print_setup_before, formula_rewrites } => {
@@ -341,6 +343,7 @@ impl Spreadsheet {
                         });
                     }
                     self.bump_cells_rev();
+                    self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Col, count, true, cx);
                     self.status_message = Some(format!("Undo: inserted {} column(s)", count));
                 }
                 UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
@@ -398,6 +401,7 @@ impl Spreadsheet {
                         });
                     }
                     self.bump_cells_rev();
+                    self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Col, count, false, cx);
                     self.status_message = Some(format!("Undo: deleted {} column(s)", count));
                 }
                 UndoAction::ColumnWidthSet { sheet_id, col, old, .. } => {
@@ -709,6 +713,7 @@ impl Spreadsheet {
                 }
                 self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Row, count, true, cx);
             }
             UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, deleted_cells, deleted_comments, deleted_row_heights, print_setup_before, formula_rewrites } => {
                 if let Some(history) = &table_rows {
@@ -762,6 +767,7 @@ impl Spreadsheet {
                 }
                 self.replay_row_layout(row_layout.as_deref(), sheet_index, true, cx);
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Row, count, false, cx);
             }
             UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, print_setup_before, formula_rewrites } => {
                 if let Some(history) = &table_columns {
@@ -795,6 +801,7 @@ impl Spreadsheet {
                     });
                 }
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Col, count, true, cx);
             }
             UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, deleted_cells, deleted_comments, deleted_col_widths, print_setup_before, formula_rewrites } => {
                 if let Some(history) = &table_columns {
@@ -847,6 +854,7 @@ impl Spreadsheet {
                     });
                 }
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Col, count, false, cx);
             }
             UndoAction::ColumnWidthSet { sheet_id, col, old, .. } => {
                 // Undo: restore old width (or remove if was default)
@@ -1111,6 +1119,7 @@ impl Spreadsheet {
                 }
                 self.replay_row_layout(row_layout.as_deref(), sheet_index, false, cx);
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Row, count, false, cx);
             }
             UndoAction::RowsDeleted { sheet_index, at_row, count, table_rows, row_layout, .. } => {
                 if let Err(error) = self.workbook.update(cx, |wb, _| {
@@ -1132,6 +1141,7 @@ impl Spreadsheet {
                 }
                 self.replay_row_layout(row_layout.as_deref(), sheet_index, false, cx);
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Row, count, true, cx);
             }
             UndoAction::ColsInserted { sheet_index, at_col, count, table_columns, formula_rewrites, .. } => {
                 let _ = formula_rewrites;
@@ -1156,6 +1166,7 @@ impl Spreadsheet {
                     }
                 }
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Col, count, false, cx);
             }
             UndoAction::ColsDeleted { sheet_index, at_col, count, table_columns, .. } => {
                 if let Err(error) = self.workbook.update(cx, |wb, _| {
@@ -1176,6 +1187,7 @@ impl Spreadsheet {
                     sheet_widths.insert(c - count, w);
                 }
                 self.bump_cells_rev();
+                self.adjust_grid_structure(sheet_index, visigrid_engine::structural::Axis::Col, count, true, cx);
             }
             UndoAction::ColumnWidthSet { sheet_id, col, new, .. } => {
                 // Redo: apply new width (or remove if resetting to default)

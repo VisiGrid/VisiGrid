@@ -22,6 +22,11 @@ pub fn render_context_menu(
 
     // Build menu items based on kind
     let items = match state.kind {
+        ContextMenuKind::GridEdge => vec![
+            menu_item("ctx-add-rows", "Add rows…", None, true, text_primary, text_muted, selection_bg, cx, |app, _, cx| app.show_add_count(visigrid_engine::structural::Axis::Row, cx)),
+            menu_item("ctx-add-cols", "Add columns…", None, true, text_primary, text_muted, selection_bg, cx, |app, _, cx| app.show_add_count(visigrid_engine::structural::Axis::Col, cx)),
+            menu_item("ctx-shrink-grid", "Shrink to data", None, true, text_primary, text_muted, selection_bg, cx, |app, _, cx| app.shrink_grid_to_data(cx)),
+        ],
         ContextMenuKind::Cell => build_cell_menu(app, text_primary, text_muted, selection_bg, cx),
         ContextMenuKind::RowHeader => build_row_header_menu(app, text_primary, text_muted, selection_bg, cx),
         ContextMenuKind::ColHeader => build_col_header_menu(app, text_primary, text_muted, selection_bg, cx),
@@ -30,6 +35,7 @@ pub fn render_context_menu(
     // Estimate menu height for clamping.
     // Items: ~24px each (py(5) + ~14px text). Separators: ~9px (1px + my_1 = 4+1+4).
     let (n_items, n_seps) = match state.kind {
+        ContextMenuKind::GridEdge => (3, 0),
         ContextMenuKind::Cell => (16, 7),
         ContextMenuKind::RowHeader => (5, 1),
         ContextMenuKind::ColHeader => (9, 3),

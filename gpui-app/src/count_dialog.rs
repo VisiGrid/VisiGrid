@@ -13,6 +13,7 @@ pub(crate) struct CountDialog {
     pub at: usize,
     pub max: usize,
     pub input: String,
+    pub grow_only: bool,
 }
 
 impl CountDialog {
@@ -73,6 +74,7 @@ impl Spreadsheet {
             at,
             max,
             input: String::new(),
+            grow_only: false,
         });
         self.mode = Mode::CountDialog;
         cx.notify();
@@ -90,6 +92,13 @@ impl Spreadsheet {
         };
         let dialog = self.count_dialog.take().unwrap();
         self.mode = Mode::Navigation;
+        if dialog.grow_only {
+            match dialog.axis {
+                Axis::Row => self.grow_grid(count, 0, cx),
+                Axis::Col => self.grow_grid(0, count, cx),
+            }
+            return;
+        }
         match dialog.axis {
             Axis::Row => self.insert_rows(dialog.at, count, cx),
             Axis::Col => self.insert_cols(dialog.at, count, cx),
