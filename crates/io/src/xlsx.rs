@@ -5,10 +5,11 @@
 //         See docs/features/xlsx-export-spec.md for design rationale.
 
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::Path;
 use std::time::Instant;
 
-use calamine::{open_workbook_auto, Data, Reader, Sheets};
+use calamine::{open_workbook_auto_from_rs, open_workbook_from_rs, Data, Ods, Reader, Sheets, Xls, Xlsb, Xlsx};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Workbook as XlsxWorkbook, Worksheet};
 use visigrid_engine::cell::{Alignment, BorderStyle, CellFormat, CellValue, ValueRef, DateStyle, NumberFormat, VerticalAlignment};
 use visigrid_engine::formula::analyze::tally_unknown_functions;
@@ -145,14 +146,9 @@ pub struct ImportResult {
 /// Checked by magic number, not by extension: plenty of files named .xls are
 /// actually xlsx, HTML or TSV, and a file named .xlsx is occasionally a real
 /// .xls. An OLE2 compound document starts with this signature.
-fn is_legacy_xls(path: &Path) -> bool {
-    use std::io::Read;
+fn is_legacy_xls(bytes: &[u8]) -> bool {
     const OLE2_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-    let mut header = [0u8; 8];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut header))
-        .map(|_| header == OLE2_MAGIC)
-        .unwrap_or(false)
+    bytes.starts_with(&OLE2_MAGIC)
 }
 
 
@@ -497,17 +493,76 @@ pub fn import(path: &Path) -> Result<(Workbook, ImportResult), String> {
     import_with_options(path, &ImportOptions::default())
 }
 
+/// Spreadsheet container format selected from a file extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkbookFormat {
+    Xls,
+    Xlsx,
+    Xlsb,
+    Ods,
+}
+
+impl WorkbookFormat {
+    /// Match `calamine::open_workbook_auto`'s extension dispatch so opening from
+    /// bytes preserves the exact format-specific error (e.g. `Workbook is
+    /// password protected` or ZIP corruption) rather than falling back to
+    /// `Cannot detect file format`.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("xls" | "xla") => Some(Self::Xls),
+            Some("xlsx" | "xlsm" | "xlam") => Some(Self::Xlsx),
+            Some("xlsb") => Some(Self::Xlsb),
+            Some("ods") => Some(Self::Ods),
+            _ => None,
+        }
+    }
+}
+
+fn open_sheets_from_bytes<'a>(
+    bytes: &'a [u8],
+    format: Option<WorkbookFormat>,
+) -> Result<Sheets<Cursor<&'a [u8]>>, calamine::Error> {
+    let cursor = Cursor::new(bytes);
+    match format {
+        Some(WorkbookFormat::Xls) => Ok(Sheets::Xls(
+            open_workbook_from_rs::<Xls<_>, _>(cursor).map_err(calamine::Error::Xls)?,
+        )),
+        Some(WorkbookFormat::Xlsx) => Ok(Sheets::Xlsx(
+            open_workbook_from_rs::<Xlsx<_>, _>(cursor).map_err(calamine::Error::Xlsx)?,
+        )),
+        Some(WorkbookFormat::Xlsb) => Ok(Sheets::Xlsb(
+            open_workbook_from_rs::<Xlsb<_>, _>(cursor).map_err(calamine::Error::Xlsb)?,
+        )),
+        Some(WorkbookFormat::Ods) => Ok(Sheets::Ods(
+            open_workbook_from_rs::<Ods<_>, _>(cursor).map_err(calamine::Error::Ods)?,
+        )),
+        None => open_workbook_auto_from_rs(cursor),
+    }
+}
+
 /// Import an Excel file with options (xlsx, xls, xlsb, ods)
 pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Workbook, ImportResult), String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to open Excel file: {}", e))?;
+    import_bytes_with_options(&bytes, WorkbookFormat::from_path(path), options)
+}
+
+/// Import an Excel workbook from in-memory bytes with options (xlsx, xls, xlsb, ods)
+pub fn import_bytes_with_options(
+    bytes: &[u8],
+    format: Option<WorkbookFormat>,
+    options: &ImportOptions,
+) -> Result<(Workbook, ImportResult), String> {
     let start_time = Instant::now();
     // Notes never stop an import; what can't be read becomes a warning.
-    let notes = crate::xlsx_comments::read(path);
+    let notes = crate::xlsx_comments::read(bytes);
 
-    let mut workbook: Sheets<_> = open_workbook_auto(path)
+    let mut workbook: Sheets<_> = open_sheets_from_bytes(bytes, format)
         .map_err(|e| format!("Failed to open Excel file: {}", e))?;
+    let is_xlsx = matches!(workbook, Sheets::Xlsx(_));
 
     let mut result = ImportResult::default();
-    let modern_errors = crate::xlsx_rich_errors::read(path, &mut result.warnings);
+    let modern_errors = crate::xlsx_rich_errors::read(bytes, &mut result.warnings);
     let mut sheets: Vec<Sheet> = Vec::new();
     // Google placeholders emptied on a guess (see xlsx_google::spill_owners):
     // `(sheet index, row, col, Google's value)`, put back after recalculation
@@ -550,7 +605,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
             next_sheet_id += 1;
 
             // Import validations even for empty sheets
-            let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet, &mut result.warnings);
+            let (imported, skipped) = import_validation_rules(bytes, is_xlsx, sheet_name, &mut sheet, &mut result.warnings);
             result.validations_imported += imported;
             result.validations_skipped += skipped;
 
@@ -617,7 +672,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
                         // <f>, so nothing here needs the '=' branch.
                         let decoded;
                         let text = if s.contains("_x") && formula_string_cells.get_or_insert_with(|| {
-                            crate::xlsx_formula_cache::string_cells(path).unwrap_or_else(|e| {
+                            crate::xlsx_formula_cache::string_cells(bytes).unwrap_or_else(|e| {
                                 result.warnings.push(format!("Formula cached-text escapes could not be decoded: {e}"));
                                 Default::default()
                             })
@@ -886,7 +941,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         result.dates_imported += stats.dates_imported + stats.times_imported;
 
         // Import validation rules from worksheet XML
-        let (imported, skipped) = import_validation_rules(path, sheet_name, &mut sheet, &mut result.warnings);
+        let (imported, skipped) = import_validation_rules(bytes, is_xlsx, sheet_name, &mut sheet, &mut result.warnings);
         result.validations_imported += imported;
         result.validations_skipped += skipped;
 
@@ -903,26 +958,26 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
     result.import_duration_ms = start_time.elapsed().as_millis();
 
     let mut workbook = Workbook::from_sheets(sheets, 0);
-    crate::xlsx_names::import(path, &mut workbook, &mut result.warnings);
+    crate::xlsx_names::import(bytes, &mut workbook, &mut result.warnings);
 
     // Import formatting from styles.xml and per-cell style IDs
-    import_formatting(path, &sheet_names, &mut workbook, &mut result);
+    import_formatting(bytes, &sheet_names, &mut workbook, &mut result);
     result.warnings.extend(notes.warnings);
     result.comments_imported = crate::xlsx_comments::apply(notes.comments, &mut workbook, &mut result.warnings);
     crate::xlsx_google::note_frozen(&result.google_formulas_frozen, &mut workbook);
 
     let mut table_views = Vec::new();
     if options.values_only {
-        table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, true);
+        table_views = crate::xlsx_tables::import(bytes, &mut workbook, &mut result, true);
     }
 
     if !options.values_only {
         // Detect shared formula groups from XLSX XML (diagnostic guardrail)
-        result.shared_formula_groups = count_shared_formula_groups(path);
+        result.shared_formula_groups = count_shared_formula_groups(bytes);
 
         // Extract formula-only cells from worksheet XML (cells with <f> but possibly no <v>).
         // calamine may skip these, causing "phantom blank" cells where formulas should exist.
-        let xml_formulas = extract_xml_formula_cells(path);
+        let xml_formulas = extract_xml_formula_cells(bytes);
         let mut formula_backfill_count = 0usize;
         for (sheet_idx, row, col, formula_text) in &xml_formulas {
             if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
@@ -958,7 +1013,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         // Backfill value-only cells from XLSX XML.
         // calamine may skip cells stored as shared strings, inline strings, or numbers
         // that it doesn't surface through its cell iterator.
-        let xml_values = extract_xml_value_cells(path);
+        let xml_values = extract_xml_value_cells(bytes);
         let mut value_backfill_count = 0usize;
         for (sheet_idx, row, col, value_text) in &xml_values {
             if let Some(sheet) = workbook.sheet_mut(*sheet_idx) {
@@ -977,8 +1032,8 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
         }
 
         // Install ownership only after formula/value backfill, including footer cells.
-        table_views = crate::xlsx_tables::import(path, &mut workbook, &mut result, false);
-        let array_caches = crate::xlsx_arrays::prepare(path, &mut workbook, &mut result.warnings)?;
+        table_views = crate::xlsx_tables::import(bytes, &mut workbook, &mut result, false);
+        let array_caches = crate::xlsx_arrays::prepare(bytes, &mut workbook, &mut result.warnings)?;
         // Rebuild dependency graph after loading all data
         workbook.rebuild_dep_graph();
 
@@ -1152,7 +1207,7 @@ pub fn import_with_options(path: &Path, options: &ImportOptions) -> Result<(Work
 /// Import formatting (styles, column widths, row heights) from XLSX into the workbook.
 /// This is called after calamine has imported cell data, to layer formatting on top.
 fn import_formatting(
-    path: &Path,
+    bytes: &[u8],
     sheet_names: &[String],
     workbook: &mut Workbook,
     result: &mut ImportResult,
@@ -1166,7 +1221,7 @@ fn import_formatting(
     // not fail: the ZIP reader accepts an OLE2 file and returns an empty style
     // table, so the error path this used to sit in was never taken. A silent
     // success is not something a fallback branch can catch.
-    if is_legacy_xls(path) {
+    if is_legacy_xls(bytes) {
         let note = "Legacy .xls: cell formatting, merges, column widths and frozen panes were \
                     not imported — the format stores them in a way this importer does not read. \
                     Values and number formats were imported. Re-saving as .xlsx keeps formatting.";
@@ -1176,7 +1231,7 @@ fn import_formatting(
     }
 
     // Parse styles.xml and per-sheet formatting from the XLSX ZIP
-    let (style_table, sheet_formats, mut stats) = match xlsx_styles::parse_xlsx_formatting(path, sheet_names) {
+    let (style_table, sheet_formats, mut stats) = match xlsx_styles::parse_xlsx_formatting_from_bytes(bytes, sheet_names) {
         Ok(data) => data,
         Err(_) => return, // Graceful fallback: an xlsx with no styles
     };
@@ -2172,17 +2227,17 @@ fn export_validation_rules(
 /// Returns (imported_count, skipped_count).
 /// Skipped rules contain unrepresentable or malformed validation metadata.
 fn import_validation_rules(
-    xlsx_path: &Path,
+    bytes: &[u8],
+    is_xlsx: bool,
     sheet_name: &str,
     sheet: &mut Sheet,
     warnings: &mut Vec<String>,
 ) -> (usize, usize) {
     // This XML pass does not apply to the other calamine formats.
-    if xlsx_path.extension().and_then(|s| s.to_str()).is_some_and(|s|
-        matches!(s.to_ascii_lowercase().as_str(), "xls" | "xlsb" | "ods")) {
+    if !is_xlsx {
         return (0, 0);
     }
-    match crate::xlsx_validation::parse_sheet_validations_report(xlsx_path, sheet_name) {
+    match crate::xlsx_validation::parse_sheet_validations_report_from_bytes(bytes, sheet_name) {
         Ok(report) => {
             let imported = report.rules.len();
             for v in report.rules { sheet.validations.set(v.range, v.rule); }
@@ -2207,15 +2262,11 @@ fn import_validation_rules(
 /// doesn't expand shared formulas correctly, this count helps diagnose the issue.
 ///
 /// Returns 0 for non-XLSX formats (xls, xlsb, ods) or on any error.
-fn count_shared_formula_groups(path: &Path) -> usize {
+fn count_shared_formula_groups(bytes: &[u8]) -> usize {
     use zip::ZipArchive;
 
     // Only works for XLSX files (ZIP-based XML)
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    let mut archive = match ZipArchive::new(file) {
+    let mut archive = match ZipArchive::new(Cursor::new(bytes)) {
         Ok(a) => a,
         Err(_) => return 0,
     };
@@ -2369,14 +2420,10 @@ fn count_shared_masters_in_xml(xml: &str) -> usize {
 /// Extract all formula cells from worksheet XML, including those with no cached <v> value.
 /// Returns: Vec<(sheet_index, row, col, formula_text)>
 /// sheet_index corresponds to the order in which sheets appear in workbook.xml.
-fn extract_xml_formula_cells(path: &Path) -> Vec<(usize, usize, usize, String)> {
+fn extract_xml_formula_cells(bytes: &[u8]) -> Vec<(usize, usize, usize, String)> {
     use zip::ZipArchive;
 
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    let mut archive = match ZipArchive::new(file) {
+    let mut archive = match ZipArchive::new(Cursor::new(bytes)) {
         Ok(a) => a,
         Err(_) => return Vec::new(),
     };
@@ -2603,14 +2650,10 @@ fn adjust_formula_refs_for_shared(formula: &str, row_delta: i32, col_delta: i32)
 /// Extract value-only cells from XLSX XML that calamine may have missed.
 /// Parses shared strings (t="s"), inline strings (t="inlineStr"), and numeric values.
 /// Returns: Vec<(sheet_index, row, col, value_string)>
-fn extract_xml_value_cells(path: &Path) -> Vec<(usize, usize, usize, String)> {
+fn extract_xml_value_cells(bytes: &[u8]) -> Vec<(usize, usize, usize, String)> {
     use zip::ZipArchive;
 
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    let mut archive = match ZipArchive::new(file) {
+    let mut archive = match ZipArchive::new(Cursor::new(bytes)) {
         Ok(a) => a,
         Err(_) => return Vec::new(),
     };
@@ -4782,23 +4825,112 @@ mod tests {
     /// error branch never runs. That is why the check precedes the parse.
     #[test]
     fn a_legacy_xls_is_recognised_by_content_not_extension() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let xls = dir.path().join("legacy.xls");
         let mut bytes = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
         bytes.extend_from_slice(&[0u8; 64]);
-        std::fs::write(&xls, &bytes).unwrap();
-        assert!(is_legacy_xls(&xls));
+        assert!(is_legacy_xls(&bytes));
 
         // Plenty of files named .xls are really something else.
-        let zipish = dir.path().join("actually-a-zip.xls");
-        std::fs::write(&zipish, b"PK\x03\x04rest of the file").unwrap();
-        assert!(!is_legacy_xls(&zipish), "detection is by content, not extension");
+        assert!(!is_legacy_xls(b"PK\x03\x04rest of the file"), "detection is by content, not extension");
 
         // A file too short to have a header is not one either.
-        let tiny = dir.path().join("tiny.xls");
-        std::fs::write(&tiny, b"no").unwrap();
-        assert!(!is_legacy_xls(&tiny));
+        assert!(!is_legacy_xls(b"no"));
+    }
+
+    /// Build a minimal 3-sector OLE2 CFB container with an `EncryptedPackage`
+    /// stream entry — the structure Excel writes for password-protected `.xlsx`.
+    fn minimal_encrypted_ooxml_cfb() -> Vec<u8> {
+        let mut buf = vec![0u8; 1536];
+        // Header (sector -1): OLE2 magic, v3 (512-byte sectors), 1 FAT sector at 0, directory at 1.
+        buf[0..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+        buf[24..26].copy_from_slice(&0x003Eu16.to_le_bytes());
+        buf[26..28].copy_from_slice(&0x0003u16.to_le_bytes());
+        buf[28..30].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        buf[30..32].copy_from_slice(&9u16.to_le_bytes());
+        buf[32..34].copy_from_slice(&6u16.to_le_bytes());
+        buf[44..48].copy_from_slice(&1u32.to_le_bytes());
+        buf[48..52].copy_from_slice(&1u32.to_le_bytes());
+        buf[56..60].copy_from_slice(&4096u32.to_le_bytes());
+        buf[60..64].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        buf[68..72].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        // DIFAT[0] = 0 (FAT sector), remaining DIFAT entries = FREESECT.
+        buf[76..80].copy_from_slice(&0u32.to_le_bytes());
+        for i in 1..109 {
+            let off = 76 + i * 4;
+            buf[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        }
+
+        // Sector 0 (FAT): sector 0 = FATSECT, sector 1 = ENDOFCHAIN, rest = FREESECT.
+        buf[512..516].copy_from_slice(&0xFFFF_FFFDu32.to_le_bytes());
+        buf[516..520].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        for i in 2..128 {
+            let off = 512 + i * 4;
+            buf[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        }
+
+        // Sector 1 (Directory): entry 0 = Root Entry (child = 1), entry 1 = EncryptedPackage.
+        let write_entry = |slot: &mut [u8], name: &str, obj_type: u8, child: u32| {
+            let utf16: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            for (i, ch) in utf16.iter().enumerate() {
+                slot[i * 2..i * 2 + 2].copy_from_slice(&ch.to_le_bytes());
+            }
+            slot[64..66].copy_from_slice(&((utf16.len() * 2) as u16).to_le_bytes());
+            slot[66] = obj_type;
+            slot[67] = 1; // black
+            slot[68..72].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // left
+            slot[72..76].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // right
+            slot[76..80].copy_from_slice(&child.to_le_bytes());
+            slot[116..120].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes()); // start sector
+        };
+        write_entry(&mut buf[1024..1152], "Root Entry", 5, 1);
+        write_entry(&mut buf[1152..1280], "EncryptedPackage", 2, 0xFFFF_FFFF);
+        buf
+    }
+
+    #[test]
+    fn encrypted_xlsx_reports_password_protected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("encrypted.xlsx");
+        std::fs::write(&path, minimal_encrypted_ooxml_cfb()).unwrap();
+
+        let err = import(&path).unwrap_err();
+        assert!(
+            err.contains("Workbook is password protected"),
+            "expected password-protected error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn truncated_xlsx_reports_zip_error_not_generic_format_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("truncated.xlsx");
+        std::fs::write(&path, b"PK\x03\x04truncated").unwrap();
+
+        let err = import(&path).unwrap_err();
+        assert!(
+            err.contains("invalid Zip archive") || err.contains("Zip"),
+            "expected ZIP error, got: {err}"
+        );
+        assert!(
+            !err.contains("Cannot detect file format"),
+            "must not collapse corrupt .xlsx into generic detection error: {err}"
+        );
+    }
+
+    #[test]
+    fn xlsx_with_xls_extension_preserves_xls_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wb = Workbook::new();
+        wb.active_sheet_mut().set_value(0, 0, "hello");
+        let (xlsx_bytes, _) = export_to_buffer(&wb, None).unwrap();
+
+        let path = dir.path().join("actually-xlsx.xls");
+        std::fs::write(&path, xlsx_bytes).unwrap();
+
+        let err = import(&path).unwrap_err();
+        assert!(
+            err.contains("Xls error"),
+            "expected format-specific XLS error, got: {err}"
+        );
     }
 
     #[test]
