@@ -194,6 +194,17 @@ pub(crate) fn bind(
             }
         }))
         // Insert/Delete rows/columns (Ctrl+= / Ctrl+-)
+        .on_action(cx.listener(|this, _: &InsertRowsOrColsWithCount, window, cx| {
+            if this.guard_terminal_focus(window, cx, "InsertRowsOrColsWithCount") { return; }
+            if this.mode != crate::mode::Mode::Navigation || this.ui.format_bar.size_editing { return; }
+            let axis = if this.is_col_selection() {
+                visigrid_engine::structural::Axis::Col
+            } else {
+                visigrid_engine::structural::Axis::Row
+            };
+            this.show_insert_count(axis, false, cx);
+            window.focus(&this.focus_handle, cx);
+        }))
         .on_action(cx.listener(|this, _: &InsertRowsOrCols, window, cx| {
             if !this.mode.is_editing() {
                 this.insert_rows_or_cols(cx);

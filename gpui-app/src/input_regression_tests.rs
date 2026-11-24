@@ -113,6 +113,56 @@ fn selected_columns_resize_together_and_undo_restores_each_original(cx: &mut Tes
 }
 
 #[gpui::test]
+fn insert_count_starts_selected_and_accepts_default_or_replacement(cx: &mut TestAppContext) {
+    use visigrid_engine::structural::Axis;
+    let view = setup(cx);
+    view.update(cx, |app, window, cx| {
+        window.focus(&app.focus_handle, cx);
+        app.wb_mut(cx, |wb| { wb.set_cell_value_tracked(0, 0, 0, "original"); });
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "ctrl-shift-enter");
+    view.update(cx, |app, window, _| {
+        assert!(app.focus_handle.is_focused(window));
+        let dialog = app.count_dialog.as_ref().unwrap();
+        assert_eq!(dialog.input, "1");
+        assert!(dialog.input_selected);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "enter");
+    view.update(cx, |app, _, cx| {
+        assert!(app.count_dialog.is_none());
+        assert_eq!(app.sheet(cx).get_raw(1, 0), "original");
+        assert_eq!(app.history.undo_count(), 1);
+        app.undo(cx);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "ctrl-shift-enter 4");
+    view.update(cx, |app, _, _| {
+        assert_eq!(app.count_dialog.as_ref().unwrap().input, "4");
+        assert!(!app.count_dialog.as_ref().unwrap().input_selected);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "ctrl-a 5 enter");
+    view.update(cx, |app, _, cx| {
+        assert_eq!(app.sheet(cx).get_raw(5, 0), "original");
+        assert_eq!(app.history.undo_count(), 1);
+        app.show_insert_count(Axis::Col, false, cx);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "backspace enter");
+    view.update(cx, |app, _, _| {
+        assert!(app.count_dialog.as_ref().unwrap().input.is_empty());
+        assert_eq!(app.history.undo_count(), 1);
+    }).unwrap();
+    cx.simulate_keystrokes(view.into(), "escape");
+    view.update(cx, |app, _, cx| app.select_col(2, false, cx)).unwrap();
+    cx.simulate_keystrokes(view.into(), "ctrl-shift-enter");
+    view.update(cx, |app, _, _| {
+        let dialog = app.count_dialog.as_ref().unwrap();
+        assert!(matches!(dialog.axis, Axis::Col));
+        assert_eq!(dialog.at, 2);
+        assert_eq!(dialog.input, "1");
+        assert!(dialog.input_selected);
+    }).unwrap();
+}
+
+#[gpui::test]
 fn insert_count_dialog_validates_keys_and_inserts_in_one_undo_step(cx: &mut TestAppContext) {
     use visigrid_engine::structural::Axis;
     let view = setup(cx);
@@ -192,11 +242,15 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
     let bounds = vcx.debug_bounds("count-popover").unwrap();
     assert_eq!(bounds.origin, point(px(80.), px(200.)));
     assert!(bounds.size.width <= px(208.) && bounds.size.height <= px(72.));
-    view.update(vcx, |app, cx| {
-        let dialog = app.count_dialog.as_mut().expect("row insert dialog");
+    view.read_with(vcx, |app, _| {
+        let dialog = app.count_dialog.as_ref().expect("row insert dialog");
         assert_eq!(dialog.at, 3);
-        dialog.input = "2".into();
-        cx.notify();
+        assert_eq!(dialog.input, "1");
+        assert!(dialog.input_selected);
+    });
+    vcx.simulate_keystrokes("2");
+    view.read_with(vcx, |app, _| {
+        assert_eq!(app.count_dialog.as_ref().unwrap().input, "2");
     });
     vcx.run_until_parked();
     let confirm = vcx.debug_bounds("count-confirm").unwrap().center();
