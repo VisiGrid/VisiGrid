@@ -248,6 +248,7 @@ fn create_binding(key: &str, action: &str) -> Option<KeyBinding> {
         "edit.filldown" | "fill.down" => Some(KeyBinding::new(key, FillDown, context)),
         "edit.fillright" | "fill.right" => Some(KeyBinding::new(key, FillRight, context)),
         "edit.insertrows" | "insert.rows" => Some(KeyBinding::new(key, InsertRowsOrCols, context)),
+        "edit.insertwithcount" | "insert.count" => Some(KeyBinding::new(key, InsertRowsOrColsWithCount, context)),
         "edit.deleterows" | "delete.rows" => Some(KeyBinding::new(key, DeleteRowsOrCols, context)),
         "edit.autosum" | "formula.autosum" => Some(KeyBinding::new(key, AutoSum, context)),
         "edit.cyclereference" | "formula.cycle" => Some(KeyBinding::new(key, CycleReference, context)),

@@ -8,6 +8,11 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if this.count_dialog.is_some() {
+        this.count_dialog_key(event, cx);
+        cx.stop_propagation();
+        return;
+    }
     if this.rewind_confirm.visible {
         if event.keystroke.key == "escape" { this.cancel_rewind(cx); }
         cx.stop_propagation();

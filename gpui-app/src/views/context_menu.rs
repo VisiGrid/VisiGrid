@@ -31,8 +31,8 @@ pub fn render_context_menu(
     // Items: ~24px each (py(5) + ~14px text). Separators: ~9px (1px + my_1 = 4+1+4).
     let (n_items, n_seps) = match state.kind {
         ContextMenuKind::Cell => (16, 7),
-        ContextMenuKind::RowHeader => (4, 1),
-        ContextMenuKind::ColHeader => (8, 3),
+        ContextMenuKind::RowHeader => (5, 1),
+        ContextMenuKind::ColHeader => (9, 3),
     };
     // Leave room for the inherited line height as well as vertical padding.
     let menu_h: f32 = n_items as f32 * 30.0 + n_seps as f32 * 12.0 + 8.0;
@@ -70,6 +70,7 @@ fn menu_item(
 ) -> AnyElement {
     let el = div()
         .id(id)
+        .debug_selector(move || id.into())
         .px_3()
         .py(px(5.0))
         .flex()
@@ -92,8 +93,13 @@ fn menu_item(
                 )
             })
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                let anchor = this.context_menu.map(|menu| menu.position);
                 this.hide_context_menu(cx);
                 on_click(this, window, cx);
+                if let Some(picker) = &mut this.count_dialog {
+                    picker.anchor = anchor;
+                    window.focus(&this.focus_handle, cx);
+                }
             }))
             .into_any_element()
     } else {
@@ -231,8 +237,11 @@ fn build_row_header_menu(
     let panel_border = app.token(TokenKey::PanelBorder);
 
     vec![
-        menu_item("ctx-insert-row", "Insert Row", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, _, cx| this.insert_rows_or_cols(cx),
+        menu_item("ctx-insert-row", "Insert rows above…", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, _, cx| this.show_insert_count(visigrid_engine::structural::Axis::Row, false, cx),
+        ),
+        menu_item("ctx-insert-row-below", "Insert rows below…", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, _, cx| this.show_insert_count(visigrid_engine::structural::Axis::Row, true, cx),
         ),
         menu_item("ctx-delete-row", "Delete Row", None, true, text_primary, text_muted, selection_bg, cx,
             |this, _, cx| this.delete_rows_or_cols(cx),
@@ -284,8 +293,11 @@ fn build_col_header_menu(
     let is_col_sel = app.is_col_selection();
 
     vec![
-        menu_item("ctx-insert-col", "Insert Column", None, true, text_primary, text_muted, selection_bg, cx,
-            |this, _, cx| this.insert_rows_or_cols(cx),
+        menu_item("ctx-insert-col", "Insert columns left…", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, _, cx| this.show_insert_count(visigrid_engine::structural::Axis::Col, false, cx),
+        ),
+        menu_item("ctx-insert-col-right", "Insert columns right…", None, true, text_primary, text_muted, selection_bg, cx,
+            |this, _, cx| this.show_insert_count(visigrid_engine::structural::Axis::Col, true, cx),
         ),
         menu_item("ctx-delete-col", "Delete Column", None, true, text_primary, text_muted, selection_bg, cx,
             |this, _, cx| this.delete_rows_or_cols(cx),
