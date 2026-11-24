@@ -3,9 +3,7 @@
 use quick_xml::{events::Event, Reader, Writer};
 use std::{
     collections::HashMap,
-    fs::File,
     io::{Cursor, Read, Write},
-    path::Path,
 };
 use visigrid_engine::{
     formula::parser::{self, Expr},
@@ -24,9 +22,8 @@ struct Definition {
     local: bool,
     hidden: bool,
 }
-fn read(path: &Path) -> Result<Vec<Definition>, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+fn read(bytes: &[u8]) -> Result<Vec<Definition>, String> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return Ok(Vec::new());
     };
     let Ok(part) = zip.by_name("xl/workbook.xml") else {
@@ -95,8 +92,8 @@ fn target(wb: &Workbook, name: &str, formula: &str) -> Result<NamedRange, String
         _ => Err("only absolute cells and rectangular ranges are supported; relative, formula, constant, union and whole-row/column names are not imported".into()),
     }
 }
-pub(crate) fn import(path: &Path, wb: &mut Workbook, warnings: &mut Vec<String>) {
-    let names = match read(path) {
+pub(crate) fn import(bytes: &[u8], wb: &mut Workbook, warnings: &mut Vec<String>) {
+    let names = match read(bytes) {
         Ok(names) => names,
         Err(e) => {
             warnings.push(format!("Defined names were not imported: {e}"));
@@ -261,14 +258,12 @@ pub(crate) fn finish(bytes: Vec<u8>, wb: &Workbook) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn package(xml: &str) -> tempfile::NamedTempFile {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mut zip = zip::ZipWriter::new(File::create(file.path()).unwrap());
+    fn package(xml: &str) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         zip.start_file("xl/workbook.xml", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(xml.as_bytes()).unwrap();
-        zip.finish().unwrap();
-        file
+        zip.finish().unwrap().into_inner()
     }
     #[test]
     fn name_metadata_is_bounded_without_partial_publication() {
@@ -276,25 +271,25 @@ mod tests {
             "<workbook><definedNames>{}</definedNames></workbook>",
             "<definedName name=\"Name\">Sheet1!$A$1</definedName>".repeat(MAX_NAMES + 1)
         );
-        let file = package(&xml);
+        let bytes = package(&xml);
         let mut wb = Workbook::new();
         let mut warnings = Vec::new();
-        import(file.path(), &mut wb, &mut warnings);
+        import(&bytes, &mut wb, &mut warnings);
         assert!(wb.named_ranges().is_empty());
         assert!(warnings[0].contains("8,192"));
-        let file = package(&" ".repeat(MAX_BYTES as usize + 1));
-        assert!(read(file.path()).err().unwrap().contains("8 MiB"));
+        let bytes = package(&" ".repeat(MAX_BYTES as usize + 1));
+        assert!(read(&bytes).err().unwrap().contains("8 MiB"));
     }
     #[test]
     fn hidden_names_warn_and_malformed_xml_does_not_install_earlier_definitions() {
-        let file = package("<workbook><definedNames><definedName name=\"Private\" hidden=\"1\">Sheet1!$A$1</definedName></definedNames></workbook>");
+        let bytes = package("<workbook><definedNames><definedName name=\"Private\" hidden=\"1\">Sheet1!$A$1</definedName></definedNames></workbook>");
         let mut wb = Workbook::new();
         let mut warnings = Vec::new();
-        import(file.path(), &mut wb, &mut warnings);
+        import(&bytes, &mut wb, &mut warnings);
         assert!(wb.named_ranges().get("Private").is_some());
         assert!(warnings[0].contains("visible name"));
-        let file = package("<workbook><definedNames><definedName name=\"Good\">Sheet1!$A$1</definedName><definedName name=\"Broken\">Sheet1!$B$1");
-        import(file.path(), &mut wb, &mut warnings);
+        let bytes = package("<workbook><definedNames><definedName name=\"Good\">Sheet1!$A$1</definedName><definedName name=\"Broken\">Sheet1!$B$1");
+        import(&bytes, &mut wb, &mut warnings);
         assert!(wb.named_ranges().get("Good").is_none());
     }
 }

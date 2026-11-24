@@ -228,10 +228,17 @@ pub(crate) fn parse_sheet_validations_report(
     xlsx_path: &Path,
     sheet_name: &str,
 ) -> Result<ValidationImport, String> {
-    let file =
-        std::fs::File::open(xlsx_path).map_err(|e| format!("Failed to open XLSX file: {}", e))?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|e| format!("Failed to read XLSX as ZIP: {}", e))?;
+    let bytes =
+        std::fs::read(xlsx_path).map_err(|e| format!("Failed to open XLSX file: {}", e))?;
+    parse_sheet_validations_report_from_bytes(&bytes, sheet_name)
+}
+
+pub(crate) fn parse_sheet_validations_report_from_bytes(
+    bytes: &[u8],
+    sheet_name: &str,
+) -> Result<ValidationImport, String> {
+    let mut archive = ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("Failed to read XLSX as ZIP: {}", e))?;
 
     // Step 1: Find the worksheet XML path for this sheet name
     let xml_path = find_worksheet_xml_path(&mut archive, sheet_name)?;
