@@ -221,6 +221,7 @@ impl Spreadsheet {
     pub fn set_cell_value(&mut self, row: usize, col: usize, value: &str, cx: &mut Context<Self>) {
         if self.block_if_previewing_cell(cx) { return; }
         if self.cloud_live_cell(row,col,value,cx) { return; }
+        self.limited_grid.invalidate();
         self.workbook.update(cx, |wb, _| {
             // The tracked write also re-evaluates spills the edit blocks or
             // unblocks (typing into a spilled cell gives its anchor #SPILL!,
@@ -236,6 +237,7 @@ impl Spreadsheet {
     pub fn clear_cell_value(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         if self.block_if_previewing_cell(cx) { return; }
         if self.cloud_live_cell(row,col,"",cx) { return; }
+        self.limited_grid.invalidate();
         self.workbook.update(cx, |wb, _| {
             let index = wb.active_sheet_index();
             wb.clear_cell_tracked(index, row, col);
@@ -250,6 +252,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Sheet) -> R,
     ) -> R {
+        self.limited_grid.invalidate();
         self.workbook.update(cx, |wb, _| {
             f(wb.active_sheet_mut())
         })
@@ -262,6 +265,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Sheet) -> R,
     ) -> Option<R> {
+        self.limited_grid.invalidate();
         self.workbook.update(cx, |wb, _| {
             wb.sheet_mut(sheet_idx).map(f)
         })
@@ -279,6 +283,7 @@ impl Spreadsheet {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Workbook, &mut Context<Workbook>) -> R,
     ) -> R {
+        self.limited_grid.invalidate();
         self.workbook.update(cx, f)
     }
 
@@ -296,6 +301,7 @@ impl Spreadsheet {
     /// Shorthand for workbook mutation: `self.wb_mut(cx, |wb| wb.method())`
     #[inline]
     pub fn wb_mut<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Workbook) -> R) -> R {
+        self.limited_grid.invalidate();
         self.workbook.update(cx, |wb, _| f(wb))
     }
 

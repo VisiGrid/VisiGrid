@@ -61,6 +61,10 @@ mod fonts;
 pub(crate) use visigrid_engine::formula::help as formula_context;
 mod formula_refs;
 mod grid_ops;
+mod count_dialog;
+mod limited_grid;
+#[cfg(test)]
+mod limited_grid_tests;
 mod hints;
 mod history;
 mod ime;

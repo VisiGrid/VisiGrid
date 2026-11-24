@@ -66,14 +66,23 @@ fn boundary_in_visible_rows(
     result
 }
 
+#[cfg(test)]
 fn visible_data_boundary(
     rows: &RowView, current: usize, direction: i32,
     manual: Option<&BTreeSet<usize>>, empty: impl Fn(usize) -> bool,
+) -> usize {
+    visible_data_boundary_until(rows, current, direction, manual, rows.row_count(), empty)
+}
+
+fn visible_data_boundary_until(
+    rows: &RowView, current: usize, direction: i32,
+    manual: Option<&BTreeSet<usize>>, limit: usize, empty: impl Fn(usize) -> bool,
 ) -> usize {
     if direction == 0 { return current; }
     let shown = |slot: &usize| manual.is_none_or(|hidden| !hidden.contains(&rows.view_to_data(*slot)));
     let current_empty = !rows.is_view_row_visible(current) || !shown(&current) || empty(current);
     let visible = rows.visible_rows();
+    let visible = &visible[..visible.partition_point(|row| *row < limit)];
     if direction > 0 {
         let first = visible.partition_point(|row| *row <= current);
         boundary_in_visible_rows(current, visible[first..].iter().copied().filter(shown), current_empty, empty)
@@ -94,7 +103,10 @@ impl Spreadsheet {
     /// - `current_row`: Current view row
     /// - `delta`: Direction (+1 for down, -1 for up)
     pub(crate) fn next_visible_row(&self, current_row: usize, delta: i32) -> usize {
-        step_visible_row(&self.row_view, current_row, delta, self.display_hidden_rows())
+        let next = step_visible_row(&self.row_view, current_row, delta, self.display_hidden_rows());
+        if !self.limited_grid.enabled || next < self.grid_rows() { next } else {
+            step_visible_row(&self.row_view, self.grid_rows(), -1, self.display_hidden_rows()).min(self.grid_rows() - 1)
+        }
     }
 
     /// Both sources of hiding address canonical data rows.
@@ -108,7 +120,14 @@ impl Spreadsheet {
     // =========================================================================
 
     pub fn move_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
+        self.move_selection_inner(dr, dc, true, cx);
+    }
+
+    fn move_selection_inner(&mut self, dr: i32, dc: i32, grow: bool, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.sync_limited_grid(cx);
+
+        if grow && dr == 1 && dc == 0 { self.grow_grid_for_down(cx); }
 
         // Close validation dropdown when selection changes
         self.close_validation_dropdown(
@@ -146,9 +165,9 @@ impl Spreadsheet {
 
         // For horizontal movement, move from the effective edge
         let new_col = if dc > 0 {
-            (eff_end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+            (eff_end_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize
         } else if dc < 0 {
-            (eff_start_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+            (eff_start_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize
         } else {
             col
         };
@@ -171,6 +190,7 @@ impl Spreadsheet {
 
     pub fn extend_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.sync_limited_grid(cx);
 
         let view_state = self.active_view_state();
         let (row, col) = view_state.selection_end.unwrap_or(view_state.selected);
@@ -209,9 +229,9 @@ impl Spreadsheet {
 
         // For horizontal movement, move from the effective edge
         let new_col = if dc > 0 {
-            (eff_end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+            (eff_end_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize
         } else if dc < 0 {
-            (eff_start_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize
+            (eff_start_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize
         } else {
             col
         };
@@ -236,6 +256,7 @@ impl Spreadsheet {
 
     pub fn page_up(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.sync_limited_grid(cx);
         // Move by screen-visible rows, but through filter-visible rows
         let page_size = self.visible_rows() as i32;
         self.move_selection(-page_size, 0, cx);
@@ -243,9 +264,10 @@ impl Spreadsheet {
 
     pub fn page_down(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.sync_limited_grid(cx);
         // Move by screen-visible rows, but through filter-visible rows
         let page_size = self.visible_rows() as i32;
-        self.move_selection(page_size, 0, cx);
+        self.move_selection_inner(page_size, 0, false, cx);
     }
 
     // =========================================================================
@@ -270,15 +292,15 @@ impl Spreadsheet {
 
         // Keep manual visibility independent of worksheet/Table filter ownership.
         if dr != 0 && (self.row_view.is_filtered() || self.has_hidden_rows()) {
-            let row = visible_data_boundary(&self.row_view, row, dr, self.display_hidden_rows(),
+            let row = visible_data_boundary_until(&self.row_view, row, dr, self.display_hidden_rows(), self.grid_rows(),
                 |slot| is_cell_empty(slot, col));
             return (row, col);
         }
 
         let current_empty = is_cell_empty(row, col);
         // Horizontal movement or no filtering - original logic
-        let peek_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
-        let peek_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+        let peek_row = (row as i32 + dr).max(0).min(self.grid_rows() as i32 - 1) as usize;
+        let peek_col = (col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize;
         let next_empty = if peek_row == row && peek_col == col {
             true // At edge
         } else {
@@ -310,16 +332,16 @@ impl Spreadsheet {
 
             if no_data_ahead {
                 // No data in scan direction — jump to sheet edge
-                if dr > 0 { return (NUM_ROWS - 1, col); }
+                if dr > 0 { return (self.grid_rows() - 1, col); }
                 if dr < 0 { return (0, col); }
-                if dc > 0 { return (row, NUM_COLS - 1); }
+                if dc > 0 { return (row, self.grid_cols() - 1); }
                 if dc < 0 { return (row, 0); }
             }
         }
 
         loop {
-            let next_row = (row as i32 + dr).max(0).min(NUM_ROWS as i32 - 1) as usize;
-            let next_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+            let next_row = (row as i32 + dr).max(0).min(self.grid_rows() as i32 - 1) as usize;
+            let next_col = (col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize;
 
             // Stop if we hit the edge
             if next_row == row && next_col == col {
@@ -358,6 +380,7 @@ impl Spreadsheet {
     /// When filtering is active, stops at visible row boundaries.
     pub fn jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.sync_limited_grid(cx);
 
         let (row, mut col) = self.view_state.selected;
 
@@ -395,6 +418,7 @@ impl Spreadsheet {
     /// When filtering is active, stops at visible row boundaries.
     pub fn extend_jump_selection(&mut self, dr: i32, dc: i32, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
+        self.sync_limited_grid(cx);
 
         let (row, col) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
         let (anchor_row, anchor_col) = self.view_state.selected;
@@ -508,6 +532,7 @@ impl Spreadsheet {
     /// of the next render pass, which naturally coalesces multiple
     /// navigation events within a single frame into one scroll update.
     pub fn ensure_visible(&mut self, cx: &mut Context<Self>) {
+        self.sync_limited_grid(cx);
         self.nav_scroll_dirty = true;
         cx.notify();
     }
@@ -523,9 +548,9 @@ impl Spreadsheet {
 
         let view = self.active_view_state();
         let (row, col) = scroll_target(view.selected, view.selection_end, (view.scroll_row, view.scroll_col));
-        let scroll_row = crate::pane_layout::ensure_visible(self.row_view.row_count(), view.frozen_rows,
+        let scroll_row = crate::pane_layout::ensure_visible(self.viewport_rows(), view.frozen_rows,
             view.scroll_row, row, self.grid_layout.viewport_size.1, |r| self.displayed_row_height(r));
-        let scroll_col = crate::pane_layout::ensure_visible(NUM_COLS, view.frozen_cols,
+        let scroll_col = crate::pane_layout::ensure_visible(self.grid_cols(), view.frozen_cols,
             view.scroll_col, col, self.grid_layout.viewport_size.0, |c| self.displayed_col_width(c));
         let view = self.active_view_state_mut();
         view.scroll_row = scroll_row;
@@ -533,6 +558,7 @@ impl Spreadsheet {
     }
 
     pub fn scroll(&mut self, delta_rows: i32, delta_cols: i32, cx: &mut Context<Self>) {
+        self.sync_limited_grid(cx);
         // Close validation dropdown on scroll
         self.close_validation_dropdown(
             crate::validation_dropdown::DropdownCloseReason::Scroll,
@@ -540,9 +566,9 @@ impl Spreadsheet {
         );
 
         let view = self.active_view_state();
-        let new_row = crate::pane_layout::scroll(self.row_view.row_count(), view.frozen_rows,
+        let new_row = crate::pane_layout::scroll(self.viewport_rows(), view.frozen_rows,
             view.scroll_row, delta_rows, |r| self.displayed_row_height(r) > 0.0);
-        let new_col = crate::pane_layout::scroll(NUM_COLS, view.frozen_cols,
+        let new_col = crate::pane_layout::scroll(self.grid_cols(), view.frozen_cols,
             view.scroll_col, delta_cols, |c| !self.is_col_hidden(c));
         let view = self.active_view_state_mut();
         if new_row != view.scroll_row || new_col != view.scroll_col {

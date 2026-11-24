@@ -21,6 +21,7 @@ pub enum Mode {
     Formula,       // Formula entry: grid navigation inserts references
     Command,       // Command palette open
     Comment,       // Cell comment editor
+    CountDialog,   // Insert/add rows or columns
     GoTo,          // Go to cell dialog
     QuickOpen,     // Quick file open (Ctrl+P)
     Find,          // Find in cells (Ctrl+F)
@@ -132,7 +133,7 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::CsvImport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen | Mode::DuckdbImport | Mode::RecipeBuilder | Mode::PasswordPrompt)
+        matches!(self, Mode::CountDialog | Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::CsvImport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen | Mode::DuckdbImport | Mode::RecipeBuilder | Mode::PasswordPrompt)
     }
 
     /// True if this mode has text input active (typing should work normally).
@@ -145,6 +146,7 @@ impl Mode {
                 | Mode::Edit
                 | Mode::Formula
                 | Mode::Preferences    // Default cell dimensions
+                | Mode::CountDialog    // Row/column count
                 | Mode::GoTo           // GoTo cell input
                 | Mode::Find           // Find/Replace input
                 | Mode::Command        // Command palette input

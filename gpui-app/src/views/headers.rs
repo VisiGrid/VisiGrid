@@ -67,6 +67,10 @@ pub fn render_column_headers(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -
         .flex_shrink_0()
         .h(px(metrics.header_h))  // Scaled header height
         .bg(header_bg)
+        .when(app.limited_grid.enabled, |d| {
+            let end = panes.frozen.iter().chain(&panes.body).map(|s| s.offset + s.size).fold(0.0_f32, f32::max);
+            d.w(px(metrics.header_w + end))
+        })
         // Corner cell - click to select all
         .child(
             div()

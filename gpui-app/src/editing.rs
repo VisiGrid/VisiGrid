@@ -834,6 +834,7 @@ impl Spreadsheet {
             if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             // Move to next row at the origin column
             let (row, _) = self.active_view_state().selected;
+            self.grow_grid_for_down(cx);
             let new_row = self.next_visible_row(row, 1);
             self.close_validation_dropdown(
                 crate::validation_dropdown::DropdownCloseReason::SelectionChanged,

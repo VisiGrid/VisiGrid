@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use gpui::*;
 
-use crate::app::{Spreadsheet, NUM_ROWS};
+use crate::app::Spreadsheet;
 
 /// Time between scroll steps while the pointer stays outside the grid.
 const TICK: Duration = Duration::from_millis(50);
@@ -173,7 +173,7 @@ impl Spreadsheet {
             -1 => cols.body.first().map_or(last_col, |s| s.index),
             _ => last_col,
         };
-        (row.min(NUM_ROWS - 1), col)
+        (row.min(self.grid_rows() - 1), col.min(self.grid_cols() - 1))
     }
 }
 

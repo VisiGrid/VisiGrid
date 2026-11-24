@@ -360,6 +360,7 @@ pub enum ContextMenuKind {
     Cell,
     RowHeader,
     ColHeader,
+    GridEdge,
 }
 
 /// State for the right-click context menu on cells/headers.

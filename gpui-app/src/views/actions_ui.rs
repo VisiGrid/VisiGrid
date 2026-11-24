@@ -141,6 +141,8 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ToggleFormulaView, _, cx| {
             this.toggle_show_formulas(cx);
         }))
+        .on_action(cx.listener(|this, _: &ToggleLimitedGrid, _, cx| { this.toggle_limited_grid(cx); }))
+        .on_action(cx.listener(|this, _: &ShrinkGridToData, _, cx| { this.shrink_grid_to_data(cx); }))
         .on_action(cx.listener(|this, _: &ToggleGridlines, _, cx| {
             this.toggle_gridlines(cx);
         }))

@@ -284,6 +284,9 @@ fn render_view_menu(highlight: Option<usize>, text_primary: Hsla, text_muted: Hs
         .child(menu_item("Toolbar: Compact", None, 15, h(15), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.set_toolbar_layout(crate::settings::ToolbarLayout::Compact, window, cx); }))
         .child(menu_item("Toolbar: Ribbon", None, 16, h(16), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.set_toolbar_layout(crate::settings::ToolbarLayout::Ribbon, window, cx); }))
         .child(menu_item("Collapse/Expand Ribbon", None, 17, h(17), text_primary, text_muted, selection_bg, cx, |this, window, cx| { this.close_menu(cx); this.toggle_ribbon_collapsed(window, cx); }))
+        .child(menu_separator(border))
+        .child(menu_item("Toggle Limited Grid", None, 18, h(18), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.toggle_limited_grid(cx); }))
+        .child(menu_item("Shrink to data", None, 19, h(19), text_primary, text_muted, selection_bg, cx, |this, _window, cx| { this.close_menu(cx); this.shrink_grid_to_data(cx); }))
 }
 
 // Item indices here must follow menu_model's order of selectable entries:

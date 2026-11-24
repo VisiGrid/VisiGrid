@@ -48,6 +48,7 @@ actions!(editing, [
     FillRight,
     TrimWhitespace,
     InsertRowsOrCols,    // Ctrl+= / Ctrl++ - insert rows/cols based on selection
+    InsertRowsOrColsWithCount, // Ctrl+Shift+Enter - open the count picker
     DeleteRowsOrCols,    // Ctrl+- - delete rows/cols based on selection
     HideRows,            // Ctrl+9 - hide selected rows
     UnhideRows,          // Ctrl+Shift+9 - unhide rows adjacent to selection
@@ -164,6 +165,8 @@ actions!(view, [
     UseRibbonToolbar,
     ToggleRibbonCollapsed,
     ToggleFormulaView,
+    ToggleLimitedGrid,
+    ShrinkGridToData,
     ToggleGridlines,  // Alt+W, V, G - Excel ribbon sequence
     ToggleMinimap,
     ToggleShowZeros,

@@ -44,6 +44,13 @@ pub struct DocumentDisplaySettings {
     /// Show gridlines (overrides user preference for this doc)
     #[serde(default, skip_serializing_if = "Setting::is_inherit")]
     pub show_gridlines: Setting<bool>,
+
+    #[serde(default, skip_serializing_if = "Setting::is_inherit")]
+    pub limited_grid: Setting<bool>,
+
+    /// Desktop view extents, keyed by stable SheetId. Never workbook data.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sheet_extents: std::collections::BTreeMap<u64, crate::limited_grid::GridExtent>,
 }
 
 fn default_show_zeros() -> Setting<bool> {
@@ -60,6 +67,8 @@ impl Default for DocumentDisplaySettings {
             show_formulas: Setting::Inherit, // Inherit from user (which inherits default: false)
             show_zeros: Setting::Value(true),
             show_headers: Setting::Value(true),
+            limited_grid: Setting::Inherit,
+            sheet_extents: Default::default(),
             show_gridlines: Setting::Inherit, // Inherit from user preference
         }
     }

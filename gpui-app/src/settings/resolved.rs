@@ -31,6 +31,7 @@ pub struct ResolvedAppearance {
     pub cell_font: super::CellFontDefaults,
     /// Show gridlines
     pub show_gridlines: bool,
+    pub limited_grid: bool,
     /// Show format bar
     pub show_format_bar: bool,
 }
@@ -111,6 +112,7 @@ impl ResolvedSettings {
                 theme_id: resolve_option(&user.appearance.theme_id),
                 cell_sizes: super::CellSizeDefaults::from_user(user),
                 cell_font: super::CellFontDefaults::from_user(user),
+                limited_grid: resolve_layered(&doc.display.limited_grid, &user.appearance.limited_grid, false),
                 show_gridlines: resolve_layered(
                     &doc.display.show_gridlines,
                     &user.appearance.show_gridlines,
@@ -297,6 +299,7 @@ mod tests {
                 default_row_height: Setting::Inherit,
                 default_font_family: Setting::Inherit,
                 default_font_size: Setting::Inherit,
+                limited_grid: Setting::Inherit,
                 show_gridlines: Setting::Inherit,
                 show_format_bar: Setting::Inherit,
                 toolbar: Default::default(),
@@ -324,6 +327,8 @@ mod tests {
                 show_formulas: Setting::Inherit,
                 show_zeros: Setting::Inherit,
                 show_headers: Setting::Inherit,
+                sheet_extents: Default::default(),
+                limited_grid: Setting::Inherit,
                 show_gridlines: Setting::Inherit,
             },
             calculation: Default::default(),
@@ -456,4 +461,27 @@ mod tests {
         assert!(!json.contains("enter_behavior"));
         assert!(!json.contains("null"));
     }
+}
+
+#[cfg(test)]
+mod limited_grid_tests {
+    #[test]
+    fn limited_grid_defaults_off_and_document_override_wins() {
+        use crate::settings::{DocumentSettings, UserSettings, Setting};
+        use super::ResolvedSettings;
+        let mut user = UserSettings::default();
+        let mut doc = DocumentSettings::default();
+        assert!(!ResolvedSettings::merge(&user, &doc).appearance.limited_grid);
+        assert!(!serde_json::to_string(&doc)
+            .unwrap()
+            .contains("limited_grid"));
+        assert!(!serde_json::to_string(&doc)
+            .unwrap()
+            .contains("sheet_extents"));
+        user.appearance.limited_grid = Setting::Value(true);
+        assert!(ResolvedSettings::merge(&user, &doc).appearance.limited_grid);
+        doc.display.limited_grid = Setting::Value(false);
+        assert!(!ResolvedSettings::merge(&user, &doc).appearance.limited_grid);
+    }
+
 }

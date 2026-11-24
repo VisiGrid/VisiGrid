@@ -8,7 +8,7 @@
 //! - Formula nav mode auto-switching (Caret vs Point)
 
 use gpui::*;
-use crate::app::{Spreadsheet, NUM_COLS};
+use crate::app::Spreadsheet;
 use crate::mode::FormulaNavMode;
 
 /// Determine if the caret is at a position where a cell reference can be inserted.
@@ -120,13 +120,13 @@ impl Spreadsheet {
         let (new_row, new_col) = if let Some((row, col)) = self.formula_ref_cell {
             // Move existing reference
             let new_row = self.next_visible_row(row, dr);
-            let new_col = (col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+            let new_col = (col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize;
             (new_row, new_col)
         } else {
             // Start new reference from the selected cell (editing cell)
             let (sel_row, sel_col) = self.view_state.selected;
             let new_row = self.next_visible_row(sel_row, dr);
-            let new_col = (sel_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+            let new_col = (sel_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize;
             (new_row, new_col)
         };
 
@@ -166,7 +166,7 @@ impl Spreadsheet {
 
         // Extend from the end position
         let new_row = self.next_visible_row(end_row, dr);
-        let new_col = (end_col as i32 + dc).max(0).min(NUM_COLS as i32 - 1) as usize;
+        let new_col = (end_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize;
 
         self.formula_ref_end = Some((new_row, new_col));
 
@@ -349,10 +349,10 @@ impl Spreadsheet {
 
     /// Ensure a cell is visible (scroll if necessary)
     pub(crate) fn ensure_cell_visible(&mut self, row: usize, col: usize) {
-        self.view_state.scroll_row = crate::pane_layout::ensure_visible(self.row_view.row_count(),
+        self.view_state.scroll_row = crate::pane_layout::ensure_visible(self.viewport_rows(),
             self.view_state.frozen_rows, self.view_state.scroll_row, row,
             self.grid_layout.viewport_size.1, |r| self.displayed_row_height(r));
-        self.view_state.scroll_col = crate::pane_layout::ensure_visible(crate::app::NUM_COLS,
+        self.view_state.scroll_col = crate::pane_layout::ensure_visible(self.grid_cols(),
             self.view_state.frozen_cols, self.view_state.scroll_col, col,
             self.grid_layout.viewport_size.0, |c| self.displayed_col_width(c));
     }

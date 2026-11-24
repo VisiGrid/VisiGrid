@@ -473,6 +473,7 @@ pub struct Spreadsheet {
     pub goto_input: String,
     pub(crate) password_prompt: Option<crate::views::password_dialog::PasswordPromptState>,
     pub(crate) opened_from_encrypted_xlsx: bool,
+    pub(crate) count_dialog: Option<crate::count_dialog::CountDialog>,
     pub recovery_warning: Option<String>,
     pub pending_table_recovery: Option<(std::path::PathBuf, visigrid_io::table_recovery::TableLoadIssue)>,
     pub find_input: String,
@@ -777,6 +778,7 @@ pub struct Spreadsheet {
     pub theme_preview: Option<Theme>,  // For live preview in picker
 
     // Cell search cache (generation-based freshness)
+    pub(crate) limited_grid: crate::limited_grid::LimitedGrid,
     pub(crate) cells_rev: u64,  // Monotonically increasing; bumped on any cell value change
     pub(crate) cell_search_cache: CellSearchCache,
     pub(crate) named_range_usage_cache: NamedRangeUsageCache,
@@ -1296,6 +1298,7 @@ impl Spreadsheet {
             goto_input: String::new(),
             password_prompt: None,
             opened_from_encrypted_xlsx: false,
+            count_dialog: None,
             recovery_warning: None,
             pending_table_recovery: None,
             find_input: String::new(),
@@ -1461,6 +1464,7 @@ impl Spreadsheet {
             transform_preview: None,
             theme,
             theme_preview: None,
+            limited_grid: Default::default(),
             cells_rev: 1,  // Start at 1 so cache (starting at 0) is immediately stale
             cell_search_cache: CellSearchCache::default(),
             named_range_usage_cache: NamedRangeUsageCache::default(),
@@ -2222,6 +2226,7 @@ impl Spreadsheet {
     #[inline]
     pub(crate) fn bump_cells_rev(&mut self) {
         self.cells_rev = self.cells_rev.wrapping_add(1);
+        self.limited_grid.invalidate();
     }
 
     pub(crate) fn bump_cf_rules_rev(&mut self) {
@@ -2301,8 +2306,10 @@ impl Spreadsheet {
         match action {
             SearchAction::RunCommand(cmd) => self.dispatch_command(cmd, window, cx),
             SearchAction::JumpToCell { row, col } => {
+                if !self.allow_grid_jump(self.sheet_index(cx), row, col, cx) { return; }
                 self.view_state.selected = (row, col);
                 self.view_state.selection_end = None;
+                self.sync_limited_grid(cx);
                 self.ensure_cell_visible(row, col);
                 cx.notify();
             }
@@ -2565,6 +2572,8 @@ impl Spreadsheet {
                 self.profiler_hotspots = Vec::new();
                 cx.notify();
             }
+            CommandId::ToggleLimitedGrid => self.toggle_limited_grid(cx),
+            CommandId::ShrinkGridToData => self.shrink_grid_to_data(cx),
             CommandId::ToggleMinimap => {
                 self.minimap_visible = !self.minimap_visible;
                 cx.notify();
@@ -4402,6 +4411,7 @@ impl Render for Spreadsheet {
         self.sync_freeze_panes(frozen);
         // Drain pending session server requests (TCP → GUI bridge)
         self.drain_session_requests(cx);
+        self.sync_limited_grid(cx);
 
         // Flush batched navigation moves (multiple arrow repeats → one batch per frame)
         self.flush_pending_nav_moves(cx);
