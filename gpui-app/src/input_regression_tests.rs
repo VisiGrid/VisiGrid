@@ -189,6 +189,9 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
     let item = vcx.debug_bounds("ctx-insert-row-below").unwrap().center();
     vcx.simulate_click(item, Modifiers::none());
     vcx.run_until_parked();
+    let bounds = vcx.debug_bounds("count-popover").unwrap();
+    assert_eq!(bounds.origin, point(px(80.), px(200.)));
+    assert!(bounds.size.width <= px(260.) && bounds.size.height <= px(120.));
     view.update(vcx, |app, cx| {
         let dialog = app.count_dialog.as_mut().expect("row insert dialog");
         assert_eq!(dialog.at, 3);
@@ -202,5 +205,12 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
     view.read_with(vcx, |app, _| {
         assert!(app.count_dialog.is_none());
         assert_eq!(app.history.undo_count(), 1);
+    });
+    view.update(vcx, |app, cx| app.show_insert_count(visigrid_engine::structural::Axis::Row, false, cx));
+    vcx.run_until_parked();
+    vcx.simulate_click(point(px(500.), px(400.)), Modifiers::none());
+    view.read_with(vcx, |app, _| {
+        assert!(app.count_dialog.is_none(), "clicking back on the sheet dismisses the popover");
+        assert_eq!(app.history.undo_count(), 1, "dismissal does not insert");
     });
 }

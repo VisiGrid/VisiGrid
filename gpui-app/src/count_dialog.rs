@@ -13,6 +13,7 @@ pub(crate) struct CountDialog {
     pub at: usize,
     pub max: usize,
     pub input: String,
+    pub anchor: Option<Point<Pixels>>,
 }
 
 impl CountDialog {
@@ -73,6 +74,7 @@ impl Spreadsheet {
             at,
             max,
             input: String::new(),
+            anchor: None,
         });
         self.mode = Mode::CountDialog;
         cx.notify();
@@ -120,81 +122,125 @@ impl Spreadsheet {
     }
 }
 
-pub(crate) fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &Spreadsheet,
+    window: &Window,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
     let dialog = app.count_dialog.as_ref().unwrap();
     let valid = dialog.count().is_some();
-    let content = div()
-        .w(px(420.))
-        .p_6()
-        .rounded_md()
-        .shadow_lg()
-        .bg(app.token(TokenKey::PanelBg))
-        .text_color(app.token(TokenKey::TextPrimary))
-        .flex()
-        .flex_col()
-        .gap_4()
-        .child(div().text_lg().child(dialog.title))
-        .child(format!("Count (1–{})", dialog.max))
-        .child(
-            div()
-                .id("count-input")
-                .p_3()
-                .border_1()
-                .border_color(app.token(TokenKey::Accent))
-                .bg(app.token(TokenKey::EditorBg))
-                .child(format!("{}│", dialog.input)),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(app.token(TokenKey::TextMuted))
-                .child("Enter to confirm · Esc to cancel"),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_4()
-                .child(
-                    div()
-                        .id("count-cancel")
-                        .debug_selector(|| "count-cancel".into())
-                        .p_2()
-                        .cursor_pointer()
-                        .child("Cancel")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|app, _, _, cx| {
-                                cx.stop_propagation();
-                                app.close_count_dialog(cx);
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("count-confirm")
-                        .debug_selector(|| "count-confirm".into())
-                        .p_2()
-                        .cursor_pointer()
-                        .text_color(app.token(if valid {
-                            TokenKey::Accent
-                        } else {
-                            TokenKey::TextDisabled
-                        }))
-                        .child("Confirm")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|app, _, _, cx| {
-                                cx.stop_propagation();
-                                app.confirm_count_dialog(cx);
-                            }),
-                        ),
-                ),
-        );
-    crate::ui::modal_overlay(
+    let cell = app.active_cell_rect();
+    let (origin_x, origin_y) = app.grid_layout.grid_body_origin;
+    let anchor = dialog.anchor.unwrap_or_else(|| match dialog.axis {
+        Axis::Row => point(px(origin_x + 8.), px(origin_y + cell.y)),
+        Axis::Col => point(px(origin_x + cell.x), px(origin_y)),
+    });
+    let viewport = window.viewport_size();
+    let (x, y) = crate::ui::clamp_to_viewport(
+        anchor.x.into(),
+        anchor.y.into(),
+        248.,
+        112.,
+        viewport.width.into(),
+        viewport.height.into(),
+    );
+    let hint = if !dialog.input.is_empty() && !valid {
+        format!("Enter a count from 1 to {}", dialog.max)
+    } else {
+        "Enter to insert · Esc to cancel".into()
+    };
+    crate::ui::popup(
         "count-dialog",
+        app.token(TokenKey::PanelBg),
+        app.token(TokenKey::PanelBorder),
         |app, cx| app.close_count_dialog(cx),
-        content,
         cx,
+    )
+    .debug_selector(|| "count-popover".into())
+    .left(px(x))
+    .top(px(y))
+    .w(px(248.))
+    .p_3()
+    .gap_2()
+    .text_size(px(12.))
+    .text_color(app.token(TokenKey::TextPrimary))
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(dialog.title)
+            .child(
+                div()
+                    .id("count-cancel")
+                    .debug_selector(|| "count-cancel".into())
+                    .px_1()
+                    .cursor_pointer()
+                    .text_color(app.token(TokenKey::TextMuted))
+                    .child("×")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|app, _, _, cx| {
+                            cx.stop_propagation();
+                            app.close_count_dialog(cx);
+                        }),
+                    ),
+            ),
+    )
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("count-input")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_1()
+                    .rounded_sm()
+                    .border_color(app.token(TokenKey::Accent))
+                    .bg(app.token(TokenKey::EditorBg))
+                    .child(format!("{}│", dialog.input)),
+            )
+            .child(
+                div()
+                    .id("count-confirm")
+                    .flex_shrink_0()
+                    .debug_selector(|| "count-confirm".into())
+                    .h(px(28.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(app
+                        .token(TokenKey::Accent)
+                        .opacity(if valid { 0.15 } else { 0.05 }))
+                    .text_color(app.token(if valid {
+                        TokenKey::Accent
+                    } else {
+                        TokenKey::TextDisabled
+                    }))
+                    .child("Insert")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|app, _, _, cx| {
+                            cx.stop_propagation();
+                            app.confirm_count_dialog(cx);
+                        }),
+                    ),
+            ),
+    )
+    .child(
+        div()
+            .text_size(px(11.))
+            .text_color(app.token(TokenKey::TextMuted))
+            .child(hint),
     )
 }
