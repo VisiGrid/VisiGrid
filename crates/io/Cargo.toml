@@ -20,7 +20,7 @@ native = [
     "dep:chrono", "dep:dirs", "dep:toml", "dep:toml_edit", "dep:tempfile", "dep:parquet", "dep:libduckdb-sys", "dep:bytes",
     "dep:visigrid-config", "dep:reqwest",
     "dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots",
-    "dep:cfb", "dep:aes", "dep:cbc", "dep:hmac", "dep:sha1", "dep:subtle", "dep:zeroize", "dep:base64",
+    "dep:getrandom", "dep:cfb", "dep:aes", "dep:cbc", "dep:hmac", "dep:sha1", "dep:subtle", "dep:zeroize", "dep:base64",
 ]
 
 [dependencies]
@@ -49,10 +49,11 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "1", optional = true }
 sha2 = { workspace = true }
-# MS-OFFCRYPTO decryption for password-protected .xlsx/.xlsm/.xlsb workbooks.
+# Native MS-OFFCRYPTO reader and Agile XLSX writer.
+getrandom = { version = "0.3", optional = true }
 cfb = { version = "0.16", optional = true }
-aes = { version = "0.8", optional = true }
-cbc = { version = "0.1", optional = true }
+aes = { version = "0.8", features = ["zeroize"], optional = true }
+cbc = { version = "0.1", features = ["zeroize"], optional = true }
 hmac = { workspace = true, optional = true }
 sha1 = { version = "0.10", optional = true }
 subtle = { version = "2", optional = true }

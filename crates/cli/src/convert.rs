@@ -9,19 +9,60 @@ use std::path::PathBuf;
 use crate::sheet_ops;
 use crate::{CliError, Format, InspectFormat, WhereClause, parse_where, resolve_where_columns, filter_row_indices, resolve_sheet};
 
-/// Shared non-interactive XLSX output. Warnings are data-fidelity notices, so
+#[derive(clap::Args, Debug, Default)]
+pub(crate) struct XlsxEncryption {
+    /// Encrypt XLSX output. Protected sources keep their password by default.
+    /// Set VISIGRID_XLSX_OUTPUT_PASSWORD to choose a new password, including
+    /// when changing the password on a protected source.
+    #[arg(long, conflicts_with = "no_encrypt")]
+    encrypt: bool,
+    /// Write plain XLSX output even when the input workbook was password-protected.
+    #[arg(long)]
+    no_encrypt: bool,
+}
+
+impl XlsxEncryption {
+    pub(crate) fn validate(&self, xlsx_output: bool) -> Result<(), CliError> {
+        if self.encrypt && !xlsx_output {
+            return Err(CliError::args("--encrypt requires XLSX output"));
+        }
+        Ok(())
+    }
+}
+
+/// Shared XLSX output. Warnings are data-fidelity notices, so
 /// they remain visible even with --quiet and never enter the binary stdout.
 pub(crate) fn write_xlsx(
     workbook: &visigrid_engine::workbook::Workbook,
     path: Option<&std::path::Path>,
     layouts: Option<&[visigrid_io::xlsx::ExportLayout]>,
+    encryption: &XlsxEncryption,
+    source_password: Option<visigrid_io::xlsx_crypto::Zeroizing<String>>,
 ) -> Result<(), CliError> {
+    use crate::util::{prompt_output_password, XLSX_OUTPUT_PASSWORD_ENV};
+    use visigrid_io::xlsx_crypto::{encrypt_ooxml, Zeroizing};
+
     let (bytes, report) = visigrid_io::xlsx::export_to_buffer_with_stored_fallback(workbook, layouts)
         .map_err(CliError::io)?;
+    let (bytes, notice) = if !encryption.no_encrypt && (encryption.encrypt || source_password.is_some()) {
+        let (password, notice) = match (std::env::var(XLSX_OUTPUT_PASSWORD_ENV), source_password) {
+            (Ok(value), _) => (Zeroizing::new(value), "XLSX output encrypted with the supplied output password."),
+            (Err(std::env::VarError::NotPresent), Some(original)) =>
+                (original, "XLSX output encrypted with the source workbook password."),
+            (Err(std::env::VarError::NotPresent), None) =>
+                (prompt_output_password().map_err(CliError::args)?, "XLSX output encrypted with the new password."),
+            (Err(std::env::VarError::NotUnicode(_)), _) => return Err(CliError::args(
+                format!("{XLSX_OUTPUT_PASSWORD_ENV} must be valid Unicode"))),
+        };
+        (encrypt_ooxml(&bytes, &password).map_err(|e| CliError::io(e.to_string()))?, Some(notice))
+    } else {
+        (bytes, source_password.map(|_| "warning: writing an unencrypted XLSX copy of a protected workbook."))
+    };
     match path {
         Some(path) => std::fs::write(path, &bytes),
         None => io::stdout().write_all(&bytes),
     }.map_err(|e| CliError::io(e.to_string()))?;
+    if let Some(notice) = notice { eprintln!("{notice}"); }
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
@@ -166,7 +207,10 @@ pub(crate) fn cmd_convert(
     parquet_plan: bool,
     text_columns: Vec<String>,
     banded: bool,
+    encryption: XlsxEncryption,
 ) -> Result<(), CliError> {
+    encryption.validate(matches!(to, Format::Xlsx))?;
+    let mut xlsx_options = visigrid_io::xlsx::ImportOptions::default();
     if (parquet_plan || !text_columns.is_empty()) && !matches!(to, Format::Parquet | Format::Duckdb) {
         return Err(CliError::args("--export-plan and --text-column require -t parquet or -t duckdb"));
     }
@@ -241,7 +285,7 @@ pub(crate) fn cmd_convert(
     }
 
     if !reshaping && workbook_in && matches!(to, Format::JsonFull | Format::Xlsx | Format::Sheet) {
-        let (wb, layouts, active) = read_workbook_full(input.as_deref(), input_format)?;
+        let (wb, layouts, active) = read_workbook_full(input.as_deref(), input_format, &mut xlsx_options)?;
 
         match to {
             // json-full always emits v2 workbook form — see docs/cli/convert.md.
@@ -266,7 +310,7 @@ pub(crate) fn cmd_convert(
             Format::Xlsx => {
                 let export_layouts: Vec<visigrid_io::xlsx::ExportLayout> =
                     layouts.iter().map(sheet_layout_to_export).collect();
-                write_xlsx(&wb, output.as_deref(), Some(&export_layouts))?;
+                write_xlsx(&wb, output.as_deref(), Some(&export_layouts), &encryption, xlsx_options.password)?;
             }
             Format::Sheet => {
                 let path = output.as_ref().ok_or_else(|| CliError::args("sheet output requires -o FILE"))?;
@@ -292,9 +336,9 @@ pub(crate) fn cmd_convert(
 
     // Read input into sheet (convert always starts at A1)
     let mut sheet = match &input {
-        Some(path) => read_file(path, input_format, csv, sheet_arg.as_deref())?,
+        Some(path) => read_file(path, input_format, csv, sheet_arg.as_deref(), &mut xlsx_options)?,
         None if matches!(input_format, Format::JsonFull) && matches!(to, Format::Parquet | Format::Duckdb) => {
-            let (workbook, _, active) = read_workbook_full(None, input_format)?;
+            let (workbook, _, active) = read_workbook_full(None, input_format, &mut xlsx_options)?;
             let index = if sheet_arg.is_some() { resolve_sheet(&workbook, sheet_arg.as_deref())?.0 } else { active };
             workbook.into_sheets().swap_remove(index)
         }
@@ -452,7 +496,7 @@ pub(crate) fn cmd_convert(
                 sheet
             };
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![out_sheet], 0);
-            write_xlsx(&wb, output.as_deref(), None)?;
+            write_xlsx(&wb, output.as_deref(), None, &encryption, xlsx_options.password)?;
             return Ok(());
         }
         Format::Sheet => {
@@ -594,7 +638,7 @@ pub(crate) fn read_parquet_whole(path: &std::path::Path) -> Result<visigrid_engi
     Ok(imported.sheet)
 }
 
-pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::CsvOptions, sheet_arg: Option<&str>) -> Result<visigrid_engine::sheet::Sheet, CliError> {
+pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::CsvOptions, sheet_arg: Option<&str>, xlsx_options: &mut visigrid_io::xlsx::ImportOptions) -> Result<visigrid_engine::sheet::Sheet, CliError> {
     match format {
         // A file's delimiter is sniffed. `--delimiter` sets the OUTPUT (and
         // piped input, see read_stdin), so `convert in.csv -t csv
@@ -615,7 +659,7 @@ pub(crate) fn read_file(path: &PathBuf, format: Format, csv: &visigrid_io::csv::
                 Some(visigrid_io::duckdb::IMPORT_CELL_LIMIT), true).map_err(CliError::parse)?.sheet)
         }
         Format::Xlsx => {
-            let (workbook, _stats) = crate::util::import_xlsx_cli(path, visigrid_io::xlsx::ImportOptions::default())
+            let (workbook, _stats) = crate::util::import_xlsx_with_password(path, xlsx_options)
                 .map_err(CliError::parse)?;
             let (idx, _) = resolve_sheet(&workbook, sheet_arg)?;
             Ok(workbook.into_sheets().swap_remove(idx))
@@ -678,10 +722,10 @@ fn write_banded(
     }
     let dir = output.ok_or_else(|| CliError::args("--banded writes a directory: give it with -o DIR"))?;
     let (wb, layouts, active) = if workbook_in {
-        read_workbook_full(input, input_format)?
+        read_workbook_full(input, input_format, &mut Default::default())?
     } else {
         let sheet = match input {
-            Some(path) => read_file(&path.to_path_buf(), input_format, csv, None)?,
+            Some(path) => read_file(&path.to_path_buf(), input_format, csv, None, &mut Default::default())?,
             None => read_stdin(input_format, delimiter, csv, 0, 0)?,
         };
         let text = visigrid_io::json::export_full(&sheet).map_err(CliError::io)?;
@@ -707,6 +751,7 @@ fn write_banded(
 fn read_workbook_full(
     input: Option<&std::path::Path>,
     format: Format,
+    xlsx_options: &mut visigrid_io::xlsx::ImportOptions,
 ) -> Result<
     (
         visigrid_engine::workbook::Workbook,
@@ -740,7 +785,7 @@ fn read_workbook_full(
             let path = input.ok_or_else(|| {
                 CliError::args("xlsx and sheet formats require file input")
             })?;
-            let (wb, stats) = crate::util::import_xlsx_cli(path, visigrid_io::xlsx::ImportOptions::default())
+            let (wb, stats) = crate::util::import_xlsx_with_password(path, xlsx_options)
                 .map_err(CliError::parse)?;
             // Raw Excel units (character widths, points) → pixels.
             let layouts: Vec<_> = stats

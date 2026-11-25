@@ -390,6 +390,8 @@ impl From<String> for ImportError {
 impl From<crate::xlsx_crypto::CryptoError> for ImportError {
     fn from(err: crate::xlsx_crypto::CryptoError) -> Self {
         match err {
+            crate::xlsx_crypto::CryptoError::InvalidPasswordLength
+            | crate::xlsx_crypto::CryptoError::EncryptionFailed(_) => ImportError::Other(err.to_string()),
             crate::xlsx_crypto::CryptoError::PasswordRequired => ImportError::PasswordRequired,
             crate::xlsx_crypto::CryptoError::IncorrectPassword => ImportError::IncorrectPassword,
             crate::xlsx_crypto::CryptoError::IntegrityCheckFailed => {

@@ -138,6 +138,9 @@ Examples:
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
 
+        #[command(flatten)]
+        encryption: XlsxEncryption,
+
         /// Sheet name for multi-sheet files
         #[arg(long)]
         sheet: Option<String>,
@@ -1439,6 +1442,9 @@ Examples:
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
 
+        #[command(flatten)]
+        encryption: XlsxEncryption,
+
         /// Also write the run report as JSON to this file
         #[arg(long)]
         report: Option<PathBuf>,
@@ -1994,8 +2000,8 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some(Commands::ListFunctions) => cmd_list_functions(),
-        Some(Commands::Recipe(RecipeCommands::Run { recipe, source, output, report, quiet })) => {
-            recipe_cmd::cmd_recipe_run(recipe, source, output, report, quiet)
+        Some(Commands::Recipe(RecipeCommands::Run { recipe, source, output, report, quiet, encryption })) => {
+            recipe_cmd::cmd_recipe_run(recipe, source, output, report, quiet, encryption)
         }
         Some(Commands::Visibooks(VisibooksCommands::Key { server, delete })) => visibooks_cmd::cmd_key(server, delete),
         Some(Commands::Visibooks(VisibooksCommands::Entities { server })) => visibooks_cmd::cmd_entities(server),
@@ -2016,11 +2022,12 @@ fn main() -> ExitCode {
             parquet_plan,
             text_column,
             banded,
+            encryption,
             quiet,
             csv,
         }) => {
             csv.to_options(delimiter).and_then(|csv| {
-                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv, parquet_plan, text_column, banded)
+                cmd_convert(input, from, to, output, sheet, delimiter, headers, where_clauses, select_args, rename, quiet, &csv, parquet_plan, text_column, banded, encryption)
             })
         }
         Some(Commands::Calc {
@@ -2888,7 +2895,7 @@ fn cmd_diff(
         let p = left_path.as_ref().unwrap();
         let fmt = infer_format(p)?;
         let label = p.display().to_string();
-        (read_file(p, fmt, &diff_csv, None)?, label)
+        (read_file(p, fmt, &diff_csv, None, &mut Default::default())?, label)
     };
 
     let (right_sheet, right_label) = if right_is_stdin {
@@ -2898,7 +2905,7 @@ fn cmd_diff(
         let p = right_path.as_ref().unwrap();
         let fmt = infer_format(p)?;
         let label = p.display().to_string();
-        (read_file(p, fmt, &diff_csv, None)?, label)
+        (read_file(p, fmt, &diff_csv, None, &mut Default::default())?, label)
     };
 
     let (left_bounds_rows, left_bounds_cols) = get_data_bounds(&left_sheet);

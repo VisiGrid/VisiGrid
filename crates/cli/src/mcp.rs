@@ -644,7 +644,7 @@ impl McpServer {
                     .create_new(true)
                     .open(path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
-                if let Err(e) = crate::recipe_cmd::write_output(&result.output.to_sheet(), path) {
+                if let Err(e) = crate::recipe_cmd::write_output(&result.output.to_sheet(), path, &Default::default()) {
                     let _ = std::fs::remove_file(path);
                     return Err(e.message);
                 }

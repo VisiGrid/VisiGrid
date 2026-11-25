@@ -7857,6 +7857,7 @@ dependencies = [
  "csv",
  "dirs 5.0.1",
  "encoding_rs",
+ "getrandom 0.3.4",
  "hmac 0.12.1",
  "libduckdb-sys",
  "miniz_oxide",

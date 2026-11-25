@@ -289,3 +289,28 @@ fn recipe_run_reads_nested_json_and_a_folder_of_json_lines() {
     assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(), ["user,Total", "a,5", "b,2"]);
 }
+
+#[test]
+fn recipe_run_can_encrypt_xlsx_output() {
+    let dir = setup("encrypted_xlsx");
+    let dest = dir.join("result.xlsx");
+    let result = Command::new(env!("CARGO_BIN_EXE_vgrid"))
+        .args(["recipe", "run"])
+        .arg(dir.join("orders.recipe.toml"))
+        .args(["--encrypt", "-o"])
+        .arg(&dest)
+        .env("VISIGRID_XLSX_OUTPUT_PASSWORD", "recipe-test")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let protected = std::fs::read(dest).unwrap();
+    assert!(
+        visigrid_io::xlsx_crypto::decrypt_ooxml(&protected, "recipe-test")
+            .unwrap()
+            .starts_with(b"PK")
+    );
+}
