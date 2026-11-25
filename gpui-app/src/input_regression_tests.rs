@@ -460,10 +460,10 @@ fn paste_special_uses_top_left_and_selects_the_source_sized_rectangle(cx: &mut T
 }
 
 #[gpui::test]
-fn one_cell_paste_special_writes_and_selects_only_the_top_left(cx: &mut TestAppContext) {
+fn one_cell_formula_fallback_fills_selection_while_values_and_formats_use_top_left(cx: &mut TestAppContext) {
     let view = setup_paste(cx);
     view.update(cx, |app, _, cx| {
-        // Exercise the contents fallback for external formula text as well.
+        // Use the normal contents paste when Paste Formulas falls back.
         cx.global_mut::<crate::settings::SettingsStore>()
             .user_settings_mut()
             .editing
@@ -478,16 +478,10 @@ fn one_cell_paste_special_writes_and_selects_only_the_top_left(cx: &mut TestAppC
         app.view_state.selected = (0, 0);
         app.view_state.selection_end = None;
         app.copy(cx);
-        let copied = app.internal_clipboard.as_ref().unwrap();
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string_with_json_metadata(
-            copied.raw_tsv.clone(),
-            copied.id.to_string(),
-        ));
-
         let select_target = |app: &mut Spreadsheet| {
             app.view_state.selected = (4, 5);
             app.view_state.selection_end = Some((2, 5));
-            app.view_state.additional_selections.push(((3, 8), None));
+            app.view_state.additional_selections = vec![((3, 8), None)];
         };
         let check_target = |app: &Spreadsheet, cx: &gpui::App| {
             assert_eq!(app.view_state.selected, (2, 5));
@@ -501,17 +495,34 @@ fn one_cell_paste_special_writes_and_selects_only_the_top_left(cx: &mut TestAppC
             assert!(!app.sheet(cx).get_format(3, 8).bold);
         };
 
+        let check_fill = |app: &Spreadsheet, cx: &gpui::App, formula: &str| {
+            for row in 2..=4 {
+                assert_eq!(app.sheet(cx).get_raw(row, 5), formula);
+            }
+            assert_eq!(app.sheet(cx).get_raw(3, 8), formula);
+            assert_eq!(app.view_state.selected, (4, 5));
+            assert_eq!(app.view_state.selection_end, Some((2, 5)));
+            assert_eq!(app.view_state.additional_selections.as_slice(), &[((3, 8), None)]);
+        };
+
+        // Use the clipboard exactly as Copy produced it.
+        select_target(app);
+        app.paste_formulas(cx);
+        check_fill(app, cx, "=2+3");
+        app.undo(cx);
+
         select_target(app);
         app.paste_values(cx);
         assert_eq!(app.sheet(cx).get_raw(2, 5), "5");
         check_target(app, cx);
         app.undo(cx);
 
-        select_target(app);
-        app.paste_formulas(cx);
-        assert_eq!(app.sheet(cx).get_raw(2, 5), "=2+3");
-        check_target(app, cx);
-        app.undo(cx);
+        // Formats requires matching internal clipboard metadata.
+        let copied = app.internal_clipboard.as_ref().unwrap();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string_with_json_metadata(
+            copied.raw_tsv.clone(),
+            copied.id.to_string(),
+        ));
 
         select_target(app);
         app.paste_formats(cx);
@@ -523,8 +534,7 @@ fn one_cell_paste_special_writes_and_selects_only_the_top_left(cx: &mut TestAppC
         select_target(app);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("=8+1".into()));
         app.paste_formulas(cx);
-        assert_eq!(app.sheet(cx).get_raw(2, 5), "=8+1");
-        check_target(app, cx);
+        check_fill(app, cx, "=8+1");
     })
     .unwrap();
 }

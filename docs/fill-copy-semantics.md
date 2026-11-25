@@ -109,7 +109,7 @@ Cut, Fill Down/Right, Ctrl+Enter and the fill handle can operate in safe cells a
 - With a single cell selected, the active cell is the top-left.
 - Paste always overwrites; never inserts/shifts cells
 - If target extends beyond sheet bounds: operation fails with error message
-- With one copied cell, Contents and All fill the selected cells and preserve the selection. Values, Formulas and Formats write and select only the top-left cell.
+- With one copied cell, Contents and All fill the selected cells and preserve the selection. Paste Formulas does the same when it falls back to a normal contents paste. Values and Formats are currently limited to writing and selecting the top-left cell.
 - After a successful multi-cell paste (Contents, All, Values, Formulas or Formats), select the written rectangle with its top-left active.
 
 ### Paste while Table filters are active
@@ -294,7 +294,7 @@ C1: =C2+10
 
 ## Interaction with Additional Selections
 
-Rectangular paste skips additional Ctrl+click selections. A one-cell Contents or All broadcast fills them along with the primary selection.
+Rectangular paste skips additional Ctrl+click selections. A one-cell broadcast fills them along with the primary selection.
 
 Rationale:
 - Reduces combinatorial complexity
@@ -346,7 +346,7 @@ Copy/Cut:
 
 Paste:
   Source rectangle + primary selection → Written rectangle selected, top-left active
-  One-cell Contents or All broadcast → Selected cells filled → Selection preserved
+  One-cell broadcast → Selected cells filled → Selection preserved
 
 Fill Down/Right:
   Selection → Source replicated to target → Selection unchanged

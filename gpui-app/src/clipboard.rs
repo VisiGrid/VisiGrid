@@ -712,10 +712,6 @@ impl Spreadsheet {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        self.paste_default(true, cx);
-    }
-
-    fn paste_default(&mut self, broadcast_single_cell: bool, cx: &mut Context<Self>) {
         // Block during preview mode
         if self.block_if_previewing_only(cx) { return; }
 
@@ -739,13 +735,13 @@ impl Spreadsheet {
         // Ctrl+V brings contents (formulas, comments, merges). Cells that are
         // already formatted keep their look; blank, unformatted cells take the
         // copied formatting, so pasting into empty space still looks right.
-        self.paste_contents(TablePasteKind::Contents, broadcast_single_cell, cx);
+        self.paste_contents(TablePasteKind::Contents, cx);
     }
 
     /// Paste Special > All: contents plus the copied cells' formatting.
     /// Explicit, so it never inherits the values-only preference.
     pub fn paste_all(&mut self, cx: &mut Context<Self>) {
-        self.paste_contents(TablePasteKind::All, true, cx);
+        self.paste_contents(TablePasteKind::All, cx);
     }
 
     /// Set a pasted cell's format, recording the change for undo. Unless
@@ -784,7 +780,7 @@ impl Spreadsheet {
     /// Full paste. Formatting comes only from an internal clipboard: with
     /// Paste Special > All it replaces every destination format;
     /// without, it fills only unformatted cells (Ctrl+V).
-    fn paste_contents(&mut self, kind: TablePasteKind, broadcast_single_cell: bool, cx: &mut Context<Self>) {
+    fn paste_contents(&mut self, kind: TablePasteKind, cx: &mut Context<Self>) {
         if self.block_if_previewing_only(cx) { return; }
         let all_formats = kind == TablePasteKind::All;
         if self.paste_table_headers(kind, cx) { return; }
@@ -870,7 +866,7 @@ impl Spreadsheet {
             );
 
             // If single cell and multi-selection, broadcast to all selected cells
-            if broadcast_single_cell && is_single_cell && self.is_multi_selection() {
+            if is_single_cell && self.is_multi_selection() {
                 if self.block_if_selection_in_pivot("paste", cx) { return; }
                 if self.block_selection_table_headers("paste", cx) { return; }
                 let single_value = parsed_grid.as_ref().map_or_else(
@@ -1723,9 +1719,7 @@ impl Spreadsheet {
         });
 
         if !is_internal {
-            // Use the normal clipboard parser and preference, with the single-cell
-            // destination rule shared by Values, Formulas and Formats.
-            self.paste_default(false, cx);
+            self.paste(cx);
             return;
         }
 
