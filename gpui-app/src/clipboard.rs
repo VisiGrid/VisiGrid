@@ -757,6 +757,26 @@ impl Spreadsheet {
         }
     }
 
+    /// A paste into a range selects the cells it covered, in view coordinates.
+    /// A paste into a single cell keeps that cell active.
+    pub(crate) fn select_pasted_range(&mut self, rows: usize, cols: usize) {
+        let (start, end) = self.selection_range();
+        if start == end || rows == 0 || cols == 0 {
+            return;
+        }
+        let last_row = if self.row_view.is_filtered() {
+            let Some(first) = self.row_view.visible_index_of(start.0) else { return; };
+            let visible = self.row_view.visible_rows();
+            visible[(first + rows - 1).min(visible.len() - 1)]
+        } else {
+            (start.0 + rows - 1).min(NUM_ROWS - 1)
+        };
+        let last = (last_row, (start.1 + cols - 1).min(NUM_COLS - 1));
+        let state = self.active_view_state_mut();
+        state.selected = start;
+        state.selection_end = (last != start).then_some(last);
+    }
+
     /// Full paste. Formatting comes only from an internal clipboard: with
     /// `all_formats` it replaces every destination format (Paste Special > All);
     /// without, it fills only unformatted cells (Ctrl+V).
@@ -800,7 +820,6 @@ impl Spreadsheet {
         };
 
         if let Some(text) = text {
-            let (start_row, start_col) = self.view_state.selected;
             let is_filtered = self.row_view.is_filtered();
             let mut changes = Vec::new();
             let mut comment_patches = Vec::new();
@@ -947,11 +966,10 @@ impl Spreadsheet {
 
                 // Record with provenance
                 if !changes.is_empty() || !comment_patches.is_empty() || !format_patches.is_empty() {
-                    let data_start_row = self.row_view.view_to_data(start_row);
                     let provenance = MutationOp::Paste {
                         sheet: self.sheet(cx).id,
-                        dst_row: data_start_row,
-                        dst_col: start_col,
+                        dst_row: primary_data_row,
+                        dst_col: primary_cell.1,
                         values: values_grid,
                         mode: PasteMode::Both,
                     }.to_provenance(&self.sheet(cx).name);
@@ -978,6 +996,7 @@ impl Spreadsheet {
             }
 
             // Standard paste (multi-cell clipboard or single cell to single selection)
+            let ((start_row, start_col), _) = self.selection_range();
             // When filtered, paste to consecutive visible rows
             let data_start_row = self.row_view.view_to_data(start_row);
 
@@ -1220,6 +1239,8 @@ impl Spreadsheet {
                 self.status_message = Some("Pasted from clipboard".to_string());
             }
 
+            self.select_pasted_range(paste_rows, paste_cols);
+
             // Clear copy border overlay — clipboard consumed
             self.clipboard_visual_range = None;
 
@@ -1363,21 +1384,21 @@ impl Spreadsheet {
             })
         });
 
-        let (start_row, start_col) = self.view_state.selected;
+        let ((start_row, start_col), _) = self.selection_range();
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
 
+        let (paste_rows, paste_cols) = if use_internal_values {
+            self.internal_clipboard.as_ref()
+                .map(|ic| (ic.values.len(), ic.values.first().map_or(0, |r| r.len())))
+                .unwrap_or((0, 0))
+        } else {
+            let text = system_text.as_deref().unwrap_or("");
+            let lines: Vec<&str> = text.lines().collect();
+            (lines.len(), lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1))
+        };
         // Block if paste would split a merged region
         {
-            let (paste_rows, paste_cols) = if use_internal_values {
-                self.internal_clipboard.as_ref()
-                    .map(|ic| (ic.values.len(), ic.values.first().map_or(0, |r| r.len())))
-                    .unwrap_or((0, 0))
-            } else {
-                let text = system_text.as_deref().unwrap_or("");
-                let lines: Vec<&str> = text.lines().collect();
-                (lines.len(), lines.iter().map(|l| l.split('\t').count()).max().unwrap_or(1))
-            };
             if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
             if paste_rows > 0 && paste_cols > 0 {
                 let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
@@ -1544,6 +1565,7 @@ impl Spreadsheet {
         } else {
             self.status_message = Some("Pasted values".to_string());
         }
+        self.select_pasted_range(paste_rows, paste_cols);
         self.clipboard_visual_range = None;
         cx.notify();
     }
@@ -1704,15 +1726,15 @@ impl Spreadsheet {
         }
 
         // Internal paste - use raw_tsv with reference adjustment
-        let (start_row, start_col) = self.view_state.selected;
+        let ((start_row, start_col), _) = self.selection_range();
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
 
         let raw_cells = self.internal_clipboard.as_ref().map(|ic| ic.raw_cells.clone()).unwrap_or_default();
+        let paste_rows = raw_cells.len();
+        let paste_cols = raw_cells.iter().map(Vec::len).max().unwrap_or(1);
         // Block if paste would split a merged region
         {
-            let paste_rows = raw_cells.len();
-            let paste_cols = raw_cells.iter().map(Vec::len).max().unwrap_or(1);
             if self.block_table_paste(start_row, start_col, paste_rows, paste_cols, cx) { return; }
             if paste_rows > 0 && paste_cols > 0 {
                 let dest_max_row = (data_start_row + paste_rows).saturating_sub(1);
@@ -1813,6 +1835,7 @@ impl Spreadsheet {
             self.is_modified = true;
         }
 
+        self.select_pasted_range(paste_rows, paste_cols);
         self.clipboard_visual_range = None;
         self.status_message = Some("Pasted formulas".to_string());
         self.maybe_smoke_recalc(cx);
@@ -1863,7 +1886,7 @@ impl Spreadsheet {
             }
         };
 
-        let (start_row, start_col) = self.view_state.selected;
+        let ((start_row, start_col), _) = self.selection_range();
         let is_filtered = self.row_view.is_filtered();
         let data_start_row = self.row_view.view_to_data(start_row);
 
@@ -1941,6 +1964,7 @@ impl Spreadsheet {
         self.clipboard_visual_range = None;
         let rows = formats.len();
         let cols = formats.first().map(|r| r.len()).unwrap_or(0);
+        self.select_pasted_range(rows, cols);
         self.status_message = Some(format!("Pasted formats to {}x{} range", rows, cols));
         cx.notify();
     }

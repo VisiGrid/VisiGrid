@@ -399,6 +399,7 @@ impl Spreadsheet {
                     format!("Paste and append {count} Table row(s)"),
                     cx,
                 );
+                self.select_pasted_range(values.len(), width);
                 self.clipboard_visual_range = None;
                 let failures = self.wb(cx).validate_range(
                     self.sheet_index(cx),

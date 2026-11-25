@@ -314,3 +314,225 @@ fn header_insert_menu_opens_count_picker_and_button_inserts(cx: &mut TestAppCont
         assert_eq!(app.history.undo_count(), 1, "dismissal does not insert");
     });
 }
+
+fn primary_key(cx: &mut TestAppContext, view: WindowHandle<Spreadsheet>, key: &str) {
+    let modifier = crate::keybindings::primary_mod_label(crate::settings::ModifierStyle::Platform);
+    cx.simulate_keystrokes(
+        view.into(),
+        &format!("{}-{key}", modifier.to_ascii_lowercase()),
+    );
+}
+
+fn setup_paste(cx: &mut TestAppContext) -> WindowHandle<Spreadsheet> {
+    let view = setup(cx);
+    // Keep the copy border's wall-clock animation out of the GPUI test scheduler.
+    view.update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    gpui::VisualTestContext::from_window(view.into(), cx).deactivate_window();
+    view
+}
+
+#[gpui::test]
+fn range_paste_uses_top_left_in_either_drag_direction_and_undo_restores_cells(
+    cx: &mut TestAppContext,
+) {
+    let view = setup_paste(cx);
+    cx.update(|cx| {
+        cx.global_mut::<crate::settings::SettingsStore>()
+            .user_settings_mut()
+            .editing
+            .paste_values_by_default = crate::settings::Setting::Value(false);
+    });
+    view.update(cx, |app, window, cx| {
+        window.focus(&app.focus_handle, cx);
+        app.wb_mut(cx, |wb| {
+            for row in 2..=6 {
+                wb.set_cell_value_tracked(0, row, 1, &format!("source {row}"));
+                wb.set_cell_value_tracked(0, row, 5, &format!("original {row}"));
+            }
+        });
+        app.view_state.selected = (2, 1);
+        app.view_state.selection_end = Some((6, 1));
+    })
+    .unwrap();
+    primary_key(cx, view, "c");
+
+    // A single-cell destination keeps its active cell after a multi-cell paste.
+    view.update(cx, |app, _, _| {
+        app.view_state.selected = (2, 5);
+        app.view_state.selection_end = None;
+    })
+    .unwrap();
+    primary_key(cx, view, "v");
+    view.update(cx, |app, _, cx| {
+        assert_eq!(app.sheet(cx).get_raw(6, 5), "source 6");
+        assert_eq!(app.view_state.selected, (2, 5));
+        assert_eq!(app.view_state.selection_end, None);
+        app.undo(cx);
+    })
+    .unwrap();
+
+    for (anchor, end) in [(2, 6), (6, 2)] {
+        view.update(cx, |app, _, _| {
+            app.view_state.selected = (anchor, 5);
+            app.view_state.selection_end = Some((end, 5));
+        })
+        .unwrap();
+        primary_key(cx, view, "v");
+        view.update(cx, |app, _, cx| {
+            for row in 2..=6 {
+                assert_eq!(app.sheet(cx).get_raw(row, 5), format!("source {row}"));
+            }
+            for row in 7..=10 {
+                assert_eq!(app.sheet(cx).get_raw(row, 5), "");
+            }
+            assert_eq!(app.view_state.selected, (2, 5));
+            assert_eq!(app.view_state.selection_end, Some((6, 5)));
+            assert_eq!(app.history.undo_count(), 1);
+        })
+        .unwrap();
+        primary_key(cx, view, "z");
+        view.update(cx, |app, _, cx| {
+            for row in 2..=6 {
+                assert_eq!(app.sheet(cx).get_raw(row, 5), format!("original {row}"));
+            }
+        })
+        .unwrap();
+    }
+}
+
+#[gpui::test]
+fn paste_special_uses_top_left_and_selects_the_source_sized_rectangle(cx: &mut TestAppContext) {
+    use visigrid_engine::cell::CellFormat;
+
+    let view = setup_paste(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            wb.set_cell_value_tracked(0, 0, 0, "4");
+            wb.set_cell_value_tracked(0, 0, 1, "=A1+1");
+            wb.active_sheet_mut().set_format(
+                0,
+                1,
+                CellFormat {
+                    bold: true,
+                    ..Default::default()
+                },
+            );
+        });
+        app.view_state.selected = (0, 0);
+        app.view_state.selection_end = Some((0, 1));
+        app.copy(cx);
+        // Exercise the internal-only paths with the clipboard ID they require.
+        let copied = app.internal_clipboard.as_ref().unwrap();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string_with_json_metadata(
+            copied.raw_tsv.clone(),
+            copied.id.to_string(),
+        ));
+
+        // Select H4:F3. Each paste should select exactly F3:G3.
+        let select_target = |app: &mut Spreadsheet| {
+            app.view_state.selected = (3, 7);
+            app.view_state.selection_end = Some((2, 5));
+        };
+        let check_selection = |app: &Spreadsheet| {
+            assert_eq!(app.view_state.selected, (2, 5));
+            assert_eq!(app.view_state.selection_end, Some((2, 6)));
+        };
+        select_target(app);
+        app.paste_values(cx);
+        assert_eq!(app.sheet(cx).get_raw(2, 6), "5");
+        check_selection(app);
+        app.undo(cx);
+
+        select_target(app);
+        app.paste_formulas(cx);
+        assert_eq!(app.sheet(cx).get_raw(2, 6), "=F3+1");
+        check_selection(app);
+        app.undo(cx);
+
+        select_target(app);
+        app.paste_formats(cx);
+        assert!(app.sheet(cx).get_format(2, 6).bold);
+        check_selection(app);
+    })
+    .unwrap();
+}
+
+fn check_perpendicular_jump(
+    cx: &mut TestAppContext,
+    gap: (usize, usize),
+    first: &str,
+    first_end: (usize, usize),
+    second: &str,
+) {
+    let view = setup(cx);
+    view.update(cx, |app, window, cx| {
+        window.focus(&app.focus_handle, cx);
+        app.wb_mut(cx, |wb| {
+            for row in 0..9 {
+                for col in 0..6 {
+                    wb.set_cell_value_tracked(0, row, col, "1");
+                }
+            }
+            wb.set_cell_value_tracked(0, gap.0, gap.1, "");
+        });
+        app.view_state.selected = (8, 5);
+        app.view_state.selection_end = None;
+    })
+    .unwrap();
+    primary_key(cx, view, first);
+    view.update(cx, |app, _, _| {
+        assert_eq!(app.view_state.selected, (8, 5));
+        assert_eq!(app.view_state.selection_end, Some(first_end));
+    })
+    .unwrap();
+    primary_key(cx, view, second);
+    view.update(cx, |app, _, _| {
+        assert_eq!(app.view_state.selected, (8, 5));
+        assert_eq!(app.view_state.selection_end, Some((0, 0)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn horizontal_jump_extends_along_the_anchor_row(cx: &mut TestAppContext) {
+    check_perpendicular_jump(cx, (0, 3), "shift-up", (0, 5), "shift-left");
+}
+
+#[gpui::test]
+fn vertical_jump_extends_along_the_anchor_column(cx: &mut TestAppContext) {
+    check_perpendicular_jump(cx, (3, 0), "shift-left", (8, 0), "shift-up");
+}
+
+#[gpui::test]
+fn reversed_header_paste_checks_and_renames_from_the_leftmost_header(cx: &mut TestAppContext) {
+    use visigrid_engine::table::TableRange;
+
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            for (col, name) in ["First", "Second", "Third"].iter().enumerate() {
+                wb.set_cell_value_tracked(0, 0, col, name);
+            }
+            let range = TableRange {
+                start_row: 0,
+                end_row: 2,
+                start_col: 0,
+                end_col: 2,
+            };
+            wb.create_table(wb.active_sheet().id, range, "Orders")
+                .unwrap();
+        });
+        app.view_state.selected = (0, 2);
+        app.view_state.selection_end = Some((0, 0));
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("Item\tQty".into()));
+        app.paste(cx);
+        assert_eq!(app.sheet(cx).get_raw(0, 0), "Item");
+        assert_eq!(app.sheet(cx).get_raw(0, 1), "Qty");
+        assert_eq!(app.sheet(cx).get_raw(0, 2), "Third");
+        assert_eq!(app.view_state.selected, (0, 0));
+        assert_eq!(app.view_state.selection_end, Some((0, 1)));
+    })
+    .unwrap();
+}
