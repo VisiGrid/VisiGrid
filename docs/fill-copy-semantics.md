@@ -1,6 +1,6 @@
-# VisiGrid Fill & Copy Semantics (v1)
+# VisiGrid Fill & Copy Semantics (v2)
 
-> **This document defines v1 behavior. Changes require a version bump and are treated as breaking API changes. Do not modify without explicit approval.**
+> **This document defines v2 behavior. Changes require a version bump and are treated as breaking API changes. Do not modify without explicit approval.**
 >
 > **If observed behavior differs from this document, the behavior is a bug.**
 
@@ -20,7 +20,7 @@ Fill & copy semantics define what happens when data is replicated, propagated, o
 
 ### Target Range
 - The cells receiving data from an operation
-- For Paste: rectangle starting at active cell, sized to match source
+- An ordinary rectangular paste starts at the top-left of the primary selection and matches the source dimensions.
 - For Fill Down: all rows below the first in primary selection; if the
   selection is a single row, the selected row itself
 - For Fill Right: all columns after the first in primary selection; if the
@@ -96,23 +96,25 @@ Cut, Fill Down/Right, Ctrl+Enter and the fill handle can operate in safe cells a
 
 ### Ctrl+V / Edit → Paste
 
-**Target:** Rectangle starting at active cell
+**Target:** Top-left cell of the primary selection on an ordinary sheet.
 
 **Behavior:**
 1. Read from system clipboard (fall back to internal clipboard)
 2. Parse as TSV (detect rows and columns)
-3. Compute target rectangle: starts at active cell, sized to match source
+3. Size the rectangle from that cell using the source row and column counts.
 4. Overwrite all cells in target rectangle
 5. Record as undoable batch operation
 
 **Rules:**
-- Primary selection is ignored for determining target location—only active cell matters
+- With a single cell selected, the active cell is the top-left.
 - Paste always overwrites; never inserts/shifts cells
 - If target extends beyond sheet bounds: operation fails with error message
-- If clipboard contains single value: paste to single cell only
-- If clipboard contains multi-cell data: paste entire rectangle
+- With one copied cell, Contents and All fill the selected cells and preserve the selection. Values, Formulas and Formats write and select only the top-left cell.
+- After a successful multi-cell paste (Contents, All, Values, Formulas or Formats), select the written rectangle with its top-left active.
 
 ### Paste while Table filters are active
+
+In a Table view, multi-cell paste starts at the active cell. [Table view paste rules](table-semantics.md#editing-and-pasting-visible-records)
 
 Ordinary paste can target safe cells above/below a Table or on another sheet, as well as visible Table body records. It resolves every destination through the current row projection, validates all targets, recalculates a candidate workbook and checks every saved Table view before publication. A paste beginning in a Table body cannot overflow that body. Header/adjacent-body/protected targets, invalid bounds, merged clipboard sources and unsafe recalculation reject the whole operation. One sparse undo step restores the edit and recomputes dependent filters. See [Table semantics](table-semantics.md#editing-outside-filtered-tables).
 
@@ -257,9 +259,9 @@ C1: =C2+10
 ## Invariants (Always True)
 
 1. **Copy/Cut operate on primary selection only**
-2. **Paste targets active cell, not selection**
+2. **An ordinary rectangular paste starts at the primary selection’s top-left.**
 3. **Fill operates within primary selection; source is first row/column**
-4. **Additional selections never participate in fill/copy/paste**
+4. **Fill, copy and rectangular paste use only the primary selection.**
 5. **All operations are undoable as single batch**
 6. **Formulas always adjust relative references; absolute references never change**
 7. **Paste always overwrites; never inserts or shifts**
@@ -272,15 +274,15 @@ C1: =C2+10
 
 ### Paste Shape Matching
 
-| Source Size | Target Start | Result |
+| Source (rows × columns) | Primary selection | Result |
 |-------------|--------------|--------|
-| 2×3 | Active cell D4 | Paste to D4:E6 |
-| 1×1 | Active cell A1 | Paste to A1 only |
-| 5×5 | Active at edge | Error if exceeds bounds |
+| 2×3 | D4 | Paste to D4:F5 |
+| 1×1 | A1 | Paste to A1 only |
+| 5×5 | Top-left at sheet edge | Error if exceeds bounds |
+| 5×1 | F7 dragged up to F3 (active F7) | Paste to F3:F7 with F3 active |
 
-- Target size always equals source size
+- A rectangular paste uses the source dimensions even when the selection has a different shape.
 - No tiling, no clipping, no smart resize
-- Shape mismatch with selection: ignore selection, use source size
 
 ### Fill Shape
 
@@ -292,7 +294,7 @@ C1: =C2+10
 
 ## Interaction with Additional Selections
 
-**v1 Rule: Additional selections are ignored for all fill/copy/paste operations.**
+Rectangular paste skips additional Ctrl+click selections. A one-cell Contents or All broadcast fills them along with the primary selection.
 
 Rationale:
 - Reduces combinatorial complexity
@@ -308,7 +310,7 @@ Future versions may support:
 
 ## Explicit Non-Goals (v1)
 
-We do **not** support:
+The original v1 scope excluded the following operations:
 
 - **Paste Special** (paste values only, paste formats only, transpose)
 - **Insert Paste** (shift cells down/right to make room)
@@ -320,7 +322,7 @@ We do **not** support:
 - **Paste to non-matching shapes with tiling or clipping**
 - **Cut with insert** (remove and shift cells)
 
-These are explicitly deferred to future versions.
+The v2 paste rules above cover Contents, All, Values, Formulas and Formats.
 
 ---
 
@@ -343,13 +345,14 @@ Copy/Cut:
   Selection → Clipboard populated → Selection unchanged
 
 Paste:
-  Clipboard + Active Cell → Target cells overwritten → Selection unchanged
+  Source rectangle + primary selection → Written rectangle selected, top-left active
+  One-cell Contents or All broadcast → Selected cells filled → Selection preserved
 
 Fill Down/Right:
   Selection → Source replicated to target → Selection unchanged
 ```
 
-All operations preserve selection state. The user's view of what's selected does not change.
+Copy, cut, fill and one-cell broadcasts preserve selection.
 
 ---
 
@@ -369,4 +372,5 @@ Undo restores cell values only; selection/clipboard are not affected.
 
 ## Version History
 
+- **v2** (2026-11): Ordinary rectangular paste starts at the primary selection’s top-left and selects the written rectangle.
 - **v1** (2026-01): Initial specification
