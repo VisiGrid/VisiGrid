@@ -1,6 +1,7 @@
-//! MS-OFFCRYPTO (ECMA-376) decryption for password-protected OOXML workbooks.
+//! MS-OFFCRYPTO (ECMA-376) encryption and decryption for password-protected OOXML workbooks.
 //!
-//! Supports:
+//! Writes Agile AES-256-CBC/SHA-512 with authenticated package data.
+//! Reads:
 //! - Agile Encryption (Excel 2010–present): AES-128/192/256-CBC with SHA-1,
 //!   SHA-256, SHA-384, or SHA-512, constant-time verifier check, and
 //!   constant-time `dataIntegrity` HMAC verification when present.
@@ -25,6 +26,9 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use subtle::ConstantTimeEq;
 pub use zeroize::Zeroizing;
+
+mod write;
+pub use write::encrypt_ooxml;
 
 const OLE2_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
@@ -53,9 +57,13 @@ const ALG_ID_AES_192: u32 = 0x0000_660F;
 const ALG_ID_AES_256: u32 = 0x0000_6610;
 const ALG_ID_SHA1: u32 = 0x0000_8004;
 
-/// Typed errors from MS-OFFCRYPTO detection and decryption.
+/// Errors from MS-OFFCRYPTO detection, decryption and encryption.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CryptoError {
+    /// A new workbook password must contain 1 through 255 UTF-16 code units.
+    InvalidPasswordLength,
+    /// The encrypted output could not be constructed.
+    EncryptionFailed(String),
     /// Document is encrypted and no password was supplied.
     PasswordRequired,
     /// Supplied password did not match the document's verifier hash.
@@ -73,6 +81,8 @@ pub enum CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CryptoError::InvalidPasswordLength => write!(f, "Excel output password must contain 1 to 255 UTF-16 code units"),
+            CryptoError::EncryptionFailed(msg) => write!(f, "Failed to encrypt Excel workbook: {msg}"),
             CryptoError::PasswordRequired => write!(f, "Workbook is password protected"),
             CryptoError::IncorrectPassword => write!(f, "Incorrect password"),
             CryptoError::IntegrityCheckFailed => {
@@ -625,8 +635,7 @@ fn agile_spin_hash(alg: HashAlg, salt: &[u8], password: &str, spin_count: u32) -
     let mut h = Zeroizing::new(alg.hash(&[salt, &pw]));
     for i in 0..spin_count {
         let iter = i.to_le_bytes();
-        let next = alg.hash(&[&iter, &h]);
-        *h = next;
+        h = Zeroizing::new(alg.hash(&[&iter, &h]));
     }
     h
 }
@@ -906,33 +915,8 @@ fn parse_package_header(package_bytes: &[u8]) -> Result<(usize, &[u8]), CryptoEr
 mod tests {
     use super::*;
     use aes::cipher::BlockEncrypt;
-    use cbc::cipher::BlockEncryptMut;
     use std::io::Write;
     use visigrid_engine::workbook::Workbook;
-
-    fn aes_cbc_encrypt_in_place(key: &[u8], iv: &[u8], data: &mut [u8]) {
-        match key.len() {
-            16 => {
-                let mut enc = cbc::Encryptor::<Aes128>::new_from_slices(key, iv).unwrap();
-                for block in data.chunks_exact_mut(16) {
-                    enc.encrypt_block_mut(block.into());
-                }
-            }
-            24 => {
-                let mut enc = cbc::Encryptor::<Aes192>::new_from_slices(key, iv).unwrap();
-                for block in data.chunks_exact_mut(16) {
-                    enc.encrypt_block_mut(block.into());
-                }
-            }
-            32 => {
-                let mut enc = cbc::Encryptor::<Aes256>::new_from_slices(key, iv).unwrap();
-                for block in data.chunks_exact_mut(16) {
-                    enc.encrypt_block_mut(block.into());
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
 
     fn aes_ecb_encrypt_in_place(key: &[u8], data: &mut [u8]) {
         match key.len() {
@@ -958,31 +942,6 @@ mod tests {
         }
     }
 
-    fn compute_hmac(alg: HashAlg, key: &[u8], data: &[u8]) -> Vec<u8> {
-        match alg {
-            HashAlg::Sha1 => {
-                let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(key).unwrap();
-                mac.update(data);
-                mac.finalize().into_bytes().to_vec()
-            }
-            HashAlg::Sha256 => {
-                let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
-                mac.update(data);
-                mac.finalize().into_bytes().to_vec()
-            }
-            HashAlg::Sha384 => {
-                let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(key).unwrap();
-                mac.update(data);
-                mac.finalize().into_bytes().to_vec()
-            }
-            HashAlg::Sha512 => {
-                let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(key).unwrap();
-                mac.update(data);
-                mac.finalize().into_bytes().to_vec()
-            }
-        }
-    }
-
     fn wrap_cfb(encryption_info: &[u8], encrypted_package: &[u8]) -> Vec<u8> {
         let mut comp = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
         comp.create_stream("EncryptionInfo")
@@ -996,7 +955,6 @@ mod tests {
         comp.into_inner().into_inner()
     }
 
-    /// Build a spec-compliant Agile MS-OFFCRYPTO container for testing.
     fn encrypt_agile_fixture(
         plaintext: &[u8],
         password: &str,
@@ -1004,101 +962,14 @@ mod tests {
         key_bits: usize,
         spin_count: u32,
     ) -> Vec<u8> {
-        let key_bytes = key_bits / 8;
-        let hash_size = hash_alg.digest_len();
-        let hash_name = match hash_alg {
-            HashAlg::Sha1 => "SHA1",
-            HashAlg::Sha256 => "SHA256",
-            HashAlg::Sha384 => "SHA384",
-            HashAlg::Sha512 => "SHA512",
+        let keys = write::AgileKeys {
+            data_salt: [0x11; 16],
+            password_salt: [0x22; 16],
+            package_key: Zeroizing::new(vec![0x33; key_bits / 8]),
+            verifier: Zeroizing::new([0x44; 16]),
+            hmac_key: Zeroizing::new(vec![0x55; hash_alg.digest_len()]),
         };
-        let key_data_salt = [0x11u8; 16];
-        let pk_salt = [0x22u8; 16];
-        let secret_key = vec![0x33u8; key_bytes];
-        let verifier_input = [0x44u8; 16];
-        let hmac_key = vec![0x55u8; hash_size];
-
-        // Encrypt package in 4096-byte segments
-        let mut package = Vec::new();
-        package.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
-        for (idx, chunk) in plaintext.chunks(4096).enumerate() {
-            let mut buf = chunk.to_vec();
-            let rem = buf.len() % 16;
-            if rem != 0 {
-                buf.resize(buf.len() + (16 - rem), 0);
-            }
-            let iv = agile_derive_iv(hash_alg, &key_data_salt, &(idx as u32).to_le_bytes(), 16);
-            aes_cbc_encrypt_in_place(&secret_key, &iv, &mut buf);
-            package.extend_from_slice(&buf);
-        }
-
-        // Compute HMAC over entire EncryptedPackage (including 8-byte header)
-        let hmac_value = compute_hmac(hash_alg, &hmac_key, &package);
-
-        let mut enc_hmac_key = hmac_key.clone();
-        let rem = enc_hmac_key.len() % 16;
-        if rem != 0 {
-            enc_hmac_key.resize(enc_hmac_key.len() + (16 - rem), 0);
-        }
-        let hmac_key_iv = agile_derive_iv(hash_alg, &key_data_salt, &AGILE_HMAC_KEY_BLOCK_KEY, 16);
-        aes_cbc_encrypt_in_place(&secret_key, &hmac_key_iv, &mut enc_hmac_key);
-
-        let mut enc_hmac_val = hmac_value;
-        let rem = enc_hmac_val.len() % 16;
-        if rem != 0 {
-            enc_hmac_val.resize(enc_hmac_val.len() + (16 - rem), 0);
-        }
-        let hmac_val_iv = agile_derive_iv(hash_alg, &key_data_salt, &AGILE_HMAC_VALUE_BLOCK_KEY, 16);
-        aes_cbc_encrypt_in_place(&secret_key, &hmac_val_iv, &mut enc_hmac_val);
-
-        // Encrypt verifier & secret key with password-derived keys
-        let spun = agile_spin_hash(hash_alg, &pk_salt, password, spin_count);
-
-        let k_vi = agile_derive_key(hash_alg, &spun, &AGILE_VERIFIER_HASH_INPUT_BLOCK_KEY, key_bytes);
-        let mut enc_vi = verifier_input.to_vec();
-        aes_cbc_encrypt_in_place(&k_vi, &pk_salt, &mut enc_vi);
-
-        let k_vv = agile_derive_key(hash_alg, &spun, &AGILE_VERIFIER_HASH_VALUE_BLOCK_KEY, key_bytes);
-        let mut enc_vv = hash_alg.hash(&[&verifier_input]);
-        let rem = enc_vv.len() % 16;
-        if rem != 0 {
-            enc_vv.resize(enc_vv.len() + (16 - rem), 0);
-        }
-        aes_cbc_encrypt_in_place(&k_vv, &pk_salt, &mut enc_vv);
-
-        let k_ek = agile_derive_key(hash_alg, &spun, &AGILE_ENCRYPTED_KEY_VALUE_BLOCK_KEY, key_bytes);
-        let mut enc_ek = secret_key.clone();
-        aes_cbc_encrypt_in_place(&k_ek, &pk_salt, &mut enc_ek);
-
-        let xml = format!(
-            concat!(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
-                r#"<encryption xmlns="http://schemas.microsoft.com/office/2006/encryption" xmlns:p="http://schemas.microsoft.com/office/2006/keyEncryptor/password">"#,
-                r#"<keyData saltSize="16" blockSize="16" keyBits="{key_bits}" hashSize="{hash_size}" cipherAlgorithm="AES" cipherChaining="ChainingModeCBC" hashAlgorithm="{hash_name}" saltValue="{kd_salt}"/>"#,
-                r#"<dataIntegrity encryptedHmacKey="{enc_hmac_key}" encryptedHmacValue="{enc_hmac_val}"/>"#,
-                r#"<keyEncryptors><keyEncryptor uri="http://schemas.microsoft.com/office/2006/keyEncryptor/password">"#,
-                r#"<p:encryptedKey spinCount="{spin_count}" saltSize="16" blockSize="16" keyBits="{key_bits}" hashSize="{hash_size}" cipherAlgorithm="AES" cipherChaining="ChainingModeCBC" hashAlgorithm="{hash_name}" saltValue="{pk_salt}" encryptedVerifierHashInput="{enc_vi}" encryptedVerifierHashValue="{enc_vv}" encryptedKeyValue="{enc_ek}"/>"#,
-                r#"</keyEncryptor></keyEncryptors></encryption>"#
-            ),
-            key_bits = key_bits,
-            hash_size = hash_size,
-            hash_name = hash_name,
-            spin_count = spin_count,
-            kd_salt = BASE64.encode(key_data_salt),
-            enc_hmac_key = BASE64.encode(&enc_hmac_key),
-            enc_hmac_val = BASE64.encode(&enc_hmac_val),
-            pk_salt = BASE64.encode(pk_salt),
-            enc_vi = BASE64.encode(&enc_vi),
-            enc_vv = BASE64.encode(&enc_vv),
-            enc_ek = BASE64.encode(&enc_ek),
-        );
-
-        let mut info = Vec::new();
-        info.extend_from_slice(&4u16.to_le_bytes()); // major
-        info.extend_from_slice(&4u16.to_le_bytes()); // minor
-        info.extend_from_slice(&0x40u32.to_le_bytes()); // flags
-        info.extend_from_slice(xml.as_bytes());
-        wrap_cfb(&info, &package)
+        write::encrypt_agile(plaintext, password, hash_alg, spin_count, &keys).unwrap()
     }
 
     /// Build a spec-compliant Excel 2007 Standard MS-OFFCRYPTO container (AES-128-ECB + SHA-1).
@@ -1162,6 +1033,22 @@ mod tests {
         sheet.set_value(1, 1, "=B1*2");
         let (bytes, _) = crate::xlsx::export_to_buffer(&wb, None).unwrap();
         bytes
+    }
+
+    #[test]
+    fn writer_uses_fixed_agile_parameters() {
+        let encrypted = encrypt_ooxml(b"test", "workbook").unwrap();
+        let mut file = cfb::CompoundFile::open(Cursor::new(encrypted.as_slice())).unwrap();
+        let info = read_bounded_stream(&mut file, "EncryptionInfo", MAX_ENCRYPTION_INFO_BYTES).unwrap();
+        assert_eq!(&info[..8], &[4, 0, 4, 0, 0x40, 0, 0, 0]);
+        let desc = parse_agile_xml(&info[8..]).unwrap();
+        let pk = desc.password_key;
+        let kd = desc.key_data;
+        assert_eq!(pk.spin_count, 100_000);
+        assert_eq!((pk.hash_alg, pk.key_bytes, pk.block_size, pk.salt.len()), (HashAlg::Sha512, 32, 16, 16));
+        assert_eq!((kd.hash_alg, kd.key_bytes, kd.block_size, kd.salt.len()), (HashAlg::Sha512, 32, 16, 16));
+        assert_ne!(pk.salt, kd.salt);
+        assert!(desc.data_integrity.is_some());
     }
 
     #[test]

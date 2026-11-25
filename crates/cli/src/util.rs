@@ -54,6 +54,14 @@ pub(crate) fn import_xlsx_cli(
     path: &std::path::Path,
     mut options: visigrid_io::xlsx::ImportOptions,
 ) -> Result<(visigrid_engine::workbook::Workbook, visigrid_io::xlsx::ImportResult), String> {
+    import_xlsx_with_password(path, &mut options)
+}
+
+/// On success, retain only the password that actually opened a protected workbook.
+pub(crate) fn import_xlsx_with_password(
+    path: &std::path::Path,
+    options: &mut visigrid_io::xlsx::ImportOptions,
+) -> Result<(visigrid_engine::workbook::Workbook, visigrid_io::xlsx::ImportResult), String> {
     use std::io::IsTerminal as _;
     use visigrid_io::xlsx::ImportError;
     use visigrid_io::xlsx_crypto::Zeroizing;
@@ -64,7 +72,7 @@ pub(crate) fn import_xlsx_cli(
         }
     }
 
-    match visigrid_io::xlsx::import_with_options_typed(path, &options) {
+    let imported = match visigrid_io::xlsx::import_with_options_typed(path, options) {
         Ok(ok) => Ok(ok),
         Err(ImportError::PasswordRequired) => {
             if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
@@ -75,7 +83,7 @@ pub(crate) fn import_xlsx_cli(
                 let prompt = format!("Password for {name}: ");
                 let pw = read_password_tty(&prompt)?;
                 options.password = Some(pw);
-                visigrid_io::xlsx::import_with_options_typed(path, &options)
+                visigrid_io::xlsx::import_with_options_typed(path, options)
                     .map_err(|e| e.to_string())
             } else {
                 Err(format!(
@@ -84,7 +92,26 @@ pub(crate) fn import_xlsx_cli(
             }
         }
         Err(other) => Err(other.to_string()),
+    }?;
+    if !imported.1.was_encrypted {
+        options.password = None;
     }
+    Ok(imported)
+}
+
+pub(crate) const XLSX_OUTPUT_PASSWORD_ENV: &str = "VISIGRID_XLSX_OUTPUT_PASSWORD";
+
+pub(crate) fn prompt_output_password() -> Result<visigrid_io::xlsx_crypto::Zeroizing<String>, String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(format!("Set {XLSX_OUTPUT_PASSWORD_ENV} or enter the output password in an interactive terminal."));
+    }
+    let password = read_password_tty("New Excel output password: ")?;
+    let confirmation = read_password_tty("Confirm Excel output password: ")?;
+    if password != confirmation {
+        return Err("Output passwords do not match".into());
+    }
+    Ok(password)
 }
 
 fn read_password_tty(prompt: &str) -> Result<visigrid_io::xlsx_crypto::Zeroizing<String>, String> {
@@ -100,12 +127,11 @@ fn read_password_tty(prompt: &str) -> Result<visigrid_io::xlsx_crypto::Zeroizing
         }
     }
 
+    enable_raw_mode().map_err(|e| format!("failed to read password from terminal: {e}"))?;
+    let _guard = RawModeGuard;
     let mut stderr = std::io::stderr();
     write!(stderr, "{prompt}").map_err(|e| e.to_string())?;
     stderr.flush().map_err(|e| e.to_string())?;
-
-    enable_raw_mode().map_err(|e| format!("failed to read password from terminal: {e}"))?;
-    let _guard = RawModeGuard;
 
     let mut password = Zeroizing::new(String::new());
     loop {

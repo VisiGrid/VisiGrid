@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use visigrid_io::recipe::{self, Recipe, Snapshot};
 
-use crate::convert::{infer_format, write_format};
+use crate::convert::{infer_format, write_format, XlsxEncryption};
 use crate::exit_codes::{EXIT_RECIPE_FAILED, EXIT_RECIPE_INVALID};
 use crate::{CliError, Format};
 
@@ -20,7 +20,10 @@ pub(crate) fn cmd_recipe_run(
     output: Option<PathBuf>,
     report_path: Option<PathBuf>,
     quiet: bool,
+    encryption: XlsxEncryption,
 ) -> Result<(), CliError> {
+    encryption.validate(output.as_ref().and_then(|p| p.extension())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx")))?;
     let recipe = Recipe::load(&recipe_path).map_err(|e| CliError { code: EXIT_RECIPE_INVALID, message: e, hint: None })?;
     let recipe_dir = recipe_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     // One file, or every file an appending recipe matches
@@ -74,19 +77,19 @@ pub(crate) fn cmd_recipe_run(
             let bytes = write_format(&sheet, Format::Csv, ',', false, 0, None, None)?;
             std::io::stdout().write_all(&bytes).map_err(|e| CliError::io(e.to_string()))?;
         }
-        Some(path) => write_output(&sheet, &path)?,
+        Some(path) => write_output(&sheet, &path, &encryption)?,
     }
     Ok(())
 }
 
 /// Write a recipe's result to `path` in the format its extension names,
 /// replacing it atomically. Shared with the MCP `run_recipe` tool.
-pub(crate) fn write_output(sheet: &visigrid_engine::sheet::Sheet, path: &Path) -> Result<(), CliError> {
+pub(crate) fn write_output(sheet: &visigrid_engine::sheet::Sheet, path: &Path, encryption: &XlsxEncryption) -> Result<(), CliError> {
     let format = infer_format(&path.to_path_buf())?;
     write_replacing(path, |tmp| match format {
         Format::Xlsx => {
             let wb = visigrid_engine::workbook::Workbook::from_sheets(vec![sheet.clone()], 0);
-            crate::convert::write_xlsx(&wb, Some(tmp), None)
+            crate::convert::write_xlsx(&wb, Some(tmp), None, encryption, None)
         }
         Format::Sheet => visigrid_io::native::save(sheet, tmp).map_err(CliError::io),
         Format::Parquet => Err(CliError::format("parquet output is not supported by recipes yet")),
