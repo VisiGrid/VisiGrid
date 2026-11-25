@@ -184,10 +184,11 @@ impl Spreadsheet {
         kind: TablePasteKind,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.mode.is_editing() {
+        if self.mode.is_editing() || self.sheet(cx).tables().is_empty() {
             return false;
         }
-        let (view_row, col) = self.view_state.selected;
+        let table_view = crate::table_filter_ui::has_table_criteria(self.wb(cx));
+        let (view_row, col) = if table_view { self.view_state.selected } else { self.selection_range().0 };
         let row = self.row_view.view_to_data(view_row);
         let Some(table) = self.sheet(cx).table_header_at(row, col) else {
             return false;
@@ -249,6 +250,9 @@ impl Spreadsheet {
             } else {
                 self.status_message = Some("Table header names are unchanged.".into());
                 cx.notify();
+            }
+            if !table_view {
+                self.select_pasted_range(1, grid[0].len());
             }
             Ok(())
         })();

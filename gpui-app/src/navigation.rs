@@ -437,25 +437,30 @@ impl Spreadsheet {
         // Full column selection + vertical jump → no-op
         if is_full_col && dr != 0 && dc == 0 { return; }
 
-        // For full-row selections extending vertically, use the original column
-        // (from before Shift+Space) for boundary detection instead of column 0 or sentinel 255.
-        // Otherwise find_data_boundary scans an always-empty column and goes to sheet edge.
+        // Scan along the anchor's row or column, from the moving edge.
+        let boundary_row = if dc != 0 { anchor_row } else { row };
         let boundary_col = if is_full_row && dr != 0 {
             self.pre_row_select_col.unwrap_or(anchor_col)
+        } else if dr != 0 {
+            anchor_col
         } else {
             col
         };
 
         // Start from effective merge edge
-        let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(row, boundary_col) {
-            let sr = if dr > 0 { merge.end.0 } else if dr < 0 { merge.start.0 } else { row };
+        let (start_row, start_col) = if let Some(merge) = self.sheet(cx).get_merge(boundary_row, boundary_col) {
+            let sr = if dr > 0 { merge.end.0 } else if dr < 0 { merge.start.0 } else { boundary_row };
             let sc = if dc > 0 { merge.end.1 } else if dc < 0 { merge.start.1 } else { boundary_col };
             (sr, sc)
         } else {
-            (row, boundary_col)
+            (boundary_row, boundary_col)
         };
 
-        let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
+        let (mut new_row, mut new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
+        // Apply the boundary on the jump axis to the moving corner. Whole-row
+        // and whole-column selections keep their special merge and sentinel handling below.
+        if dc != 0 && !is_full_col { new_row = row; }
+        if dr != 0 && !is_full_row { new_col = col; }
 
         // Expand to include merge if landing on one.
         // If anchor is inside the same merge, normalize to merge.start for stable comparison.
