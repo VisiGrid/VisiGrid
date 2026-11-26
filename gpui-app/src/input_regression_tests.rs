@@ -116,8 +116,7 @@ fn selected_rows_resize_together_and_undo_restores_each_original(cx: &mut TestAp
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
         let id = app.cached_sheet_id();
-        app.view_state.selected = (4, 0);
-        app.view_state.selection_end = Some((1, 1));
+        app.view_state.set_range((4, 0), (1, 1));
         app.view_state.additional_selections.push(((3, 4), Some((5, 4))));
         app.view_state.additional_selections.push(((7, 4), None));
         app.sheet_row_heights_mut().extend([(1, 30.), (4, 62.), (6, 37.)]);
@@ -151,8 +150,7 @@ fn selected_rows_resize_together_and_undo_restores_each_original(cx: &mut TestAp
 fn unselected_row_resizes_alone(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 0);
-        app.view_state.selection_end = Some((4, 2));
+        app.view_state.set_range((1, 0), (4, 2));
         let height = app.row_height(6);
         app.begin_row_resize(6, 80., cx);
         app.update_row_resize(88., cx);
@@ -168,7 +166,7 @@ fn unselected_row_resizes_alone(cx: &mut TestAppContext) {
 fn zero_distance_row_resize_preserves_default_and_explicit_heights(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selection_end = Some((2, 0));
+        app.view_state.set_range((0, 0), (2, 0));
         app.sheet_row_heights_mut().insert(1, 48.);
         let before = app.row_heights.clone();
         app.begin_row_resize(0, 100., cx);
@@ -203,7 +201,7 @@ fn active_table_view_keeps_its_single_row_resize(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
         app.table_view_installed = true;
-        app.view_state.selection_end = Some((4, 2));
+        app.view_state.set_range((0, 0), (4, 2));
         let height = app.row_height(1);
         app.begin_row_resize(1, 80., cx);
         app.update_row_resize(88., cx);
@@ -326,7 +324,7 @@ fn limited_grid_caps_full_column_resize_at_its_effective_extent(cx: &mut TestApp
         assert_eq!(app.grid_rows(), 20);
         app.sheet_row_heights_mut().insert(99, 70.);
         app.select_col(2, false, cx);
-        assert_eq!(app.selection_range().1.0, crate::app::NUM_ROWS - 1);
+        assert_eq!(app.view_state.primary_range().1.0, crate::app::NUM_ROWS - 1);
         app.begin_row_resize(0, 0., cx);
         app.update_row_resize(8., cx);
         app.finish_row_resize(cx);
@@ -334,6 +332,7 @@ fn limited_grid_caps_full_column_resize_at_its_effective_extent(cx: &mut TestApp
         assert_eq!(heights.len(), 21);
         assert!(heights.contains_key(&19));
         assert_eq!(heights[&99], 70.);
+        assert_eq!(app.status_message.as_deref(), Some("Resized rows 1–20. Rows below keep their existing heights."));
         assert_eq!(app.grid_rows(), 20);
     }).unwrap();
 }

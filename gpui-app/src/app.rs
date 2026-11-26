@@ -3882,7 +3882,12 @@ impl Spreadsheet {
                 if first == last { (first + 1).to_string() }
                 else { format!("{}–{}", first + 1, last + 1) }
             }).collect::<Vec<_>>().join(", ");
-            self.status_message = Some(format!("Resized rows {labels}. Empty rows below keep the default height."));
+            let note = if self.limited_grid.enabled {
+                "Rows below keep their existing heights."
+            } else {
+                "Empty rows below keep the default height."
+            };
+            self.status_message = Some(format!("Resized rows {labels}. {note}"));
         }
         cx.notify();
     }
