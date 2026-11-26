@@ -25,7 +25,10 @@ env:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the binary requires the glibc of the image it
+    # was linked on. ubuntu-latest moving to 26.04 raised that to 2.43 and
+    # broke Debian 13 and Ubuntu 24.04 (#183). 24.04 gives glibc 2.39.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,12 +55,15 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-release-ubuntu24-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-${{ runner.arch }}-release-ubuntu24-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build release
         run: bash scripts/ci/release-build.sh linux
+
+      - name: Check glibc requirement
+        run: bash scripts/ci/check-glibc-floor.sh 2.39 target/release/visigrid target/release/vgrid
 
       - name: Get version
         id: version
@@ -154,6 +160,9 @@ jobs:
 
       - name: Build release
         run: bash scripts/ci/release-build.sh linux
+
+      - name: Check glibc requirement
+        run: bash scripts/ci/check-glibc-floor.sh 2.39 target/release/visigrid target/release/vgrid
 
       - name: Create tarball
         run: |
