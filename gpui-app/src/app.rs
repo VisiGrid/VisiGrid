@@ -376,6 +376,26 @@ impl FormatBarState {
     }
 }
 
+/// A drag previews one height for disjoint, inclusive row ranges. The height
+/// map retains the originals until mouse-up, even when the whole sheet is selected.
+pub(crate) struct RowResize {
+    sheet_id: SheetId,
+    ranges: Vec<(usize, usize)>,
+    clipped: bool,
+    height: Option<f32>,
+}
+
+impl RowResize {
+    fn preview_height(&self, sheet_id: SheetId, row: usize) -> Option<f32> {
+        let height = self.height?;
+        if self.sheet_id != sheet_id {
+            return None;
+        }
+        let index = self.ranges.partition_point(|&(_, last)| last < row);
+        self.ranges.get(index).filter(|&&(first, _)| first <= row).map(|_| height)
+    }
+}
+
 pub struct Spreadsheet {
     // Core data
     /// The shared workbook entity. All mutations must go through update(cx, ...).
@@ -558,10 +578,9 @@ pub struct Spreadsheet {
     // Resize drag state
     pub resizing_col: Option<usize>,       // Column being resized (by right edge)
     pub resize_col_originals: Vec<(usize, Option<f32>)>, // Columns captured at drag start
-    pub resizing_row: Option<usize>,       // Row being resized (by bottom edge)
+    pub(crate) resizing_row: Option<RowResize>,
     pub resize_start_pos: f32,             // Mouse position at drag start
     pub resize_start_size: f32,            // Original size at drag start
-    pub resize_start_original: Option<f32>, // Original map value (None = was default)
 
     // Menu bar state (Excel 2003 style dropdown menus)
     pub open_menu: Option<crate::mode::Menu>,
@@ -1361,7 +1380,6 @@ impl Spreadsheet {
             resizing_row: None,
             resize_start_pos: 0.0,
             resize_start_size: 0.0,
-            resize_start_original: None,
             open_menu: None,
             menu_highlight: None,
             sheet_rename_draft: None,
@@ -3264,6 +3282,9 @@ impl Spreadsheet {
                 .copied()
                 .unwrap_or(self.metrics.default_cell_sizes.row_height);
         }
+        if let Some(height) = self.resizing_row.as_ref().and_then(|drag| drag.preview_height(self.cached_sheet_id, row)) {
+            return height;
+        }
         self.row_heights
             .get(&self.cached_sheet_id)
             .and_then(|sheet_heights| sheet_heights.get(&row))
@@ -3287,45 +3308,6 @@ impl Spreadsheet {
         let sheet_widths = self.col_widths.entry(sheet_id).or_insert_with(HashMap::new);
         // A manual resize is explicit even when it equals today's preference.
         sheet_widths.insert(col, width);
-    }
-
-    /// Set row height for the current sheet
-    pub fn set_row_height(&mut self, row: usize, height: f32) {
-        // Deliberately not `clamp`. For a NaN input `max(12.0)` yields
-        // 12.0, because f32::max prefers the non-NaN operand, while
-        // `clamp` propagates NaN into the size map.
-        // Sizes are persisted with the session, so it would outlive a restart.
-        #[allow(clippy::manual_clamp)]
-        let height = height.max(12.0).min(200.0); // 12-200px
-        let sheet_heights = self.row_heights.entry(self.cached_sheet_id).or_insert_with(HashMap::new);
-        sheet_heights.insert(row, height);
-    }
-
-    /// Record a row height change to history (for undo/redo support).
-    /// Called on mouse up after a resize drag to coalesce all drag events into one history entry.
-    pub fn record_row_height_change(&mut self, row: usize, old: Option<f32>, cx: &mut Context<Self>) {
-        if self.block_if_previewing(cx) { return; }
-        // Get the current value from the map
-        let new = self.row_heights
-            .get(&self.cached_sheet_id)
-            .and_then(|m| m.get(&row))
-            .copied();
-
-        // Only record if something actually changed
-        if old != new {
-            // Use SheetId (stable across sheet reorder/delete) instead of index
-            let sheet_id = self.cached_sheet_id;
-            self.record_action_with_provenance(cx,
-                crate::history::UndoAction::RowHeightSet {
-                    sheet_id,
-                    row,
-                    old,
-                    new,
-                },
-                None,
-            );
-            self.is_modified = true;
-        }
     }
 
     /// Get mutable reference to column widths map for the current sheet
@@ -3787,6 +3769,125 @@ impl Spreadsheet {
             self.record_action_with_provenance(cx, action, None);
             self.is_modified = true;
             self.request_title_refresh(cx);
+        }
+        cx.notify();
+    }
+
+    fn header_resize_rows(&self, clicked_row: usize, cx: &App) -> (Vec<(usize, usize)>, bool) {
+        // Table views keep their existing single-header resize.
+        if self.table_view_installed || !self.is_row_header_selected(clicked_row) {
+            return (vec![(clicked_row, clicked_row)], false);
+        }
+
+        // Like row auto-fit, include all row indices in each range, irrespective
+        // of visibility. Merge overlaps without enumerating the individual rows.
+        let mut ranges: Vec<_> = self.all_selection_ranges().into_iter()
+            .map(|((first, _), (last, _))| (first, last))
+            .collect();
+        let mut clipped = false;
+        if ranges.iter().any(|&(_, last)| last == NUM_ROWS - 1) {
+            let last_visible = |view: &WorkbookViewState| {
+                let rows = self.pane_rows(view);
+                rows.body.last().or_else(|| rows.frozen.last()).map_or(0, |slot| slot.index)
+            };
+            let mut bound = self.sheet(cx).data_extent().0.max(last_visible(&self.view_state));
+            if let Some(pane) = &self.split_pane {
+                bound = bound.max(last_visible(&pane.view_state));
+            }
+            if let Some(heights) = self.row_heights.get(&self.cached_sheet_id) {
+                bound = bound.max(heights.keys().copied().max().unwrap_or(0));
+            }
+            // Full-column and whole-sheet selections retain engine bounds in Limited Grid.
+            bound = bound.min(self.grid_rows() - 1).max(clicked_row);
+            if bound < NUM_ROWS - 1 {
+                clipped = true;
+                ranges.retain_mut(|(first, last)| {
+                    if *last == NUM_ROWS - 1 {
+                        *last = bound;
+                    }
+                    *first <= *last
+                });
+            }
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (first, last) in ranges {
+            if let Some(previous) = merged.last_mut() {
+                if first <= previous.1.saturating_add(1) {
+                    previous.1 = previous.1.max(last);
+                    continue;
+                }
+            }
+            merged.push((first, last));
+        }
+        (merged, clipped)
+    }
+
+    pub(crate) fn begin_row_resize(&mut self, row: usize, y: f32, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        self.resize_start_pos = y;
+        self.resize_start_size = self.row_height(row);
+        let (ranges, clipped) = self.header_resize_rows(row, cx);
+        self.resizing_row = Some(RowResize {
+            sheet_id: self.cached_sheet_id,
+            ranges,
+            clipped,
+            height: None,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn update_row_resize(&mut self, y: f32, cx: &mut Context<Self>) {
+        if self.block_if_previewing(cx) { return; }
+        let Some(drag) = &mut self.resizing_row else { return; };
+        let screen_delta = y - self.resize_start_pos;
+        // Active Table views retain their existing single-row drag behavior.
+        let delta = if self.table_view_installed { screen_delta } else { screen_delta / self.metrics.zoom };
+        // f32::max selects 12 for NaN, keeping invalid heights out of the saved layout.
+        #[allow(clippy::manual_clamp)]
+        let height = (self.resize_start_size + delta).max(12.0).min(200.0);
+        drag.height = (screen_delta != 0.0 || self.table_view_installed).then_some(height);
+        cx.notify();
+    }
+
+    pub(crate) fn finish_row_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.resizing_row.take() else { return; };
+        if self.block_if_previewing(cx) || drag.sheet_id != self.cached_sheet_id { return; }
+        let Some(height) = drag.height else { return; };
+
+        let mut actions = Vec::new();
+        let heights = self.row_heights.entry(drag.sheet_id).or_default();
+        for &(first, last) in &drag.ranges {
+            for row in first..=last {
+                let old = heights.insert(row, height);
+                if old != Some(height) {
+                    actions.push(crate::history::UndoAction::RowHeightSet {
+                        sheet_id: drag.sheet_id, row, old, new: Some(height),
+                    });
+                }
+            }
+        }
+        if !actions.is_empty() {
+            let action = if actions.len() == 1 {
+                actions.remove(0)
+            } else {
+                crate::history::UndoAction::Group { actions, description: "Resize rows".into() }
+            };
+            self.record_action_with_provenance(cx, action, None);
+            self.is_modified = true;
+            self.request_title_refresh(cx);
+        }
+        if drag.clipped {
+            let labels = drag.ranges.iter().map(|&(first, last)| {
+                if first == last { (first + 1).to_string() }
+                else { format!("{}–{}", first + 1, last + 1) }
+            }).collect::<Vec<_>>().join(", ");
+            let note = if self.limited_grid.enabled {
+                "Rows below keep their existing heights."
+            } else {
+                "Empty rows below keep the default height."
+            };
+            self.status_message = Some(format!("Resized rows {labels}. {note}"));
         }
         cx.notify();
     }

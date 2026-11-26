@@ -409,17 +409,7 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
                         this.auto_fit_selected_row_heights(row, cx);
                     } else {
                         // Start resize drag
-                        this.resizing_row = Some(row);
-                        let y: f32 = event.position.y.into();
-                        this.resize_start_pos = y;
-                        this.resize_start_size = this.row_height(row);
-                        // Capture original map value for history (None = was default)
-                        let sheet_id = this.cached_sheet_id();
-                        this.resize_start_original = this.row_heights
-                            .get(&sheet_id)
-                            .and_then(|m| m.get(&row))
-                            .copied();
-                        cx.notify();
+                        this.begin_row_resize(row, event.position.y.into(), cx);
                     }
                 }))
         )
