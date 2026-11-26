@@ -637,7 +637,7 @@ impl Spreadsheet {
             .or_else(|| self.import_source_dir.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let name = snapshot.name.replace(['/', '\\', ':'], "-");
-        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let warn_unencrypted = self.has_source_xlsx_password();
         let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&format!("{name}.pdf")));
         cx.notify();

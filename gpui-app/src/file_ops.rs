@@ -29,7 +29,31 @@ fn default_save_directory() -> PathBuf {
 /// Delay before showing the import overlay (prevents flash for fast imports)
 const OVERLAY_DELAY_MS: u64 = 150;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExcelProtection {
+    KeepPassword,
+    Unprotected,
+}
+
+pub(crate) struct ExcelExportPrompt {
+    path: PathBuf,
+    review: crate::xlsx_export::ExportReview,
+    pub(crate) focused: usize,
+}
+
 impl Spreadsheet {
+    pub(crate) fn clear_source_xlsx_password(&mut self) {
+        self.source_xlsx_password = None;
+        self.excel_export_prompt = None;
+        if self.mode == crate::mode::Mode::ExcelExportPassword {
+            self.mode = crate::mode::Mode::Navigation;
+        }
+    }
+
+    pub(crate) fn has_source_xlsx_password(&self) -> bool {
+        self.source_xlsx_password.is_some()
+    }
+
     /// Replace the current workbook in-place with a blank workbook.
     ///
     /// WARNING: This is destructive - it discards all unsaved changes without
@@ -55,6 +79,7 @@ impl Spreadsheet {
         self.rewind_preview = crate::app::RewindPreviewState::Off; // Reset preview state
         self.cycle_banner.reset_for_new_file();
         self.current_file = None;
+        self.clear_source_xlsx_password();
         self.is_modified = false;
 
         // Reset terminal workspace to fallback (unsaved workbook)
@@ -400,8 +425,6 @@ impl Spreadsheet {
         let path_for_import = path.clone();
         let path_for_recent = path.clone();
         let filename_for_completion = filename.clone();
-        let mut retry_options = options.clone();
-        retry_options.password = None;
 
         cx.notify();
 
@@ -421,9 +444,10 @@ impl Spreadsheet {
         // Task B: Actual import (runs in background)
         cx.spawn(async move |this, cx| {
             // Do the import on background thread
-            let import_result = cx.background_executor()
+            let (import_result, mut retry_options) = cx.background_executor()
                 .spawn(async move {
-                    xlsx::import_with_options_typed(&path_for_import, &options)
+                    let result = xlsx::import_with_options_typed(&path_for_import, &options);
+                    (result, options)
                 })
                 .await;
 
@@ -458,7 +482,9 @@ impl Spreadsheet {
 
                         // Set up document identity (XLSX is native per spec)
                         this.finalize_load(&path_for_recent);
-                        this.opened_from_encrypted_xlsx = result.was_encrypted;
+                        if result.was_encrypted {
+                            this.source_xlsx_password = retry_options.password.take();
+                        }
                         this.password_prompt = None;
                         this.request_title_refresh(cx);
 
@@ -820,8 +846,6 @@ impl Spreadsheet {
         let path_for_import = path.clone();
         let path_for_recent = path.clone();
         let filename_for_completion = filename.clone();
-        let mut retry_options = options.clone();
-        retry_options.password = None;
 
         cx.notify();
 
@@ -839,9 +863,10 @@ impl Spreadsheet {
 
         // Actual import
         cx.spawn(async move |this, cx| {
-            let import_result = cx.background_executor()
+            let (import_result, mut retry_options) = cx.background_executor()
                 .spawn(async move {
-                    xlsx::import_with_options_typed(&path_for_import, &options)
+                    let result = xlsx::import_with_options_typed(&path_for_import, &options);
+                    (result, options)
                 })
                 .await;
 
@@ -873,7 +898,9 @@ impl Spreadsheet {
                         this.add_recent_file(&path_for_recent);
 
                         this.finalize_load(&path_for_recent);
-                        this.opened_from_encrypted_xlsx = result.was_encrypted;
+                        if result.was_encrypted {
+                            this.source_xlsx_password = retry_options.password.take();
+                        }
                         this.password_prompt = None;
                         this.request_title_refresh(cx);
 
@@ -1126,7 +1153,7 @@ impl Spreadsheet {
             })
             .unwrap_or_else(|| "untitled.sheet".to_string());
 
-        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let warn_unencrypted = self.has_source_xlsx_password();
         let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
@@ -1137,7 +1164,7 @@ impl Spreadsheet {
                             window.prompt(
                                 PromptLevel::Warning,
                                 "Save unencrypted copy?",
-                                Some("This workbook was opened from a password-protected Excel file. Saving will write an unencrypted copy to disk."),
+                                Some("This workbook was opened from a password-protected Excel file. Saving will write an unencrypted copy to disk. File > Export to Excel lets you keep the password."),
                                 &["Save Unencrypted", "Cancel"],
                                 cx,
                             )
@@ -1159,9 +1186,6 @@ impl Spreadsheet {
                 }
                 let close_result = this.update(cx, |this, cx| {
                     let saved = this.save_to_path(&path, cx);
-                    if saved {
-                        this.opened_from_encrypted_xlsx = false;
-                    }
                     // Check if we should close after save (from save_and_close flow)
                     let should_close = this.close_after_save && saved;
                     this.close_after_save = false;  // Reset flag
@@ -1250,6 +1274,7 @@ impl Spreadsheet {
 
                 // Update document identity (handles current_file, is_modified, save_point)
                 self.finalize_save(path);
+                self.clear_source_xlsx_password();
                 self.request_title_refresh(cx);
 
                 // Merge pending run records into loaded (now persisted)
@@ -1374,79 +1399,105 @@ impl Spreadsheet {
             .unwrap_or("export");
         let suggested_name = format!("{}.xlsx", base_name);
 
-        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let protected_source = self.has_source_xlsx_password();
+        let workbook_id = self.workbook.entity_id();
         let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(path))) = future.await {
-                if warn_unencrypted {
-                    let prompt_rx = window_handle
-                        .update(cx, |_, window, cx| {
-                            window.prompt(
-                                PromptLevel::Warning,
-                                "Export unencrypted copy?",
-                                Some("This workbook was opened from a password-protected Excel file. Exporting will write an unencrypted copy to disk."),
-                                &["Export Unencrypted", "Cancel"],
-                                cx,
-                            )
-                        })
-                        .ok();
-                    let confirmed = match prompt_rx {
-                        Some(rx) => matches!(rx.await, Ok(0)),
-                        None => false,
-                    };
-                    if !confirmed {
-                        let _ = this.update(cx, |this, cx| {
-                            this.status_message = Some("Export cancelled".to_string());
-                            cx.notify();
-                        });
-                        return;
-                    }
-                }
-                let _ = this.update(cx, |this, cx| {
-                    if this.block_read_only_recovery(cx) { return; }
-                    // Rebuild layouts in case data changed
-                    let layouts = this.build_export_layouts(cx);
-
-                    if let Err(error) = review.check_current(this.wb(cx), &layouts) {
-                        this.status_message = Some(error); cx.notify(); return;
-                    }
-
-                    match xlsx::export_with_order(this.wb(cx), &path, Some(&layouts), review.order()) {
-                        Ok(result) => {
-                            let filename = path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("file.xlsx")
-                                .to_string();
-
-                            let has_warnings = result.has_warnings();
-                            let mut status = format!("Exported to {}", path.display());
-                            if let Some(warning) = result.warning_summary() {
-                                status.push_str(&format!(" ({})", warning));
-                            }
-                            this.status_message = Some(status);
-
-                            // Store result and show dialog if there are warnings
-                            if has_warnings {
-                                this.export_result = Some(result);
-                                this.export_filename = Some(filename);
-                                this.show_export_report(cx);
-                            } else {
-                                this.export_result = None;
-                                this.export_filename = None;
-                            }
-                        }
-                        Err(e) => {
-                            this.status_message = Some(format!("Export failed: {}", e));
-                            this.export_result = None;
-                            this.export_filename = None;
-                        }
-                    }
+            let Ok(Ok(Some(path))) = future.await else { return; };
+            let _ = window_handle.update(cx, |_, window, cx| this.update(cx, |this, cx| {
+                // A path picker can outlive the document that requested it.
+                if this.workbook.entity_id() != workbook_id || this.has_source_xlsx_password() != protected_source {
+                    this.status_message = Some("The workbook changed. Export again.".into());
                     cx.notify();
-                });
-            }
+                    return;
+                }
+                if protected_source {
+                    this.excel_export_prompt = Some(ExcelExportPrompt { path, review, focused: 0 });
+                    this.mode = crate::mode::Mode::ExcelExportPassword;
+                    window.focus(&this.focus_handle, cx);
+                    cx.notify();
+                } else {
+                    this.write_reviewed_xlsx(&path, &review, ExcelProtection::Unprotected, cx);
+                }
+            }));
         })
         .detach();
+    }
+
+    pub(crate) fn finish_excel_export_prompt(&mut self, choice: usize, cx: &mut Context<Self>) {
+        let Some(prompt) = self.excel_export_prompt.take() else { return; };
+        self.mode = crate::mode::Mode::Navigation;
+        let protection = match choice {
+            0 => ExcelProtection::KeepPassword,
+            1 => ExcelProtection::Unprotected,
+            _ => {
+                self.status_message = Some("Export cancelled".into());
+                cx.notify();
+                return;
+            }
+        };
+        self.write_reviewed_xlsx(&prompt.path, &prompt.review, protection, cx);
+    }
+
+    fn write_reviewed_xlsx(
+        &mut self,
+        path: &Path,
+        review: &crate::xlsx_export::ExportReview,
+        protection: ExcelProtection,
+        cx: &mut Context<Self>,
+    ) {
+        if self.block_read_only_recovery(cx) { return; }
+        let layouts = self.build_export_layouts(cx);
+        if let Err(error) = review.check_current(self.wb(cx), &layouts) {
+            self.status_message = Some(error);
+            cx.notify();
+            return;
+        }
+
+        let write = || -> Result<xlsx::ExportResult, String> {
+            if protection == ExcelProtection::Unprotected && !self.has_source_xlsx_password() {
+                return xlsx::export_with_order(self.wb(cx), path, Some(&layouts), review.order());
+            }
+            let start = Instant::now();
+            let (bytes, mut report) = xlsx::export_to_buffer_with_order(self.wb(cx), Some(&layouts), review.order())?;
+            let bytes = match protection {
+                ExcelProtection::KeepPassword => {
+                    let password = self.source_xlsx_password.as_ref().ok_or("The source password is no longer available.")?;
+                    visigrid_io::xlsx_crypto::encrypt_ooxml(&bytes, password).map_err(|e| e.to_string())?
+                }
+                ExcelProtection::Unprotected => bytes,
+            };
+            visigrid_print::pdf::save_atomic(path, &bytes).map_err(|e| format!("Failed to save XLSX file: {e}"))?;
+            report.export_duration_ms = start.elapsed().as_millis();
+            Ok(report)
+        };
+        match write() {
+            Ok(report) => {
+                let mut status = format!("Exported to {}", path.display());
+                if protection == ExcelProtection::KeepPassword {
+                    status.push_str(" (password protected)");
+                }
+                if let Some(warning) = report.warning_summary() {
+                    status.push_str(&format!(" ({})", warning));
+                }
+                self.status_message = Some(status);
+                if report.has_warnings() {
+                    self.export_filename = Some(path.file_name().and_then(|n| n.to_str()).unwrap_or("file.xlsx").to_string());
+                    self.export_result = Some(report);
+                    self.show_export_report(cx);
+                } else {
+                    self.export_result = None;
+                    self.export_filename = None;
+                }
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Export failed: {error}"));
+                self.export_result = None;
+                self.export_filename = None;
+            }
+        }
+        cx.notify();
     }
 
     /// Export history as a deterministic Lua provenance script.
@@ -1474,7 +1525,7 @@ impl Spreadsheet {
             .and_then(|n| n.to_str())
             .map(|s| s.to_string());
 
-        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let warn_unencrypted = self.has_source_xlsx_password();
         let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
@@ -1609,7 +1660,7 @@ impl Spreadsheet {
             .unwrap_or("export");
         let suggested_name = format!("{}.{}", base_name, ext);
 
-        let warn_unencrypted = self.opened_from_encrypted_xlsx;
+        let warn_unencrypted = self.has_source_xlsx_password();
         let window_handle = self.window_handle;
         let future = cx.prompt_for_new_path(&directory, Some(&suggested_name));
         cx.spawn(async move |this, cx| {
@@ -1847,5 +1898,199 @@ mod limited_grid_roundtrip_tests {
             assert_eq!((app.grid_rows(), app.grid_cols()), (crate::app::NUM_ROWS, crate::app::NUM_COLS));
             assert_eq!(app.sheet(cx).get_raw(6, 2), "saved");
         }).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod excel_protection_tests {
+    use super::{ExcelProtection, Spreadsheet};
+    use std::path::{Path, PathBuf};
+    use visigrid_io::xlsx;
+    use crate::xlsx_export::ExportReview;
+    use gpui::{BorrowAppContext, TestAppContext, WindowHandle};
+    use visigrid_io::xlsx_crypto::{decrypt_ooxml, is_encrypted_ooxml, CryptoError, Zeroizing};
+
+    fn setup(cx: &mut TestAppContext) -> WindowHandle<Spreadsheet> {
+        cx.update(|cx| {
+            crate::settings::init_settings_store(cx);
+            crate::load_embedded_fonts(cx);
+            crate::keybindings::register(cx, crate::settings::ModifierStyle::Platform);
+            cx.set_global(crate::session::SessionManager::new());
+            cx.set_global(crate::window_registry::WindowRegistry::new());
+        });
+        let view = cx.add_window(Spreadsheet::new);
+        view.update(cx, |app, _, cx| {
+            app.session_window_id = cx.update_global::<crate::session::SessionManager, _>(|mgr, _| mgr.next_window_id());
+        }).unwrap();
+        view
+    }
+
+    fn fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/io/tests/fixtures/encrypted_msoffcrypto_agile.xlsx")
+    }
+
+    fn enter_password(view: WindowHandle<Spreadsheet>, cx: &mut TestAppContext, password: &str) {
+        view.update(cx, |app, _, cx| {
+            assert!(app.password_prompt.is_some());
+            for c in password.chars() {
+                app.password_prompt_insert_char(c, cx);
+            }
+            app.confirm_password_prompt(cx);
+        }).unwrap();
+        cx.run_until_parked();
+    }
+
+    fn open_protected(view: WindowHandle<Spreadsheet>, cx: &mut TestAppContext) {
+        view.update(cx, |app, _, cx| app.load_file(&fixture(), cx)).unwrap();
+        cx.run_until_parked();
+        enter_password(view, cx, "hunter2");
+        view.update(cx, |app, _, _| assert!(app.has_source_xlsx_password())).unwrap();
+    }
+
+    fn export(view: WindowHandle<Spreadsheet>, cx: &mut TestAppContext, path: &Path, keys: Option<&str>) {
+        view.update(cx, |app, _, cx| app.export_xlsx(cx)).unwrap();
+        assert!(cx.did_prompt_for_new_path());
+        cx.simulate_new_path_selection(|_| Some(path.to_owned()));
+        cx.run_until_parked();
+        view.update(cx, |app, _, _| {
+            assert_eq!(app.excel_export_prompt.is_some(), keys.is_some());
+        }).unwrap();
+        if let Some(keys) = keys {
+            cx.simulate_keystrokes(view.into(), keys);
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn opened_excel_exports_with_its_password_and_current_edits(cx: &mut TestAppContext) {
+        let view = setup(cx);
+        open_protected(view, cx);
+        view.update(cx, |app, window, cx| {
+            app.set_cell_value(9, 2, "edited after opening", cx);
+            let snapshot = app.snapshot(window, cx);
+            assert!(snapshot.file.is_none());
+            assert!(snapshot.sheets.is_empty());
+            let json = serde_json::to_string(&snapshot).unwrap();
+            assert!(!json.contains("hunter2"));
+            assert!(!json.contains("encrypted_msoffcrypto"));
+        }).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.xlsx");
+        export(view, cx, &path, Some("enter"));
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(is_encrypted_ooxml(&bytes));
+        assert_eq!(decrypt_ooxml(&bytes, "wrong").unwrap_err(), CryptoError::IncorrectPassword);
+        let clear = decrypt_ooxml(&bytes, "hunter2").unwrap();
+        let (reopened, _) = xlsx::import_bytes_with_options_typed(&clear, None, &Default::default()).unwrap();
+        view.update(cx, |app, _, cx| {
+            assert_eq!(app.status_message.as_deref(), Some(format!("Exported to {} (password protected)", path.display()).as_str()));
+            let original = app.wb(cx);
+            assert_eq!(reopened.sheet_count(), original.sheet_count());
+            for (sheet, copy) in original.sheets().iter().zip(reopened.sheets()) {
+                assert_eq!(copy.name, sheet.name);
+                let values = |sheet: &visigrid_engine::sheet::Sheet| {
+                    sheet.cells_iter().map(|((r,c), _)| ((r,c), sheet.get_display(r,c)))
+                        .collect::<std::collections::BTreeMap<_,_>>()
+                };
+                assert_eq!(values(sheet), values(copy));
+            }
+            assert_eq!(reopened.active_sheet().get_raw(9, 2), "edited after opening");
+        }).unwrap();
+        export(view, cx, &path, Some("escape"));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        export(view, cx, &path, Some("tab enter"));
+        assert!(std::fs::read(&path).unwrap().starts_with(b"PK\x03\x04"));
+        view.update(cx, |app, _, _| assert!(app.has_source_xlsx_password())).unwrap();
+    }
+
+    #[gpui::test]
+    fn save_and_replacement_load_forget_the_excel_password(cx: &mut TestAppContext) {
+        let view = setup(cx);
+        open_protected(view, cx);
+        let dir = tempfile::tempdir().unwrap();
+        let sheet = dir.path().join("saved.sheet");
+        let export_path = dir.path().join("plain.xlsx");
+        view.update(cx, |app, _, cx| app.save(cx)).unwrap();
+        cx.simulate_new_path_selection(|_| Some(sheet.clone()));
+        cx.run_until_parked();
+        assert!(cx.pending_prompt().unwrap().1.contains("File > Export to Excel"));
+        cx.simulate_prompt_answer("Save Unencrypted");
+        cx.run_until_parked();
+        assert!(sheet.is_file());
+        export(view, cx, &export_path, None);
+        assert!(std::fs::read(&export_path).unwrap().starts_with(b"PK\x03\x04"));
+
+        // Exercise the second import path (reimport with calculation options).
+        view.update(cx, |app, _, cx| {
+            app.start_excel_import_with_options(&fixture(), Default::default(), 0, cx);
+        }).unwrap();
+        cx.run_until_parked();
+        enter_password(view, cx, "hunter2");
+        view.update(cx, |app, _, cx| {
+            assert!(app.has_source_xlsx_password());
+            app.load_file(&sheet, cx);
+            assert!(!app.has_source_xlsx_password());
+        }).unwrap();
+        export(view, cx, &export_path, None);
+        assert!(std::fs::read(export_path).unwrap().starts_with(b"PK\x03\x04"));
+    }
+
+    #[gpui::test]
+    fn wrong_and_cancelled_passwords_are_discarded(cx: &mut TestAppContext) {
+        let view = setup(cx);
+        view.update(cx, |app, _, cx| app.load_file(&fixture(), cx)).unwrap();
+        cx.run_until_parked();
+        enter_password(view, cx, "incorrect trial");
+        view.update(cx, |app, _, cx| {
+            let retry = app.password_prompt.as_ref().unwrap();
+            assert!(retry.error.is_some());
+            assert!(retry.input.is_empty() && retry.options.password.is_none());
+            assert!(!app.has_source_xlsx_password());
+            app.password_prompt_insert_char('x', cx);
+            app.cancel_password_prompt(cx);
+            assert!(app.password_prompt.is_none() && !app.has_source_xlsx_password());
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn ordinary_excel_export_uses_the_existing_writer_and_no_password_prompt(cx: &mut TestAppContext) {
+        let view = setup(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary.xlsx");
+        let expected_path = dir.path().join("reference.xlsx");
+        view.update(cx, |app, _, cx| {
+            app.set_cell_value(0, 0, "ordinary workbook", cx);
+            app.set_cell_value(1, 0, "=1+2", cx);
+            app.set_col_width(0, 180.0);
+            let layouts = app.build_export_layouts(cx);
+            xlsx::export_with_order(app.wb(cx), &expected_path, Some(&layouts), xlsx::ExportOrder::Sorted).unwrap();
+        }).unwrap();
+        export(view, cx, &path, None);
+        // Excel ZIPs carry the creation time. Compare their workbook and layout instead.
+        let (actual, info) = xlsx::import_with_options_typed(&path, &Default::default()).unwrap();
+        let (expected, old_info) = xlsx::import_with_options_typed(&expected_path, &Default::default()).unwrap();
+        assert!(!info.was_encrypted);
+        assert_eq!(actual.active_sheet().name, expected.active_sheet().name);
+        assert_eq!(actual.active_sheet().get_raw(0, 0), expected.active_sheet().get_raw(0, 0));
+        assert_eq!(actual.active_sheet().get_raw(1, 0), expected.active_sheet().get_raw(1, 0));
+        assert_eq!(info.imported_layouts[0].col_widths, old_info.imported_layouts[0].col_widths);
+    }
+
+    #[gpui::test]
+    fn failed_excel_encryption_preserves_destination(cx: &mut TestAppContext) {
+        let view = setup(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.xlsx");
+        std::fs::write(&path, b"existing destination").unwrap();
+        view.update(cx, |app, _, cx| {
+            // Reader accepts passwords longer than the writer's 255 UTF-16 unit limit.
+            app.source_xlsx_password = Some(Zeroizing::new("x".repeat(256)));
+            let review = ExportReview::new(app.wb(cx), &app.build_export_layouts(cx)).unwrap();
+            app.write_reviewed_xlsx(&path, &review, ExcelProtection::KeepPassword, cx);
+            assert!(app.status_message.as_ref().unwrap().contains("Export failed"));
+            assert!(app.has_source_xlsx_password());
+        }).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing destination");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

@@ -931,6 +931,8 @@ VisiGrid uses SQLite-based `.sheet` files. These are:
 - Crash-safe (atomic writes)
 - Self-contained (no external dependencies)
 
+After opening a password-protected Excel workbook, choose **File > Export to Excel** and press Enter on **Keep Password** to protect the exported copy with the same password. Choose **Export Unprotected** for a plain Excel copy. Saving as `.sheet` writes an unencrypted workbook and clears the remembered password for later exports.
+
 VisiGrid can also import/export CSV files.
 
 ---

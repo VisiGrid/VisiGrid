@@ -472,7 +472,8 @@ pub struct Spreadsheet {
     pub comment_list_scroll: gpui::ScrollHandle,
     pub goto_input: String,
     pub(crate) password_prompt: Option<crate::views::password_dialog::PasswordPromptState>,
-    pub(crate) opened_from_encrypted_xlsx: bool,
+    /// Window-local credential, never included in workbook or session snapshots.
+    pub(crate) source_xlsx_password: Option<visigrid_io::xlsx_crypto::Zeroizing<String>>,
     pub(crate) count_dialog: Option<crate::count_dialog::CountDialog>,
     pub recovery_warning: Option<String>,
     pub pending_table_recovery: Option<(std::path::PathBuf, visigrid_io::table_recovery::TableLoadIssue)>,
@@ -897,6 +898,7 @@ pub struct Spreadsheet {
     // Export report state (for Excel exports with warnings)
     pub pdf_export: Option<crate::pdf_export::PdfExportState>,
     pub export_result: Option<visigrid_io::xlsx::ExportResult>,
+    pub(crate) excel_export_prompt: Option<crate::file_ops::ExcelExportPrompt>,
     pub pending_xlsx_export: Option<crate::xlsx_export::ExportReview>, // Order and losses awaiting review
     pub export_filename: Option<String>,  // Exported filename for display
 
@@ -1297,7 +1299,7 @@ impl Spreadsheet {
             comment_list_scroll: gpui::ScrollHandle::new(),
             goto_input: String::new(),
             password_prompt: None,
-            opened_from_encrypted_xlsx: false,
+            source_xlsx_password: None,
             count_dialog: None,
             recovery_warning: None,
             pending_table_recovery: None,
@@ -1547,6 +1549,7 @@ impl Spreadsheet {
 
             pdf_export: None,
             export_result: None,
+            excel_export_prompt: None,
             pending_xlsx_export: None,
             export_filename: None,
 
