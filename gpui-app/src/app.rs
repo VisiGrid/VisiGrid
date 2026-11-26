@@ -381,6 +381,7 @@ impl FormatBarState {
 pub(crate) struct RowResize {
     sheet_id: SheetId,
     ranges: Vec<(usize, usize)>,
+    clipped: bool,
     height: Option<f32>,
 }
 
@@ -3772,10 +3773,10 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    fn header_resize_rows(&self, clicked_row: usize) -> Vec<(usize, usize)> {
+    fn header_resize_rows(&self, clicked_row: usize, cx: &App) -> (Vec<(usize, usize)>, bool) {
         // Table views keep their existing single-header resize.
         if self.table_view_installed || !self.is_row_header_selected(clicked_row) {
-            return vec![(clicked_row, clicked_row)];
+            return (vec![(clicked_row, clicked_row)], false);
         }
 
         // Like row auto-fit, include all row indices in each range, irrespective
@@ -3783,6 +3784,31 @@ impl Spreadsheet {
         let mut ranges: Vec<_> = self.all_selection_ranges().into_iter()
             .map(|((first, _), (last, _))| (first, last))
             .collect();
+        let mut clipped = false;
+        if ranges.iter().any(|&(_, last)| last == NUM_ROWS - 1) {
+            let last_visible = |view: &WorkbookViewState| {
+                let rows = self.pane_rows(view);
+                rows.body.last().or_else(|| rows.frozen.last()).map_or(0, |slot| slot.index)
+            };
+            let mut bound = self.sheet(cx).data_extent().0.max(last_visible(&self.view_state));
+            if let Some(pane) = &self.split_pane {
+                bound = bound.max(last_visible(&pane.view_state));
+            }
+            if let Some(heights) = self.row_heights.get(&self.cached_sheet_id) {
+                bound = bound.max(heights.keys().copied().max().unwrap_or(0));
+            }
+            // Full-column and whole-sheet selections retain engine bounds in Limited Grid.
+            bound = bound.min(self.grid_rows() - 1).max(clicked_row);
+            if bound < NUM_ROWS - 1 {
+                clipped = true;
+                ranges.retain_mut(|(first, last)| {
+                    if *last == NUM_ROWS - 1 {
+                        *last = bound;
+                    }
+                    *first <= *last
+                });
+            }
+        }
         ranges.sort_unstable();
         let mut merged: Vec<(usize, usize)> = Vec::new();
         for (first, last) in ranges {
@@ -3794,16 +3820,18 @@ impl Spreadsheet {
             }
             merged.push((first, last));
         }
-        merged
+        (merged, clipped)
     }
 
     pub(crate) fn begin_row_resize(&mut self, row: usize, y: f32, cx: &mut Context<Self>) {
         if self.block_if_previewing(cx) { return; }
         self.resize_start_pos = y;
         self.resize_start_size = self.row_height(row);
+        let (ranges, clipped) = self.header_resize_rows(row, cx);
         self.resizing_row = Some(RowResize {
             sheet_id: self.cached_sheet_id,
-            ranges: self.header_resize_rows(row),
+            ranges,
+            clipped,
             height: None,
         });
         cx.notify();
@@ -3829,7 +3857,7 @@ impl Spreadsheet {
 
         let mut actions = Vec::new();
         let heights = self.row_heights.entry(drag.sheet_id).or_default();
-        for (first, last) in drag.ranges {
+        for &(first, last) in &drag.ranges {
             for row in first..=last {
                 let old = heights.insert(row, height);
                 if old != Some(height) {
@@ -3848,6 +3876,13 @@ impl Spreadsheet {
             self.record_action_with_provenance(cx, action, None);
             self.is_modified = true;
             self.request_title_refresh(cx);
+        }
+        if drag.clipped {
+            let labels = drag.ranges.iter().map(|&(first, last)| {
+                if first == last { (first + 1).to_string() }
+                else { format!("{}–{}", first + 1, last + 1) }
+            }).collect::<Vec<_>>().join(", ");
+            self.status_message = Some(format!("Resized rows {labels}. Empty rows below keep the default height."));
         }
         cx.notify();
     }

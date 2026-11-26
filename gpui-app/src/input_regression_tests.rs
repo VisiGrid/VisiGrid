@@ -215,22 +215,126 @@ fn active_table_view_keeps_its_single_row_resize(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn whole_sheet_row_resize_previews_even_the_last_row_without_materializing_heights(cx: &mut TestAppContext) {
+fn whole_sheet_row_resize_previews_and_commits_only_the_bounded_rows(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
+        app.grid_layout.viewport_size.1 = 100.;
+        app.wb_mut(cx, |wb| {
+            for row in 0..50 {
+                wb.set_cell_value_tracked(0, row, 0, "data");
+            }
+        });
+        app.select_all(cx); // Current region, then the whole sheet.
         app.select_all(cx);
-        let before = app.row_heights.clone();
         let start = app.row_height(0);
         app.begin_row_resize(0, 100., cx);
         for delta in [10., 15., 20.] {
             app.update_row_resize(100. + delta, cx);
-            assert_eq!(app.row_height(crate::app::NUM_ROWS - 1), start + delta);
-            assert_eq!(app.row_heights, before);
+            assert_eq!(app.row_height(49), start + delta);
+            assert_eq!(app.row_height(50), start);
+            assert_eq!(app.row_height(crate::app::NUM_ROWS - 1), start);
         }
-        app.update_row_resize(100., cx);
+        let id = app.cached_sheet_id();
+        assert!(app.row_heights.get(&id).is_none_or(|heights| heights.is_empty()));
+        let release = std::time::Instant::now();
         app.finish_row_resize(cx);
-        assert_eq!(app.row_heights, before);
-        assert_eq!(app.history.undo_count(), 0);
+        let release = release.elapsed();
+        assert_eq!(app.row_heights[&id].len(), 50);
+        assert_eq!(app.row_heights[&id][&49], start + 20.);
+        assert_eq!(app.status_message.as_deref(), Some("Resized rows 1–50. Empty rows below keep the default height."));
+        assert_eq!(app.history.undo_count(), 1);
+        let undo = std::time::Instant::now();
+        app.undo(cx);
+        eprintln!("50-row Ctrl+A resize: mouse-up {release:?}, undo {:?}", undo.elapsed());
+        assert!(app.row_heights[&id].is_empty());
+    }).unwrap();
+}
+
+#[gpui::test]
+fn explicit_five_thousand_row_resize_is_not_clipped(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.select_row(0, false, cx);
+        app.select_row(4999, true, cx);
+        let status = app.status_message.clone();
+        app.begin_row_resize(0, 100., cx);
+        app.update_row_resize(120., cx);
+        app.finish_row_resize(cx);
+        let heights = &app.row_heights[&app.cached_sheet_id()];
+        assert_eq!(heights.len(), 5000);
+        assert!(heights.contains_key(&4999));
+        assert_eq!(app.status_message, status);
+        assert_eq!(app.history.undo_count(), 1);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn full_column_resize_includes_visible_rows_and_explicit_heights(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.select_col(2, false, cx);
+        app.split_right(cx);
+        app.split_pane.as_mut().unwrap().view_state.scroll_row = 39;
+        app.grid_layout.viewport_size.1 = 1.; // Only row 40 is visible in the right pane.
+        app.begin_row_resize(0, 0., cx);
+        app.update_row_resize(8., cx);
+        app.finish_row_resize(cx);
+        let id = app.cached_sheet_id();
+        assert_eq!(app.row_heights[&id].len(), 40);
+        app.undo(cx);
+
+        app.sheet_row_heights_mut().insert(79, 31.);
+        app.begin_row_resize(0, 0., cx);
+        app.update_row_resize(8., cx);
+        app.finish_row_resize(cx);
+        assert_eq!(app.row_heights[&id].len(), 80);
+        assert_eq!(app.status_message.as_deref(), Some("Resized rows 1–80. Empty rows below keep the default height."));
+        app.undo(cx);
+        assert_eq!(app.row_heights[&id].len(), 1);
+        assert_eq!(app.row_heights[&id][&79], 31.);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn resize_drops_an_empty_bottom_range_and_keeps_the_dragged_row(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.grid_layout.viewport_size.1 = 1.;
+        app.select_row(80, false, cx);
+        app.view_state.additional_selections.push(((120, 0), Some((crate::app::NUM_ROWS - 1, 0))));
+        app.begin_row_resize(80, 0., cx);
+        app.update_row_resize(8., cx);
+        app.finish_row_resize(cx);
+        let heights = &app.row_heights[&app.cached_sheet_id()];
+        assert_eq!(heights.len(), 1);
+        assert!(heights.contains_key(&80));
+        app.select_col(0, false, cx);
+        app.undo(cx);
+        app.begin_row_resize(80, 0., cx);
+        app.update_row_resize(8., cx);
+        app.finish_row_resize(cx);
+        assert_eq!(app.row_heights[&app.cached_sheet_id()].len(), 81);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn limited_grid_caps_full_column_resize_at_its_effective_extent(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.doc_settings.display.limited_grid = crate::settings::Setting::Value(true);
+        app.sync_limited_grid(cx);
+        assert_eq!(app.grid_rows(), 20);
+        app.sheet_row_heights_mut().insert(99, 70.);
+        app.select_col(2, false, cx);
+        assert_eq!(app.selection_range().1.0, crate::app::NUM_ROWS - 1);
+        app.begin_row_resize(0, 0., cx);
+        app.update_row_resize(8., cx);
+        app.finish_row_resize(cx);
+        let heights = &app.row_heights[&app.cached_sheet_id()];
+        assert_eq!(heights.len(), 21);
+        assert!(heights.contains_key(&19));
+        assert_eq!(heights[&99], 70.);
+        assert_eq!(app.grid_rows(), 20);
     }).unwrap();
 }
 
