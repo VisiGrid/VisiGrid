@@ -110,7 +110,7 @@ impl Spreadsheet {
     ) {
         use visigrid_engine::filter::{sort_by_column, SortState};
         if let Some(table) = self.table_under_cursor(cx) {
-            let col = self.view_state.selected.1;
+            let col = self.view_state.active_cell().1;
             let mut spec = self.sheet(cx).table_view_spec().filter(|s| s.table == table.id).cloned()
                 .unwrap_or_else(|| visigrid_engine::table_view::TableViewSpec::new(table.id));
             spec.sort = Some(visigrid_engine::table_view::TableSort { column: table.columns[col - table.range.start_col].id, direction });
@@ -140,7 +140,7 @@ impl Spreadsheet {
         if self.block_if_merges_in_rows("sort", (range.0 + 1, range.2), cx) { return; }
         self.filter_state.filter_range = Some(range);
 
-        let col = self.view_state.selected.1;
+        let col = self.view_state.active_cell().1;
 
         // Create value_at closure (captures sheet for computed values)
         let sheet = self.sheet(cx);
@@ -211,7 +211,7 @@ impl Spreadsheet {
     /// is skipped (a merged or centered report title sits there). None if
     /// there's no header with at least one row of data under it.
     pub(crate) fn table_range_at_cursor(&self, cx: &App) -> Option<(usize, usize, usize, usize)> {
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         table_range_around(self.sheet(cx), row, col)
     }
 

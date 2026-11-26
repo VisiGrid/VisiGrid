@@ -872,10 +872,7 @@ impl Spreadsheet {
                 return;
             }
         }
-        let view_state = self.active_view_state_mut();
-        view_state.selected = (row, col);
-        view_state.selection_end = None;
-        view_state.additional_selections.clear();
+        self.active_view_state_mut().select_cell(row, col);
         self.ensure_cell_visible(row, col);
         cx.notify();
     }

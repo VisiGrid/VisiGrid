@@ -141,7 +141,7 @@ impl Spreadsheet {
 
     pub(crate) fn restore_column_formula(&mut self, id: TableId, cx: &mut Context<Self>) {
         if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) || self.mode.is_editing() { return; }
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let row = self.row_view.view_to_data(row);
         let result = crate::table_calculated::prepare_restore(self.wb(cx), id, row, col)
             .and_then(|(candidate, commit)| self.publish_calculated(candidate, commit, "Restore column formula", cx));
@@ -236,7 +236,7 @@ impl Spreadsheet {
                 let percent_cell = self
                     .mode
                     .is_editing()
-                    .then_some(self.view_state.selected)
+                    .then_some(self.view_state.active_cell())
                     .filter(|_| self.edit_value.trim().ends_with('%'));
                 self.cancel_edit(cx);
                 self.record_table_commit(commit, "Append Table row".into(), cx);
@@ -260,12 +260,10 @@ impl Spreadsheet {
                 let (row, hidden) = crate::table_append::append_focus(
                     &self.row_view, range, &self.sheet(cx).manual_hidden_rows(),
                 );
-                self.view_state.selected = (row, range.start_col);
+                self.view_state.select_cell(row, range.start_col);
                 if hidden {
                     self.status_message = Some("Added 1 Table row, hidden by the current view. Unhide rows or clear filters to enter its values.".into());
                 }
-                self.view_state.selection_end = None;
-                self.view_state.additional_selections.clear();
                 self.tab_chain_origin_col = Some(range.start_col);
                 self.ensure_visible(cx);
             }
@@ -286,7 +284,7 @@ impl Spreadsheet {
         let Some(table) = self.table_under_cursor(cx) else {
             return false;
         };
-        let (r, c) = self.view_state.selected;
+        let (r, c) = self.view_state.active_cell();
         if table.range.data_rows() == 0
             || !crate::table_append::is_last_visible_cell(&self.row_view, table.range, (r, c), &self.sheet(cx).manual_hidden_rows())
         {
@@ -425,7 +423,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn show_table_controls(&self, cx: &App) -> bool {
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         !self.zen_mode
             && !self.is_previewing()
             && self.review_mode.is_none()
@@ -436,7 +434,7 @@ impl Spreadsheet {
     }
 
     pub(crate) fn table_under_cursor(&self, cx: &App) -> Option<DataTable> {
-        let (r, c) = self.view_state.selected;
+        let (r, c) = self.view_state.active_cell();
         self.sheet(cx)
             .table_at(self.row_view.view_to_data(r), c)
             .cloned()
@@ -528,7 +526,7 @@ impl Spreadsheet {
             } else if let TableDialogKind::Total(_, col) = kind {
                 self.sheet(cx).get_raw(table.range.end_row + 1, col)
             } else if let TableDialogKind::ColumnFormula(_, col, _) = kind {
-                let row = self.row_view.view_to_data(self.view_state.selected.0);
+                let row = self.row_view.view_to_data(self.view_state.active_cell().0);
                 if table.columns[col - table.range.start_col].formula.is_some() {
                     table.columns[col - table.range.start_col]
                         .formula
@@ -554,7 +552,7 @@ impl Spreadsheet {
                     (table.range.start_row + column.formula_origin).to_string()
                 } else {
                     self.row_view
-                        .view_to_data(self.view_state.selected.0)
+                        .view_to_data(self.view_state.active_cell().0)
                         .to_string()
                 }
             } else {
@@ -821,8 +819,10 @@ impl Spreadsheet {
         if self.sheet(cx).id == sheet {
             if undo { self.row_view.delete_row(at); } else { self.row_view.insert_row(at); }
             let range = commit.after_table().unwrap().range;
-            self.view_state.selected = (range.start_row, range.start_col);
-            self.view_state.selection_end = Some((range.end_row - usize::from(undo), range.end_col));
+            self.view_state.set_range(
+                (range.start_row, range.start_col),
+                (range.end_row - usize::from(undo), range.end_col),
+            );
             self.view_state.additional_selections.clear();
         }
     }
@@ -1176,7 +1176,7 @@ mod conversion_size_tests {
                 id
             });
             app.sync_table_view(cx);
-            app.view_state.selected = (1, 0);
+            app.view_state.set_single_cell((1, 0));
             app.cloud_identity = Some(crate::cloud::CloudIdentity {
                 sheet_id: 1, public_id: "test-live".into(), sheet_name: "Test".into(),
                 api_base: "https://example.invalid".into(), last_synced_hash: None,
@@ -1193,10 +1193,10 @@ mod conversion_size_tests {
                     assert!(!app.history.can_undo());
                 }};
             }
-            app.view_state.selected = (0, 0);
+            app.view_state.set_single_cell((0, 0));
             blocked!(assert!(app.paste_table_headers(crate::clipboard::TablePasteKind::Contents, cx)));
             blocked!(assert!(app.paste_table_headers(crate::clipboard::TablePasteKind::Values, cx)));
-            app.view_state.selected = (1, 0);
+            app.view_state.set_single_cell((1, 0));
             assert_eq!(app.commit_calculated_value(1, 0, "=1+2", cx), None);
             assert_eq!(format!("{:?}", app.wb(cx)), before);
             use visigrid_protocol::StructureOp;

@@ -44,7 +44,7 @@ fn delete_routes_to_cell_contents_or_forward_text_deletion(cx: &mut TestAppConte
         assert_eq!(app.sheet(cx).get_raw(1, 0), "keep");
         app.undo(cx);
         assert_eq!(app.sheet(cx).get_raw(0, 0), "abc");
-        app.view_state.selection_end = Some((1, 0));
+        app.view_state.set_selection_end(Some((1, 0)));
         cx.notify();
     })
     .unwrap();
@@ -64,8 +64,7 @@ fn selected_columns_resize_together_and_undo_restores_each_original(cx: &mut Tes
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
         let id = app.cached_sheet_id();
-        app.view_state.selected = (0, 1);
-        app.view_state.selection_end = Some((10, 2));
+        app.view_state.set_range((0, 1), (10, 2));
         app.view_state
             .additional_selections
             .push(((0, 4), Some((10, 4))));
@@ -213,7 +212,7 @@ fn insert_count_dialog_validates_keys_and_inserts_in_one_undo_step(cx: &mut Test
     view.update(cx, |app, window, cx| {
         window.focus(&app.focus_handle, cx);
         app.wb_mut(cx, |wb| { wb.set_cell_value_tracked(0, 1, 0, "original"); });
-        app.view_state.selected = (1, 0);
+        app.view_state.set_single_cell((1, 0));
         app.show_insert_count(Axis::Row, false, cx);
     }).unwrap();
     cx.simulate_keystrokes(view.into(), "0 enter");
@@ -240,8 +239,7 @@ fn insert_count_dialog_targets_all_four_sides_and_checks_remaining_capacity(cx: 
     use visigrid_engine::structural::Axis;
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (4, 3);
-        app.view_state.selection_end = Some((6, 5));
+        app.view_state.set_range((4, 3), (6, 5));
         for (axis, after, at, capacity) in [
             (Axis::Row, false, 4, crate::app::NUM_ROWS - 4),
             (Axis::Row, true, 7, crate::app::NUM_ROWS - 7),
@@ -352,31 +350,28 @@ fn range_paste_uses_top_left_in_either_drag_direction_and_undo_restores_cells(
                 wb.set_cell_value_tracked(0, row, 5, &format!("original {row}"));
             }
         });
-        app.view_state.selected = (2, 1);
-        app.view_state.selection_end = Some((6, 1));
+        app.view_state.set_range((2, 1), (6, 1));
     })
     .unwrap();
     primary_key(cx, view, "c");
 
     // A single-cell destination expands to the pasted rectangle.
     view.update(cx, |app, _, _| {
-        app.view_state.selected = (2, 5);
-        app.view_state.selection_end = None;
+        app.view_state.set_single_cell((2, 5));
     })
     .unwrap();
     primary_key(cx, view, "v");
     view.update(cx, |app, _, cx| {
         assert_eq!(app.sheet(cx).get_raw(6, 5), "source 6");
-        assert_eq!(app.view_state.selected, (2, 5));
-        assert_eq!(app.view_state.selection_end, Some((6, 5)));
+        assert_eq!(app.view_state.active_cell(), (2, 5));
+        assert_eq!(app.view_state.selection_end(), Some((6, 5)));
         app.undo(cx);
     })
     .unwrap();
 
     for (anchor, end) in [(2, 6), (6, 2)] {
         view.update(cx, |app, _, _| {
-            app.view_state.selected = (anchor, 5);
-            app.view_state.selection_end = Some((end, 5));
+            app.view_state.set_range((anchor, 5), (end, 5));
         })
         .unwrap();
         primary_key(cx, view, "v");
@@ -387,8 +382,8 @@ fn range_paste_uses_top_left_in_either_drag_direction_and_undo_restores_cells(
             for row in 7..=10 {
                 assert_eq!(app.sheet(cx).get_raw(row, 5), "");
             }
-            assert_eq!(app.view_state.selected, (2, 5));
-            assert_eq!(app.view_state.selection_end, Some((6, 5)));
+            assert_eq!(app.view_state.active_cell(), (2, 5));
+            assert_eq!(app.view_state.selection_end(), Some((6, 5)));
             assert_eq!(app.history.undo_count(), 1);
         })
         .unwrap();
@@ -420,8 +415,7 @@ fn paste_special_uses_top_left_and_selects_the_source_sized_rectangle(cx: &mut T
                 },
             );
         });
-        app.view_state.selected = (0, 0);
-        app.view_state.selection_end = Some((0, 1));
+        app.view_state.set_range((0, 0), (0, 1));
         app.copy(cx);
         // Exercise the internal-only paths with the clipboard ID they require.
         let copied = app.internal_clipboard.as_ref().unwrap();
@@ -432,12 +426,11 @@ fn paste_special_uses_top_left_and_selects_the_source_sized_rectangle(cx: &mut T
 
         // Select H4:F3. Each paste should select exactly F3:G3.
         let select_target = |app: &mut Spreadsheet| {
-            app.view_state.selected = (3, 7);
-            app.view_state.selection_end = Some((2, 5));
+            app.view_state.set_range((3, 7), (2, 5));
         };
         let check_selection = |app: &Spreadsheet| {
-            assert_eq!(app.view_state.selected, (2, 5));
-            assert_eq!(app.view_state.selection_end, Some((2, 6)));
+            assert_eq!(app.view_state.active_cell(), (2, 5));
+            assert_eq!(app.view_state.selection_end(), Some((2, 6)));
         };
         select_target(app);
         app.paste_values(cx);
@@ -475,17 +468,15 @@ fn one_cell_formula_fallback_fills_selection_while_values_and_formats_use_top_le
                 wb.set_cell_value_tracked(0, row, 5, "original");
             }
         });
-        app.view_state.selected = (0, 0);
-        app.view_state.selection_end = None;
+        app.view_state.set_single_cell((0, 0));
         app.copy(cx);
         let select_target = |app: &mut Spreadsheet| {
-            app.view_state.selected = (4, 5);
-            app.view_state.selection_end = Some((2, 5));
+            app.view_state.set_range((4, 5), (2, 5));
             app.view_state.additional_selections = vec![((3, 8), None)];
         };
         let check_target = |app: &Spreadsheet, cx: &gpui::App| {
-            assert_eq!(app.view_state.selected, (2, 5));
-            assert_eq!(app.view_state.selection_end, None);
+            assert_eq!(app.view_state.active_cell(), (2, 5));
+            assert_eq!(app.view_state.selection_end(), None);
             assert!(app.view_state.additional_selections.is_empty());
             for row in 3..=4 {
                 assert_eq!(app.sheet(cx).get_raw(row, 5), "original");
@@ -500,8 +491,8 @@ fn one_cell_formula_fallback_fills_selection_while_values_and_formats_use_top_le
                 assert_eq!(app.sheet(cx).get_raw(row, 5), formula);
             }
             assert_eq!(app.sheet(cx).get_raw(3, 8), formula);
-            assert_eq!(app.view_state.selected, (4, 5));
-            assert_eq!(app.view_state.selection_end, Some((2, 5)));
+            assert_eq!(app.view_state.active_cell(), (4, 5));
+            assert_eq!(app.view_state.selection_end(), Some((2, 5)));
             assert_eq!(app.view_state.additional_selections.as_slice(), &[((3, 8), None)]);
         };
 
@@ -555,9 +546,9 @@ fn whole_column_jump_right_stops_at_the_end_of_first_row_data(cx: &mut TestAppCo
     .unwrap();
     primary_key(cx, view, "shift-right");
     view.update(cx, |app, _, _| {
-        assert_eq!(app.view_state.selected, (0, 1));
+        assert_eq!(app.view_state.active_cell(), (0, 1));
         assert_eq!(
-            app.view_state.selection_end,
+            app.view_state.selection_end(),
             Some((crate::app::NUM_ROWS - 1, 3))
         );
     })
@@ -573,8 +564,7 @@ fn one_cell_contents_and_all_preserve_the_selection_they_fill(cx: &mut TestAppCo
             .editing
             .paste_values_by_default = crate::settings::Setting::Value(false);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("fill".into()));
-        app.view_state.selected = (4, 5);
-        app.view_state.selection_end = Some((2, 5));
+        app.view_state.set_range((4, 5), (2, 5));
         app.view_state.additional_selections.push(((3, 8), None));
 
         for paste in [Spreadsheet::paste, Spreadsheet::paste_all] {
@@ -583,8 +573,8 @@ fn one_cell_contents_and_all_preserve_the_selection_they_fill(cx: &mut TestAppCo
                 assert_eq!(app.sheet(cx).get_raw(row, 5), "fill");
             }
             assert_eq!(app.sheet(cx).get_raw(3, 8), "fill");
-            assert_eq!(app.view_state.selected, (4, 5));
-            assert_eq!(app.view_state.selection_end, Some((2, 5)));
+            assert_eq!(app.view_state.active_cell(), (4, 5));
+            assert_eq!(app.view_state.selection_end(), Some((2, 5)));
             assert_eq!(
                 app.view_state.additional_selections.as_slice(),
                 &[((3, 8), None)]
@@ -613,20 +603,19 @@ fn check_perpendicular_jump(
             }
             wb.set_cell_value_tracked(0, gap.0, gap.1, "");
         });
-        app.view_state.selected = (8, 5);
-        app.view_state.selection_end = None;
+        app.view_state.set_single_cell((8, 5));
     })
     .unwrap();
     primary_key(cx, view, first);
     view.update(cx, |app, _, _| {
-        assert_eq!(app.view_state.selected, (8, 5));
-        assert_eq!(app.view_state.selection_end, Some(first_end));
+        assert_eq!(app.view_state.active_cell(), (8, 5));
+        assert_eq!(app.view_state.selection_end(), Some(first_end));
     })
     .unwrap();
     primary_key(cx, view, second);
     view.update(cx, |app, _, _| {
-        assert_eq!(app.view_state.selected, (8, 5));
-        assert_eq!(app.view_state.selection_end, Some((0, 0)));
+        assert_eq!(app.view_state.active_cell(), (8, 5));
+        assert_eq!(app.view_state.selection_end(), Some((0, 0)));
     })
     .unwrap();
 }
@@ -660,15 +649,14 @@ fn reversed_header_paste_checks_and_renames_from_the_leftmost_header(cx: &mut Te
             wb.create_table(wb.active_sheet().id, range, "Orders")
                 .unwrap();
         });
-        app.view_state.selected = (0, 2);
-        app.view_state.selection_end = Some((0, 0));
+        app.view_state.set_range((0, 2), (0, 0));
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("Item\tQty".into()));
         app.paste(cx);
         assert_eq!(app.sheet(cx).get_raw(0, 0), "Item");
         assert_eq!(app.sheet(cx).get_raw(0, 1), "Qty");
         assert_eq!(app.sheet(cx).get_raw(0, 2), "Third");
-        assert_eq!(app.view_state.selected, (0, 0));
-        assert_eq!(app.view_state.selection_end, Some((0, 1)));
+        assert_eq!(app.view_state.active_cell(), (0, 0));
+        assert_eq!(app.view_state.selection_end(), Some((0, 1)));
     })
     .unwrap();
 }
@@ -678,14 +666,13 @@ fn enter_shift_enter_tab_shift_tab_cycle_2x3_range_and_wrap(cx: &mut TestAppCont
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
         let range = ((1, 1), (2, 3));
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((2, 3));
+        app.view_state.set_range((1, 1), (2, 3));
 
         // Enter: down then next column, wrapping to top-left
         let enter_expected = [(2, 1), (1, 2), (2, 2), (1, 3), (2, 3), (1, 1)];
         for expected in enter_expected {
             app.confirm_edit_enter(cx);
-            assert_eq!(app.view_state.selected, expected, "Enter step");
+            assert_eq!(app.view_state.active_cell(), expected, "Enter step");
             assert_eq!(app.selection_range(), range, "range preserved on Enter");
         }
 
@@ -693,7 +680,7 @@ fn enter_shift_enter_tab_shift_tab_cycle_2x3_range_and_wrap(cx: &mut TestAppCont
         let shift_enter_expected = [(2, 3), (1, 3), (2, 2), (1, 2), (2, 1), (1, 1)];
         for expected in shift_enter_expected {
             app.confirm_edit_up_enter(cx);
-            assert_eq!(app.view_state.selected, expected, "Shift+Enter step");
+            assert_eq!(app.view_state.active_cell(), expected, "Shift+Enter step");
             assert_eq!(app.selection_range(), range, "range preserved on Shift+Enter");
         }
 
@@ -701,7 +688,7 @@ fn enter_shift_enter_tab_shift_tab_cycle_2x3_range_and_wrap(cx: &mut TestAppCont
         let tab_expected = [(1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (1, 1)];
         for expected in tab_expected {
             app.confirm_edit_and_tab_right(cx);
-            assert_eq!(app.view_state.selected, expected, "Tab step");
+            assert_eq!(app.view_state.active_cell(), expected, "Tab step");
             assert_eq!(app.selection_range(), range, "range preserved on Tab");
         }
 
@@ -709,7 +696,7 @@ fn enter_shift_enter_tab_shift_tab_cycle_2x3_range_and_wrap(cx: &mut TestAppCont
         let shift_tab_expected = [(2, 3), (2, 2), (2, 1), (1, 3), (1, 2), (1, 1)];
         for expected in shift_tab_expected {
             app.confirm_edit_and_tab_left(cx);
-            assert_eq!(app.view_state.selected, expected, "Shift+Tab step");
+            assert_eq!(app.view_state.active_cell(), expected, "Shift+Tab step");
             assert_eq!(app.selection_range(), range, "range preserved on Shift+Tab");
         }
     })
@@ -720,8 +707,7 @@ fn enter_shift_enter_tab_shift_tab_cycle_2x3_range_and_wrap(cx: &mut TestAppCont
 fn typing_then_enter_in_range_writes_only_active_cell_and_advances(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((2, 2));
+        app.view_state.set_range((1, 1), (2, 2));
 
         app.start_edit(cx);
         app.edit_value = "alpha".into();
@@ -730,7 +716,7 @@ fn typing_then_enter_in_range_writes_only_active_cell_and_advances(cx: &mut Test
         assert_eq!(app.sheet(cx).get_raw(2, 1), "");
         assert_eq!(app.sheet(cx).get_raw(1, 2), "");
         assert_eq!(app.sheet(cx).get_raw(2, 2), "");
-        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.active_cell(), (2, 1));
         assert_eq!(app.selection_range(), ((1, 1), (2, 2)));
 
         app.start_edit(cx);
@@ -738,7 +724,7 @@ fn typing_then_enter_in_range_writes_only_active_cell_and_advances(cx: &mut Test
         app.confirm_edit_enter(cx);
         assert_eq!(app.sheet(cx).get_raw(2, 1), "beta");
         assert_eq!(app.sheet(cx).get_raw(1, 2), "");
-        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.view_state.active_cell(), (1, 2));
         assert_eq!(app.selection_range(), ((1, 1), (2, 2)));
     })
     .unwrap();
@@ -752,21 +738,20 @@ fn cycle_skips_hidden_row_and_hidden_column(cx: &mut TestAppContext) {
         app.hidden_rows.entry(sheet_id).or_default().insert(2);
         app.hidden_cols.entry(sheet_id).or_default().insert(2);
 
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((3, 3));
+        app.view_state.set_range((1, 1), (3, 3));
 
         // Visible cells in (1,1)..=(3,3) are (1,1), (3,1), (1,3), (3,3)
         let enter_expected = [(3, 1), (1, 3), (3, 3), (1, 1)];
         for expected in enter_expected {
             app.confirm_edit_enter(cx);
-            assert_eq!(app.view_state.selected, expected);
+            assert_eq!(app.view_state.active_cell(), expected);
             assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
         }
 
         let tab_expected = [(1, 3), (3, 1), (3, 3), (1, 1)];
         for expected in tab_expected {
             app.confirm_edit_and_tab_right(cx);
-            assert_eq!(app.view_state.selected, expected);
+            assert_eq!(app.view_state.active_cell(), expected);
             assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
         }
     })
@@ -782,14 +767,13 @@ fn cycle_treats_merged_area_as_one_stop_at_origin(cx: &mut TestAppContext) {
                 .add_merge(visigrid_engine::sheet::MergedRegion::new(1, 1, 2, 2))
                 .expect("merge 2x2");
         });
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((3, 3));
+        app.view_state.set_range((1, 1), (3, 3));
 
         // Enter order: (1,1) [merge origin] -> (3,1) -> (3,2) -> (1,3) -> (2,3) -> (3,3) -> (1,1)
         let enter_expected = [(3, 1), (3, 2), (1, 3), (2, 3), (3, 3), (1, 1)];
         for expected in enter_expected {
             app.confirm_edit_enter(cx);
-            assert_eq!(app.view_state.selected, expected, "Enter with merge");
+            assert_eq!(app.view_state.active_cell(), expected, "Enter with merge");
             assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
         }
 
@@ -797,7 +781,7 @@ fn cycle_treats_merged_area_as_one_stop_at_origin(cx: &mut TestAppContext) {
         let tab_expected = [(1, 3), (2, 3), (3, 1), (3, 2), (3, 3), (1, 1)];
         for expected in tab_expected {
             app.confirm_edit_and_tab_right(cx);
-            assert_eq!(app.view_state.selected, expected, "Tab with merge");
+            assert_eq!(app.view_state.active_cell(), expected, "Tab with merge");
             assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
         }
     })
@@ -808,16 +792,15 @@ fn cycle_treats_merged_area_as_one_stop_at_origin(cx: &mut TestAppContext) {
 fn single_cell_enter_and_tab_preserve_tab_chain_return(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = None;
+        app.view_state.set_single_cell((1, 1));
 
         app.confirm_edit_and_tab_right(cx);
-        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.view_state.active_cell(), (1, 2));
         app.confirm_edit_and_tab_right(cx);
-        assert_eq!(app.view_state.selected, (1, 3));
+        assert_eq!(app.view_state.active_cell(), (1, 3));
         app.confirm_edit_enter(cx);
-        assert_eq!(app.view_state.selected, (2, 1), "Enter returns to tab-chain origin column");
-        assert_eq!(app.view_state.selection_end, None);
+        assert_eq!(app.view_state.active_cell(), (2, 1), "Enter returns to tab-chain origin column");
+        assert_eq!(app.view_state.selection_end(), None);
     })
     .unwrap();
 }
@@ -826,13 +809,12 @@ fn single_cell_enter_and_tab_preserve_tab_chain_return(cx: &mut TestAppContext) 
 fn additional_selections_keep_existing_collapse_behaviour(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((2, 2));
+        app.view_state.set_range((1, 1), (2, 2));
         app.view_state.additional_selections.push(((5, 5), None));
 
         app.confirm_edit_enter(cx);
-        assert_eq!(app.view_state.selected, (2, 1));
-        assert_eq!(app.view_state.selection_end, None);
+        assert_eq!(app.view_state.active_cell(), (2, 1));
+        assert_eq!(app.view_state.selection_end(), None);
         assert!(app.view_state.additional_selections.is_empty());
     })
     .unwrap();
@@ -842,17 +824,16 @@ fn additional_selections_keep_existing_collapse_behaviour(cx: &mut TestAppContex
 fn arrow_key_after_cycling_collapses_selection(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((2, 3));
+        app.view_state.set_range((1, 1), (2, 3));
 
         app.confirm_edit_enter(cx);
-        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.active_cell(), (2, 1));
         assert_eq!(app.selection_range(), ((1, 1), (2, 3)));
 
         app.move_selection(0, 1, cx);
-        assert_eq!(app.view_state.selected, (2, 2));
-        assert_eq!(app.view_state.selection_end, None);
-        assert_eq!(app.view_state.selection_anchor, None);
+        assert_eq!(app.view_state.active_cell(), (2, 2));
+        assert_eq!(app.view_state.selection_end(), None);
+        assert!(!app.view_state.is_cycling_in_range());
         assert_eq!(app.selection_range(), ((2, 2), (2, 2)));
     })
     .unwrap();
@@ -862,27 +843,24 @@ fn arrow_key_after_cycling_collapses_selection(cx: &mut TestAppContext) {
 fn shift_arrow_and_shift_click_after_cycling_extend_from_active_cell(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((3, 3));
+        app.view_state.set_range((1, 1), (3, 3));
         app.confirm_edit_enter(cx);
-        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.active_cell(), (2, 1));
 
         // Shift+Right extends from active cell (2, 1) -> (2, 1)..=(2, 2)
         app.extend_selection(0, 1, cx);
-        assert_eq!(app.view_state.selected, (2, 1));
-        assert_eq!(app.view_state.selection_anchor, None);
+        assert_eq!(app.view_state.active_cell(), (2, 1));
+        assert!(!app.view_state.is_cycling_in_range());
         assert_eq!(app.selection_range(), ((2, 1), (2, 2)));
 
         // Re-select range, cycle to (2, 1), then Shift+Click (2, 3) -> (2, 1)..=(2, 3)
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((3, 3));
-        app.view_state.selection_anchor = None;
+        app.view_state.set_range((1, 1), (3, 3));
         app.confirm_edit_enter(cx);
-        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.active_cell(), (2, 1));
 
         app.select_cell(2, 3, true, cx);
-        assert_eq!(app.view_state.selected, (2, 1));
-        assert_eq!(app.view_state.selection_anchor, None);
+        assert_eq!(app.view_state.active_cell(), (2, 1));
+        assert!(!app.view_state.is_cycling_in_range());
         assert_eq!(app.selection_range(), ((2, 1), (2, 3)));
     })
     .unwrap();
@@ -892,13 +870,12 @@ fn shift_arrow_and_shift_click_after_cycling_extend_from_active_cell(cx: &mut Te
 fn paste_after_cycling_still_starts_at_range_top_left(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (1, 1);
-        app.view_state.selection_end = Some((2, 3));
+        app.view_state.set_range((1, 1), (2, 3));
 
         // Cycle Enter twice: (1,1) -> (2,1) -> (1,2)
         app.confirm_edit_enter(cx);
         app.confirm_edit_enter(cx);
-        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.view_state.active_cell(), (1, 2));
         assert_eq!(app.selection_range(), ((1, 1), (2, 3)));
 
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("X\tY".into()));
@@ -915,20 +892,261 @@ fn cycling_in_whole_column_selection_moves_one_row_and_is_instant(cx: &mut TestA
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
         app.select_col(2, false, cx);
-        assert_eq!(app.view_state.selected, (0, 2));
+        assert_eq!(app.view_state.active_cell(), (0, 2));
         let expected_range = app.selection_range();
 
         let start = std::time::Instant::now();
         app.confirm_edit_enter(cx);
         let elapsed = start.elapsed();
 
-        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.view_state.active_cell(), (1, 2));
         assert_eq!(app.selection_range(), expected_range);
         assert!(
             elapsed < std::time::Duration::from_millis(100),
             "whole-column cycling took {:?} (expected O(log N) / instant)",
             elapsed
         );
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_named_range_jump(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            let nr = visigrid_engine::named_range::NamedRange::range("Target", 0, 9, 23, 11, 24);
+            wb.named_ranges_mut().set(nr).unwrap();
+        });
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+
+        app.jump_to_named_range("Target", cx);
+        assert_eq!(app.view_state.active_cell(), (9, 23));
+        assert_eq!(app.selection_range(), ((9, 23), (11, 24)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_goto_merged_cell(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            wb.active_sheet_mut()
+                .add_merge(visigrid_engine::sheet::MergedRegion::new(5, 5, 6, 6))
+                .unwrap();
+        });
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+
+        app.goto_input = "F6".into();
+        app.confirm_goto(cx);
+        assert_eq!(app.view_state.active_cell(), (5, 5));
+        assert_eq!(app.selection_range(), ((5, 5), (6, 6)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_fill_down_and_fill_handle(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            wb.set_cell_value_tracked(0, 0, 0, "10");
+            wb.set_cell_value_tracked(0, 4, 4, "1");
+            wb.set_cell_value_tracked(0, 5, 4, "2");
+        });
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+
+        // Fill Down keeps the primary selection cleanly
+        app.fill_down(cx);
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+        assert_eq!(app.sheet(cx).get_raw(1, 0), "10");
+
+        // Fill handle drag from E5:E6 down to E8
+        app.select_cell(4, 4, false, cx);
+        app.select_cell(5, 4, true, cx);
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (5, 4));
+        app.start_fill_drag(cx);
+        app.continue_fill_drag(7, 4, cx);
+        app.end_fill_drag(false, cx);
+        assert_eq!(app.selection_range(), ((4, 4), (7, 4)));
+        assert_eq!(app.view_state.active_cell(), (4, 4));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_insert_and_delete_rows_and_cols(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+
+        app.delete_rows(5, 2, cx);
+        assert_eq!(app.view_state.active_cell(), (5, 0));
+        assert_eq!(app.selection_range(), ((5, 0), (6, crate::app::NUM_COLS - 1)));
+
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        app.delete_cols(5, 2, cx);
+        assert_eq!(app.view_state.active_cell(), (0, 5));
+        assert_eq!(app.selection_range(), ((0, 5), (crate::app::NUM_ROWS - 1, 6)));
+
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        app.insert_rows(4, 1, cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+        app.insert_cols(4, 1, cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_select_row_col_all(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+
+        app.select_row(5, false, cx);
+        assert_eq!(app.view_state.active_cell(), (5, 0));
+        assert_eq!(app.selection_range(), ((5, 0), (5, crate::app::NUM_COLS - 1)));
+
+        app.confirm_edit_and_tab_right(cx);
+        app.select_col(4, false, cx);
+        assert_eq!(app.view_state.active_cell(), (0, 4));
+        assert_eq!(app.selection_range(), ((0, 4), (crate::app::NUM_ROWS - 1, 4)));
+
+        app.confirm_edit_enter(cx);
+        app.select_all(cx);
+        assert_eq!(app.view_state.active_cell(), (0, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (crate::app::NUM_ROWS - 1, crate::app::NUM_COLS - 1)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_find_next(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            wb.set_cell_value_tracked(0, 4, 4, "needle");
+        });
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+
+        app.show_find(cx);
+        for c in "needle".chars() {
+            app.find_insert_char(c, cx);
+        }
+        app.find_next(cx);
+        assert_eq!(app.view_state.active_cell(), (4, 4));
+        assert_eq!(app.selection_range(), ((4, 4), (4, 4)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_undo_redo_selection(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+
+        app.delete_rows(5, 2, cx);
+        assert_eq!(app.selection_range(), ((5, 0), (6, crate::app::NUM_COLS - 1)));
+
+        app.undo(cx);
+        assert_eq!(app.selection_range().0.0, app.view_state.active_cell().0);
+        app.redo(cx);
+        assert_eq!(app.selection_range().0.0, app.view_state.active_cell().0);
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_rewind_preview_enter_and_exit(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        // Create one history entry at (5, 5)
+        app.select_cell(5, 5, false, cx);
+        app.start_edit(cx);
+        app.edit_value = "42".into();
+        app.confirm_edit(cx);
+
+        // Select A1:C3 and cycle to (1, 0)
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+
+        // Enter rewind preview for entry 0 with a multi-cell highlight range, then exit
+        app.selected_history_id = app.history.display_entries().first().map(|e| e.id);
+        app.history_highlight_range = Some((0, 5, 5, 6, 6));
+        app.enter_preview(cx).unwrap();
+        assert_eq!(app.view_state.active_cell(), (5, 5));
+        assert_eq!(app.selection_range(), ((5, 5), (6, 6)));
+        app.exit_preview(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+        assert!(app.view_state.is_cycling_in_range());
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_sheet_switch_and_split_pane(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            wb.add_sheet();
+        });
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+
+        // Split pane inherits selection independently; moving in split pane doesn't corrupt main
+        app.split_right(cx);
+        assert_eq!(app.active_view_state().active_cell(), (1, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+        app.move_selection(0, 1, cx);
+        assert_eq!(app.selection_range(), ((1, 1), (1, 1)));
+        app.close_split(cx);
+
+        // Switching sheets resets selection cleanly
+        app.goto_sheet(1, cx);
+        assert_eq!(app.view_state.active_cell(), (0, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (0, 0)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn stale_anchor_after_cycling_session_save_and_restore(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.session_window_id = 1;
+        app.view_state.set_range((0, 0), (2, 2));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.active_cell(), (1, 0));
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+
+        let snap = app.snapshot_cached(cx);
+        app.select_cell(8, 8, false, cx);
+        app.apply(&snap, cx);
+        assert_eq!(app.selection_range(), ((0, 0), (2, 2)));
+        assert_eq!(app.view_state.active_cell(), (0, 0));
     })
     .unwrap();
 }

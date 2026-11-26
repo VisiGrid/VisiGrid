@@ -620,8 +620,8 @@ impl Spreadsheet {
                 .and_then(ReviewModeState::focused_cell)
                 .unwrap_or_else(|| {
                     (
-                        self.view_to_data(self.view_state.selected.0, cx),
-                        self.view_state.selected.1,
+                        self.view_to_data(self.view_state.active_cell().0, cx),
+                        self.view_state.active_cell().1,
                     )
                 })
         } else if forward {

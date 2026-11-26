@@ -15,7 +15,7 @@ impl Spreadsheet {
     pub fn show_extract_named_range(&mut self, cx: &mut Context<Self>) {
         if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
         self.sync_table_view(cx);
-        let draft = match ExtractionDraft::capture(self.wb(cx), &self.row_view, self.view_state.selected) {
+        let draft = match ExtractionDraft::capture(self.wb(cx), &self.row_view, self.view_state.active_cell()) {
             Ok(draft) => draft,
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };

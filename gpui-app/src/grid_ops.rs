@@ -82,7 +82,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        let (at_view, count) = insert_target(Axis::Row, self.selection_range(), self.view_state.selected);
+        let (at_view, count) = insert_target(Axis::Row, self.selection_range(), self.view_state.active_cell());
         let data_row = self.view_to_data(at_view, cx);
         self.insert_rows(data_row, count, cx);
     }
@@ -97,7 +97,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        let (at_col, count) = insert_target(Axis::Col, self.selection_range(), self.view_state.selected);
+        let (at_col, count) = insert_target(Axis::Col, self.selection_range(), self.view_state.active_cell());
         self.insert_cols(at_col, count, cx);
     }
 
@@ -347,8 +347,7 @@ impl Spreadsheet {
         // Maintain full-row selection at the same position (Excel behavior):
         // after deleting rows 3-5, the selection highlights rows 3-5 (now shifted-up data)
         let sel_row = at_row.min(NUM_ROWS - 1);
-        self.view_state.selected = (sel_row, 0);
-        self.view_state.selection_end = Some(((sel_row + count - 1).min(NUM_ROWS - 1), NUM_COLS - 1));
+        self.view_state.set_range((sel_row, 0), ((sel_row + count - 1).min(NUM_ROWS - 1), NUM_COLS - 1));
         self.view_state.additional_selections.clear();
 
         self.bump_cells_rev();
@@ -508,8 +507,7 @@ impl Spreadsheet {
         // Maintain full-column selection at the same position (Excel behavior):
         // after deleting cols C-E, the selection highlights cols C-E (now shifted-left data)
         let sel_col = at_col.min(NUM_COLS - 1);
-        self.view_state.selected = (0, sel_col);
-        self.view_state.selection_end = Some((NUM_ROWS - 1, (sel_col + count - 1).min(NUM_COLS - 1)));
+        self.view_state.set_range((0, sel_col), (NUM_ROWS - 1, (sel_col + count - 1).min(NUM_COLS - 1)));
         self.view_state.additional_selections.clear();
 
         self.bump_cells_rev();

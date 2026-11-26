@@ -512,8 +512,7 @@ pub fn populate_diff_sheet(
     // Switch to the new sheet
     app.activate_sheet(sheet_idx, cx);
     // Reset selection to A1 for the new sheet
-    app.view_state.selected = (0, 0);
-    app.view_state.selection_end = None;
+    app.view_state.set_single_cell((0, 0));
     app.view_state.scroll_row = 0;
     app.view_state.scroll_col = 0;
 

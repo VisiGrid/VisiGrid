@@ -197,8 +197,7 @@ impl Spreadsheet {
         let editing = self.mode.is_editing();
         let clamp = |view: &mut crate::workbook_view::WorkbookViewState| {
             if !editing {
-                view.selected.0 = view.selected.0.min(extent.rows - 1);
-                view.selected.1 = view.selected.1.min(extent.cols - 1);
+                view.clamp_active_cell(extent.rows - 1, extent.cols - 1);
             }
             view.scroll_row = view
                 .scroll_row
@@ -309,7 +308,7 @@ impl Spreadsheet {
     /// Only a one-row downward move can extend a nonempty last row (R4).
     pub(crate) fn grow_grid_for_down(&mut self, cx: &mut Context<Self>) {
         self.sync_limited_grid(cx);
-        let row = self.active_view_state().selected.0;
+        let row = self.active_view_state().active_cell().0;
         if !self.limited_grid.enabled || row + 1 != self.grid_rows() || row + 1 >= NUM_ROWS {
             return;
         }

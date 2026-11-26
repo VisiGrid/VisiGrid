@@ -34,20 +34,44 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use visigrid_engine::workbook::Workbook;
 
+/// Opaque snapshot of the primary selection (active cell, moving corner, and
+/// optional latched anchor) for round-trip save/restore (e.g. Rewind preview
+/// and Command Palette preview).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrimarySelectionSnapshot {
+    selected: (usize, usize),
+    selection_end: Option<(usize, usize)>,
+    selection_anchor: Option<(usize, usize)>,
+}
+
+impl Default for PrimarySelectionSnapshot {
+    fn default() -> Self {
+        Self {
+            selected: (0, 0),
+            selection_end: None,
+            selection_anchor: None,
+        }
+    }
+}
+
 /// View-specific state that can differ between views of the same workbook.
 ///
 /// This is the "per-(pane, workbook)" state. When you split a pane, each side
 /// gets its own `WorkbookViewState` while sharing the same `Workbook`.
 #[derive(Clone, Debug)]
 pub struct WorkbookViewState {
-    // === Selection ===
+    // === Selection (private to enforce anchor/end/active invariants) ===
     /// Active cell — where edits occur and the solid border is drawn.
-    pub selected: (usize, usize),
-    /// End of active range selection (None = single cell selected)
-    pub selection_end: Option<(usize, usize)>,
+    selected: (usize, usize),
+    /// End of active range selection (None = single cell selected).
+    selection_end: Option<(usize, usize)>,
     /// Fixed anchor corner of the primary range when `selected` has cycled into
     /// the range via Enter/Tab. When `None`, the primary range anchor is `selected`.
-    pub selection_anchor: Option<(usize, usize)>,
+    ///
+    /// Invariant: `selection_anchor.is_some()` implies `selection_end.is_some()`.
+    /// Only `move_active_within_range` (and `restore_primary_selection`) can set
+    /// `selection_anchor` to `Some(_)`. Every other mutator clears it to `None`.
+    selection_anchor: Option<(usize, usize)>,
     /// Additional selections from Ctrl+Click (each is anchor + optional end)
     pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,
 
@@ -101,7 +125,7 @@ impl WorkbookViewState {
         self.clone()
     }
 
-    /// Reset selection to a single cell
+    /// Reset selection to a single cell and clear any additional selections.
     pub fn select_cell(&mut self, row: usize, col: usize) {
         self.selected = (row, col);
         self.selection_end = None;
@@ -109,9 +133,120 @@ impl WorkbookViewState {
         self.additional_selections.clear();
     }
 
-    /// Get the active cell position
+    /// Set the primary selection to a single cell, clearing any latched anchor
+    /// and range end, while preserving `additional_selections`.
+    pub fn set_single_cell(&mut self, cell: (usize, usize)) {
+        self.selected = cell;
+        self.selection_end = None;
+        self.selection_anchor = None;
+    }
+
+    /// Set the primary selection to the range from `anchor` to `end`, clearing
+    /// any latched anchor. Collapses to a single cell if `anchor == end`.
+    pub fn set_range(&mut self, anchor: (usize, usize), end: (usize, usize)) {
+        self.selected = anchor;
+        self.selection_end = (end != anchor).then_some(end);
+        self.selection_anchor = None;
+    }
+
+    /// Set the primary selection from `anchor` and optional `end`, clearing
+    /// any latched anchor. Collapses to a single cell if `end == Some(anchor)`.
+    pub fn set_selection(&mut self, anchor: (usize, usize), end: Option<(usize, usize)>) {
+        self.selected = anchor;
+        self.selection_end = end.filter(|&e| e != anchor);
+        self.selection_anchor = None;
+    }
+
+    /// Update only the moving corner of the primary selection relative to the
+    /// current active cell, clearing any latched anchor.
+    pub fn set_selection_end(&mut self, end: Option<(usize, usize)>) {
+        self.selection_end = end.filter(|&e| e != self.selected);
+        self.selection_anchor = None;
+    }
+
+    /// Move the active cell within the current multi-cell primary selection
+    /// (Enter/Tab cycling). Latches `selection_anchor` on the first move so the
+    /// primary range stays fixed while `selected` moves inside it.
+    pub fn move_active_within_range(&mut self, next: (usize, usize)) {
+        if self.selection_end.is_some() {
+            self.selection_anchor.get_or_insert(self.selected);
+        } else {
+            self.selection_anchor = None;
+        }
+        self.selected = next;
+    }
+
+    /// Snapshot the primary selection (including any latched cycling anchor)
+    /// for later restoration via `restore_primary_selection`.
+    pub fn primary_selection_snapshot(&self) -> PrimarySelectionSnapshot {
+        PrimarySelectionSnapshot {
+            selected: self.selected,
+            selection_end: self.selection_end,
+            selection_anchor: self.selection_anchor,
+        }
+    }
+
+    /// Restore a previously captured `PrimarySelectionSnapshot`.
+    pub fn restore_primary_selection(&mut self, snapshot: PrimarySelectionSnapshot) {
+        self.selected = snapshot.selected;
+        self.selection_end = snapshot.selection_end;
+        self.selection_anchor = if self.selection_end.is_some() {
+            snapshot.selection_anchor
+        } else {
+            None
+        };
+    }
+
+    /// Push the current primary selection (anchor + optional end) into
+    /// `additional_selections`.
+    pub fn push_primary_to_additional(&mut self) {
+        self.additional_selections
+            .push((self.primary_anchor(), self.selection_end));
+    }
+
+    /// Clamp active cell, primary range, latched anchor, and additional
+    /// selections to `(0..=max_row, 0..=max_col)`.
+    pub fn clamp_selection(&mut self, max_row: usize, max_col: usize) {
+        let clamp = |(r, c): (usize, usize)| (r.min(max_row), c.min(max_col));
+        self.selected = clamp(self.selected);
+        self.selection_end = self.selection_end.map(clamp);
+        self.selection_anchor = self.selection_anchor.map(clamp);
+        if let Some(end) = self.selection_end {
+            let anchor = self.selection_anchor.unwrap_or(self.selected);
+            if anchor == end {
+                self.selection_end = None;
+                self.selection_anchor = None;
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        for (a, e) in &mut self.additional_selections {
+            *a = clamp(*a);
+            if let Some(end) = e {
+                *end = clamp(*end);
+            }
+        }
+    }
+
+    /// Clamp only the active cell to `(0..=max_row, 0..=max_col)`, preserving
+    /// full-row/column/sheet range endpoints (used by Limited Grid).
+    pub fn clamp_active_cell(&mut self, max_row: usize, max_col: usize) {
+        self.selected = (self.selected.0.min(max_row), self.selected.1.min(max_col));
+    }
+
+    /// Get the active cell position.
     pub fn active_cell(&self) -> (usize, usize) {
         self.selected
+    }
+
+    /// Get the moving corner of the primary range, if a multi-cell range is selected.
+    pub fn selection_end(&self) -> Option<(usize, usize)> {
+        self.selection_end
+    }
+
+    /// True if the active cell has cycled within a multi-cell selection.
+    pub fn is_cycling_in_range(&self) -> bool {
+        self.selection_anchor.is_some()
     }
 
     /// Fixed anchor corner of the primary selection (defaults to `selected` when
@@ -373,6 +508,42 @@ mod tests {
         assert_eq!(state.selected, (3, 4));
         assert_eq!(state.selection_end, None);
         assert!(state.additional_selections.is_empty());
+    }
+
+    #[test]
+    fn test_selection_anchor_cleared_by_all_non_cycling_mutators() {
+        let mut state = WorkbookViewState::default();
+        state.set_range((0, 0), (2, 2));
+        state.move_active_within_range((1, 0));
+        assert!(state.is_cycling_in_range());
+        assert_eq!(state.active_cell(), (1, 0));
+        assert_eq!(state.primary_range(), ((0, 0), (2, 2)));
+
+        let snap = state.primary_selection_snapshot();
+
+        state.set_range((9, 23), (11, 24));
+        assert!(!state.is_cycling_in_range());
+        assert_eq!(state.active_cell(), (9, 23));
+        assert_eq!(state.primary_range(), ((9, 23), (11, 24)));
+
+        state.restore_primary_selection(snap);
+        assert!(state.is_cycling_in_range());
+        assert_eq!(state.active_cell(), (1, 0));
+        assert_eq!(state.primary_range(), ((0, 0), (2, 2)));
+
+        state.set_selection_end(Some((4, 4)));
+        assert!(!state.is_cycling_in_range());
+        assert_eq!(state.primary_range(), ((1, 0), (4, 4)));
+
+        state.restore_primary_selection(snap);
+        state.set_single_cell((7, 7));
+        assert!(!state.is_cycling_in_range());
+        assert_eq!(state.primary_range(), ((7, 7), (7, 7)));
+
+        state.restore_primary_selection(snap);
+        state.clamp_selection(0, 0);
+        assert!(!state.is_cycling_in_range());
+        assert_eq!(state.primary_range(), ((0, 0), (0, 0)));
     }
 
     #[test]

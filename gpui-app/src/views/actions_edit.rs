@@ -598,7 +598,7 @@ pub(crate) fn bind(
             } else {
                 // Nav mode: Tab also sets origin for tab-chain return
                 if this.tab_chain_origin_col.is_none() {
-                    this.tab_chain_origin_col = Some(this.view_state.selected.1);
+                    this.tab_chain_origin_col = Some(this.view_state.active_cell().1);
                 }
                 this.move_selection(0, 1, cx);
             }
@@ -628,7 +628,7 @@ pub(crate) fn bind(
             } else {
                 // Nav mode: Shift+Tab also sets origin for tab-chain return
                 if this.tab_chain_origin_col.is_none() {
-                    this.tab_chain_origin_col = Some(this.view_state.selected.1);
+                    this.tab_chain_origin_col = Some(this.view_state.active_cell().1);
                 }
                 this.move_selection(0, -1, cx);
             }
@@ -713,7 +713,7 @@ pub(crate) fn bind(
                     && this.view_state.additional_selections.is_empty();
                 let is_text = {
                     use visigrid_engine::cell::CellValue;
-                    let (row, col) = this.view_state.selected;
+                    let (row, col) = this.view_state.active_cell();
                     matches!(this.sheet(cx).get_cell(row, col).value, CellValue::Text(_))
                 };
 
@@ -802,8 +802,8 @@ pub(crate) fn bind(
                 this.update_edit_scroll(window, cx);
             } else {
                 // Navigation mode: go to first column of current row
-                this.view_state.selected.1 = 0;
-                this.view_state.selection_end = None;
+                let row = this.view_state.active_cell().0;
+                this.view_state.set_single_cell((row, 0));
                 this.view_state.scroll_col = this.view_state.frozen_cols;
                 cx.notify();
             }
@@ -814,8 +814,8 @@ pub(crate) fn bind(
                 this.update_edit_scroll(window, cx);
             } else {
                 // Navigation mode: go to last column of current row
-                this.view_state.selected.1 = crate::app::NUM_COLS - 1;
-                this.view_state.selection_end = None;
+                let row = this.view_state.active_cell().0;
+                this.view_state.set_single_cell((row, crate::app::NUM_COLS - 1));
                 this.view_state.scroll_col = crate::app::NUM_COLS.saturating_sub(this.visible_cols());
                 cx.notify();
             }

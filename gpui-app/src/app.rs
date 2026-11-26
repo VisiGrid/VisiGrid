@@ -500,8 +500,7 @@ pub struct Spreadsheet {
     pub(crate) palette_wheel_px: f32,
     pub palette_total_results: usize,  // Matches counted for the footer
     // Pre-palette state for preview/restore
-    pub(crate) palette_pre_selection: (usize, usize),
-    pub(crate) palette_pre_selection_end: Option<(usize, usize)>,
+    pub(crate) palette_pre_selection: crate::workbook_view::PrimarySelectionSnapshot,
     pub(crate) palette_pre_scroll: (usize, usize),
     pub palette_previewing: bool,  // True if user has previewed (Shift+Enter)
 
@@ -1319,8 +1318,7 @@ impl Spreadsheet {
             palette_recent_files: Vec::new(),
             palette_wheel_px: 0.0,
             palette_total_results: 0,
-            palette_pre_selection: (0, 0),
-            palette_pre_selection_end: None,
+            palette_pre_selection: crate::workbook_view::PrimarySelectionSnapshot::default(),
             palette_pre_scroll: (0, 0),
             palette_previewing: false,
             internal_clipboard: None,
@@ -1833,7 +1831,7 @@ impl Spreadsheet {
         use crate::validation_dropdown::ValidationDropdownState;
 
         self.sync_table_view(cx);
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let target = crate::validation_ui::plan::DropdownTarget::capture(self.wb(cx), &self.row_view, (row,col));
         if !target.is_current(self.wb(cx), &self.row_view, (row,col)) || self.is_row_hidden(target.cell.0) || self.is_col_hidden(col) { return; }
         let sheet_index = self.sheet_index(cx);
@@ -1896,7 +1894,7 @@ impl Spreadsheet {
         let Some(target) = &open_state.target else {
             self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
         };
-        if !target.is_current(self.wb(cx), &self.row_view, self.view_state.selected) || self.is_col_hidden(target.cell.1) {
+        if !target.is_current(self.wb(cx), &self.row_view, self.view_state.active_cell()) || self.is_col_hidden(target.cell.1) {
             self.close_validation_dropdown(DropdownCloseReason::SourceChanged, cx); return;
         }
     }
@@ -2310,8 +2308,7 @@ impl Spreadsheet {
             SearchAction::RunCommand(cmd) => self.dispatch_command(cmd, window, cx),
             SearchAction::JumpToCell { row, col } => {
                 if !self.allow_grid_jump(self.sheet_index(cx), row, col, cx) { return; }
-                self.view_state.selected = (row, col);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((row, col));
                 self.sync_limited_grid(cx);
                 self.ensure_cell_visible(row, col);
                 cx.notify();
@@ -2401,8 +2398,7 @@ impl Spreadsheet {
             CommandId::GoToCell => self.show_goto(cx),
             CommandId::FindInCells => self.show_find(cx),
             CommandId::GoToStart => {
-                self.view_state.selected = (0, 0);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((0, 0));
                 self.view_state.scroll_row = self.view_state.frozen_rows;
                 self.view_state.scroll_col = self.view_state.frozen_cols;
                 cx.notify();
@@ -3497,7 +3493,7 @@ impl Spreadsheet {
 
     /// Get the bounding rect of the currently selected (active) cell in grid-relative coordinates.
     pub fn active_cell_rect(&self) -> CellRect {
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         self.cell_rect(row, col)
     }
 
@@ -4110,8 +4106,8 @@ impl Spreadsheet {
 
     // Cell reference (A1, B2, etc.)
     pub fn cell_ref(&self) -> String {
-        let row = if self.table_view_installed { self.row_view.view_to_data(self.view_state.selected.0) } else { self.view_state.selected.0 };
-        format!("{}{}", Self::col_letter(self.view_state.selected.1), row + 1)
+        let row = if self.table_view_installed { self.row_view.view_to_data(self.view_state.active_cell().0) } else { self.view_state.active_cell().0 };
+        format!("{}{}", Self::col_letter(self.view_state.active_cell().1), row + 1)
     }
 
 
@@ -4197,7 +4193,7 @@ impl Spreadsheet {
     /// Extend selection to cell A1 (Ctrl+Shift+Home)
     pub fn extend_to_start(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
-        self.view_state.selection_end = Some((0, 0));
+        self.view_state.set_selection_end(Some((0, 0)));
         self.view_state.scroll_row = self.view_state.frozen_rows;
         self.view_state.scroll_col = self.view_state.frozen_cols;
         cx.notify();
@@ -4206,23 +4202,18 @@ impl Spreadsheet {
     /// Extend selection to last cell (Ctrl+Shift+End)
     pub fn extend_to_end(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
-        self.view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
+        self.view_state.set_selection_end(Some((NUM_ROWS - 1, NUM_COLS - 1)));
         self.ensure_visible(cx);
     }
 
     /// Select current region (Ctrl+Shift+*) — selects contiguous data block around active cell
     pub fn select_current_region(&mut self, cx: &mut Context<Self>) {
         if self.mode.is_editing() { return; }
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let (min_row, min_col, max_row, max_col) =
             crate::ai::find_current_region(self.sheet(cx), row, col);
         // Anchor at top-left, extend to bottom-right
-        self.view_state.selected = (min_row, min_col);
-        self.view_state.selection_end = if (min_row, min_col) == (max_row, max_col) {
-            None  // Single cell — no range needed
-        } else {
-            Some((max_row, max_col))
-        };
+        self.view_state.set_range((min_row, min_col), (max_row, max_col));
         self.ensure_visible(cx);
         let rows = max_row - min_row + 1;
         let cols = max_col - min_col + 1;
@@ -4244,7 +4235,7 @@ impl Spreadsheet {
             cx.notify();
         } else {
             // Start editing then insert newline
-            let (row, col) = self.view_state.selected;
+            let (row, col) = self.view_state.active_cell();
             self.edit_original = self.sheet(cx).get_raw(row, col);
             self.clear_edit_marks();
             self.edit_value = self.edit_original.clone();
@@ -4380,7 +4371,7 @@ impl Spreadsheet {
                 "Can't {op_name}: {what} {} merged. Press Ctrl+Alt+C to convert to Center Across Selection: same look, and {op_name} works.",
                 if blocking.len() == 1 { "is" } else { "are" }
             );
-            self.merge_block_offer = Some((convertible, self.view_state.selected, message.clone()));
+            self.merge_block_offer = Some((convertible, self.view_state.active_cell(), message.clone()));
             self.status_message = Some(message);
         } else {
             self.merge_block_offer = None;
@@ -4565,7 +4556,7 @@ impl Render for Spreadsheet {
         // Update formula bar display cache (only when not editing)
         // This avoids re-parsing on every render
         if !self.mode.is_editing() {
-            let cell = self.view_state.selected;
+            let cell = self.view_state.active_cell();
             let row = self.view_to_data(cell.0, cx);
             let formula = self.sheet(cx).get_raw(row, cell.1);
 

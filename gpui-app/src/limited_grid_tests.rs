@@ -39,7 +39,7 @@ fn split_panes_keep_visible_grid_bodies_and_working_strips(cx: &mut TestAppConte
     view.update(vcx, |app, cx| {
         app.doc_settings.display.limited_grid = Setting::Value(true);
         app.set_zoom(0.5, cx);
-        app.view_state.selected = (1, 1);
+        app.view_state.set_single_cell((1, 1));
         app.freeze_panes(cx);
         app.split_right(cx);
         app.sync_limited_grid(cx);
@@ -133,7 +133,7 @@ fn default_extent_strips_clicks_and_add_count(cx: &mut TestAppContext) {
     });
     let blank = vcx.debug_bounds("grid-add-both").unwrap().center()
         + gpui::point(gpui::px(40.), gpui::px(40.));
-    let selected = view.read_with(vcx, |app, _| app.view_state.selected);
+    let selected = view.read_with(vcx, |app, _| app.view_state.active_cell());
     vcx.simulate_click(blank, Modifiers::none());
     vcx.simulate_event(gpui::ScrollEvent {
         position: blank,
@@ -145,7 +145,7 @@ fn default_extent_strips_clicks_and_add_count(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     view.read_with(vcx, |app, _| {
         assert_eq!(
-            app.view_state.selected, selected,
+            app.view_state.active_cell(), selected,
             "blank canvas does not select a cell"
         );
         assert!(app.view_state.scroll_row < 26 && app.view_state.scroll_col < 12);
@@ -159,7 +159,7 @@ fn default_extent_strips_clicks_and_add_count(cx: &mut TestAppContext) {
 fn enter_on_content_grows_once_empty_row_stops_and_right_stops(cx: &mut TestAppContext) {
     let view = setup(cx);
     view.update(cx, |app, _, cx| {
-        app.view_state.selected = (19, 10);
+        app.view_state.set_single_cell((19, 10));
         app.start_edit_clear(cx);
         app.edit_value = "ledger".into();
         app.edit_cursor = 6;
@@ -168,7 +168,7 @@ fn enter_on_content_grows_once_empty_row_stops_and_right_stops(cx: &mut TestAppC
     cx.simulate_keystrokes(view.into(), "enter");
     view.update(cx, |app, _, cx| {
         assert_eq!(extent(app, cx), (21, 11));
-        assert_eq!(app.view_state.selected, (20, 10));
+        assert_eq!(app.view_state.active_cell(), (20, 10));
         assert_eq!(app.sheet(cx).get_raw(19, 10), "ledger");
     })
     .unwrap();
@@ -176,7 +176,7 @@ fn enter_on_content_grows_once_empty_row_stops_and_right_stops(cx: &mut TestAppC
     view.update(cx, |app, _, cx| {
         app.flush_pending_nav_moves(cx);
         assert_eq!(extent(app, cx), (21, 11));
-        assert_eq!(app.view_state.selected, (20, 10));
+        assert_eq!(app.view_state.active_cell(), (20, 10));
     })
     .unwrap();
 }
@@ -210,15 +210,15 @@ fn navigation_scroll_and_jumps_stay_inside(cx: &mut TestAppContext) {
     cx.simulate_keystrokes(view.into(), "ctrl-down ctrl-end pagedown");
     view.update(cx, |app, _, cx| {
         app.flush_pending_nav_moves(cx);
-        assert!(app.view_state.selected.0 < 20);
+        assert!(app.view_state.active_cell().0 < 20);
         app.scroll(i32::MAX, i32::MAX, cx);
         assert!(app.view_state.scroll_row < 20);
         assert!(app.view_state.scroll_col < 11);
-        let before = app.view_state.selected;
+        let before = app.view_state.active_cell();
         app.show_goto(cx);
         app.goto_input = "Z500".into();
         app.confirm_goto(cx);
-        assert_eq!(app.view_state.selected, before);
+        assert_eq!(app.view_state.active_cell(), before);
         assert!(app
             .status_message
             .as_ref()
@@ -227,7 +227,7 @@ fn navigation_scroll_and_jumps_stay_inside(cx: &mut TestAppContext) {
         assert_eq!(extent(app, cx), (20, 11));
         app.name_box_input = "Z500".into();
         app.confirm_name_box(cx);
-        assert_eq!(app.view_state.selected, before);
+        assert_eq!(app.view_state.active_cell(), before);
         assert_eq!(extent(app, cx), (20, 11));
     })
     .unwrap();
@@ -512,12 +512,12 @@ fn metadata_changes_invalidate_bounds_and_empty_last_row_never_grows(cx: &mut Te
                 ]),
             );
         });
-        app.view_state.selected = (19, 0);
+        app.view_state.set_single_cell((19, 0));
         for _ in 0..20 {
             app.move_selection(1, 0, cx);
         }
         assert_eq!(extent(app, cx), (20, 11));
-        assert_eq!(app.view_state.selected, (19, 0));
+        assert_eq!(app.view_state.active_cell(), (19, 0));
     })
     .unwrap();
     cx.simulate_keystrokes(view.into(), "enter enter");
@@ -527,7 +527,7 @@ fn metadata_changes_invalidate_bounds_and_empty_last_row_never_grows(cx: &mut Te
             (20, 11),
             "validation on an empty last row must not trigger growth"
         );
-        assert_eq!(app.view_state.selected, (19, 0));
+        assert_eq!(app.view_state.active_cell(), (19, 0));
         app.set_cell_value(19, 5, "last row content in another column", cx);
         // Page Down must not grow even when a tiny viewport fits only one row.
         app.grid_layout.viewport_size.1 = 1.;
@@ -535,9 +535,9 @@ fn metadata_changes_invalidate_bounds_and_empty_last_row_never_grows(cx: &mut Te
         assert_eq!(extent(app, cx), (20, 11));
         app.move_selection(1, 0, cx);
         assert_eq!(extent(app, cx), (21, 11));
-        assert_eq!(app.view_state.selected, (20, 0));
+        assert_eq!(app.view_state.active_cell(), (20, 0));
         app.toggle_limited_grid(cx);
-        app.view_state.selected = (499, 25);
+        app.view_state.set_single_cell((499, 25));
         app.start_edit_clear(cx);
         app.edit_value = "pending".into();
         app.edit_cursor = 7;
@@ -558,15 +558,14 @@ fn hidden_last_row_freeze_and_external_jump_paths_respect_extent(cx: &mut TestAp
     view.update(cx, |app, _, cx| {
         app.select_row(19, false, cx);
         app.hide_rows(cx);
-        app.view_state.selected = (0, 0);
-        app.view_state.selection_end = None;
+        app.view_state.set_single_cell((0, 0));
         app.jump_selection(1, 0, cx);
         assert_eq!(
-            app.view_state.selected.0, 18,
+            app.view_state.active_cell().0, 18,
             "Ctrl+Down stops at the last visible row"
         );
         app.move_selection(1, 0, cx);
-        assert_eq!(app.view_state.selected.0, 18);
+        assert_eq!(app.view_state.active_cell().0, 18);
         app.with_active_sheet_mut(cx, |s| s.frozen_panes = (2, 1));
         app.sync_freeze_panes((2, 1));
         app.scroll(i32::MAX, i32::MAX, cx);
@@ -580,18 +579,18 @@ fn hidden_last_row_freeze_and_external_jump_paths_respect_extent(cx: &mut TestAp
             let other = wb.add_sheet();
             wb.define_name_for_cell("Outside", other, 499, 25).unwrap();
         });
-        let before = (app.sheet_index(cx), app.view_state.selected);
+        let before = (app.sheet_index(cx), app.view_state.active_cell());
         app.jump_to_named_range("Outside", cx);
-        assert_eq!((app.sheet_index(cx), app.view_state.selected), before);
+        assert_eq!((app.sheet_index(cx), app.view_state.active_cell()), before);
         assert!(app
             .status_message
             .as_ref()
             .unwrap()
             .contains("Z500 is outside"));
         app.set_cell_value(0, 0, "=Z500", cx);
-        app.view_state.selected = (0, 0);
+        app.view_state.set_single_cell((0, 0));
         app.cycle_trace_precedent(false, cx);
-        assert_eq!(app.view_state.selected, (0, 0));
+        assert_eq!(app.view_state.active_cell(), (0, 0));
         assert!(app
             .status_message
             .as_ref()

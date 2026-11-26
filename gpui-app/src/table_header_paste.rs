@@ -188,7 +188,7 @@ impl Spreadsheet {
             return false;
         }
         let table_view = crate::table_filter_ui::has_table_criteria(self.wb(cx));
-        let (view_row, col) = if table_view { self.view_state.selected } else { self.selection_range().0 };
+        let (view_row, col) = if table_view { self.view_state.active_cell() } else { self.selection_range().0 };
         let row = self.row_view.view_to_data(view_row);
         let Some(table) = self.sheet(cx).table_header_at(row, col) else {
             return false;

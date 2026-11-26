@@ -372,7 +372,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
             if this.mode.is_overlay() { return; }
-            this.view_state.selected = (0, 0);
+            this.view_state.set_single_cell((0, 0));
             this.view_state.scroll_row = this.view_state.frozen_rows;
             this.view_state.scroll_col = this.view_state.frozen_cols;
             cx.notify();
@@ -381,8 +381,7 @@ pub(crate) fn bind(
             if this.mode.is_overlay() { return; }
             // Excel behavior: Ctrl+End goes to the last used cell, not sheet edge
             let (max_row, max_col) = this.sheet(cx).data_extent();
-            this.view_state.selected = (max_row, max_col);
-            this.view_state.selection_end = None;
+            this.view_state.set_single_cell((max_row, max_col));
             this.ensure_visible(cx);
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
@@ -616,13 +615,13 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &SelectRow, _, cx| {
             if !this.mode.is_editing() {
-                let row = this.view_state.selected.0;
+                let row = this.view_state.active_cell().0;
                 this.select_row(row, false, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &SelectColumn, _, cx| {
             if !this.mode.is_editing() {
-                let col = this.view_state.selected.1;
+                let col = this.view_state.active_cell().1;
                 this.select_col(col, false, cx);
             }
         }))
@@ -664,7 +663,7 @@ pub(crate) fn bind(
                 }
             }
             // Fall back to cell references
-            let (row, col) = this.view_state.selected;
+            let (row, col) = this.view_state.active_cell();
             this.show_references(row, col, cx);
         }))
         .on_action(cx.listener(|this, _: &GoToPrecedents, _, cx| {
@@ -676,7 +675,7 @@ pub(crate) fn bind(
                 }
             }
             // Fall back to cell precedents
-            let (row, col) = this.view_state.selected;
+            let (row, col) = this.view_state.active_cell();
             this.show_precedents(row, col, cx);
         }))
         .on_action(cx.listener(|this, _: &RenameSymbol, _, cx| {

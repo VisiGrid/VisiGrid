@@ -320,7 +320,7 @@ impl Spreadsheet {
                 return true;
             }
         }
-        let (view_row, col) = self.view_state.selected;
+        let (view_row, col) = self.view_state.active_cell();
         let row = self.row_view.view_to_data(view_row);
         let (row, col) = self
             .sheet(cx)
@@ -331,7 +331,10 @@ impl Spreadsheet {
         });
         match result {
             Ok(_) => {
-                self.view_state.selected = (self.row_view.data_to_view(row).unwrap_or(row), col);
+                let target = (self.row_view.data_to_view(row).unwrap_or(row), col);
+                if self.view_state.active_cell() != target {
+                    self.view_state.set_single_cell(target);
+                }
                 self.table_edit_target =
                     Some((self.sheet_index(cx), row, col, self.wb(cx).revision()));
                 false
@@ -387,7 +390,7 @@ impl Spreadsheet {
         if commit.patches.is_empty() {
             return true;
         }
-        let old_focus = self.view_state.selected;
+        let old_focus = self.view_state.active_cell();
         let record = self.row_view.view_to_data(old_focus.0);
         let range = self
             .sheet(cx)

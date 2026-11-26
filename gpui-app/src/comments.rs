@@ -62,7 +62,7 @@ impl Spreadsheet {
 
     pub fn open_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_table_view(cx);
-        let (r, c) = self.view_state.selected;
+        let (r, c) = self.view_state.active_cell();
         self.open_cell_comment(self.row_view.view_to_data(r), c, window, cx);
     }
     pub fn open_cell_comment(
@@ -174,7 +174,7 @@ impl Spreadsheet {
             };
             (index, editor.row, editor.col)
         } else {
-            let (r, c) = self.view_state.selected;
+            let (r, c) = self.view_state.active_cell();
             let r = self.row_view.view_to_data(r);
             let (r, c) = self
                 .sheet(cx)
@@ -927,7 +927,7 @@ impl Spreadsheet {
     pub fn dismiss_stale_comment_reader(&mut self, cx: &App) {
         if self.comment_reader.as_ref().is_some_and(|r| {
             r.sheet_id != self.sheet(cx).id
-                || r.selection != self.view_state.selected
+                || r.selection != self.view_state.active_cell()
                 || r.revision != self.cells_rev
         }) {
             self.comment_reader = None;
@@ -957,12 +957,12 @@ impl Spreadsheet {
             .as_ref()
             .filter(|r| {
                 r.sheet_id == self.sheet(cx).id
-                    && r.selection == self.view_state.selected
+                    && r.selection == self.view_state.active_cell()
                     && r.revision == self.cells_rev
             })
             .map(|r| (current_sheet, r.row, r.col))
             .unwrap_or_else(|| {
-                let (row, col) = self.view_state.selected;
+                let (row, col) = self.view_state.active_cell();
                 (current_sheet, self.view_to_data(row, cx), col)
             });
         let Some(index) = comment_step(&locations, current, forward) else {
@@ -1018,7 +1018,7 @@ impl Spreadsheet {
             sheet_id: self.sheet(cx).id,
             row,
             col,
-            selection: self.view_state.selected,
+            selection: self.view_state.active_cell(),
             revision: self.cells_rev,
             ordinal,
             total,
@@ -1041,7 +1041,7 @@ pub fn reader_visible(app: &Spreadsheet, cx: &App) -> bool {
     app.mode.is_navigation()
         && app.comment_reader.as_ref().is_some_and(|r| {
             r.sheet_id == app.sheet(cx).id
-                && r.selection == app.view_state.selected
+                && r.selection == app.view_state.active_cell()
                 && r.revision == app.cells_rev
                 && app.sheet(cx).comment(r.row, r.col).is_some()
         })

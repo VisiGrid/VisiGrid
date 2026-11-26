@@ -772,9 +772,7 @@ impl Spreadsheet {
         };
         let last = (last_row, (start.1 + cols - 1).min(NUM_COLS - 1));
         let state = self.active_view_state_mut();
-        state.selected = start;
-        state.selection_end = (last != start).then_some(last);
-        state.selection_anchor = None;
+        state.set_range(start, last);
         state.additional_selections.clear();
     }
 
@@ -873,7 +871,7 @@ impl Spreadsheet {
                 let single_value = parsed_grid.as_ref().map_or_else(
                     || lines[0].to_string(), |grid| grid[0][0].clone(),
                 );
-                let primary_cell = self.view_state.selected;
+                let primary_cell = self.view_state.active_cell();
                 let primary_data_row = self.row_view.view_to_data(primary_cell.0);
 
                 // Source cell position for formula rebasing (delta = target - source)
@@ -2218,7 +2216,7 @@ impl Spreadsheet {
         if grid.len().saturating_mul(width) > 100_000 {
             return Err("Paste at most 100,000 cells at a time through a Table view.".into());
         }
-        let (start, col) = self.view_state.selected;
+        let (start, col) = self.view_state.active_cell();
         let broadcast = grid.len() == 1 && width == 1 && self.is_multi_selection();
         let mut append = None;
         let targets: Vec<(usize, usize, usize, usize)> = if broadcast {

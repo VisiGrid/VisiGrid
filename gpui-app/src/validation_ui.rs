@@ -14,7 +14,7 @@ impl Spreadsheet {
             self.display_hidden_rows(),
             self.hidden_cols.get(&self.cached_sheet_id()),
             &self.validation_failures,
-            self.view_state.selected,
+            self.view_state.active_cell(),
             backward,
         );
         if let Some((index, pos, rank, total)) = target {

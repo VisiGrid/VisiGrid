@@ -470,7 +470,7 @@ impl Spreadsheet {
         // Right after a sort/filter refused because of merged titles, the
         // shortcut converts those titles (the refusal says so).
         if let Some((origins, at, message)) = self.merge_block_offer.take() {
-            if at == self.view_state.selected && self.status_message.as_deref() == Some(message.as_str()) {
+            if at == self.view_state.active_cell() && self.status_message.as_deref() == Some(message.as_str()) {
                 self.convert_merges_at(origins, cx);
                 return;
             }
@@ -946,7 +946,7 @@ impl Spreadsheet {
 
     fn start_format_painter_inner(&mut self, locked: bool, cx: &mut Context<Self>) {
         self.sync_table_view(cx);
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let row = self.row_view.view_to_data(row);
         let snapshot = self.sheet(cx).get_format(row, col);
         self.format_painter = Some(FormatPaintState { snapshot, locked });
@@ -962,7 +962,7 @@ impl Spreadsheet {
     /// Copy format from active cell without entering FormatPainter mode (Ctrl+Shift+C).
     pub fn copy_format(&mut self, cx: &mut Context<Self>) {
         self.sync_table_view(cx);
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let row = self.row_view.view_to_data(row);
         let snapshot = self.sheet(cx).get_format(row, col);
         self.format_painter = Some(FormatPaintState { snapshot, locked: false });
@@ -1482,8 +1482,7 @@ impl Spreadsheet {
         self.status_message = Some(format!("Merged {}", range_ref));
 
         // Snap selection to merged range
-        self.view_state.selected = (min_row, min_col);
-        self.view_state.selection_end = Some((max_row, max_col));
+        self.view_state.set_range((min_row, min_col), (max_row, max_col));
 
         // Reset dialog state
         self.merge_confirm = Default::default();

@@ -89,8 +89,7 @@ impl Spreadsheet {
             self.terminal.ensure_cwd();
         }
         self.doc_settings = DocumentSettings::default();  // Reset doc settings
-        self.view_state.selected = (0, 0);
-        self.view_state.selection_end = None;
+        self.view_state.set_single_cell((0, 0));
         self.view_state.scroll_row = self.view_state.frozen_rows;
         self.view_state.scroll_col = self.view_state.frozen_cols;
         self.bump_cells_rev();  // Invalidate cell search cache
@@ -284,8 +283,7 @@ impl Spreadsheet {
                     wb.set_iterative_tolerance(tolerance);
                 });
 
-                self.view_state.selected = (0, 0);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((0, 0));
                 self.view_state.scroll_row = self.view_state.frozen_rows;
                 self.view_state.scroll_col = self.view_state.frozen_cols;
                 // Fingerprint above still sees the history this file was opened with.
@@ -471,8 +469,7 @@ impl Spreadsheet {
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
                         this.doc_settings = load_import_view_settings(&path_for_recent);
-                        this.view_state.selected = (0, 0);
-                        this.view_state.selection_end = None;
+                        this.view_state.set_single_cell((0, 0));
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
@@ -689,8 +686,7 @@ impl Spreadsheet {
                         this.doc_settings = load_import_view_settings(&path_for_recent);
                         this.col_widths.clear();
                         this.row_heights.clear();
-                        this.view_state.selected = (0, 0);
-                        this.view_state.selection_end = None;
+                        this.view_state.set_single_cell((0, 0));
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();
@@ -753,10 +749,8 @@ impl Spreadsheet {
         self.doc_settings = load_import_view_settings(path);
         self.col_widths.clear();
         self.row_heights.clear();
-        self.view_state.selected = (0, 0);
+        self.view_state.select_cell(0, 0);
         self.view_state.active_sheet = 0;
-        self.view_state.selection_end = None;
-        self.view_state.additional_selections.clear();
         self.view_state.scroll_row = 0;
         self.view_state.scroll_col = 0;
         self.view_state.frozen_rows = 0;
@@ -888,8 +882,7 @@ impl Spreadsheet {
                         this.import_filename = Some(filename_for_completion.clone());
                         this.import_source_dir = source_dir;
                         this.doc_settings = load_import_view_settings(&path_for_recent);
-                        this.view_state.selected = (0, 0);
-                        this.view_state.selection_end = None;
+                        this.view_state.set_single_cell((0, 0));
                         this.view_state.scroll_row = this.view_state.frozen_rows;
                         this.view_state.scroll_col = this.view_state.frozen_cols;
                         this.history.clear();

@@ -160,7 +160,7 @@ impl Spreadsheet {
     /// edge it is scrolling toward, and the last cell reached on the other axis.
     fn drag_autoscroll_target(&self, d_rows: i32, d_cols: i32, _cx: &App) -> (usize, usize) {
         let view_state = self.active_view_state();
-        let (last_row, last_col) = self.drag_last_cell.or(view_state.selection_end).unwrap_or(view_state.selected);
+        let (last_row, last_col) = self.drag_last_cell.or(view_state.selection_end()).unwrap_or(view_state.active_cell());
         let rows = self.pane_rows(view_state);
         let cols = self.pane_cols(view_state);
         let row = match d_rows.signum() {

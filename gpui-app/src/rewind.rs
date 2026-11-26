@@ -41,7 +41,7 @@ impl Spreadsheet {
             return None;
         }
         // Skip the active cell (it shows the real edit_value)
-        if (row, col) == self.view_state.selected {
+        if (row, col) == self.view_state.active_cell() {
             return None;
         }
         // Only for selected cells
@@ -50,8 +50,8 @@ impl Spreadsheet {
         }
 
         // Compute delta from primary cell
-        let delta_row = row as i32 - self.view_state.selected.0 as i32;
-        let delta_col = col as i32 - self.view_state.selected.1 as i32;
+        let delta_row = row as i32 - self.view_state.active_cell().0 as i32;
+        let delta_col = col as i32 - self.view_state.active_cell().1 as i32;
 
         // If it's a formula, adjust references
         if self.edit_value.starts_with('=') {
@@ -141,7 +141,7 @@ impl Spreadsheet {
             .unwrap_or((0,0,0,0));
         let (start, end) = preview_selection(&self.row_view, (r0,c0), (r1,c1), table_range);
         self.view_state.select_cell(start.0, start.1);
-        if end != start { self.view_state.selection_end = Some(end); }
+        if end != start { self.view_state.set_selection_end(Some(end)); }
         self.ensure_visible(cx);
     }
 
@@ -212,8 +212,7 @@ impl Spreadsheet {
         let live_focus = PreviewFocus {
             additional_selections: self.view_state.additional_selections.clone(),
             sheet_index: self.sheet_index(cx),
-            selected: self.view_state.selected,
-            selection_end: self.view_state.selection_end,
+            primary_selection: self.view_state.primary_selection_snapshot(),
             scroll_row: self.view_state.scroll_row,
             scroll_col: self.view_state.scroll_col,
         };
@@ -249,8 +248,7 @@ impl Spreadsheet {
             self.activate_sheet(session.live_focus.sheet_index, cx);
             self.row_view = session.live_rows;
             self.table_view_installed = session.live_table_view_installed;
-            self.view_state.selected = session.live_focus.selected;
-            self.view_state.selection_end = session.live_focus.selection_end;
+            self.view_state.restore_primary_selection(session.live_focus.primary_selection);
             self.view_state.additional_selections = session.live_focus.additional_selections;
             self.view_state.scroll_row = session.live_focus.scroll_row;
             self.view_state.scroll_col = session.live_focus.scroll_col;

@@ -135,12 +135,12 @@ impl Spreadsheet {
             cx,
         );
 
-        let (row, mut col) = self.active_view_state().selected;
+        let (row, mut col) = self.active_view_state().active_cell();
 
         // When collapsing a full-row selection, restore the original column
         // so the cursor returns to where it was before Shift+Space.
         if let Some(saved_col) = self.pre_row_select_col.take() {
-            if self.active_view_state().selection_end.is_some() {
+            if self.active_view_state().selection_end().is_some() {
                 col = saved_col;
             }
         }
@@ -179,11 +179,7 @@ impl Spreadsheet {
             (new_row, new_col)
         };
 
-        let view_state = self.active_view_state_mut();
-        view_state.selected = (final_row, final_col);
-        view_state.selection_end = None;  // Clear range selection
-        view_state.selection_anchor = None;
-        view_state.additional_selections.clear();  // Clear discontiguous selections
+        self.active_view_state_mut().select_cell(final_row, final_col);
 
         self.nav_perf.mark_state_updated();
         self.ensure_visible(cx);
@@ -281,7 +277,7 @@ impl Spreadsheet {
         let Some(first_col) = self.first_visible_col_in(min_col, max_col) else { return true; };
         let Some(last_col) = self.last_visible_col_in(min_col, max_col) else { return true; };
 
-        let start = self.active_view_state().selected;
+        let start = self.active_view_state().active_cell();
         let mut cur = (
             start.0.clamp(min_row, max_row),
             start.1.clamp(min_col, max_col),
@@ -373,11 +369,7 @@ impl Spreadsheet {
         );
         self.tab_chain_origin_col = None;
 
-        let view_state = self.active_view_state_mut();
-        if view_state.selection_anchor.is_none() {
-            view_state.selection_anchor = Some(view_state.selected);
-        }
-        view_state.selected = next;
+        self.active_view_state_mut().move_active_within_range(next);
 
         self.nav_perf.mark_state_updated();
         self.recompute_trace_if_needed(cx);
@@ -390,13 +382,13 @@ impl Spreadsheet {
         self.sync_limited_grid(cx);
 
         let view_state = self.active_view_state();
-        let was_cycled = view_state.selection_anchor.is_some();
+        let was_cycled = view_state.is_cycling_in_range();
         let (row, col) = if was_cycled {
-            view_state.selected
+            view_state.active_cell()
         } else {
-            view_state.selection_end.unwrap_or(view_state.selected)
+            view_state.selection_end().unwrap_or(view_state.active_cell())
         };
-        let (anchor_row, anchor_col) = view_state.selected;
+        let (anchor_row, anchor_col) = view_state.active_cell();
 
         // NOTE: Full-row / full-column selections are represented via sentinel
         // coordinates (row=NUM_ROWS-1, col=NUM_COLS-1). We must block wrong-
@@ -451,9 +443,7 @@ impl Spreadsheet {
         if is_full_row { final_col = NUM_COLS - 1; }
         if is_full_col { final_row = NUM_ROWS - 1; }
 
-        let view_state = self.active_view_state_mut();
-        view_state.selection_anchor = None;
-        view_state.selection_end = Some((final_row, final_col));
+        self.active_view_state_mut().set_selection_end(Some((final_row, final_col)));
 
         self.ensure_visible(cx);
     }
@@ -586,11 +576,11 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
         self.sync_limited_grid(cx);
 
-        let (row, mut col) = self.view_state.selected;
+        let (row, mut col) = self.view_state.active_cell();
 
         // When collapsing a full-row selection with Ctrl+Arrow, restore the original column
         if let Some(saved_col) = self.pre_row_select_col.take() {
-            if self.view_state.selection_end.is_some() {
+            if self.view_state.selection_end().is_some() {
                 col = saved_col;
             }
         }
@@ -613,9 +603,7 @@ impl Spreadsheet {
             (new_row, new_col)
         };
 
-        self.view_state.selected = (final_row, final_col);
-        self.view_state.selection_end = None;
-        self.view_state.selection_anchor = None;
+        self.view_state.set_single_cell((final_row, final_col));
         self.ensure_visible(cx);
     }
 
@@ -625,13 +613,13 @@ impl Spreadsheet {
         if self.mode.is_editing() { return; }
         self.sync_limited_grid(cx);
 
-        let was_cycled = self.view_state.selection_anchor.is_some();
+        let was_cycled = self.view_state.is_cycling_in_range();
         let (row, col) = if was_cycled {
-            self.view_state.selected
+            self.view_state.active_cell()
         } else {
-            self.view_state.selection_end.unwrap_or(self.view_state.selected)
+            self.view_state.selection_end().unwrap_or(self.view_state.active_cell())
         };
-        let (anchor_row, anchor_col) = self.view_state.selected;
+        let (anchor_row, anchor_col) = self.view_state.active_cell();
 
         // NOTE: Full-row / full-column selections are represented via sentinel
         // coordinates (row=NUM_ROWS-1, col=NUM_COLS-1). We must block wrong-
@@ -691,8 +679,7 @@ impl Spreadsheet {
         if is_full_row { final_col = NUM_COLS - 1; }
         if is_full_col { final_row = NUM_ROWS - 1; }
 
-        self.view_state.selection_anchor = None;
-        self.view_state.selection_end = Some((final_row, final_col));
+        self.view_state.set_selection_end(Some((final_row, final_col)));
         self.ensure_visible(cx);
     }
 
@@ -763,12 +750,12 @@ impl Spreadsheet {
         self.nav_scroll_dirty = false;
 
         let view = self.active_view_state();
-        let (row, col) = if view.selection_anchor.is_some() {
+        let (row, col) = if view.is_cycling_in_range() {
             // While cycling inside a range, keep the active cell visible rather
             // than the range's far corner (e.g., row 1M in a whole-column selection).
-            view.selected
+            view.active_cell()
         } else {
-            scroll_target(view.selected, view.selection_end, (view.scroll_row, view.scroll_col))
+            scroll_target(view.active_cell(), view.selection_end(), (view.scroll_row, view.scroll_col))
         };
         let scroll_row = crate::pane_layout::ensure_visible(self.viewport_rows(), view.frozen_rows,
             view.scroll_row, row, self.grid_layout.viewport_size.1, |r| self.displayed_row_height(r));
@@ -809,17 +796,9 @@ impl Spreadsheet {
         // Mouse click breaks the tab-chain
         self.tab_chain_origin_col = None;
         if extend {
-            let view_state = self.active_view_state_mut();
-            view_state.selection_anchor = None;
-            view_state.selection_end = Some((row, col));
+            self.active_view_state_mut().set_selection_end(Some((row, col)));
         } else {
-            {
-                let view_state = self.active_view_state_mut();
-                view_state.selected = (row, col);
-                view_state.selection_end = None;
-                view_state.selection_anchor = None;
-                view_state.additional_selections.clear();  // Clear Ctrl+Click selections
-            }
+            self.active_view_state_mut().select_cell(row, col);
             // Clear trace path when selection changes (unless inspector is pinned)
             if self.inspector_pinned.is_none() && self.inspector_trace_path.is_some() {
                 self.inspector_trace_path = None;
@@ -854,12 +833,9 @@ impl Spreadsheet {
     pub fn ctrl_click_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         let view_state = self.active_view_state_mut();
         // Save current selection to additional_selections
-        let prev_anchor = view_state.primary_anchor();
-        view_state.additional_selections.push((prev_anchor, view_state.selection_end));
+        view_state.push_primary_to_additional();
         // Start new selection at clicked cell
-        view_state.selected = (row, col);
-        view_state.selection_end = None;
-        view_state.selection_anchor = None;
+        view_state.set_single_cell((row, col));
         cx.notify();
     }
 
@@ -867,19 +843,17 @@ impl Spreadsheet {
     /// selects the current region; a second press (or Ctrl+A outside any
     /// data) selects the whole sheet.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        let (row, col) = self.active_view_state().selected;
+        let (row, col) = self.active_view_state().active_cell();
         let (min_row, min_col, max_row, max_col) =
             crate::ai::find_current_region(self.sheet(cx), row, col);
         let region_is_multi = (min_row, min_col) != (max_row, max_col);
         let region = ((min_row, min_col), (max_row, max_col));
-        let has_range = self.active_view_state().selection_end.is_some();
+        let has_range = self.active_view_state().selection_end().is_some();
         let current = self.selection_range();
 
         if region_is_multi && !(has_range && current == region) {
             let view_state = self.active_view_state_mut();
-            view_state.selected = (min_row, min_col);
-            view_state.selection_end = Some((max_row, max_col));
-            view_state.selection_anchor = None;
+            view_state.set_range((min_row, min_col), (max_row, max_col));
             view_state.additional_selections.clear();
             let rows = max_row - min_row + 1;
             let cols = max_col - min_col + 1;
@@ -891,9 +865,7 @@ impl Spreadsheet {
         }
 
         let view_state = self.active_view_state_mut();
-        view_state.selected = (0, 0);
-        view_state.selection_end = Some((NUM_ROWS - 1, NUM_COLS - 1));
-        view_state.selection_anchor = None;
+        view_state.set_range((0, 0), (NUM_ROWS - 1, NUM_COLS - 1));
         view_state.additional_selections.clear();  // Clear discontiguous selections
         cx.notify();
     }
@@ -905,11 +877,7 @@ impl Spreadsheet {
     /// Start drag selection - called on mouse_down
     pub fn start_drag_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         self.dragging_selection = true;
-        let view_state = self.active_view_state_mut();
-        view_state.selected = (row, col);
-        view_state.selection_end = None;
-        view_state.selection_anchor = None;
-        view_state.additional_selections.clear();  // Clear Ctrl+Click selections on new drag
+        self.active_view_state_mut().select_cell(row, col);
         cx.notify();
     }
 
@@ -918,12 +886,9 @@ impl Spreadsheet {
         self.dragging_selection = true;
         let view_state = self.active_view_state_mut();
         // Save current selection to additional_selections
-        let prev_anchor = view_state.primary_anchor();
-        view_state.additional_selections.push((prev_anchor, view_state.selection_end));
+        view_state.push_primary_to_additional();
         // Start new selection at clicked cell
-        view_state.selected = (row, col);
-        view_state.selection_end = None;
-        view_state.selection_anchor = None;
+        view_state.set_single_cell((row, col));
         cx.notify();
     }
 
@@ -934,7 +899,7 @@ impl Spreadsheet {
         }
         // If dragging over a merged cell, expand to include the full merge region
         let effective = if let Some(merge) = self.sheet(cx).get_merge(row, col) {
-            let (anchor_row, anchor_col) = self.active_view_state().selected;
+            let (anchor_row, anchor_col) = self.active_view_state().active_cell();
             let eff_row = if anchor_row <= merge.start.0 { merge.end.0 } else { merge.start.0 };
             let eff_col = if anchor_col <= merge.start.1 { merge.end.1 } else { merge.start.1 };
             (eff_row, eff_col)
@@ -943,8 +908,8 @@ impl Spreadsheet {
         };
         // Only update if the effective cell changed to avoid unnecessary redraws
         let view_state = self.active_view_state_mut();
-        if view_state.selection_end != Some(effective) {
-            view_state.selection_end = Some(effective);
+        if view_state.selection_end() != Some(effective) {
+            view_state.set_selection_end(Some(effective));
             cx.notify();
         }
     }
@@ -968,32 +933,7 @@ impl Spreadsheet {
     /// Clamp selection to valid bounds after operations that might invalidate it.
     /// Preserves column where possible (user mental model), clamps row to valid range.
     pub fn clamp_selection(&mut self) {
-        let view_state = self.active_view_state_mut();
-        // Clamp selected cell
-        view_state.selected.0 = view_state.selected.0.min(NUM_ROWS - 1);
-        view_state.selected.1 = view_state.selected.1.min(NUM_COLS - 1);
-
-        // Clamp selection_end if present
-        if let Some(ref mut end) = view_state.selection_end {
-            end.0 = end.0.min(NUM_ROWS - 1);
-            end.1 = end.1.min(NUM_COLS - 1);
-        }
-
-        // Clamp selection_anchor if present
-        if let Some(ref mut anchor) = view_state.selection_anchor {
-            anchor.0 = anchor.0.min(NUM_ROWS - 1);
-            anchor.1 = anchor.1.min(NUM_COLS - 1);
-        }
-
-        // Clamp additional selections
-        for (start, end) in &mut view_state.additional_selections {
-            start.0 = start.0.min(NUM_ROWS - 1);
-            start.1 = start.1.min(NUM_COLS - 1);
-            if let Some(ref mut e) = end {
-                e.0 = e.0.min(NUM_ROWS - 1);
-                e.1 = e.1.min(NUM_COLS - 1);
-            }
-        }
+        self.active_view_state_mut().clamp_selection(NUM_ROWS - 1, NUM_COLS - 1);
     }
 
     /// Returns true if more than one cell is selected.
@@ -1086,17 +1026,14 @@ impl Spreadsheet {
 
     /// Select entire row. If extend=true, extends from current anchor row.
     pub fn select_row(&mut self, row: usize, extend: bool, cx: &mut Context<Self>) {
-        self.view_state.selection_anchor = None;
         if extend {
-            // Extend from the current anchor (self.view_state.selected.0 before this call)
-            let anchor_row = self.view_state.selected.0;
-            self.view_state.selected = (anchor_row.min(row), 0);
-            self.view_state.selection_end = Some((anchor_row.max(row), NUM_COLS - 1));
+            // Extend from the current anchor (self.view_state.active_cell().0 before this call)
+            let anchor_row = self.view_state.active_cell().0;
+            self.view_state.set_range((anchor_row.min(row), 0), (anchor_row.max(row), NUM_COLS - 1));
         } else {
             // Remember the original column so navigation restores it when selection collapses
-            self.pre_row_select_col = Some(self.view_state.selected.1);
-            self.view_state.selected = (row, 0);
-            self.view_state.selection_end = Some((row, NUM_COLS - 1));
+            self.pre_row_select_col = Some(self.view_state.active_cell().1);
+            self.view_state.set_range((row, 0), (row, NUM_COLS - 1));
             self.view_state.additional_selections.clear();
         }
         cx.notify();
@@ -1104,14 +1041,11 @@ impl Spreadsheet {
 
     /// Select entire column. If extend=true, extends from current anchor col.
     pub fn select_col(&mut self, col: usize, extend: bool, cx: &mut Context<Self>) {
-        self.view_state.selection_anchor = None;
         if extend {
-            let anchor_col = self.view_state.selected.1;
-            self.view_state.selected = (0, anchor_col.min(col));
-            self.view_state.selection_end = Some((NUM_ROWS - 1, anchor_col.max(col)));
+            let anchor_col = self.view_state.active_cell().1;
+            self.view_state.set_range((0, anchor_col.min(col)), (NUM_ROWS - 1, anchor_col.max(col)));
         } else {
-            self.view_state.selected = (0, col);
-            self.view_state.selection_end = Some((NUM_ROWS - 1, col));
+            self.view_state.set_range((0, col), (NUM_ROWS - 1, col));
             self.view_state.additional_selections.clear();
         }
         cx.notify();
@@ -1136,8 +1070,7 @@ impl Spreadsheet {
         let anchor = self.row_header_anchor.unwrap_or(row);
         let min_r = anchor.min(row);
         let max_r = anchor.max(row);
-        self.view_state.selected = (min_r, 0);
-        self.view_state.selection_end = Some((max_r, NUM_COLS - 1));
+        self.view_state.set_range((min_r, 0), (max_r, NUM_COLS - 1));
         cx.notify();
     }
 
@@ -1162,8 +1095,7 @@ impl Spreadsheet {
         let anchor = self.col_header_anchor.unwrap_or(col);
         let min_c = anchor.min(col);
         let max_c = anchor.max(col);
-        self.view_state.selected = (0, min_c);
-        self.view_state.selection_end = Some((NUM_ROWS - 1, max_c));
+        self.view_state.set_range((0, min_c), (NUM_ROWS - 1, max_c));
         cx.notify();
     }
 
@@ -1176,14 +1108,14 @@ impl Spreadsheet {
     /// Ctrl+click on row header - add row to additional selections
     pub fn ctrl_click_row(&mut self, row: usize, cx: &mut Context<Self>) {
         let prev_anchor = self.view_state.primary_anchor();
-        self.view_state.additional_selections.push((prev_anchor, self.view_state.selection_end));
+        self.view_state.additional_selections.push((prev_anchor, self.view_state.selection_end()));
         self.select_row(row, false, cx);
     }
 
     /// Ctrl+click on column header - add column to additional selections
     pub fn ctrl_click_col(&mut self, col: usize, cx: &mut Context<Self>) {
         let prev_anchor = self.view_state.primary_anchor();
-        self.view_state.additional_selections.push((prev_anchor, self.view_state.selection_end));
+        self.view_state.additional_selections.push((prev_anchor, self.view_state.selection_end()));
         self.select_col(col, false, cx);
     }
 }

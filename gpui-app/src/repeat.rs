@@ -146,7 +146,7 @@ impl Spreadsheet {
                 return;
             }
             self.sync_table_view(cx);
-            let (row, col) = self.view_state.selected;
+            let (row, col) = self.view_state.active_cell();
             let steps = if axis == Axis::Row {
                 self.row_view
                     .visible_index_of(row)

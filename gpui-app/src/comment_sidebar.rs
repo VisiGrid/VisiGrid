@@ -106,7 +106,7 @@ pub fn render(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElem
     let (results, total) = entries(app, cx);
     let has_query = !app.comment_search.read(cx).buffer.text.trim().is_empty();
     let count = results.len();
-    let (vr, selected_col) = app.view_state.selected;
+    let (vr, selected_col) = app.view_state.active_cell();
     let selected_row = app.view_to_data(vr, cx);
     let selected_sheet = app.sheet_index(cx);
     div()

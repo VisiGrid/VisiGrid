@@ -83,7 +83,7 @@ impl Spreadsheet {
         let before: Vec<_> = self.wb(cx).sheets().iter().map(|s| s.id).collect();
         let changed_sheets = before != candidate.sheets().iter().map(|s| s.id).collect::<Vec<_>>();
         let same_active = self.wb(cx).active_sheet_id() == candidate.active_sheet_id();
-        let (row, col) = self.active_view_state().selected;
+        let (row, col) = self.active_view_state().active_cell();
         let data_row = self.row_view.view_to_data(row);
         self.workbook
             .update(cx, |wb, _| wb.restore_snapshot_monotonic(candidate));

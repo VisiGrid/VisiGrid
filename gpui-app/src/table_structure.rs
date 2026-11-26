@@ -351,7 +351,7 @@ impl Spreadsheet {
         if !self.table_view_installed {
             self.row_view = RowView::new(NUM_ROWS.min(self.sheet(cx).rows));
         }
-        let old = self.view_state.selected;
+        let old = self.view_state.active_cell();
         let row = self
             .row_view
             .visible_rows()
@@ -368,14 +368,14 @@ impl Spreadsheet {
                 .copied()
                 .unwrap_or_else(|| self.row_view.visible_rows().last().copied().unwrap_or(row));
             self.view_state.select_cell(row, 0);
-            self.view_state.selection_end = Some((last, NUM_COLS - 1));
+            self.view_state.set_selection_end(Some((last, NUM_COLS - 1)));
         } else {
             let col = old.1.min(NUM_COLS - 1);
             self.view_state.select_cell(0, col);
-            self.view_state.selection_end = Some((
+            self.view_state.set_selection_end(Some((
                 NUM_ROWS - 1,
                 (col + count.saturating_sub(1)).min(NUM_COLS - 1),
-            ));
+            )));
         }
 
         self.table_filter_dropdown = None;
