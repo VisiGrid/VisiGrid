@@ -672,3 +672,263 @@ fn reversed_header_paste_checks_and_renames_from_the_leftmost_header(cx: &mut Te
     })
     .unwrap();
 }
+
+#[gpui::test]
+fn enter_shift_enter_tab_shift_tab_cycle_2x3_range_and_wrap(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        let range = ((1, 1), (2, 3));
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((2, 3));
+
+        // Enter: down then next column, wrapping to top-left
+        let enter_expected = [(2, 1), (1, 2), (2, 2), (1, 3), (2, 3), (1, 1)];
+        for expected in enter_expected {
+            app.confirm_edit_enter(cx);
+            assert_eq!(app.view_state.selected, expected, "Enter step");
+            assert_eq!(app.selection_range(), range, "range preserved on Enter");
+        }
+
+        // Shift+Enter: reverse order, wrapping to bottom-right
+        let shift_enter_expected = [(2, 3), (1, 3), (2, 2), (1, 2), (2, 1), (1, 1)];
+        for expected in shift_enter_expected {
+            app.confirm_edit_up_enter(cx);
+            assert_eq!(app.view_state.selected, expected, "Shift+Enter step");
+            assert_eq!(app.selection_range(), range, "range preserved on Shift+Enter");
+        }
+
+        // Tab: right then next row, wrapping to top-left
+        let tab_expected = [(1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (1, 1)];
+        for expected in tab_expected {
+            app.confirm_edit_and_tab_right(cx);
+            assert_eq!(app.view_state.selected, expected, "Tab step");
+            assert_eq!(app.selection_range(), range, "range preserved on Tab");
+        }
+
+        // Shift+Tab: reverse order, wrapping to bottom-right
+        let shift_tab_expected = [(2, 3), (2, 2), (2, 1), (1, 3), (1, 2), (1, 1)];
+        for expected in shift_tab_expected {
+            app.confirm_edit_and_tab_left(cx);
+            assert_eq!(app.view_state.selected, expected, "Shift+Tab step");
+            assert_eq!(app.selection_range(), range, "range preserved on Shift+Tab");
+        }
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn typing_then_enter_in_range_writes_only_active_cell_and_advances(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((2, 2));
+
+        app.start_edit(cx);
+        app.edit_value = "alpha".into();
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.sheet(cx).get_raw(1, 1), "alpha");
+        assert_eq!(app.sheet(cx).get_raw(2, 1), "");
+        assert_eq!(app.sheet(cx).get_raw(1, 2), "");
+        assert_eq!(app.sheet(cx).get_raw(2, 2), "");
+        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.selection_range(), ((1, 1), (2, 2)));
+
+        app.start_edit(cx);
+        app.edit_value = "beta".into();
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.sheet(cx).get_raw(2, 1), "beta");
+        assert_eq!(app.sheet(cx).get_raw(1, 2), "");
+        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.selection_range(), ((1, 1), (2, 2)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn cycle_skips_hidden_row_and_hidden_column(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        let sheet_id = app.sheet(cx).id;
+        app.hidden_rows.entry(sheet_id).or_default().insert(2);
+        app.hidden_cols.entry(sheet_id).or_default().insert(2);
+
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((3, 3));
+
+        // Visible cells in (1,1)..=(3,3) are (1,1), (3,1), (1,3), (3,3)
+        let enter_expected = [(3, 1), (1, 3), (3, 3), (1, 1)];
+        for expected in enter_expected {
+            app.confirm_edit_enter(cx);
+            assert_eq!(app.view_state.selected, expected);
+            assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
+        }
+
+        let tab_expected = [(1, 3), (3, 1), (3, 3), (1, 1)];
+        for expected in tab_expected {
+            app.confirm_edit_and_tab_right(cx);
+            assert_eq!(app.view_state.selected, expected);
+            assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
+        }
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn cycle_treats_merged_area_as_one_stop_at_origin(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.wb_mut(cx, |wb| {
+            wb.active_sheet_mut()
+                .add_merge(visigrid_engine::sheet::MergedRegion::new(1, 1, 2, 2))
+                .expect("merge 2x2");
+        });
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((3, 3));
+
+        // Enter order: (1,1) [merge origin] -> (3,1) -> (3,2) -> (1,3) -> (2,3) -> (3,3) -> (1,1)
+        let enter_expected = [(3, 1), (3, 2), (1, 3), (2, 3), (3, 3), (1, 1)];
+        for expected in enter_expected {
+            app.confirm_edit_enter(cx);
+            assert_eq!(app.view_state.selected, expected, "Enter with merge");
+            assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
+        }
+
+        // Tab order: (1,1) [merge origin] -> (1,3) -> (2,3) -> (3,1) -> (3,2) -> (3,3) -> (1,1)
+        let tab_expected = [(1, 3), (2, 3), (3, 1), (3, 2), (3, 3), (1, 1)];
+        for expected in tab_expected {
+            app.confirm_edit_and_tab_right(cx);
+            assert_eq!(app.view_state.selected, expected, "Tab with merge");
+            assert_eq!(app.selection_range(), ((1, 1), (3, 3)));
+        }
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn single_cell_enter_and_tab_preserve_tab_chain_return(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = None;
+
+        app.confirm_edit_and_tab_right(cx);
+        assert_eq!(app.view_state.selected, (1, 2));
+        app.confirm_edit_and_tab_right(cx);
+        assert_eq!(app.view_state.selected, (1, 3));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.selected, (2, 1), "Enter returns to tab-chain origin column");
+        assert_eq!(app.view_state.selection_end, None);
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn additional_selections_keep_existing_collapse_behaviour(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((2, 2));
+        app.view_state.additional_selections.push(((5, 5), None));
+
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.selection_end, None);
+        assert!(app.view_state.additional_selections.is_empty());
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn arrow_key_after_cycling_collapses_selection(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((2, 3));
+
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.selection_range(), ((1, 1), (2, 3)));
+
+        app.move_selection(0, 1, cx);
+        assert_eq!(app.view_state.selected, (2, 2));
+        assert_eq!(app.view_state.selection_end, None);
+        assert_eq!(app.view_state.selection_anchor, None);
+        assert_eq!(app.selection_range(), ((2, 2), (2, 2)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn shift_arrow_and_shift_click_after_cycling_extend_from_active_cell(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((3, 3));
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.selected, (2, 1));
+
+        // Shift+Right extends from active cell (2, 1) -> (2, 1)..=(2, 2)
+        app.extend_selection(0, 1, cx);
+        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.selection_anchor, None);
+        assert_eq!(app.selection_range(), ((2, 1), (2, 2)));
+
+        // Re-select range, cycle to (2, 1), then Shift+Click (2, 3) -> (2, 1)..=(2, 3)
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((3, 3));
+        app.view_state.selection_anchor = None;
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.selected, (2, 1));
+
+        app.select_cell(2, 3, true, cx);
+        assert_eq!(app.view_state.selected, (2, 1));
+        assert_eq!(app.view_state.selection_anchor, None);
+        assert_eq!(app.selection_range(), ((2, 1), (2, 3)));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn paste_after_cycling_still_starts_at_range_top_left(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 1);
+        app.view_state.selection_end = Some((2, 3));
+
+        // Cycle Enter twice: (1,1) -> (2,1) -> (1,2)
+        app.confirm_edit_enter(cx);
+        app.confirm_edit_enter(cx);
+        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.selection_range(), ((1, 1), (2, 3)));
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("X\tY".into()));
+        app.paste(cx);
+        assert_eq!(app.sheet(cx).get_raw(1, 1), "X");
+        assert_eq!(app.sheet(cx).get_raw(1, 2), "Y");
+        assert_eq!(app.sheet(cx).get_raw(1, 3), "");
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn cycling_in_whole_column_selection_moves_one_row_and_is_instant(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.select_col(2, false, cx);
+        assert_eq!(app.view_state.selected, (0, 2));
+        let expected_range = app.selection_range();
+
+        let start = std::time::Instant::now();
+        app.confirm_edit_enter(cx);
+        let elapsed = start.elapsed();
+
+        assert_eq!(app.view_state.selected, (1, 2));
+        assert_eq!(app.selection_range(), expected_range);
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "whole-column cycling took {:?} (expected O(log N) / instant)",
+            elapsed
+        );
+    })
+    .unwrap();
+}

@@ -802,33 +802,49 @@ impl Spreadsheet {
         self.confirm_edit_and_move(0, -1, cx);
     }
 
-    /// Tab commit-and-move-right: records the tab-chain origin column,
-    /// then commits the current edit and moves right.
-    ///
-    /// The origin column is used by `confirm_edit_enter` to return the
-    /// cursor to the starting column when Enter is pressed (Excel behavior).
+    /// Tab commit-and-move-right: in a multi-cell primary selection (with no
+    /// additional selections), cycles the active cell right/down inside the range
+    /// without collapsing it. On a single cell (or with additional selections),
+    /// records the tab-chain origin column, commits, and moves right.
     pub fn confirm_edit_and_tab_right(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(true, true, cx);
+            return;
+        }
         if self.tab_chain_origin_col.is_none() {
             self.tab_chain_origin_col = Some(self.view_state.selected.1);
         }
         self.confirm_edit_and_move(0, 1, cx);
     }
 
-    /// Shift+Tab commit-and-move-left: records the tab-chain origin column,
-    /// then commits the current edit and moves left.
+    /// Shift+Tab commit-and-move-left: cycles backward inside a multi-cell
+    /// primary selection, or records tab-chain origin and moves left.
     pub fn confirm_edit_and_tab_left(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(true, false, cx);
+            return;
+        }
         if self.tab_chain_origin_col.is_none() {
             self.tab_chain_origin_col = Some(self.view_state.selected.1);
         }
         self.confirm_edit_and_move(0, -1, cx);
     }
 
-    /// Enter key: confirm edit and move down, with tab-chain return.
-    ///
-    /// If the user tabbed across cells entering data, Enter returns the cursor
-    /// to the origin column on the next row instead of staying in the current
-    /// column. This matches Excel's Tab-chain return behavior.
+    /// Enter key: in a multi-cell primary selection (with no additional
+    /// selections), commits any active-cell edit and cycles the active cell
+    /// down/right inside the preserved range. On a single cell (or with
+    /// additional selections), confirms and moves down with tab-chain return.
     pub fn confirm_edit_enter(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(false, true, cx);
+            return;
+        }
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             // Commit the edit if currently editing
             if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
@@ -849,6 +865,7 @@ impl Spreadsheet {
             let view_state = self.active_view_state_mut();
             view_state.selected = (final_row, final_col);
             view_state.selection_end = None;
+            view_state.selection_anchor = None;
             view_state.additional_selections.clear();
             self.ensure_visible(cx);
         } else {
@@ -856,8 +873,15 @@ impl Spreadsheet {
         }
     }
 
-    /// Shift+Enter key: confirm edit and move up, with tab-chain return.
+    /// Shift+Enter key: cycles backward inside a multi-cell primary selection,
+    /// or confirms edit and moves up with tab-chain return.
     pub fn confirm_edit_up_enter(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(false, false, cx);
+            return;
+        }
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             let (row, _) = self.active_view_state().selected;
@@ -875,6 +899,7 @@ impl Spreadsheet {
             let view_state = self.active_view_state_mut();
             view_state.selected = (final_row, final_col);
             view_state.selection_end = None;
+            view_state.selection_anchor = None;
             view_state.additional_selections.clear();
             self.ensure_visible(cx);
         } else {

@@ -161,13 +161,7 @@ pub(super) fn selection_borders_for_pane(
 
 /// Get selection range from view state
 fn selection_range_for_pane(view_state: &WorkbookViewState) -> ((usize, usize), (usize, usize)) {
-    let (r1, c1) = view_state.selected;
-    let (r2, c2) = view_state.selection_end.unwrap_or(view_state.selected);
-    let min_row = r1.min(r2);
-    let max_row = r1.max(r2);
-    let min_col = c1.min(c2);
-    let max_col = c1.max(c2);
-    ((min_row, min_col), (max_row, max_col))
+    view_state.primary_range()
 }
 
 /// Render the main cell grid with freeze pane support
@@ -3101,9 +3095,8 @@ fn is_merge_in_selection(
         return true;
     }
     // Selection range overlaps merge
-    if let Some(sel_end) = view_state.selection_end {
-        let (min_r, max_r) = (ar.min(sel_end.0), ar.max(sel_end.0));
-        let (min_c, max_c) = (ac.min(sel_end.1), ac.max(sel_end.1));
+    if view_state.is_primary_multi_cell() {
+        let ((min_r, min_c), (max_r, max_c)) = view_state.primary_range();
         merge_end_row >= min_r && merge_start_row <= max_r
             && merge_end_col >= min_c && merge_start_col <= max_c
     } else {

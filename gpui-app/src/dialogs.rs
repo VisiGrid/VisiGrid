@@ -1234,9 +1234,8 @@ impl Spreadsheet {
         // Determine range based on context mode
         let (start_row, start_col, end_row, end_col) = match self.ask_ai.context_mode {
             AskAIContextMode::CurrentSelection => {
-                let (sr, sc) = self.view_state.selected;
-                let (er, ec) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-                (sr.min(er), sc.min(ec), sr.max(er), sc.max(ec))
+                let ((sr, sc), (er, ec)) = self.selection_range();
+                (sr, sc, er, ec)
             }
             AskAIContextMode::CurrentRegion => {
                 let (row, col) = self.view_state.selected;
@@ -1319,9 +1318,8 @@ impl Spreadsheet {
         // Get range from stored selection or current view state
         let (start_row, start_col, end_row, end_col) = self.ask_ai.selected_range
             .unwrap_or_else(|| {
-                let (sr, sc) = self.view_state.selected;
-                let (er, ec) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-                (sr.min(er), sc.min(ec), sr.max(er), sc.max(ec))
+                let ((sr, sc), (er, ec)) = self.selection_range();
+                (sr, sc, er, ec)
             });
 
         let sheet_name = self.workbook.read(cx)

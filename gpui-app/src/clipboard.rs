@@ -774,6 +774,7 @@ impl Spreadsheet {
         let state = self.active_view_state_mut();
         state.selected = start;
         state.selection_end = (last != start).then_some(last);
+        state.selection_anchor = None;
         state.additional_selections.clear();
     }
 

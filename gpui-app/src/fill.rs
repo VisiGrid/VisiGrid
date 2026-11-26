@@ -591,9 +591,8 @@ impl Spreadsheet {
             }
         }
 
-        // Anchor is the selection start, range end is selection_end (or same as anchor for single cell)
-        let anchor = self.view_state.selected;
-        let range_end = self.view_state.selection_end.unwrap_or(anchor);
+        // Anchor is the selection top-left, range end is bottom-right
+        let (anchor, range_end) = self.selection_range();
 
         self.fill_drag = FillDrag::Dragging {
             anchor,

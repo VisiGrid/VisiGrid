@@ -641,7 +641,7 @@ impl Spreadsheet {
                             col: self.view_state.scroll_col,
                         },
                         selection: SelectionState {
-                            anchor: self.view_state.selected,
+                            anchor: self.view_state.primary_anchor(),
                             end: self.view_state.selection_end,
                             additional: self.view_state.additional_selections.clone(),
                         },
@@ -739,6 +739,7 @@ impl Spreadsheet {
             self.view_state.selection_end = sheet_session.selection.end.map(|(r, c): (usize, usize)| {
                 (r.min(max_row.saturating_sub(1)), c.min(max_col.saturating_sub(1)))
             });
+            self.view_state.selection_anchor = None;
 
             // Restore additional selections (clamped)
             self.view_state.additional_selections = sheet_session.selection.additional

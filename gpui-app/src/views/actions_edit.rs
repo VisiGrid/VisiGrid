@@ -709,8 +709,8 @@ pub(crate) fn bind(
                 this.update_edit_scroll(window, cx);
             } else if this.mode == Mode::Navigation {
                 // Single text cell: enter edit mode and delete last char
-                let is_single_cell = this.view_state.selection_end.is_none()
-                    || this.view_state.selection_end == Some(this.view_state.selected);
+                let is_single_cell = !this.view_state.is_primary_multi_cell()
+                    && this.view_state.additional_selections.is_empty();
                 let is_text = {
                     use visigrid_engine::cell::CellValue;
                     let (row, col) = this.view_state.selected;

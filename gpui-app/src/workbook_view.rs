@@ -41,10 +41,13 @@ use visigrid_engine::workbook::Workbook;
 #[derive(Clone, Debug)]
 pub struct WorkbookViewState {
     // === Selection ===
-    /// Active cell (anchor of the current selection)
+    /// Active cell — where edits occur and the solid border is drawn.
     pub selected: (usize, usize),
     /// End of active range selection (None = single cell selected)
     pub selection_end: Option<(usize, usize)>,
+    /// Fixed anchor corner of the primary range when `selected` has cycled into
+    /// the range via Enter/Tab. When `None`, the primary range anchor is `selected`.
+    pub selection_anchor: Option<(usize, usize)>,
     /// Additional selections from Ctrl+Click (each is anchor + optional end)
     pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,
 
@@ -74,6 +77,7 @@ impl Default for WorkbookViewState {
         Self {
             selected: (0, 0),
             selection_end: None,
+            selection_anchor: None,
             additional_selections: Vec::new(),
             scroll_row: 0,
             scroll_col: 0,
@@ -101,12 +105,42 @@ impl WorkbookViewState {
     pub fn select_cell(&mut self, row: usize, col: usize) {
         self.selected = (row, col);
         self.selection_end = None;
+        self.selection_anchor = None;
         self.additional_selections.clear();
     }
 
     /// Get the active cell position
     pub fn active_cell(&self) -> (usize, usize) {
         self.selected
+    }
+
+    /// Fixed anchor corner of the primary selection (defaults to `selected` when
+    /// not cycling inside a range, or when `selection_end` is `None`).
+    pub fn primary_anchor(&self) -> (usize, usize) {
+        if self.selection_end.is_some() {
+            self.selection_anchor.unwrap_or(self.selected)
+        } else {
+            self.selected
+        }
+    }
+
+    /// Normalized bounding box `((min_row, min_col), (max_row, max_col))` of the
+    /// primary selection.
+    pub fn primary_range(&self) -> ((usize, usize), (usize, usize)) {
+        let Some(end) = self.selection_end else {
+            return (self.selected, self.selected);
+        };
+        let anchor = self.selection_anchor.unwrap_or(self.selected);
+        (
+            (anchor.0.min(end.0), anchor.1.min(end.1)),
+            (anchor.0.max(end.0), anchor.1.max(end.1)),
+        )
+    }
+
+    /// True if the primary selection covers more than one cell.
+    pub fn is_primary_multi_cell(&self) -> bool {
+        let (start, end) = self.primary_range();
+        start != end
     }
 
     /// Check if a cell is within the current selection
@@ -126,7 +160,7 @@ impl WorkbookViewState {
 
     /// Check if a cell is in the primary selection
     fn is_in_primary_selection(&self, row: usize, col: usize) -> bool {
-        Self::is_in_range(row, col, self.selected, self.selection_end)
+        Self::is_in_range(row, col, self.primary_anchor(), self.selection_end)
     }
 
     /// Check if a cell is within a selection range
