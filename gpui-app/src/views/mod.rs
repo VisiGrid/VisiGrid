@@ -323,12 +323,8 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
                 this.update_col_resize(event.position.x.into(), cx);
             }
             // Handle row resize drag
-            if let Some(row) = this.resizing_row {
-                let y: f32 = event.position.y.into();
-                let delta = y - this.resize_start_pos;
-                let new_height = this.resize_start_size + delta;
-                this.set_row_height(row, new_height);
-                cx.notify();
+            if this.resizing_row.is_some() {
+                this.update_row_resize(event.position.y.into(), cx);
             }
             // Handle column header selection drag
             if this.dragging_col_header {
@@ -371,12 +367,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             }
             // End column/row resize and record to history (coalescing)
             this.finish_col_resize(cx);
-            if let Some(row) = this.resizing_row.take() {
-                // Record the sizing change to history (coalesces all drag events into one entry)
-                let old = this.resize_start_original.take();
-                this.record_row_height_change(row, old, cx);
-                cx.notify();
-            }
+            this.finish_row_resize(cx);
             // End header selection drag
             if this.dragging_row_header {
                 this.end_row_header_drag(cx);

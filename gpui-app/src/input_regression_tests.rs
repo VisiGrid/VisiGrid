@@ -112,6 +112,129 @@ fn selected_columns_resize_together_and_undo_restores_each_original(cx: &mut Tes
 }
 
 #[gpui::test]
+fn selected_rows_resize_together_and_undo_restores_each_original(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        let id = app.cached_sheet_id();
+        app.view_state.selected = (4, 0);
+        app.view_state.selection_end = Some((1, 1));
+        app.view_state.additional_selections.push(((3, 4), Some((5, 4))));
+        app.view_state.additional_selections.push(((7, 4), None));
+        app.sheet_row_heights_mut().extend([(1, 30.), (4, 62.), (6, 37.)]);
+        app.hidden_rows.entry(id).or_default().insert(2);
+        app.row_view = visigrid_engine::filter::RowView::new(10);
+        app.row_view.apply_filter((0..10).map(|r| r != 3).collect());
+        let originals = app.row_heights.clone();
+
+        app.begin_row_resize(1, 100., cx);
+        app.update_row_resize(114., cx);
+        app.update_row_resize(120., cx);
+        for row in [1, 2, 3, 4, 5, 7] {
+            assert_eq!(app.row_height(row), 50.);
+        }
+        assert_eq!(app.displayed_row_height(2), 0.);
+        assert_eq!(app.displayed_row_height(3), 0.);
+        app.finish_row_resize(cx);
+        assert_eq!(app.row_heights[&id].len(), 7);
+        assert_eq!(app.row_height(6), 37.);
+        assert_eq!(app.history.undo_count(), 1);
+        app.undo(cx);
+        assert_eq!(app.row_heights, originals);
+        app.redo(cx);
+        for row in [1, 2, 3, 4, 5, 7] {
+            assert_eq!(app.row_heights[&id][&row], 50.);
+        }
+    }).unwrap();
+}
+
+#[gpui::test]
+fn unselected_row_resizes_alone(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selected = (1, 0);
+        app.view_state.selection_end = Some((4, 2));
+        let height = app.row_height(6);
+        app.begin_row_resize(6, 80., cx);
+        app.update_row_resize(88., cx);
+        app.finish_row_resize(cx);
+        let heights = &app.row_heights[&app.cached_sheet_id()];
+        assert_eq!(heights.len(), 1);
+        assert_eq!(heights[&6], height + 8.);
+        assert_eq!(app.history.undo_count(), 1);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn zero_distance_row_resize_preserves_default_and_explicit_heights(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.view_state.selection_end = Some((2, 0));
+        app.sheet_row_heights_mut().insert(1, 48.);
+        let before = app.row_heights.clone();
+        app.begin_row_resize(0, 100., cx);
+        app.finish_row_resize(cx);
+        app.begin_row_resize(1, 100., cx);
+        app.update_row_resize(130., cx);
+        app.update_row_resize(100., cx);
+        assert_eq!(app.row_height(1), 48.);
+        assert_eq!(app.row_height(0), app.metrics.default_cell_sizes.row_height);
+        app.finish_row_resize(cx);
+        assert_eq!(app.row_heights, before);
+        assert_eq!(app.history.undo_count(), 0);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn row_resize_at_double_zoom_tracks_the_pointer(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.metrics.zoom = 2.;
+        app.sheet_row_heights_mut().insert(1, 30.);
+        app.begin_row_resize(1, 100., cx);
+        app.update_row_resize(140., cx);
+        assert_eq!(app.displayed_row_height(1), 100.);
+        app.finish_row_resize(cx);
+        assert_eq!(app.row_height(1), 50.);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn active_table_view_keeps_its_single_row_resize(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.table_view_installed = true;
+        app.view_state.selection_end = Some((4, 2));
+        let height = app.row_height(1);
+        app.begin_row_resize(1, 80., cx);
+        app.update_row_resize(88., cx);
+        app.finish_row_resize(cx);
+        let heights = &app.row_heights[&app.cached_sheet_id()];
+        assert_eq!(heights.len(), 1);
+        assert_eq!(heights[&1], height + 8.);
+    }).unwrap();
+}
+
+#[gpui::test]
+fn whole_sheet_row_resize_previews_even_the_last_row_without_materializing_heights(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    view.update(cx, |app, _, cx| {
+        app.select_all(cx);
+        let before = app.row_heights.clone();
+        let start = app.row_height(0);
+        app.begin_row_resize(0, 100., cx);
+        for delta in [10., 15., 20.] {
+            app.update_row_resize(100. + delta, cx);
+            assert_eq!(app.row_height(crate::app::NUM_ROWS - 1), start + delta);
+            assert_eq!(app.row_heights, before);
+        }
+        app.update_row_resize(100., cx);
+        app.finish_row_resize(cx);
+        assert_eq!(app.row_heights, before);
+        assert_eq!(app.history.undo_count(), 0);
+    }).unwrap();
+}
+
+#[gpui::test]
 fn insert_count_starts_selected_and_accepts_default_or_replacement(cx: &mut TestAppContext) {
     use visigrid_engine::structural::Axis;
     let view = setup(cx);
