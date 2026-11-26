@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.56.1
+
+### Fixed
+
+- **The Linux x86_64 app runs on glibc 2.39 and later again.** The 0.56.0 build needed glibc 2.43, so it did not start on Debian 13 and similar systems. Releases are built on Ubuntu 24.04 again, and the build now fails if the requirement rises. The `vgrid` CLI and the aarch64 builds were not affected. ([#183](https://github.com/VisiGrid/VisiGrid/issues/183))
+- **Paste starts at the top-left of the selection.** Pasting into a range selected by dragging up or to the left used to start at the cell where the drag began. Paste, Paste Values, Paste Formulas and Paste Formats now all start at the selection's top-left corner, and the pasted range is selected afterwards. Table view is unchanged. ([#173](https://github.com/VisiGrid/VisiGrid/issues/173), partial fix)
+- **Ctrl+Shift+Arrow extends along the row or column where the selection started.** Extending a multi-row or multi-column selection to the edge of the data used to follow the moving corner's row or column instead. ([#173](https://github.com/VisiGrid/VisiGrid/issues/173), partial fix)
+
+### Excel files
+
+- **Export a password-protected workbook with its password.** After opening a protected Excel file, **File > Export to Excel** asks whether to **Keep Password** or **Export Unprotected**. Keep Password is the default and writes the file encrypted with the password it was opened with (AES-256, SHA-512). The password is held in memory for that window only and is dropped when you close it, load another file, or save to `.sheet`. ([#184](https://github.com/VisiGrid/VisiGrid/issues/184))
+- **Command line:** `vgrid convert` from a protected workbook to `.xlsx` now keeps the password; it used to write an unprotected copy. `--no-encrypt` writes an unprotected copy on purpose. `--encrypt` protects output from an unprotected source, taking the password from `VISIGRID_XLSX_OUTPUT_PASSWORD` or a hidden prompt. Setting that variable when converting a protected workbook changes its password. `vgrid recipe run` accepts the same flags.
+
+Setting or changing a password from the desktop app is not supported yet; use the command line. Protected files written by this version have been checked in LibreOffice and with msoffcrypto-tool, but not yet in Microsoft Excel. If one does not open in Excel with the right password, please report it. `.sheet` files are not encrypted.
+
 ## 0.56.0
 
 ### Excel files
