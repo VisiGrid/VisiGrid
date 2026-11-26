@@ -59,7 +59,7 @@ impl Spreadsheet {
     /// Freeze boundaries are view-slot positions, not canonical record identities.
     pub fn freeze_panes(&mut self, cx: &mut Context<Self>) {
         if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) { return; }
-        let (row, col) = self.active_view_state().selected;
+        let (row, col) = self.active_view_state().active_cell();
         if (row, col) == (0, 0) {
             self.status_message = Some("Select a cell to freeze rows above and columns to the left".into());
             cx.notify(); return;
@@ -678,8 +678,7 @@ impl Spreadsheet {
         if self.mode.is_formula() {
             if self.activate_sheet(index, cx) {
                 // Reset scroll/selection on the target sheet but stay in formula mode
-                self.view_state.selected = (0, 0);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((0, 0));
                 self.view_state.scroll_row = self.view_state.frozen_rows;
                 self.view_state.scroll_col = self.view_state.frozen_cols;
                 // Track which sheet the ref target is on
@@ -772,8 +771,7 @@ impl Spreadsheet {
 
     /// Clear selection state when switching sheets
     pub(crate) fn clear_selection_state(&mut self) {
-        self.view_state.selected = (0, 0);
-        self.view_state.selection_end = None;
+        self.view_state.set_single_cell((0, 0));
         self.view_state.scroll_row = self.view_state.frozen_rows;
         self.view_state.scroll_col = self.view_state.frozen_cols;
         self.mode = Mode::Navigation;

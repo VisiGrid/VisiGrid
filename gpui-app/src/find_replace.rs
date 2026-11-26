@@ -223,7 +223,7 @@ impl Spreadsheet {
         let old_slot = self
             .row_view
             .data_to_view(hit.row)
-            .unwrap_or(self.view_state.selected.0);
+            .unwrap_or(self.view_state.active_cell().0);
         let Some(count) = self.apply_find_replacements(std::slice::from_ref(&hit), cx) else {
             return;
         };

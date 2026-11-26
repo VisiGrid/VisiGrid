@@ -437,7 +437,7 @@ impl Spreadsheet {
         }
         let home = self.formula_home_sheet.unwrap_or(wb.active_sheet_index());
         let sheet = wb.sheet(home).unwrap_or(wb.active_sheet());
-        let (row, col) = self.formula_edit_cell.unwrap_or(self.view_state.selected);
+        let (row, col) = self.formula_edit_cell.unwrap_or(self.view_state.active_cell());
         let row = if home == wb.active_sheet_index() { self.row_view.row_order().get(row).copied().unwrap_or(row) } else { row };
         (sheet.id, (row,col))
     }

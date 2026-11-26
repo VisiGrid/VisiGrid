@@ -28,7 +28,7 @@ pub fn render_paste_special_dialog(app: &Spreadsheet, cx: &mut Context<Spreadshe
     let selected = dialog.selected;
 
     // Where the paste lands: the active cell, extended by the clipboard's size
-    let (view_row, col) = app.view_state.selected;
+    let (view_row, col) = app.view_state.active_cell();
     let row = app.row_view.view_to_data(view_row);
     let start = app.cell_ref_at(row, col);
     let target = if dialog.rows * dialog.cols > 1 {

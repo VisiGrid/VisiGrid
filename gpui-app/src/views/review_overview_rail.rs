@@ -26,7 +26,7 @@ pub fn render_review_overview_rail(
         state.bucket_for_source_row(app.view_to_data(app.view_state.scroll_row, cx))
     });
     let selected_data_row = on_source_sheet
-        .then(|| app.view_to_data(app.view_state.selected.0, cx));
+        .then(|| app.view_to_data(app.view_state.active_cell().0, cx));
     let selected_bucket = selected_data_row
         .filter(|row| !state.change_indices_at_source_row(*row).is_empty())
         .map(|row| state.bucket_for_source_row(row));

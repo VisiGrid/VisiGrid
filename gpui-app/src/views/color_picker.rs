@@ -26,7 +26,7 @@ pub fn render_color_picker(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> 
     let accent = app.token(TokenKey::Accent);
 
     // Get current cell's background color
-    let (row, col) = app.view_state.selected;
+    let (row, col) = app.view_state.active_cell();
     let current_bg = app.sheet(cx).get_background_color(row, col);
 
     // Build theme grid (6 rows × 10 cols)

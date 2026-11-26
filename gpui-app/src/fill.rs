@@ -260,7 +260,7 @@ impl Spreadsheet {
             }
         }
 
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
 
         // Find contiguous numeric cells above
         let above_range = self.find_numeric_range_above(row, col, cx);
@@ -474,8 +474,7 @@ impl Spreadsheet {
 
         // Set the first blank as the primary selection
         let first = blank_cells.remove(0);
-        self.view_state.selected = first;
-        self.view_state.selection_end = None;
+        self.view_state.set_single_cell(first);
 
         // Add remaining blanks as additional selections (single-cell each)
         self.view_state.additional_selections.clear();
@@ -501,7 +500,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        let pivot_col = self.active_view_state().selected.1;
+        let pivot_col = self.active_view_state().active_cell().1;
         let cells = crate::selection_differences::find_row_differences(&self.sheet(cx), min, max, pivot_col);
         self.select_cells_with_status(cells, "row", cx);
     }
@@ -514,7 +513,7 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
-        let pivot_row = self.active_view_state().selected.0;
+        let pivot_row = self.active_view_state().active_cell().0;
         let cells = crate::selection_differences::find_column_differences(&self.sheet(cx), min, max, pivot_row);
         self.select_cells_with_status(cells, "column", cx);
     }
@@ -528,8 +527,7 @@ impl Spreadsheet {
             return;
         }
         let first = cells.remove(0);
-        self.view_state.selected = first;
-        self.view_state.selection_end = None;
+        self.view_state.set_single_cell(first);
         self.view_state.additional_selections.clear();
         for cell in cells {
             self.view_state.additional_selections.push((cell, None));
@@ -591,9 +589,8 @@ impl Spreadsheet {
             }
         }
 
-        // Anchor is the selection start, range end is selection_end (or same as anchor for single cell)
-        let anchor = self.view_state.selected;
-        let range_end = self.view_state.selection_end.unwrap_or(anchor);
+        // Anchor is the selection top-left, range end is bottom-right
+        let (anchor, range_end) = self.selection_range();
 
         self.fill_drag = FillDrag::Dragging {
             anchor,
@@ -865,7 +862,7 @@ impl Spreadsheet {
         }
 
         // Update selection to include filled range
-        self.view_state.selection_end = Some(end);
+        self.view_state.set_range(anchor, end);
 
         self.status_message = Some(format!("Filled {} cell{}", count, if count == 1 { "" } else { "s" }));
         cx.notify();
@@ -1039,7 +1036,7 @@ impl Spreadsheet {
         }
 
         // Update selection to include filled range
-        self.view_state.selection_end = Some(end);
+        self.view_state.set_range(anchor, end);
 
         self.status_message = Some(format!("Filled {} cell{}", count, if count == 1 { "" } else { "s" }));
         cx.notify();

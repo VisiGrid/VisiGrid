@@ -144,7 +144,7 @@ fn build_cell_menu(
 ) -> Vec<AnyElement> {
     let panel_border = app.token(TokenKey::PanelBorder);
     let has_clipboard = app.internal_clipboard.is_some();
-    let (r, c) = app.view_state.selected;
+    let (r, c) = app.view_state.active_cell();
     let r = app.row_view.view_to_data(r);
     let (r, c) = app.sheet(cx).get_merge(r,c).map(|m| m.start).unwrap_or((r,c));
     let has_comment = app.sheet(cx).comment(r,c).is_some();

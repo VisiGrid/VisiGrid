@@ -28,7 +28,7 @@ impl Spreadsheet {
             n.to_string()
         } else {
             // Try to find a named range in the current cell's formula
-            let (view_row, col) = self.view_state.selected;
+            let (view_row, col) = self.view_state.active_cell();
             let row = self.row_view.view_to_data(view_row);
             let cell = self.sheet(cx).get_cell(row, col);
             let formula_text = self.get_formula_source(cell.value());

@@ -161,13 +161,7 @@ pub(super) fn selection_borders_for_pane(
 
 /// Get selection range from view state
 fn selection_range_for_pane(view_state: &WorkbookViewState) -> ((usize, usize), (usize, usize)) {
-    let (r1, c1) = view_state.selected;
-    let (r2, c2) = view_state.selection_end.unwrap_or(view_state.selected);
-    let min_row = r1.min(r2);
-    let max_row = r1.max(r2);
-    let min_col = c1.min(c2);
-    let max_col = c1.max(c2);
-    ((min_row, min_col), (max_row, max_col))
+    view_state.primary_range()
 }
 
 /// Render the main cell grid with freeze pane support
@@ -558,7 +552,7 @@ fn render_cell(
     // Selection uses view_row (what user sees/clicks)
     // Use pane-specific view state for selection checks
     let is_selected = is_selected_in_pane(view_state, view_row, col);
-    let is_active = view_state.selected == (view_row, col);
+    let is_active = view_state.active_cell() == (view_row, col);
     let is_editing = editing && is_active;
     let is_formula_ref = app.is_formula_ref(view_row, col);
     let formula_ref_color = app.formula_ref_color(view_row, col);  // Color index for multi-color refs
@@ -777,7 +771,7 @@ fn render_cell(
     // viewport-only overlay; no borders or fills are stamped into cell storage.
     if !is_frozen_review && !app.is_previewing() {
         if let Some(table) = display_sheet.table_at(display_data_row,col) {
-            let (selected_row,selected_col)=view_state.selected;
+            let (selected_row,selected_col)=view_state.active_cell();
             if table.full_range().contains(app.row_view.view_to_data(selected_row),selected_col) {
                 let range=table.full_range();
                 cell=cell.child(non_interactive_overlay()
@@ -1664,7 +1658,7 @@ fn render_cell(
     let is_fill_handle_cell = if app.is_fill_dragging() {
         // During drag: show at source_end (bottom-right of source range)
         app.fill_drag_source_end() == Some((view_row, col))
-    } else if view_state.selection_end.is_some() {
+    } else if view_state.selection_end().is_some() {
         // Range selection: fill handle goes on bottom-right corner
         let ((_min_row, _min_col), (max_row, max_col)) = selection_range_for_pane(view_state);
         view_row == max_row && col == max_col
@@ -1755,7 +1749,7 @@ fn render_cell(
 
             // If editing, commit the current edit before navigating to another cell
             if this.mode.is_editing() {
-                let active = this.active_view_state().selected;
+                let active = this.active_view_state().active_cell();
                 if (target_row, target_col) != active {
                     this.commit_pending_edit(cx);
                     if this.mode.is_editing() { return; }
@@ -1783,11 +1777,11 @@ fn render_cell(
             // If the click target is a multi-cell merge, expand selection to cover full region
             if let Some(merge_br) = merge_end {
                 if merge_br != (target_row, target_col) {
-                    let (anchor_row, anchor_col) = this.active_view_state().selected;
+                    let (anchor_row, anchor_col) = this.active_view_state().active_cell();
                     // Pick the merge corner that, combined with anchor, covers the full region
                     let far_row = if anchor_row <= target_row { merge_br.0 } else { target_row };
                     let far_col = if anchor_col <= target_col { merge_br.1 } else { target_col };
-                    this.active_view_state_mut().selection_end = Some((far_row, far_col));
+                    this.active_view_state_mut().set_selection_end(Some((far_row, far_col)));
                     cx.notify();
                 }
             }
@@ -2769,7 +2763,7 @@ fn render_merge_div(
     let format = sheet.get_format(display_row, m.origin_col);
     let merge_cell_style = resolve_cell_style(app, format.cell_style);
     let bg = cell_base_background(app, false, format.background_color, merge_cell_style.fill);
-    let is_editing_this = editing && view_state.selected == (m.origin_row, m.origin_col);
+    let is_editing_this = editing && view_state.active_cell() == (m.origin_row, m.origin_col);
 
     // 1. Background + position
     let mut merge_div = div()
@@ -2842,9 +2836,9 @@ fn render_merge_div(
     }
 
     // 2. Selection tint
-    let is_active = view_state.selected == (m.origin_row, m.origin_col)
-        || (view_state.selected.0 >= m.origin_row && view_state.selected.0 <= m.end_row
-            && view_state.selected.1 >= m.origin_col && view_state.selected.1 <= m.end_col);
+    let is_active = view_state.active_cell() == (m.origin_row, m.origin_col)
+        || (view_state.active_cell().0 >= m.origin_row && view_state.active_cell().0 <= m.end_row
+            && view_state.active_cell().1 >= m.origin_col && view_state.active_cell().1 <= m.end_col);
     let is_selected = is_merge_in_selection(view_state, m.origin_row, m.origin_col, m.end_row, m.end_col);
 
     if !is_editing_this {
@@ -2966,7 +2960,7 @@ fn render_merge_div(
 
             // If editing, commit the current edit before navigating to this merge
             if this.mode.is_editing() {
-                let active = this.active_view_state().selected;
+                let active = this.active_view_state().active_cell();
                 if (target_row, target_col) != active {
                     this.commit_pending_edit(cx);
                     if this.mode.is_editing() { return; }
@@ -2988,10 +2982,10 @@ fn render_merge_div(
             // Expand selection to cover full merge region
             if let Some(merge_br) = merge_end {
                 if merge_br != (target_row, target_col) {
-                    let (anchor_row, anchor_col) = this.active_view_state().selected;
+                    let (anchor_row, anchor_col) = this.active_view_state().active_cell();
                     let far_row = if anchor_row <= target_row { merge_br.0 } else { target_row };
                     let far_col = if anchor_col <= target_col { merge_br.1 } else { target_col };
-                    this.active_view_state_mut().selection_end = Some((far_row, far_col));
+                    this.active_view_state_mut().set_selection_end(Some((far_row, far_col)));
                     cx.notify();
                 }
             }
@@ -3001,7 +2995,7 @@ fn render_merge_div(
             this.activate_pane(pane_side, cx);
             this.end_drag_selection(cx);
             this.select_cell(origin_row, origin_col, false, cx);
-            this.active_view_state_mut().selection_end = Some((end_row, end_col));
+            this.active_view_state_mut().set_selection_end(Some((end_row, end_col)));
             this.show_context_menu(crate::app::ContextMenuKind::Cell, event.position, cx);
             cx.stop_propagation();
         }))
@@ -3095,15 +3089,14 @@ fn is_merge_in_selection(
     merge_end_row: usize,
     merge_end_col: usize,
 ) -> bool {
-    let (ar, ac) = view_state.selected;
+    let (ar, ac) = view_state.active_cell();
     // Active cell is inside merge
     if ar >= merge_start_row && ar <= merge_end_row && ac >= merge_start_col && ac <= merge_end_col {
         return true;
     }
     // Selection range overlaps merge
-    if let Some(sel_end) = view_state.selection_end {
-        let (min_r, max_r) = (ar.min(sel_end.0), ar.max(sel_end.0));
-        let (min_c, max_c) = (ac.min(sel_end.1), ac.max(sel_end.1));
+    if view_state.is_primary_multi_cell() {
+        let ((min_r, min_c), (max_r, max_c)) = view_state.primary_range();
         merge_end_row >= min_r && merge_start_row <= max_r
             && merge_end_col >= min_c && merge_start_col <= max_c
     } else {
@@ -3284,7 +3277,7 @@ fn render_region_text_spill(
             // stack into faux-bold ("selected rows look bolded" field report).
             // Selection does NOT suppress spill — Excel parity: the overlay
             // paints above per-cell selection tints.
-            if app.mode.is_editing() && view_state.selected == (view_row, col) {
+            if app.mode.is_editing() && view_state.active_cell() == (view_row, col) {
                 continue;
             }
 
@@ -3782,10 +3775,10 @@ mod frozen_overlay_tests {
         assert_eq!((regions[3].row, regions[3].col), (4, 2));
         view.ensure_visible(30, 12);
         assert_eq!((view.scroll_row, view.scroll_col), (4, 2));
-        view.selected = (60, 20);
+        view.set_single_cell((60, 20));
         view.ensure_visible(30, 12);
         assert_eq!((view.scroll_row, view.scroll_col), (35, 11));
-        view.selected = (0, 0);
+        view.set_single_cell((0, 0));
         view.ensure_visible(30, 12);
         assert_eq!((view.scroll_row, view.scroll_col), (35, 11),
             "selecting an already visible frozen cell must not move the body");

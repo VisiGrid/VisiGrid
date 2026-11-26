@@ -126,7 +126,7 @@ pub fn render_format_bar(app: &mut Spreadsheet, window: &Window, cx: &mut Contex
 
     // Sort/filter state for toolbar buttons
     let filter_active = app.filter_state.is_enabled();
-    let selected_col = app.view_state.selected.1;
+    let selected_col = app.view_state.active_cell().1;
     let sort_state = app.display_sort_state(cx);
     let sort_asc_active = sort_state.map_or(false, |(col, asc)| asc && col == selected_col);
     let sort_desc_active = sort_state.map_or(false, |(col, asc)| !asc && col == selected_col);

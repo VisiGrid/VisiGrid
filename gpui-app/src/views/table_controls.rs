@@ -76,7 +76,7 @@ pub(crate) fn render_table_controls(
         )
         .child(div().flex_1())
         .children({
-            let (row, col) = app.view_state.selected;
+            let (row, col) = app.view_state.active_cell();
             let row = app.row_view.view_to_data(row);
             let column = &table.columns[col - table.range.start_col];
             let mut controls: Vec<AnyElement> = Vec::new();
@@ -162,7 +162,7 @@ pub(crate) fn render_table_controls(
         .child(button("table-totals", if table.totals_row().is_some() { "✓ Totals row" } else { "Totals row" },
             app, move |s, cx| s.toggle_table_totals(id, cx), cx))
         .when(table.totals_row().is_some(), |d| {
-            let col = app.view_state.selected.1;
+            let col = app.view_state.active_cell().1;
             d.child(button("table-edit-total", "Edit total…", app,
                 move |s, cx| s.open_table_dialog(TableDialogKind::Total(id, col), cx), cx))
         })

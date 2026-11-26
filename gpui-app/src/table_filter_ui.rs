@@ -141,15 +141,15 @@ impl Spreadsheet {
                     .table_view_spec()
                     .is_some_and(|spec| spec.sort.is_some() || !spec.filters.is_empty())
             {
-                let row = self.row_view.view_to_data(self.view_state.selected.0);
+                let row = self.row_view.view_to_data(self.view_state.active_cell().0);
                 if let Some(pane) = &mut self.split_pane {
-                    let row = self.row_view.view_to_data(pane.view_state.selected.0);
-                    pane.view_state.select_cell(row, pane.view_state.selected.1);
+                    let row = self.row_view.view_to_data(pane.view_state.active_cell().0);
+                    pane.view_state.select_cell(row, pane.view_state.active_cell().1);
                     pane.view_state.additional_selections.clear();
                 }
                 self.row_view = RowView::new(crate::app::NUM_ROWS);
                 self.filter_state = FilterState::default();
-                self.view_state.select_cell(row, self.view_state.selected.1);
+                self.view_state.select_cell(row, self.view_state.active_cell().1);
                 self.view_state.additional_selections.clear();
                 self.table_view_sync_key = None;
             }
@@ -162,15 +162,15 @@ impl Spreadsheet {
         }
         let same_sheet = self.table_view_sync_key.is_some_and(|k| k.0 == key.0);
         let record = Some(if same_sheet {
-            self.row_view.view_to_data(self.view_state.selected.0)
+            self.row_view.view_to_data(self.view_state.active_cell().0)
         } else {
-            self.view_state.selected.0
+            self.view_state.active_cell().0
         });
         let split_record = self.split_pane.as_ref().map(|p| {
             if same_sheet {
-                self.row_view.view_to_data(p.view_state.selected.0)
+                self.row_view.view_to_data(p.view_state.active_cell().0)
             } else {
-                p.view_state.selected.0
+                p.view_state.active_cell().0
             }
         });
         let has_spec = sheet.table_view_spec().is_some();
@@ -189,7 +189,7 @@ impl Spreadsheet {
                     if let Some(record) = record {
                         if let Ok(focus) = view.focus_record(record) {
                             self.view_state
-                                .select_cell(focus.view_row, self.view_state.selected.1);
+                                .select_cell(focus.view_row, self.view_state.active_cell().1);
                             if focus.record_hidden {
                                 self.status_message = Some("The selected record is hidden; moved to the nearest visible row.".into());
                             }
@@ -198,7 +198,7 @@ impl Spreadsheet {
                     if let (Some(pane), Some(record)) = (&mut self.split_pane, split_record) {
                         if let Ok(focus) = view.focus_record(record) {
                             pane.view_state
-                                .select_cell(focus.view_row, pane.view_state.selected.1);
+                                .select_cell(focus.view_row, pane.view_state.active_cell().1);
                         }
                     }
                     self.row_view = view.rows().clone();
@@ -209,11 +209,11 @@ impl Spreadsheet {
                     self.filter_state = FilterState::default();
                     if let Some(record) = record {
                         self.view_state
-                            .select_cell(record, self.view_state.selected.1);
+                            .select_cell(record, self.view_state.active_cell().1);
                     }
                     if let (Some(pane), Some(record)) = (&mut self.split_pane, split_record) {
                         pane.view_state
-                            .select_cell(record, pane.view_state.selected.1);
+                            .select_cell(record, pane.view_state.active_cell().1);
                     }
                     if let Err(error) = other {
                         self.status_message = Some(format!(

@@ -20,7 +20,7 @@ impl Spreadsheet {
             cx.notify(); return;
         }
         let range = match super::plan::selection_range(self.wb(cx), &self.row_view,
-            self.view_state.selected, self.view_state.selection_end.unwrap_or(self.view_state.selected)) {
+            self.view_state.active_cell(), self.view_state.selection_end().unwrap_or(self.view_state.active_cell())) {
             Ok(range) => range,
             Err(error) => { self.status_message = Some(error); cx.notify(); return; }
         };

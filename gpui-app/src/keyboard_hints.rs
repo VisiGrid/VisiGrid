@@ -92,9 +92,7 @@ impl Spreadsheet {
                     }
                     HintResolution::Jump(row, col) => {
                         self.hint_state.last_exit_reason = Some(HintExitReason::LabelJump);
-                        self.view_state.selected = (row, col);
-                        self.view_state.selection_end = None;
-                        self.view_state.additional_selections.clear();
+                        self.view_state.select_cell(row, col);
                         self.ensure_cell_visible(row, col);
                         self.exit_hint_mode(cx);
                     }
@@ -119,9 +117,7 @@ impl Spreadsheet {
         match cmd {
             GCommand::GotoTop => {
                 // gg - Go to A1
-                self.view_state.selected = (0, 0);
-                self.view_state.selection_end = None;
-                self.view_state.additional_selections.clear();
+                self.view_state.select_cell(0, 0);
                 self.view_state.scroll_row = self.view_state.frozen_rows;
                 self.view_state.scroll_col = self.view_state.frozen_cols;
                 self.status_message = Some("Jumped to A1".into());
@@ -249,18 +245,17 @@ impl Spreadsheet {
             }
             "0" => {
                 // Move to first column
-                self.view_state.selected = (self.view_state.selected.0, 0);
-                self.view_state.selection_end = None;
-                self.ensure_cell_visible(self.view_state.selected.0, 0);
+                let row = self.view_state.active_cell().0;
+                self.view_state.set_single_cell((row, 0));
+                self.ensure_cell_visible(row, 0);
                 cx.notify();
                 true
             }
             "$" => {
                 // Move to last column with data in current row (or last visible)
-                let row = self.view_state.selected.0;
+                let row = self.view_state.active_cell().0;
                 let last_col = self.find_last_data_col_in_row(row, cx);
-                self.view_state.selected = (row, last_col);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((row, last_col));
                 self.ensure_cell_visible(row, last_col);
                 cx.notify();
                 true
@@ -279,10 +274,9 @@ impl Spreadsheet {
                 // Last row holding data in this column, mirroring how $ finds
                 // the last filled cell rather than the sheet edge — jumping to
                 // row 65,536 is never what anyone means.
-                let col = self.view_state.selected.1;
+                let col = self.view_state.active_cell().1;
                 let row = self.find_last_data_row_in_col(col, cx);
-                self.view_state.selected = (row, col);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((row, col));
                 self.ensure_cell_visible(row, col);
                 cx.notify();
                 true
@@ -290,10 +284,9 @@ impl Spreadsheet {
             "^" => {
                 // Vim's ^ is "first non-blank"; a leading run of empty cells is
                 // this grid's version of leading whitespace.
-                let row = self.view_state.selected.0;
+                let row = self.view_state.active_cell().0;
                 let col = self.find_first_data_col_in_row(row, cx);
-                self.view_state.selected = (row, col);
-                self.view_state.selection_end = None;
+                self.view_state.set_single_cell((row, col));
                 self.ensure_cell_visible(row, col);
                 cx.notify();
                 true

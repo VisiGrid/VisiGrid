@@ -1421,7 +1421,7 @@ mod sheet_menu_click_through_tests {
         view.read_with(vcx, |app, _| {
             assert_eq!(app.renaming_sheet, Some(0));
             assert_eq!(app.view_state.active_cell(), (0, 0), "row header behind the menu took the click");
-            assert_eq!(app.view_state.selection_end, None);
+            assert_eq!(app.view_state.selection_end(), None);
         });
     }
 }

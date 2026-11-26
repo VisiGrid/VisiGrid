@@ -134,8 +134,7 @@ pub fn render_import_report_dialog(
                                                         return;
                                                     };
                                                     this.clear_selection_state();
-                                                    this.view_state.additional_selections.clear();
-                                                    this.view_state.selected = (view_row, col);
+                                                    this.view_state.select_cell(view_row, col);
                                                     this.ensure_cell_visible(view_row, col);
                                                     this.hide_import_report(cx);
                                                     window.focus(&this.focus_handle, cx);

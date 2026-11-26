@@ -317,8 +317,8 @@ impl Spreadsheet {
         if writes.is_empty() {
             return true;
         }
-        let selected = self.view_state.selected;
-        let end = self.view_state.selection_end;
+        let selected = self.view_state.primary_anchor();
+        let end = self.view_state.selection_end();
         let additional = self.view_state.additional_selections.clone();
         if !self.apply_table_cell_writes(writes, description, cx) {
             return false;
@@ -327,12 +327,12 @@ impl Spreadsheet {
         // trim to visible records; an empty area keeps the safe fallback focus.
         let (start, finish) = selection.unwrap_or((selected, end.unwrap_or(selected)));
         if let Some((start, finish)) = self.visible_fill_selection(start, finish) {
-            self.view_state.selected = start;
-            self.view_state.selection_end = if selection.is_some() || end.is_some() {
+            let range_end = if selection.is_some() || end.is_some() {
                 Some(finish)
             } else {
                 None
             };
+            self.view_state.set_selection(start, range_end);
             self.view_state.additional_selections = additional
                 .into_iter()
                 .filter_map(|(a, b)| {
@@ -408,7 +408,7 @@ impl Spreadsheet {
                     col,
                 )
             } else {
-                self.view_state.selected
+                self.view_state.active_cell()
             };
             plan_broadcast(
                 self.sheet(cx),

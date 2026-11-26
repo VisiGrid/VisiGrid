@@ -98,8 +98,7 @@ impl Spreadsheet {
         // Save pre-palette state for restore on Esc (only if not already in palette)
         if self.mode != Mode::Command {
             self.ui.palette_edit_mode = self.mode.is_editing().then_some(self.mode);
-            self.palette_pre_selection = self.view_state.selected;
-            self.palette_pre_selection_end = self.view_state.selection_end;
+            self.palette_pre_selection = self.view_state.primary_selection_snapshot();
             self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
             self.palette_previewing = false;
         }
@@ -198,8 +197,7 @@ impl Spreadsheet {
         references.sort_by_key(|r| (r.row, r.col));
 
         // Save pre-palette state for restore on Esc
-        self.palette_pre_selection = self.view_state.selected;
-        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_selection = self.view_state.primary_selection_snapshot();
         self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
@@ -260,8 +258,7 @@ impl Spreadsheet {
         precedents.sort_by_key(|p| (p.row, p.col));
 
         // Save pre-palette state
-        self.palette_pre_selection = self.view_state.selected;
-        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_selection = self.view_state.primary_selection_snapshot();
         self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
@@ -358,8 +355,7 @@ impl Spreadsheet {
         references.sort_by_key(|r| (r.row, r.col));
 
         // Save pre-palette state
-        self.palette_pre_selection = self.view_state.selected;
-        self.palette_pre_selection_end = self.view_state.selection_end;
+        self.palette_pre_selection = self.view_state.primary_selection_snapshot();
         self.palette_pre_scroll = (self.view_state.scroll_row, self.view_state.scroll_col);
         self.palette_previewing = false;
 
@@ -380,8 +376,7 @@ impl Spreadsheet {
     pub fn hide_palette(&mut self, cx: &mut Context<Self>) {
         // Restore pre-palette state (Esc behavior)
         if self.palette_previewing {
-            self.view_state.selected = self.palette_pre_selection;
-            self.view_state.selection_end = self.palette_pre_selection_end;
+            self.view_state.restore_primary_selection(self.palette_pre_selection);
             self.view_state.scroll_row = self.palette_pre_scroll.0;
             self.view_state.scroll_col = self.palette_pre_scroll.1;
         }
@@ -403,8 +398,7 @@ impl Spreadsheet {
             match &item.action {
                 SearchAction::JumpToCell { row, col } => {
                     self.palette_previewing = true;
-                    self.view_state.selected = (*row, *col);
-                    self.view_state.selection_end = None;
+                    self.view_state.set_single_cell((*row, *col));
                     self.ensure_visible(cx);
                     cx.notify();
                 }
@@ -840,8 +834,7 @@ impl Spreadsheet {
             // Layout actions change personal chrome, not the suspended editor.
             if matches!(item.action, SearchAction::RunCommand(CommandId::UseCompactToolbar
                 | CommandId::UseRibbonToolbar | CommandId::ToggleRibbonCollapsed | CommandId::ToggleToolbar)) {
-                self.view_state.selected = self.palette_pre_selection;
-                self.view_state.selection_end = self.palette_pre_selection_end;
+                self.view_state.restore_primary_selection(self.palette_pre_selection);
                 self.view_state.scroll_row = self.palette_pre_scroll.0;
                 self.view_state.scroll_col = self.palette_pre_scroll.1;
                 self.mode = self.ui.palette_edit_mode.take().unwrap_or(Mode::Navigation);
@@ -1019,11 +1012,11 @@ impl Spreadsheet {
         // Pre-populate hex input with current color
         let current = match target {
             crate::color_palette::ColorTarget::Fill => {
-                let (row, col) = self.view_state.selected;
+                let (row, col) = self.view_state.active_cell();
                 self.sheet(cx).get_background_color(row, col)
             }
             crate::color_palette::ColorTarget::Text => {
-                let (row, col) = self.view_state.selected;
+                let (row, col) = self.view_state.active_cell();
                 self.sheet(cx).get_format(row, col).font_color
             }
             crate::color_palette::ColorTarget::Border => self.current_border_color,

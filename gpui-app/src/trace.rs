@@ -159,13 +159,13 @@ impl Spreadsheet {
 
         // Get current selection from active pane (single cell only for now)
         let view_state = self.active_view_state();
-        if view_state.selection_end.is_some() {
+        if view_state.selection_end().is_some() {
             // Range selection - disable trace
             self.trace_cache = None;
             return;
         }
 
-        let (row, col) = view_state.selected;
+        let (row, col) = view_state.active_cell();
         let sheet_id = self.sheet(cx).id;
         let source = CellId::new(sheet_id, row, col);
 
@@ -219,13 +219,13 @@ impl Spreadsheet {
 
         // Check if selection matches cached source
         let view_state = self.active_view_state();
-        if view_state.selection_end.is_some() {
+        if view_state.selection_end().is_some() {
             // Range selection - clear trace
             self.trace_cache = None;
             return;
         }
 
-        let (row, col) = view_state.selected;
+        let (row, col) = view_state.active_cell();
         let sheet_id = self.sheet(cx).id;
 
         // Check if cache is still valid
@@ -430,10 +430,7 @@ impl Spreadsheet {
         }
 
         // Navigate to cell (without extending selection)
-        let view_state = self.active_view_state_mut();
-        view_state.selected = (target.row, target.col);
-        view_state.selection_end = None;
-        view_state.additional_selections.clear();
+        self.active_view_state_mut().select_cell(target.row, target.col);
 
         // Ensure cell is visible
         self.sync_limited_grid(cx);
@@ -482,10 +479,7 @@ impl Spreadsheet {
         }
 
         // Navigate to source cell
-        let view_state = self.active_view_state_mut();
-        view_state.selected = (source.row, source.col);
-        view_state.selection_end = None;
-        view_state.additional_selections.clear();
+        self.active_view_state_mut().select_cell(source.row, source.col);
 
         // Ensure cell is visible
         self.sync_limited_grid(cx);

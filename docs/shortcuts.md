@@ -9,10 +9,10 @@ Complete reference for keyboard shortcuts.
 | Shortcut | Action |
 |----------|--------|
 | Arrow keys | Move selection |
-| Tab | Move right |
-| Shift+Tab | Move left |
-| Enter | Confirm edit, move down |
-| Shift+Enter | Confirm edit, move up |
+| Tab | Move right (or cycle within selection) |
+| Shift+Tab | Move left (or cycle backward within selection) |
+| Enter | Confirm edit, move down (or cycle within selection) |
+| Shift+Enter | Confirm edit, move up (or cycle backward within selection) |
 | Ctrl+Home | Go to A1 |
 | Ctrl+End | Go to last cell |
 | Ctrl+Arrow | Jump to edge of data |

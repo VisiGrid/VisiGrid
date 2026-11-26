@@ -18,7 +18,7 @@ pub fn render_formula_bar(app: &Spreadsheet, window: &Window, cx: &mut Context<S
     let editing = app.mode.is_editing();
 
     // Map view row to data row for correct value lookup after sort/filter
-    let (view_row, view_col) = app.view_state.selected;
+    let (view_row, view_col) = app.view_state.active_cell();
     let data_row = app.view_to_data(view_row, cx);
 
     // Get the raw value (without cursor)

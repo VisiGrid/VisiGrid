@@ -88,16 +88,7 @@ impl Spreadsheet {
                         }
                     }
                 } else { target_row };
-                self.view_state.selected = (target_row, target_col);
-                if let Some(end) = merge_end {
-                    if end != (target_row, target_col) {
-                        self.view_state.selection_end = Some(end);
-                    } else {
-                        self.view_state.selection_end = None;
-                    }
-                } else {
-                    self.view_state.selection_end = None;
-                }
+                self.view_state.set_selection((target_row, target_col), merge_end);
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
                 self.status_message = Some(format!("Jumped to {}", self.cell_ref()));
@@ -175,16 +166,7 @@ impl Spreadsheet {
                         }
                     }
                 } else { target_row };
-                self.view_state.selected = (target_row, target_col);
-                if let Some(end) = merge_end {
-                    if end != (target_row, target_col) {
-                        self.view_state.selection_end = Some(end);
-                    } else {
-                        self.view_state.selection_end = None;
-                    }
-                } else {
-                    self.view_state.selection_end = None;
-                }
+                self.view_state.set_selection((target_row, target_col), merge_end);
                 self.view_state.additional_selections.clear();
                 self.ensure_visible(cx);
             }
@@ -648,7 +630,7 @@ impl Spreadsheet {
             self.inspector_pinned = None;
         } else {
             // Pin: lock to current selection
-            self.inspector_pinned = Some(self.view_state.selected);
+            self.inspector_pinned = Some(self.view_state.active_cell());
         }
         cx.notify();
     }
@@ -1234,12 +1216,11 @@ impl Spreadsheet {
         // Determine range based on context mode
         let (start_row, start_col, end_row, end_col) = match self.ask_ai.context_mode {
             AskAIContextMode::CurrentSelection => {
-                let (sr, sc) = self.view_state.selected;
-                let (er, ec) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-                (sr.min(er), sc.min(ec), sr.max(er), sc.max(ec))
+                let ((sr, sc), (er, ec)) = self.selection_range();
+                (sr, sc, er, ec)
             }
             AskAIContextMode::CurrentRegion => {
-                let (row, col) = self.view_state.selected;
+                let (row, col) = self.view_state.active_cell();
                 find_current_region(sheet, row, col)
             }
             AskAIContextMode::EntireUsedRange => {
@@ -1319,9 +1300,8 @@ impl Spreadsheet {
         // Get range from stored selection or current view state
         let (start_row, start_col, end_row, end_col) = self.ask_ai.selected_range
             .unwrap_or_else(|| {
-                let (sr, sc) = self.view_state.selected;
-                let (er, ec) = self.view_state.selection_end.unwrap_or(self.view_state.selected);
-                (sr.min(er), sc.min(ec), sr.max(er), sc.max(ec))
+                let ((sr, sc), (er, ec)) = self.selection_range();
+                (sr, sc, er, ec)
             });
 
         let sheet_name = self.workbook.read(cx)
@@ -1527,7 +1507,7 @@ impl Spreadsheet {
         };
 
         // Get active cell
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
 
         // Get old value for history
         let old_value = self.workbook.read(cx)
@@ -1711,8 +1691,7 @@ impl Spreadsheet {
             }
         }
         // Select the cell
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
+        self.view_state.set_single_cell((row, col));
         // Track selected entry for highlighting
         self.diff_selected_entry = Some((sheet_index, row, col));
         // Scroll to make visible
@@ -1730,8 +1709,7 @@ impl Spreadsheet {
                 }
             }
             // Select the cell
-            self.view_state.selected = (row, col);
-            self.view_state.selection_end = None;
+            self.view_state.set_single_cell((row, col));
             // Scroll to make visible
             self.ensure_cell_visible(row, col);
         }

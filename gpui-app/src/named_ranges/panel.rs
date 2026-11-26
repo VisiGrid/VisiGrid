@@ -83,8 +83,7 @@ impl Spreadsheet {
             self.status_message = Some(format!("'{name}' = {ref_str} is hidden by the current view."));
             cx.notify(); return;
         };
-        self.view_state.selected = start;
-        self.view_state.selection_end = (start != end).then_some(end);
+        self.view_state.set_range(start, end);
         self.view_state.additional_selections = ranges.into_iter().skip(1).map(|(a,b)| (a, (a != b).then_some(b))).collect();
         self.sync_limited_grid(cx);
         self.ensure_cell_visible(start.0, start.1);

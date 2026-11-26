@@ -638,8 +638,7 @@ impl Spreadsheet {
         let Some(doc) = self.current_csv() else { return };
         let cells = doc.formula_cells.clone();
         let Some(&(row, col)) = cells.first() else { return };
-        self.view_state.selected = (row, col);
-        self.view_state.selection_end = None;
+        self.view_state.set_single_cell((row, col));
         self.ensure_cell_visible(row, col);
         let mut refs: Vec<String> = cells.iter().take(8).map(|&(r, c)| self.cell_ref_at(r, c)).collect();
         if cells.len() > 8 {

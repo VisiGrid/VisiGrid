@@ -1,6 +1,6 @@
-# VisiGrid Selection Semantics (v1)
+# VisiGrid Selection Semantics (v2)
 
-> **This document defines v1 behavior. Changes require a version bump and are treated as breaking API changes. Do not modify without explicit approval.**
+> **This document defines v2 behavior. Changes require a version bump and are treated as breaking API changes. Do not modify without explicit approval.**
 >
 > **If observed behavior differs from this document, the behavior is a bug.**
 
@@ -54,14 +54,28 @@ The behavioral contract users rely on. Not implementation, not keybindings—the
 3. Clear additional selections
 
 ### Tab / Shift+Tab
-1. Move active cell right/left by one column
-2. If editing: commit edit, then move
-3. Collapse selection to single cell
+1. If editing: commit edit to the active cell only
+2. If the primary selection covers more than one cell and there are no additional (Ctrl+Click) selections:
+   - Keep the primary selection unchanged and move only the active cell
+   - **Tab**: move right one column inside the range; from the last column, move to the first column of the next row; from the last cell, wrap to the top-left
+   - **Shift+Tab**: reverse order (left one column; from the first column, to the last column of the previous row; from the first cell, wrap to the bottom-right)
+   - Skip hidden and filtered rows and hidden columns; a merged area counts as one stop at its origin
+   - Scroll the view as needed to keep the active cell visible
+3. Otherwise (single-cell selection, or additional selections present):
+   - Move active cell right/left by one column (recording the tab-chain origin column on single-cell Tab)
+   - Collapse selection to single cell
 
 ### Enter / Shift+Enter
-1. If editing: commit edit
-2. Move active cell down/up by one row
-3. Collapse selection to single cell
+1. If editing: commit edit to the active cell only
+2. If the primary selection covers more than one cell and there are no additional (Ctrl+Click) selections:
+   - Keep the primary selection unchanged and move only the active cell
+   - **Enter**: move down one row inside the range; from the bottom row, move to the top of the next column; from the last cell, wrap to the top-left
+   - **Shift+Enter**: reverse order (up one row; from the top row, to the bottom of the previous column; from the first cell, wrap to the bottom-right)
+   - Skip hidden and filtered rows and hidden columns; a merged area counts as one stop at its origin
+   - Scroll the view as needed to keep the active cell visible
+3. Otherwise (single-cell selection, or additional selections present):
+   - Move active cell down/up by one row (honoring tab-chain return on single-cell Enter and Limited Grid's row growth on the last row)
+   - Collapse selection to single cell
 
 ### Home / End
 1. Home: move to column A in current row
@@ -93,13 +107,13 @@ Go To accepts a single cell address on the current sheet. Its preview validates 
 ## Selection Expansion Rules
 
 ### Shift+Arrow
-1. Active cell (anchor) stays fixed
+1. Active cell (anchor) stays fixed; if the active cell was cycled inside a range via Enter/Tab, extension starts from the active cell
 2. Extend selection edge in arrow direction
 3. Selection is always rectangular
 4. Additional selections are preserved
 
 ### Shift+Click
-1. Active cell (anchor) stays fixed
+1. Active cell (anchor) stays fixed; if the active cell was cycled inside a range via Enter/Tab, extension starts from the active cell
 2. Extend selection to clicked cell
 3. Creates rectangle from anchor to click target
 4. Clear additional selections
@@ -163,20 +177,14 @@ preview the value across the selection, but commit scope is explicit:
 
 | Action | Result |
 |--------|--------|
-| Enter / Shift+Enter | Commit **active cell only**, move down/up (collapses selection) |
-| Tab / Shift+Tab | Commit **active cell only**, move right/left (collapses selection) |
+| Enter / Shift+Enter | Commit **active cell only**, cycle down/up inside the preserved primary range (collapses if additional selections are present) |
+| Tab / Shift+Tab | Commit **active cell only**, cycle right/left inside the preserved primary range (collapses if additional selections are present) |
 | Ctrl+Enter | Apply value to **every selected cell** (relative refs shift per cell; one undo step) |
 | Escape | Cancel, nothing committed |
 
 Plain Enter must never write to more than one cell. Applying to the whole
 selection is always the explicit Ctrl+Enter gesture — a stray keystroke
 after Ctrl+A must not be able to rewrite the sheet.
-
-> **Deferred (needs active-cell/anchor decoupling):** Excel's Enter-cycling
-> — Enter moving the active cell *within* a preserved selection — requires
-> an active cell distinct from the selection anchor, which the current
-> model doesn't have. When that lands, Enter in a multi-selection should
-> cycle instead of collapsing.
 
 ### Formula Mode Special Behavior
 
@@ -265,7 +273,8 @@ We do **not** support:
 
 ## Version History
 
-- **v1** (2026-01): Initial specification based on Excel compatibility
+- **v2** (2026-11): Enter, Shift+Enter, Tab, and Shift+Tab cycle the active cell inside a multi-cell primary selection (with no additional selections) while preserving the range, skipping hidden/filtered rows, hidden columns, and treating merged areas as a single stop at their origin; Shift+Arrow / Shift+Click after cycling extend from the active cell (VisiGrid/VisiGrid#173)
 - **v1.1** (2026-07): Smart Ctrl+A (current region first, sheet second);
   multi-selection editing commits active cell only on Enter — selection-wide
   apply is exclusively Ctrl+Enter (VisiGrid/VisiGrid#5 data-loss report)
+- **v1** (2026-01): Initial specification based on Excel compatibility

@@ -641,8 +641,8 @@ impl Spreadsheet {
                             col: self.view_state.scroll_col,
                         },
                         selection: SelectionState {
-                            anchor: self.view_state.selected,
-                            end: self.view_state.selection_end,
+                            anchor: self.view_state.primary_anchor(),
+                            end: self.view_state.selection_end(),
                             additional: self.view_state.additional_selections.clone(),
                         },
                     }
@@ -731,14 +731,14 @@ impl Spreadsheet {
             self.view_state.scroll_row = sheet_session.scroll.row.min(max_row.saturating_sub(1));
             self.view_state.scroll_col = sheet_session.scroll.col.min(max_col.saturating_sub(1));
 
-            self.view_state.selected = (
+            let anchor = (
                 sheet_session.selection.anchor.0.min(max_row.saturating_sub(1)),
                 sheet_session.selection.anchor.1.min(max_col.saturating_sub(1)),
             );
-
-            self.view_state.selection_end = sheet_session.selection.end.map(|(r, c): (usize, usize)| {
+            let end = sheet_session.selection.end.map(|(r, c): (usize, usize)| {
                 (r.min(max_row.saturating_sub(1)), c.min(max_col.saturating_sub(1)))
             });
+            self.view_state.set_selection(anchor, end);
 
             // Restore additional selections (clamped)
             self.view_state.additional_selections = sheet_session.selection.additional

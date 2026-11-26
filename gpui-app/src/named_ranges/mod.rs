@@ -80,7 +80,7 @@ impl Spreadsheet {
         // Show if: not dismissed, no named ranges exist, has a range selection
         !user_settings(cx).is_tip_dismissed(TipId::NamedRanges)
             && self.wb(cx).list_named_ranges().is_empty()
-            && self.view_state.selection_end.is_some()
+            && self.view_state.selection_end().is_some()
     }
 
     /// Dismiss the name tooltip permanently

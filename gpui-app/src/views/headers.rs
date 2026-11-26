@@ -159,10 +159,10 @@ fn render_column_header(
     let header_active_text = app.token(TokenKey::HeaderActiveText);
     let accent = app.token(TokenKey::Accent);
     let selection_bg = app.token(TokenKey::SelectionBg);
-    let active_data_row = app.view_to_data(app.view_state.selected.0, cx);
+    let active_data_row = app.view_to_data(app.view_state.active_cell().0, cx);
     let review_focus_selected = app.review_mode.as_ref().is_some_and(|state| {
-        state.focused_cell() == Some((active_data_row, app.view_state.selected.1))
-            && app.view_state.selected.1 == col
+        state.focused_cell() == Some((active_data_row, app.view_state.active_cell().1))
+            && app.view_state.active_cell().1 == col
     });
     let proposal = review_proposal_color(app);
 
@@ -305,8 +305,8 @@ pub fn render_row_header(app: &Spreadsheet, row: usize, cx: &mut Context<Spreads
     let is_filtered = app.row_view.is_filtered();
     let data_row = if is_filtered || app.table_view_installed { app.view_to_data(row, cx) } else { row };
     let review_focus_selected = app.review_mode.as_ref().is_some_and(|state| {
-        state.focused_cell() == Some((data_row, app.view_state.selected.1))
-            && app.view_state.selected.0 == row
+        state.focused_cell() == Some((data_row, app.view_state.active_cell().1))
+            && app.view_state.active_cell().0 == row
     });
     let proposal = review_proposal_color(app);
 

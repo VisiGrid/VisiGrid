@@ -76,7 +76,7 @@ impl Spreadsheet {
         let (_, selected_count) = crate::grid_ops::insert_target(
             axis,
             ((r1, c1), (r2, c2)),
-            self.view_state.selected,
+            self.view_state.active_cell(),
         );
         self.count_dialog = Some(CountDialog {
             title,

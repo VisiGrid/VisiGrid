@@ -21,7 +21,7 @@ pub fn render_inspector_panel(app: &mut Spreadsheet, cx: &mut Context<Spreadshee
     let accent = app.token(TokenKey::Accent);
 
     // Get the cell to inspect (pinned or selected)
-    let (row, col) = app.inspector_pinned.unwrap_or(app.view_state.selected);
+    let (row, col) = app.inspector_pinned.unwrap_or(app.view_state.active_cell());
     let cell_ref = app.cell_ref_at(row, col);
     let is_pinned = app.inspector_pinned.is_some();
     let current_tab = app.inspector_tab;
@@ -3755,12 +3755,7 @@ fn render_history_tab(
                             }
                         }
                         // Select the full affected range
-                        this.view_state.selected = (start_row, start_col);
-                        if start_row != end_row || start_col != end_col {
-                            this.view_state.selection_end = Some((end_row, end_col));
-                        } else {
-                            this.view_state.selection_end = None;
-                        }
+                        this.view_state.set_range((start_row, start_col), (end_row, end_col));
                         // Scroll to make selection visible
                         this.ensure_cell_visible(start_row, start_col);
                         cx.notify();
@@ -4285,12 +4280,7 @@ fn render_history_entry(
                                                     return;
                                                 }
                                             }
-                                            this.view_state.selected = (sr, sc);
-                                            if sr != er || sc != ec {
-                                                this.view_state.selection_end = Some((er, ec));
-                                            } else {
-                                                this.view_state.selection_end = None;
-                                            }
+                                            this.view_state.set_range((sr, sc), (er, ec));
                                             this.ensure_cell_visible(sr, sc);
                                             cx.notify();
                                         }
@@ -5527,9 +5517,9 @@ mod broken_name_tests {
             assert_eq!(detail.value_preview, "#REF!");
             assert_eq!(detail.cell_count, 0);
             assert!(!detail.is_verified);
-            let selected = app.view_state.selected;
+            let selected = app.view_state.active_cell();
             app.jump_to_named_range("TaxPct", cx);
-            assert_eq!(app.view_state.selected, selected);
+            assert_eq!(app.view_state.active_cell(), selected);
             assert!(app.status_message.as_ref().unwrap().contains("#REF!"));
             app.trace_named_range("TaxPct", cx);
             assert!(app.inspector_trace_path.as_ref().unwrap().is_empty());

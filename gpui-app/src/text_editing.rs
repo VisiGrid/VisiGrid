@@ -124,7 +124,7 @@ impl Spreadsheet {
             (new_row, new_col)
         } else {
             // Start new reference from the selected cell (editing cell)
-            let (sel_row, sel_col) = self.view_state.selected;
+            let (sel_row, sel_col) = self.view_state.active_cell();
             let new_row = self.next_visible_row(sel_row, dr);
             let new_col = (sel_col as i32 + dc).max(0).min(self.grid_cols() as i32 - 1) as usize;
             (new_row, new_col)
@@ -257,7 +257,7 @@ impl Spreadsheet {
         let (start_row, start_col) = if let Some((row, col)) = self.formula_ref_cell {
             (row, col)
         } else {
-            self.view_state.selected
+            self.view_state.active_cell()
         };
 
         let (new_row, new_col) = self.find_data_boundary(start_row, start_col, dr, dc, cx);
@@ -657,7 +657,7 @@ impl Spreadsheet {
         }
         self.edit_scroll_dirty = false;
 
-        let (_, col) = self.view_state.selected;
+        let (_, col) = self.view_state.active_cell();
         let col_width = self.metrics.col_width(self.col_width(col));
         self.ensure_caret_visible(window, col_width, cx);
     }
@@ -684,7 +684,7 @@ impl Spreadsheet {
         let shape_text: SharedString = text.clone().into();
         let shape_len = shape_text.len();
 
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let format = self.sheet(cx).get_format(self.view_to_data(row, cx), col);
         let shaped = window.text_system().shape_line(
             shape_text,

@@ -315,7 +315,7 @@ pub(crate) fn render_f1_help_overlay(app: &Spreadsheet, cx: &App) -> impl IntoEl
         content
     } else {
         // Single cell inspector
-        let (row, col) = app.view_state.selected;
+        let (row, col) = app.view_state.active_cell();
         let cell_ref = app.cell_ref_at(row, col);
         let raw_value = app.sheet(cx).get_raw(row, col);
         let display_value = app.sheet(cx).get_display(row, col);

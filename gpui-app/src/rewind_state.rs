@@ -105,8 +105,7 @@ pub struct PreviewSheetView {
 pub struct PreviewFocus {
     pub additional_selections: Vec<((usize, usize), Option<(usize, usize)>)>,
     pub sheet_index: usize,
-    pub selected: (usize, usize),
-    pub selection_end: Option<(usize, usize)>,
+    pub primary_selection: crate::workbook_view::PrimarySelectionSnapshot,
     pub scroll_row: usize,
     pub scroll_col: usize,
 }

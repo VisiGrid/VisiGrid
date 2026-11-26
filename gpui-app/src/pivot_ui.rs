@@ -413,7 +413,7 @@ impl Spreadsheet {
         if (self.cloud_live_enabled() && self.block_if_previewing(cx)) || self.block_if_previewing_only(cx) {
             return;
         }
-        let (vr, col) = self.view_state.selected;
+        let (vr, col) = self.view_state.active_cell();
         let row = self.row_view.view_to_data(vr);
         if let Some(table) = self.sheet(cx).table_at(row, col) {
             let source = self.wb(cx).table_pivot_source(table.id).unwrap();
@@ -562,7 +562,7 @@ impl Spreadsheet {
 
     /// The pivot whose output contains the cursor, on the active sheet.
     pub(crate) fn pivot_under_cursor(&self, cx: &App) -> Option<PivotTable> {
-        let (vr, c) = self.view_state.selected;
+        let (vr, c) = self.view_state.active_cell();
         let r = self.row_view.view_to_data(vr);
         self.sheet(cx).pivot_at(r, c).cloned()
     }

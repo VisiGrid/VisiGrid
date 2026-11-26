@@ -111,7 +111,7 @@ pub(crate) fn bind(
             this.show_analyze(cx);
         }))
         .on_action(cx.listener(|this, _: &OpenValidationDropdown, _, cx| {
-            let (row, col) = this.view_state.selected;
+            let (row, col) = this.view_state.active_cell();
             if let Some(id) = this.table_header_button(this.row_view.view_to_data(row), col, cx) {
                 let rect = this.cell_rect(row, col);
                 let origin = this.grid_layout.grid_body_origin;

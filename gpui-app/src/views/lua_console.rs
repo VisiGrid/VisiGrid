@@ -946,8 +946,7 @@ pub(crate) fn execute_console_body(app: &mut Spreadsheet, input: String, cx: &mu
 
     // Compute selection bounds (normalize to start <= end)
     app.sync_table_view(cx);
-    let (anchor_row, anchor_col) = app.view_state.selected;
-    let (end_row, end_col) = app.view_state.selection_end.unwrap_or(app.view_state.selected);
+    let ((anchor_row, anchor_col), (end_row, end_col)) = app.selection_range();
     let selection = if app.wb(cx).has_table_criteria() {
         match crate::table_batch::canonical_script_selection(&app.row_view, (anchor_row,anchor_col), (end_row,end_col)) {
             Ok(selection) => selection,
@@ -1644,11 +1643,7 @@ pub fn start_debug_session(app: &mut Spreadsheet, cx: &mut Context<Spreadsheet>)
     let snapshot = SheetSnapshot::from_sheet(app.sheet(cx));
     let sheet_index = app.sheet_index(cx);
     app.sync_table_view(cx);
-    let (anchor_row, anchor_col) = app.view_state.selected;
-    let (end_row, end_col) = app
-        .view_state
-        .selection_end
-        .unwrap_or(app.view_state.selected);
+    let ((anchor_row, anchor_col), (end_row, end_col)) = app.view_state.primary_range();
     let selection = if app.wb(cx).has_table_criteria() {
         match crate::table_batch::canonical_script_selection(&app.row_view, (anchor_row,anchor_col), (end_row,end_col)) {
             Ok(selection) => selection,

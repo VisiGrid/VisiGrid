@@ -100,7 +100,7 @@ impl Spreadsheet {
         // Clear copy/cut border overlay when entering edit mode
         self.clipboard_visual_range = None;
 
-        let (mut row, mut col) = self.view_state.selected;
+        let (mut row, mut col) = self.view_state.active_cell();
         if self.table_edit_target.is_some() { row = self.row_view.view_to_data(row); }
 
         // If on a merge-hidden cell, redirect selection to the merge origin
@@ -110,8 +110,7 @@ impl Spreadsheet {
         if let Some((origin, end)) = merge_redirect {
             row = origin.0;
             col = origin.1;
-            self.view_state.selected = (row, col);
-            self.view_state.selection_end = Some(end);
+            self.view_state.set_range((row, col), end);
         }
 
         // Block editing spill receivers - show message and redirect to parent
@@ -143,7 +142,7 @@ impl Spreadsheet {
 
         // Record home sheet and cell for cross-sheet formula references
         self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
-        self.formula_edit_cell = Some(self.view_state.selected);
+        self.formula_edit_cell = Some(self.view_state.active_cell());
 
         // Set mode based on content: Formula if starts with '=' or '+', else Edit
         let is_formula = self.edit_value.starts_with('=') || self.edit_value.starts_with('+');
@@ -181,7 +180,7 @@ impl Spreadsheet {
         // Clear copy/cut border overlay when entering edit mode
         self.clipboard_visual_range = None;
 
-        let (mut row, mut col) = self.view_state.selected;
+        let (mut row, mut col) = self.view_state.active_cell();
         if self.table_edit_target.is_some() { row = self.row_view.view_to_data(row); }
 
         // If on a merge-hidden cell, redirect selection to the merge origin
@@ -191,8 +190,7 @@ impl Spreadsheet {
         if let Some((origin, end)) = merge_redirect {
             row = origin.0;
             col = origin.1;
-            self.view_state.selected = (row, col);
-            self.view_state.selection_end = Some(end);
+            self.view_state.set_range((row, col), end);
         }
 
         // Block editing spill receivers - show message and redirect to parent
@@ -215,7 +213,7 @@ impl Spreadsheet {
         self.clear_edit_marks();
         // Record home sheet and cell for cross-sheet formula references
         self.formula_home_sheet = Some(self.wb(cx).active_sheet_index());
-        self.formula_edit_cell = Some(self.view_state.selected);
+        self.formula_edit_cell = Some(self.view_state.active_cell());
         // Clear formula state - fresh edit session with empty buffer
         self.clear_formula_ref_colors();
         self.formula_highlighted_refs.clear();
@@ -266,7 +264,7 @@ impl Spreadsheet {
         // Restore home sheet for cross-sheet formula editing
         self.restore_formula_home_sheet(cx);
 
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let old_value = self.edit_original.clone();
         if self.edit_value == old_value {
             self.cancel_edit(cx);
@@ -802,38 +800,54 @@ impl Spreadsheet {
         self.confirm_edit_and_move(0, -1, cx);
     }
 
-    /// Tab commit-and-move-right: records the tab-chain origin column,
-    /// then commits the current edit and moves right.
-    ///
-    /// The origin column is used by `confirm_edit_enter` to return the
-    /// cursor to the starting column when Enter is pressed (Excel behavior).
+    /// Tab commit-and-move-right: in a multi-cell primary selection (with no
+    /// additional selections), cycles the active cell right/down inside the range
+    /// without collapsing it. On a single cell (or with additional selections),
+    /// records the tab-chain origin column, commits, and moves right.
     pub fn confirm_edit_and_tab_right(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(true, true, cx);
+            return;
+        }
         if self.tab_chain_origin_col.is_none() {
-            self.tab_chain_origin_col = Some(self.view_state.selected.1);
+            self.tab_chain_origin_col = Some(self.view_state.active_cell().1);
         }
         self.confirm_edit_and_move(0, 1, cx);
     }
 
-    /// Shift+Tab commit-and-move-left: records the tab-chain origin column,
-    /// then commits the current edit and moves left.
+    /// Shift+Tab commit-and-move-left: cycles backward inside a multi-cell
+    /// primary selection, or records tab-chain origin and moves left.
     pub fn confirm_edit_and_tab_left(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(true, false, cx);
+            return;
+        }
         if self.tab_chain_origin_col.is_none() {
-            self.tab_chain_origin_col = Some(self.view_state.selected.1);
+            self.tab_chain_origin_col = Some(self.view_state.active_cell().1);
         }
         self.confirm_edit_and_move(0, -1, cx);
     }
 
-    /// Enter key: confirm edit and move down, with tab-chain return.
-    ///
-    /// If the user tabbed across cells entering data, Enter returns the cursor
-    /// to the origin column on the next row instead of staying in the current
-    /// column. This matches Excel's Tab-chain return behavior.
+    /// Enter key: in a multi-cell primary selection (with no additional
+    /// selections), commits any active-cell edit and cycles the active cell
+    /// down/right inside the preserved range. On a single cell (or with
+    /// additional selections), confirms and moves down with tab-chain return.
     pub fn confirm_edit_enter(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(false, true, cx);
+            return;
+        }
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             // Commit the edit if currently editing
             if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
             // Move to next row at the origin column
-            let (row, _) = self.active_view_state().selected;
+            let (row, _) = self.active_view_state().active_cell();
             self.grow_grid_for_down(cx);
             let new_row = self.next_visible_row(row, 1);
             self.close_validation_dropdown(
@@ -846,21 +860,25 @@ impl Spreadsheet {
             } else {
                 (new_row, origin_col)
             };
-            let view_state = self.active_view_state_mut();
-            view_state.selected = (final_row, final_col);
-            view_state.selection_end = None;
-            view_state.additional_selections.clear();
+            self.active_view_state_mut().select_cell(final_row, final_col);
             self.ensure_visible(cx);
         } else {
             self.confirm_edit(cx);
         }
     }
 
-    /// Shift+Enter key: confirm edit and move up, with tab-chain return.
+    /// Shift+Enter key: cycles backward inside a multi-cell primary selection,
+    /// or confirms edit and moves up with tab-chain return.
     pub fn confirm_edit_up_enter(&mut self, cx: &mut Context<Self>) {
+        if self.can_cycle_in_selection() {
+            self.tab_chain_origin_col = None;
+            if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
+            self.cycle_in_selection(false, false, cx);
+            return;
+        }
         if let Some(origin_col) = self.tab_chain_origin_col.take() {
             if self.mode.is_editing() && !self.commit_current_edit(cx) { return; }
-            let (row, _) = self.active_view_state().selected;
+            let (row, _) = self.active_view_state().active_cell();
             let new_row = self.next_visible_row(row, -1);
             self.close_validation_dropdown(
                 crate::validation_dropdown::DropdownCloseReason::SelectionChanged,
@@ -872,10 +890,7 @@ impl Spreadsheet {
             } else {
                 (new_row, origin_col)
             };
-            let view_state = self.active_view_state_mut();
-            view_state.selected = (final_row, final_col);
-            view_state.selection_end = None;
-            view_state.additional_selections.clear();
+            self.active_view_state_mut().select_cell(final_row, final_col);
             self.ensure_visible(cx);
         } else {
             self.confirm_edit_up(cx);
@@ -920,14 +935,14 @@ impl Spreadsheet {
         }
 
         if !self.is_multi_selection() {
-            let (r,c) = self.view_state.selected;
+            let (r,c) = self.view_state.active_cell();
             let r = self.row_view.view_to_data(r);
             let range = visigrid_engine::table::TableRange { start_row:r, end_row:r, start_col:c, end_col:c };
             if (self.edit_value.starts_with('=') && self.sheet(cx).table_at(r,c).is_some()) || matches!(self.wb(cx).table_append_target(self.sheet(cx).id, range), Ok(Some(_))) {
                 self.commit_current_edit(cx); return;
             }
         }
-        let (header_view_row, header_col) = self.view_state.selected;
+        let (header_view_row, header_col) = self.view_state.active_cell();
         if !self.is_multi_selection() && self.sheet(cx).table_header_at(self.row_view.view_to_data(header_view_row), header_col).is_some() {
             self.commit_current_edit(cx);
             return;
@@ -953,7 +968,7 @@ impl Spreadsheet {
         }
 
         let is_formula = base_value.starts_with('=');
-        let primary_cell = self.view_state.selected;  // Base cell for formula reference shifting
+        let primary_cell = self.view_state.active_cell();  // Base cell for formula reference shifting
 
         // Collect all target cells from primary selection and additional_selections
         let mut target_cells: Vec<(usize, usize)> = Vec::new();
@@ -1311,7 +1326,7 @@ impl Spreadsheet {
             // Start editing with this character — clear copy/cut border overlay
             self.clipboard_visual_range = None;
 
-            let (row, col) = self.view_state.selected;
+            let (row, col) = self.view_state.active_cell();
 
             // Block editing spill receivers
             if let Some((parent_row, parent_col)) = self.sheet(cx).get_spill_parent(row, col) {
@@ -1381,7 +1396,9 @@ impl Spreadsheet {
                 self.activate_sheet(home_sheet, cx);
             }
             if let Some(edit_cell) = self.formula_edit_cell {
-                self.view_state.selected = edit_cell;
+                if self.view_state.active_cell() != edit_cell {
+                    self.view_state.set_single_cell(edit_cell);
+                }
             }
         }
     }
@@ -1403,7 +1420,7 @@ impl Spreadsheet {
         // Clear copy/cut border overlay on edit commit
         self.clipboard_visual_range = None;
 
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let old_value = self.edit_original.clone();
         if self.edit_value == old_value {
             self.cancel_edit(cx);
@@ -1499,7 +1516,9 @@ impl Spreadsheet {
         if self.sheet_index(cx) != sheet { return false; }
         self.sync_table_view(cx);
         if let Some(view_row) = self.row_view.data_to_view(row) {
-            self.view_state.selected = (view_row, col);
+            if self.view_state.active_cell() != (view_row, col) {
+                self.view_state.set_single_cell((view_row, col));
+            }
         }
         if self.edit_value == self.edit_original { self.cancel_edit(cx); return true; }
         let mut value = if self.edit_value.starts_with('+') { format!("={}", &self.edit_value[1..]) } else { self.edit_value.clone() };
@@ -1557,7 +1576,7 @@ impl Spreadsheet {
         if self.block_if_selection_in_pivot("fill", cx) { return; }
         if self.block_selection_table_headers("fill", cx) { return; }
 
-        let primary_cell = self.view_state.selected;
+        let primary_cell = self.view_state.active_cell();
         let base_value = self.sheet(cx).get_raw(primary_cell.0, primary_cell.1);
 
         let is_formula = base_value.starts_with('=');
@@ -1674,7 +1693,7 @@ impl Spreadsheet {
             return false;
         }
 
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let cell_value = self.sheet(cx).get_display(row, col);
 
         if let Some(target) = links::detect_link(&cell_value) {
@@ -1712,7 +1731,7 @@ impl Spreadsheet {
 
     /// Detect link in current cell (for status bar hint)
     pub fn detected_link(&self, cx: &App) -> Option<crate::links::LinkTarget> {
-        let (row, col) = self.view_state.selected;
+        let (row, col) = self.view_state.active_cell();
         let cell_value = self.sheet(cx).get_display(row, col);
         crate::links::detect_link(&cell_value)
     }

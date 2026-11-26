@@ -173,7 +173,7 @@ impl Spreadsheet {
         }
         self.table_view_sync_key = None;
         self.sync_table_view(cx);
-        self.view_state.selection_end = None;
+        self.view_state.set_selection_end(None);
         self.view_state.additional_selections.clear();
         self.clipboard_visual_range = None;
         self.record_action_with_provenance(cx, action, None);

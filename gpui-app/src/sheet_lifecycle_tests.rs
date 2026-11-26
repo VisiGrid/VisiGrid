@@ -130,17 +130,17 @@ fn sheet_lifecycle_view_remapping_keeps_surviving_panes_and_resets_deleted_ones(
     let (candidate, _) = wb.prepare_sheet_delete(ids[0]).unwrap();
     let mut surviving = crate::workbook_view::WorkbookViewState::default();
     surviving.active_sheet = other;
-    surviving.selected = (12, 4);
+    surviving.set_single_cell((12, 4));
     surviving.zoom_level = 1.5;
     crate::table_batch::remap_sheet_view(&mut surviving, &ids, &candidate);
     assert_eq!(surviving.active_sheet, 0);
-    assert_eq!(surviving.selected, (12, 4));
+    assert_eq!(surviving.active_cell(), (12, 4));
     let mut removed = crate::workbook_view::WorkbookViewState::default();
-    removed.selected = (8, 2);
+    removed.set_single_cell((8, 2));
     removed.zoom_level = 1.5;
     crate::table_batch::remap_sheet_view(&mut removed, &ids, &candidate);
     assert_eq!(removed.active_sheet, 0);
-    assert_eq!(removed.selected, (0, 0));
+    assert_eq!(removed.active_cell(), (0, 0));
     assert_eq!(removed.zoom_level, 1.5);
 }
 
