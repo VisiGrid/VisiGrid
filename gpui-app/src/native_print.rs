@@ -53,6 +53,7 @@ impl Spreadsheet {
 
     #[cfg(target_os = "linux")]
     pub fn print_pdf(&mut self, cx: &mut Context<Self>) {
+        let warn_unencrypted = self.has_source_xlsx_password();
         let Some(state) = self.pdf_export.as_mut() else {
             return;
         };
@@ -64,7 +65,6 @@ impl Spreadsheet {
         };
         let title = format!("{} — VisiGrid", snapshot.name);
         let settings = state.settings.clone();
-        let warn_unencrypted = self.opened_from_encrypted_xlsx;
         let window_handle = self.window_handle;
         state.busy = true;
         state.printing = true;

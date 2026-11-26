@@ -8,6 +8,21 @@ pub(crate) fn handle_key_down(
     window: &mut Window,
     cx: &mut Context<Spreadsheet>,
 ) {
+    if let Some(prompt) = &mut this.excel_export_prompt {
+        let choice = prompt.focused;
+        match event.keystroke.key.as_str() {
+            "escape" => this.finish_excel_export_prompt(2, cx),
+            "enter" | "space" => this.finish_excel_export_prompt(choice, cx),
+            "tab" | "right" | "left" => {
+                let previous = event.keystroke.key == "left" || event.keystroke.modifiers.shift;
+                prompt.focused = (choice + if previous { 2 } else { 1 }) % 3;
+                cx.notify();
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+        return;
+    }
     if this.count_dialog.is_some() {
         this.count_dialog_key(event, cx);
         cx.stop_propagation();

@@ -180,7 +180,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
             style: Default::default(),
         })
         .relative()
-        .key_context(if app.count_dialog.is_some() { "CountDialog" } else if app.comment_editor.is_some() { "CommentEditor" } else if app.mode == Mode::Preferences { "Preferences" } else if app.comments_sidebar_visible && app.comment_search.read(cx).focus.is_focused(window) { "CommentSearch" } else { "Spreadsheet" })
+        .key_context(if app.excel_export_prompt.is_some() { "ExcelExportPassword" } else if app.count_dialog.is_some() { "CountDialog" } else if app.comment_editor.is_some() { "CommentEditor" } else if app.mode == Mode::Preferences { "Preferences" } else if app.comments_sidebar_visible && app.comment_search.read(cx).focus.is_focused(window) { "CommentSearch" } else { "Spreadsheet" })
         .track_focus(&app.focus_handle);
     let el = actions_nav::bind(el, cx);
     let el = actions_edit::bind(el, cx);
@@ -837,6 +837,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_goto, |div| {
             div.child(goto_dialog::render_goto_dialog(app, cx))
+        })
+        .when_some(app.excel_export_prompt.as_ref(), |div, prompt| {
+            div.child(password_dialog::render_export_prompt(app, prompt.focused, cx))
         })
         .when(show_password_prompt, |div| {
             div.child(password_dialog::render_password_dialog(app, cx))

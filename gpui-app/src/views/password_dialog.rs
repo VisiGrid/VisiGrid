@@ -7,7 +7,7 @@ use visigrid_io::xlsx::ImportOptions;
 use visigrid_io::xlsx_crypto::Zeroizing;
 
 /// In-memory state for opening a password-protected Excel workbook.
-/// The password buffer is zeroized automatically when the prompt closes.
+/// Cancelling drops and wipes the input. Confirming moves it to the import task.
 pub struct PasswordPromptState {
     pub path: PathBuf,
     pub filename: String,
@@ -307,4 +307,43 @@ pub fn render_password_dialog(
         );
 
     modal_overlay("password-prompt-dialog", |s, cx| s.cancel_password_prompt(cx), content, cx)
+}
+
+pub(crate) fn render_export_prompt(
+    app: &Spreadsheet,
+    focused: usize,
+    cx: &mut Context<Spreadsheet>,
+) -> impl IntoElement {
+    use crate::ui::{Button, DialogFrame, DialogSize, dialog_header_simple};
+    let text = app.token(TokenKey::TextPrimary);
+    let border = app.token(TokenKey::PanelBorder);
+    let choices = [
+        ("keep-password", "Keep Password"),
+        ("export-plain", "Export Unprotected"),
+        ("cancel-export", "Cancel"),
+    ];
+    let footer = div().flex().justify_end().gap_2().children(
+        choices.into_iter().enumerate().map(|(index, (id, label))| {
+            let button = Button::new(id, label);
+            let button = if index == focused {
+                button.primary(app.token(TokenKey::Accent), app.token(TokenKey::TextInverse))
+            } else {
+                button.secondary(border, text)
+            };
+            button.on_mouse_down(MouseButton::Left, cx.listener(move |app, _, _, cx| {
+                cx.stop_propagation();
+                app.finish_excel_export_prompt(index, cx);
+            }))
+        }),
+    );
+    let body = div().text_sm().text_color(text).child(
+        "This workbook was opened from a password-protected Excel file. Keeping the password protects the exported file with the same password.",
+    );
+    modal_overlay("excel-export-password", |app, cx| app.finish_excel_export_prompt(2, cx),
+        DialogFrame::new(body, app.token(TokenKey::PanelBg), border)
+            .size(DialogSize::Lg)
+            .header(dialog_header_simple("Keep the Excel password?", text))
+            .footer(footer),
+        cx,
+    )
 }

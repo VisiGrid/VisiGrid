@@ -667,7 +667,7 @@ impl Spreadsheet {
         // Never persist file path or sheet names for workbooks opened from an
         // encrypted Excel file (avoids leaking metadata to session.json and
         // avoids unexpected password prompts on startup).
-        if self.opened_from_encrypted_xlsx {
+        if self.has_source_xlsx_password() {
             return WindowSession {
                 window_id: self.session_window_id,
                 file: None,
