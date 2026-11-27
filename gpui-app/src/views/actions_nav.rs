@@ -73,6 +73,7 @@ pub(crate) fn bind(
                 Mode::Command => this.palette_up(cx),
                 Mode::FontPicker => this.font_picker_up(cx),
                 Mode::ThemePicker => this.theme_picker_up(cx),
+                Mode::Shortcuts => this.shortcuts_scroll_rows(-1.0, cx),
                 Mode::CloudOpen => this.cloud_picker_up(cx),
                 Mode::PasteSpecial => this.paste_special_up(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
@@ -152,6 +153,7 @@ pub(crate) fn bind(
                 Mode::Command => this.palette_down(cx),
                 Mode::FontPicker => this.font_picker_down(cx),
                 Mode::ThemePicker => this.theme_picker_down(cx),
+                Mode::Shortcuts => this.shortcuts_scroll_rows(1.0, cx),
                 Mode::CloudOpen => this.cloud_picker_down(cx),
                 Mode::PasteSpecial => this.paste_special_down(cx),
                 // Edit mode: commit-on-arrow (fast data entry, Excel-like)
@@ -188,7 +190,7 @@ pub(crate) fn bind(
             }
             // Modal modes: capture arrow keys, don't leak to grid
             // List-only modals (no text input): arrows are no-op for left/right
-            if matches!(this.mode, Mode::ThemePicker | Mode::FontPicker) {
+            if matches!(this.mode, Mode::ThemePicker | Mode::FontPicker | Mode::Shortcuts) {
                 return;  // No horizontal navigation in vertical lists
             }
             // Text input modals: move cursor left in the input field
@@ -251,7 +253,7 @@ pub(crate) fn bind(
             }
             // Modal modes: capture arrow keys, don't leak to grid
             // List-only modals (no text input): arrows are no-op for left/right
-            if matches!(this.mode, Mode::ThemePicker | Mode::FontPicker) {
+            if matches!(this.mode, Mode::ThemePicker | Mode::FontPicker | Mode::Shortcuts) {
                 return;  // No horizontal navigation in vertical lists
             }
             // Text input modals: move cursor right in the input field
@@ -386,6 +388,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
             if this.mode == Mode::ExportPdf { this.pdf_preview_page(-1, cx); return; }
+            if this.mode == Mode::Shortcuts { this.shortcuts_scroll_rows(-12.0, cx); return; }
             if this.guard_terminal_focus(window, cx, "PageUp") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {
@@ -401,6 +404,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &PageDown, window, cx| {
             if this.mode == Mode::ExportPdf { this.pdf_preview_page(1, cx); return; }
+            if this.mode == Mode::Shortcuts { this.shortcuts_scroll_rows(12.0, cx); return; }
             if this.guard_terminal_focus(window, cx, "PageDown") { return; }
             // Validation dropdown takes priority
             if this.is_validation_dropdown_open() {

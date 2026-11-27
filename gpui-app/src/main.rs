@@ -65,6 +65,8 @@ mod count_dialog;
 mod limited_grid;
 #[cfg(test)]
 mod limited_grid_tests;
+#[cfg(test)]
+mod shortcuts_window_tests;
 mod hints;
 mod history;
 mod ime;
@@ -96,6 +98,7 @@ mod ref_target;
 mod review_mode;
 mod role_styles;
 mod search;
+mod shortcuts;
 mod selection_differences;
 pub(crate) use visigrid_engine::series_fill;
 mod session;

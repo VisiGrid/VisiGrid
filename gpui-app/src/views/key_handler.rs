@@ -625,6 +625,35 @@ pub(crate) fn handle_key_down(
         }
     }
 
+    // Keyboard Shortcuts window: type to search, arrows and page keys scroll
+    if this.mode == Mode::Shortcuts {
+        match event.keystroke.key.as_str() {
+            "escape" => { this.hide_shortcuts(cx); return; }
+            "up" => { this.shortcuts_scroll_rows(-1.0, cx); return; }
+            "down" => { this.shortcuts_scroll_rows(1.0, cx); return; }
+            "pageup" => { this.shortcuts_scroll_rows(-12.0, cx); return; }
+            "pagedown" => { this.shortcuts_scroll_rows(12.0, cx); return; }
+            "backspace" => { this.shortcuts_backspace(cx); return; }
+            "enter" => return,
+            "tab" => {
+                this.shortcuts_step_section(if event.keystroke.modifiers.shift { -1 } else { 1 }, cx);
+                return;
+            }
+            _ => {}
+        }
+        if let Some(key_char) = &event.keystroke.key_char {
+            if !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform
+            {
+                for c in key_char.chars() {
+                    this.shortcuts_insert_char(c, cx);
+                }
+                return;
+            }
+        }
+    }
+
     // Handle Rename Symbol mode
     if this.mode == Mode::RenameSymbol {
         match event.keystroke.key.as_str() {

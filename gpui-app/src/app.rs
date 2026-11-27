@@ -613,6 +613,12 @@ pub struct Spreadsheet {
     pub theme_picker_query: String,        // Filter query
     pub theme_picker_selected: usize,      // Selected item index
 
+    // Keyboard Shortcuts window state
+    pub shortcuts_query: String,
+    pub shortcuts_section: Option<&'static str>,  // sidebar choice; None is "All"
+    pub shortcuts_custom: Vec<(String, String)>,  // keybindings.json as (keys, action), read when the window opens
+    pub shortcuts_scroll: gpui::ScrollHandle,
+
     // Drag selection state
     pub dragging_selection: bool,          // Currently dragging to select cells
     /// Auto-scroll while a drag is outside the grid (see drag_autoscroll.rs)
@@ -1399,6 +1405,10 @@ impl Spreadsheet {
             font_picker_wheel_px: 0.0,
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
+            shortcuts_query: String::new(),
+            shortcuts_section: None,
+            shortcuts_custom: Vec::new(),
+            shortcuts_scroll: gpui::ScrollHandle::new(),
             dragging_selection: false,
             drag_autoscroll_task: None,
             drag_autoscroll_pointer: None,
@@ -2629,17 +2639,7 @@ impl Spreadsheet {
             CommandId::SwitchWindow => cx.dispatch_action(&crate::actions::SwitchWindow),
 
             // Help
-            CommandId::ShowShortcuts => {
-                #[cfg(target_os = "macos")]
-                {
-                    self.status_message = Some("Shortcuts: Cmd+D Fill Down, Cmd+R Fill Right, Cmd+Enter Multi-edit, Cmd+` Switch Window".into());
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    self.status_message = Some("Shortcuts: Ctrl+D Fill Down, Ctrl+R Fill Right, Ctrl+Enter Multi-edit, Ctrl+` Switch Window".into());
-                }
-                cx.notify();
-            }
+            CommandId::ShowShortcuts => self.show_shortcuts(cx),
             CommandId::OpenKeybindings => {
                 self.open_keybindings(cx);
             }

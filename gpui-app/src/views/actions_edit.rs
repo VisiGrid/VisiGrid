@@ -340,6 +340,7 @@ pub(crate) fn bind(
                 Mode::Preferences => { this.apply_cell_size_input(cx); }
                 Mode::ColorPicker => this.color_picker_execute(window, cx),
                 Mode::ThemePicker => this.theme_picker_execute(window, cx),
+                Mode::Shortcuts => {}
                 Mode::CloudOpen => this.cloud_open_selected(cx),
                 Mode::ExportPdf => this.confirm_pdf_action(cx),
                 Mode::CsvImport => {
@@ -370,7 +371,7 @@ pub(crate) fn bind(
             }
             // Shift+Enter: confirm and move up (or just move up in nav mode)
             match this.mode {
-                Mode::ThemePicker | Mode::FontPicker | Mode::Command | Mode::GoTo | Mode::PasswordPrompt | Mode::CloudOpen => {
+                Mode::ThemePicker | Mode::Shortcuts | Mode::FontPicker | Mode::Command | Mode::GoTo | Mode::PasswordPrompt | Mode::CloudOpen => {
                     // Shift+Enter does nothing special in these modes
                 }
                 _ => {
@@ -479,6 +480,8 @@ pub(crate) fn bind(
                 this.hide_paste_special(cx);
             } else if this.mode == Mode::About {
                 this.hide_about(cx);
+            } else if this.mode == Mode::Shortcuts {
+                this.hide_shortcuts(cx);
             } else if this.mode == Mode::RenameSymbol {
                 this.hide_rename_symbol(cx);
             } else if this.mode == Mode::CreateNamedRange {
@@ -556,6 +559,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &TabNext, window, cx| {
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
+            if this.mode == Mode::Shortcuts { this.shortcuts_step_section(1, cx); return; }
             if this.guard_terminal_focus(window, cx, "TabNext") { return; }
             if this.mode == Mode::CsvImport { this.csv_dialog_focus(1, cx); return; }
             if this.mode == Mode::ExportPdf {
@@ -605,6 +609,7 @@ pub(crate) fn bind(
         }))
         .on_action(cx.listener(|this, _: &TabPrev, window, cx| {
             if this.mode == Mode::Preferences { this.cell_size_input_tab(cx); return; }
+            if this.mode == Mode::Shortcuts { this.shortcuts_step_section(-1, cx); return; }
             if this.guard_terminal_focus(window, cx, "TabPrev") { return; }
             if this.mode == Mode::CsvImport { this.csv_dialog_focus(-1, cx); return; }
             if this.mode == Mode::ExportPdf {
@@ -691,6 +696,8 @@ pub(crate) fn bind(
                 this.find_backspace(cx);
             } else if this.mode == Mode::ThemePicker {
                 this.theme_picker_backspace(cx);
+            } else if this.mode == Mode::Shortcuts {
+                this.shortcuts_backspace(cx);
             } else if this.mode == Mode::FontPicker {
                 this.font_picker_backspace(cx);
             } else if this.mode == Mode::RenameSymbol {

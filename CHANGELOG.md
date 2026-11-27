@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.57.0
+
+### Keyboard
+
+- **A searchable list of keyboard shortcuts.** **Help > Keyboard Shortcuts** and the command palette's **Show Keyboard Shortcuts** now open a window listing every shortcut. Type to search by name or by key, and use the sidebar (or Tab and Shift+Tab) to narrow the list to one group such as Edit, Format or Data. Shortcuts you set in `keybindings.json` are listed first, and the link at the bottom opens that file. Before, the palette command only wrote four shortcuts into the status bar and the menu item opened the key tips instead. ([#198](https://github.com/VisiGrid/VisiGrid/issues/198))
+- **Enter and Tab move within a selected range.** With several cells selected, Enter moves down through the range and Tab moves across it, wrapping at the end and keeping the range selected, as in Excel and LibreOffice. Shift+Enter and Shift+Tab go the other way. Hidden and filtered rows are skipped and a merged area is one stop. An edit is written to the active cell only; Ctrl+Enter still fills every selected cell. ([#173](https://github.com/VisiGrid/VisiGrid/issues/173))
+
+### Grid
+
+- **Dragging a selected row's edge resizes every selected row.** All selected rows take the dragged row's new height, and one undo restores them. Dragging an unselected row still resizes only that row. When the selection runs to the bottom of the sheet (Ctrl+A or a whole column), only the rows down to the last one with content, an existing height or on screen are changed, and the status bar says so; empty rows below keep the default height. ([#173](https://github.com/VisiGrid/VisiGrid/issues/173))
+
+### Fixed
+
+- **Row resizing follows the pointer when zoomed.** At 200% zoom a row edge used to move twice as far as the drag.
+
 ## 0.56.1
 
 ### Fixed

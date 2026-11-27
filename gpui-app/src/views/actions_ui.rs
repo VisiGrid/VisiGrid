@@ -562,6 +562,9 @@ pub(crate) fn bind(
         .on_action(cx.listener(|this, _: &ShowPreferences, _, cx| {
             this.show_preferences(cx);
         }))
+        .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, _, cx| {
+            this.show_shortcuts(cx);
+        }))
         .on_action(cx.listener(|this, _: &OpenKeybindings, _, cx| {
             this.open_keybindings(cx);
         }))
