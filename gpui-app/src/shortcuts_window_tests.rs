@@ -53,3 +53,15 @@ fn the_help_menu_item_opens_the_same_window(cx: &mut TestAppContext) {
     cx.dispatch_action(view.into(), crate::actions::ShowKeyboardShortcuts);
     view.update(cx, |app, _, _| assert_eq!(app.mode, Mode::Shortcuts)).unwrap();
 }
+
+#[gpui::test]
+fn running_it_from_the_palette_leaves_the_window_open(cx: &mut TestAppContext) {
+    let view = setup(cx);
+    cx.simulate_keystrokes(view.into(), "ctrl-shift-p");
+    view.update(cx, |app, _, _| assert_eq!(app.mode, Mode::Command)).unwrap();
+    cx.simulate_keystrokes(view.into(), "s h o r t");
+    cx.run_until_parked();
+    cx.simulate_keystrokes(view.into(), "enter");
+    cx.run_until_parked();
+    view.update(cx, |app, _, _| assert_eq!(app.mode, Mode::Shortcuts)).unwrap();
+}
