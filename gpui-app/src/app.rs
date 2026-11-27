@@ -615,6 +615,7 @@ pub struct Spreadsheet {
 
     // Keyboard Shortcuts window state
     pub shortcuts_query: String,
+    pub shortcuts_section: Option<&'static str>,  // sidebar choice; None is "All"
     pub shortcuts_custom: Vec<(String, String)>,  // keybindings.json as (keys, action), read when the window opens
     pub shortcuts_scroll: gpui::ScrollHandle,
 
@@ -1405,6 +1406,7 @@ impl Spreadsheet {
             theme_picker_query: String::new(),
             theme_picker_selected: 0,
             shortcuts_query: String::new(),
+            shortcuts_section: None,
             shortcuts_custom: Vec::new(),
             shortcuts_scroll: gpui::ScrollHandle::new(),
             dragging_selection: false,

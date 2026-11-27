@@ -40,6 +40,17 @@ fn the_palette_command_opens_a_searchable_list(cx: &mut TestAppContext) {
         assert_eq!(app.shortcuts_query, "fill");
     }).unwrap();
 
+    // Tab narrows the list to one section at a time and wraps back to All.
+    cx.simulate_keystrokes(view.into(), "tab");
+    let first = view.update(cx, |app, _, _| app.shortcuts_section).unwrap();
+    assert!(first.is_some(), "Tab picks the first section");
+    cx.simulate_keystrokes(view.into(), "shift-tab");
+    view.update(cx, |app, _, _| {
+        assert_eq!(app.shortcuts_section, None);
+        assert_eq!(app.shortcuts_query, "fill", "Tab does not type or move the cell");
+        assert_eq!(app.view_state.active_cell(), (0, 0));
+    }).unwrap();
+
     cx.simulate_keystrokes(view.into(), "escape");
     view.update(cx, |app, _, _| {
         assert_eq!(app.mode, Mode::Navigation);

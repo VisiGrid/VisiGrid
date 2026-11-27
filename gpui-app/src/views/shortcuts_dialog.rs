@@ -1,7 +1,8 @@
 use std::time::Duration;
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use crate::app::Spreadsheet;
-use crate::shortcuts::{sections, CUSTOM_TITLE};
+use crate::shortcuts::{section_counts, sections, CUSTOM_TITLE};
 use crate::theme::TokenKey;
 
 fn keycap(key: String, text: Hsla, border: Hsla) -> Div {
@@ -44,7 +45,14 @@ fn key_parts(keys: &str) -> Vec<String> {
 pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>) -> impl IntoElement {
     let query = app.shortcuts_query.clone();
     let has_query = !query.is_empty();
-    let found = sections(&app.shortcuts_custom, &query);
+    let counts = section_counts(&app.shortcuts_custom, &query);
+    let total: usize = counts.iter().map(|(_, n)| n).sum();
+    // A section that no longer exists (keybindings.json emptied) shows All.
+    let chosen = app.shortcuts_section.filter(|c| counts.iter().any(|(t, _)| t == c));
+    let mut found = sections(&app.shortcuts_custom, &query);
+    if let Some(chosen) = chosen {
+        found.retain(|s| s.title == chosen);
+    }
     let count: usize = found.iter().map(|s| s.rows.len()).sum();
 
     let panel_bg = app.token(TokenKey::PanelBg);
@@ -54,17 +62,71 @@ pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
     let text_disabled = app.token(TokenKey::TextDisabled);
     let hover_bg = app.token(TokenKey::ToolbarButtonHoverBg);
     let accent = app.token(TokenKey::Accent);
+    let selection_bg = app.token(TokenKey::SelectionBg);
+    let selection_text = app.token(TokenKey::SelectionText);
+
+    let tab = |ix: usize, label: &'static str, n: usize, section: Option<&'static str>, cx: &mut Context<Spreadsheet>| {
+        let active = chosen == section;
+        let (fg, dim) = if active {
+            (selection_text, selection_text.opacity(0.7))
+        } else if n == 0 {
+            (text_disabled, text_disabled)
+        } else {
+            (text_primary, text_muted)
+        };
+        let mut item = div()
+            .id(ElementId::NamedInteger("shortcuts-tab".into(), ix as u64))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .mx(px(6.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(fg)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                this.shortcuts_show_section(section, cx);
+            }))
+            .child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+            .child(div().flex_shrink_0().text_size(px(11.0)).text_color(dim).child(n.to_string()));
+        if active {
+            item = item.bg(selection_bg);
+        } else {
+            item = item.hover(move |s| s.bg(hover_bg));
+        }
+        item
+    };
+    let mut sidebar = div()
+        .id("shortcuts-sidebar")
+        .w(px(180.0))
+        .flex_shrink_0()
+        .overflow_y_scroll()
+        .py(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .border_r_1()
+        .border_color(panel_border)
+        .child(tab(0, "All", total, None, cx));
+    for (ix, (title, n)) in counts.iter().enumerate() {
+        sidebar = sidebar.child(tab(ix + 1, title, *n, Some(*title), cx));
+    }
 
     let mut list = div()
         .id("shortcuts-list")
         .flex_1()
         .min_h(px(0.0))
+        .min_w(px(0.0))
         .overflow_y_scroll()
         .track_scroll(&app.shortcuts_scroll)
+        .pt(px(if chosen.is_some() { 6.0 } else { 0.0 }))
         .pb_2();
 
     for section in &found {
-        list = list.child(
+        list = list.when(chosen.is_none(), |list| list.child(
             div()
                 .px_4()
                 .pt(px(12.0))
@@ -73,7 +135,7 @@ pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(if section.title == CUSTOM_TITLE { accent } else { text_muted })
                 .child(section.title.to_uppercase()),
-        );
+        ));
         for row in &section.rows {
             let mut keys = div().flex().flex_shrink_0().gap(px(3.0));
             for part in key_parts(&row.keys) {
@@ -110,7 +172,10 @@ pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                 .py_6()
                 .text_size(px(13.0))
                 .text_color(text_muted)
-                .child(format!("No shortcut matches \"{query}\"")),
+                .child(match chosen {
+                    Some(section) => format!("No shortcut in {section} matches \"{query}\""),
+                    None => format!("No shortcut matches \"{query}\""),
+                }),
         );
     }
 
@@ -128,7 +193,7 @@ pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
         }))
         .child(
             div()
-                .w(px(560.0))
+                .w(px(720.0))
                 .h(px(520.0))
                 .max_h(relative(0.8))
                 .bg(panel_bg)
@@ -196,7 +261,7 @@ pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                                 ),
                         ),
                 )
-                .child(list)
+                .child(div().flex_1().min_h(px(0.0)).flex().child(sidebar).child(list))
                 // Footer
                 .child(
                     div()
@@ -225,6 +290,8 @@ pub fn render_shortcuts_dialog(app: &Spreadsheet, cx: &mut Context<Spreadsheet>)
                             div()
                                 .flex()
                                 .gap_3()
+                                .child("Next section")
+                                .child(div().text_color(text_disabled).child("tab"))
                                 .child("Close")
                                 .child(div().text_color(text_disabled).child("esc")),
                         ),

@@ -385,6 +385,7 @@ impl Spreadsheet {
         self.lua_console.visible = false;
         self.mode = Mode::Shortcuts;
         self.shortcuts_query.clear();
+        self.shortcuts_section = None;
         self.shortcuts_custom = crate::shortcuts::custom_bindings();
         self.shortcuts_scroll.set_offset(gpui::Point::default());
         cx.notify();
@@ -406,6 +407,23 @@ impl Spreadsheet {
         self.shortcuts_query.pop();
         self.shortcuts_scroll.set_offset(gpui::Point::default());
         cx.notify();
+    }
+
+    /// Show one section of the list, or all of them (`None`).
+    pub fn shortcuts_show_section(&mut self, section: Option<&'static str>, cx: &mut Context<Self>) {
+        self.shortcuts_section = section;
+        self.shortcuts_scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
+    /// Tab / Shift+Tab: the next or previous section in the sidebar.
+    pub fn shortcuts_step_section(&mut self, step: isize, cx: &mut Context<Self>) {
+        let titles: Vec<&'static str> = crate::shortcuts::section_counts(&self.shortcuts_custom, "")
+            .into_iter()
+            .map(|(title, _)| title)
+            .collect();
+        let next = crate::shortcuts::step_section(&titles, self.shortcuts_section, step);
+        self.shortcuts_show_section(next, cx);
     }
 
     /// Scroll the list by `rows` (negative is up), stopping at either end.

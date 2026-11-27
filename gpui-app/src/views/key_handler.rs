@@ -635,6 +635,10 @@ pub(crate) fn handle_key_down(
             "pagedown" => { this.shortcuts_scroll_rows(12.0, cx); return; }
             "backspace" => { this.shortcuts_backspace(cx); return; }
             "enter" => return,
+            "tab" => {
+                this.shortcuts_step_section(if event.keystroke.modifiers.shift { -1 } else { 1 }, cx);
+                return;
+            }
             _ => {}
         }
         if let Some(key_char) = &event.keystroke.key_char {

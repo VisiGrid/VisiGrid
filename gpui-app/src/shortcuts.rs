@@ -140,9 +140,50 @@ pub fn sections(custom: &[(String, String)], query: &str) -> Vec<ShortcutSection
     out
 }
 
+/// The sidebar: every section that exists (ignoring the search), each with
+/// how many of its rows match `query`. Sections stay listed at zero so the
+/// sidebar does not jump around while typing.
+pub fn section_counts(custom: &[(String, String)], query: &str) -> Vec<(&'static str, usize)> {
+    let found = sections(custom, query);
+    sections(custom, "")
+        .iter()
+        .map(|s| (s.title, found.iter().find(|f| f.title == s.title).map_or(0, |f| f.rows.len())))
+        .collect()
+}
+
+/// The section `step` places from `current` in the sidebar, where `None` is
+/// "All" and sits before the first section. Wraps at both ends.
+pub fn step_section(titles: &[&'static str], current: Option<&'static str>, step: isize) -> Option<&'static str> {
+    let len = titles.len() as isize + 1;
+    let at = current.and_then(|c| titles.iter().position(|t| *t == c)).map_or(0, |i| i as isize + 1);
+    match (at + step).rem_euclid(len) {
+        0 => None,
+        i => Some(titles[i as usize - 1]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sidebar_keeps_every_section_and_counts_matches() {
+        let all = section_counts(&[], "");
+        assert!(all.iter().all(|(_, n)| *n > 0));
+        let filtered = section_counts(&[], "fill down");
+        assert_eq!(filtered.len(), all.len(), "sections stay listed while searching");
+        assert_eq!(filtered.iter().map(|(_, n)| n).sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn tab_walks_the_sidebar_and_wraps() {
+        let titles = ["A", "B"];
+        assert_eq!(step_section(&titles, None, 1), Some("A"));
+        assert_eq!(step_section(&titles, Some("A"), 1), Some("B"));
+        assert_eq!(step_section(&titles, Some("B"), 1), None);
+        assert_eq!(step_section(&titles, None, -1), Some("B"));
+        assert_eq!(step_section(&titles, Some("gone"), 1), Some("A"));
+    }
 
     fn all_rows(sections: &[ShortcutSection]) -> Vec<&ShortcutRow> {
         sections.iter().flat_map(|s| s.rows.iter()).collect()
