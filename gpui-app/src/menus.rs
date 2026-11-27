@@ -151,7 +151,7 @@ pub fn set_app_menus(cx: &mut App) {
             name: "Help".into(),
             items: {
                 let mut items = vec![
-                    MenuItem::action("Keyboard Shortcuts...", ShowKeyTips),
+                    MenuItem::action("Keyboard Shortcuts...", ShowKeyboardShortcuts),
                     MenuItem::separator(),
                     MenuItem::action("About VisiGrid", ShowAbout),
                 ];

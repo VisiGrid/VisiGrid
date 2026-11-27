@@ -153,6 +153,7 @@ actions!(view, [
     ShowFormatPanel,  // Ctrl+1 - opens inspector with Format tab
     ShowPreferences,  // Cmd+, on macOS - currently routes to theme picker
     OpenKeybindings,  // Open keybindings.json for editing
+    ShowKeyboardShortcuts,  // Help > Keyboard Shortcuts: the searchable list
     ToggleProblems,
     FitColumnWidth,
     CenterAcrossSelection,         // Ctrl/Cmd+Alt+C: center a title without merging (converts merges in the selection)

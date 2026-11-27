@@ -374,6 +374,51 @@ impl Spreadsheet {
     }
 
     // =========================================================================
+    // Keyboard Shortcuts window
+    // =========================================================================
+
+    pub fn show_shortcuts(&mut self, cx: &mut Context<Self>) {
+        self.close_validation_dropdown(
+            crate::validation_dropdown::DropdownCloseReason::ModalOpened,
+            cx,
+        );
+        self.lua_console.visible = false;
+        self.mode = Mode::Shortcuts;
+        self.shortcuts_query.clear();
+        self.shortcuts_custom = crate::shortcuts::custom_bindings();
+        self.shortcuts_scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
+    pub fn hide_shortcuts(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Navigation;
+        self.shortcuts_query.clear();
+        cx.notify();
+    }
+
+    pub fn shortcuts_insert_char(&mut self, c: char, cx: &mut Context<Self>) {
+        self.shortcuts_query.push(c);
+        self.shortcuts_scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
+    pub fn shortcuts_backspace(&mut self, cx: &mut Context<Self>) {
+        self.shortcuts_query.pop();
+        self.shortcuts_scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
+    /// Scroll the list by `rows` (negative is up), stopping at either end.
+    pub fn shortcuts_scroll_rows(&mut self, rows: f32, cx: &mut Context<Self>) {
+        const ROW: f32 = 26.0;
+        let max = self.shortcuts_scroll.max_offset().y;
+        let mut offset = self.shortcuts_scroll.offset();
+        offset.y = (offset.y - gpui::px(rows * ROW)).clamp(-max, gpui::px(0.0));
+        self.shortcuts_scroll.set_offset(offset);
+        cx.notify();
+    }
+
+    // =========================================================================
     // Paste Special dialog
     // =========================================================================
 

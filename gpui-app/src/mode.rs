@@ -28,6 +28,7 @@ pub enum Mode {
     FontPicker,    // Font selection dialog
     ThemePicker,   // Theme selection dialog
     About,         // About VisiGrid dialog
+    Shortcuts,     // Keyboard Shortcuts window (Help)
     RenameSymbol,  // Rename named range (Ctrl+Shift+R)
     CreateNamedRange,  // Create named range from selection (Ctrl+Shift+N)
     AddCondFormat,     // Add conditional format rule for selection
@@ -134,7 +135,7 @@ impl Mode {
     }
 
     pub fn is_overlay(&self) -> bool {
-        matches!(self, Mode::CountDialog | Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::CsvImport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen | Mode::DuckdbImport | Mode::RecipeBuilder | Mode::PasswordPrompt | Mode::ExcelExportPassword)
+        matches!(self, Mode::CountDialog | Mode::Comment | Mode::Command | Mode::GoTo | Mode::QuickOpen | Mode::Find | Mode::FontPicker | Mode::ThemePicker | Mode::About | Mode::Shortcuts | Mode::RenameSymbol | Mode::CreateNamedRange | Mode::AddCondFormat | Mode::EditDescription | Mode::Tour | Mode::ImpactPreview | Mode::RefactorLog | Mode::ExtractNamedRange | Mode::ImportReport | Mode::CsvImport | Mode::ExportReport | Mode::ExportPdf | Mode::Preferences | Mode::License | Mode::HubPasteToken | Mode::HubLink | Mode::HubPublishConfirm | Mode::ValidationDialog | Mode::AISettings | Mode::ExplainDiff | Mode::PasteSpecial | Mode::ColorPicker | Mode::NumberFormatEditor | Mode::TransformPreview | Mode::ConvertPicker | Mode::CloudOpen | Mode::DuckdbImport | Mode::RecipeBuilder | Mode::PasswordPrompt | Mode::ExcelExportPassword)
     }
 
     /// True if this mode has text input active (typing should work normally).

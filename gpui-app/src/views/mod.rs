@@ -48,6 +48,7 @@ pub(crate) mod review_overview_rail;
 mod menu_bar;
 mod status_bar;
 mod theme_picker;
+mod shortcuts_dialog;
 mod tour;
 mod number_format_dialog;
 mod validation_dialog;
@@ -108,6 +109,7 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
     let show_font_picker = app.mode == Mode::FontPicker;
     let show_theme_picker = app.mode == Mode::ThemePicker;
     let show_about = app.mode == Mode::About;
+    let show_shortcuts = app.mode == Mode::Shortcuts;
     let show_rename_symbol = app.mode == Mode::RenameSymbol;
     let show_create_named_range = app.mode == Mode::CreateNamedRange;
     let show_add_cond_format = app.mode == Mode::AddCondFormat;
@@ -849,6 +851,9 @@ pub fn render_spreadsheet(app: &mut Spreadsheet, window: &mut Window, cx: &mut C
         })
         .when(show_theme_picker, |div| {
             div.child(theme_picker::render_theme_picker(app, cx))
+        })
+        .when(show_shortcuts, |div| {
+            div.child(shortcuts_dialog::render_shortcuts_dialog(app, cx))
         })
         .when(show_preferences, |div| {
             div.child(preferences_panel::render_preferences_panel(app, cx))
